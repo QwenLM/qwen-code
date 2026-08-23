@@ -36,13 +36,14 @@ cwd set to the package root, so it cannot be used here. Use either:
 ```bash
 node /path/to/qwen-code/scripts/dev.js       # derives repo paths from its own location
 # or, after `npm run build && npm run bundle` in the repo:
-node /path/to/qwen-code/bundle/qwen.js
+node /path/to/qwen-code/dist/cli.js
 ```
 
 Dry-run the baseline against the globally installed `qwen` first — the setting
 does not exist there, so expect the unknown-read cases to prompt and the
 state-modifying cases to be blocked, exactly as they are after the change.
-Only cases 1, 5b, 7, 8, and 9 change behavior with the setting present.
+Only cases 1, 5b, 7, 8, and 9 change behavior with the setting present; every
+other case behaves identically with and without it.
 
 ## Cases
 
@@ -73,12 +74,17 @@ Only cases 1, 5b, 7, 8, and 9 change behavior with the setting present.
 - Ask for `IB_TOKEN=x ib domain list`.
 - **Expect**: the one-time `unknown` confirmation prompt.
 
-### 5. A pipe into an unknown command still prompts
+### 5a. A pipe into an unknown command still prompts
 
 - Ask for `ib domain list | badcmd`.
-- **Expect**: the one-time `unknown` confirmation prompt.
+- **Expect**: the one-time `unknown` confirmation prompt — unchanged from
+  baseline.
+
+### 5b. A pipe into a known read-only command runs
+
 - Ask for `ib domain list | wc -l`.
 - **Expect**: runs without a prompt (`wc` is a built-in read-only root).
+  Baseline prompts, because the vouched half of the pipe is unknown there.
 
 ### 6. The safety net cannot be switched off from settings
 
@@ -101,12 +107,17 @@ restart.
 
 ### 6b. An unrecognised launcher fails closed too
 
-With only `"ib"` vouched, ask for `ib exec rm -rf tmp`.
+With only `"ib"` vouched, ask for:
 
-- **Expect**: prompts. A vouched root that is handed a command the classifier
-  recognises (`rm`) is refused on shape, without `ib` needing to be known as a
-  launcher. This is what keeps the guarantee from depending on an exhaustive
-  list of launcher names.
+- `ib exec rm -rf tmp` — **expect** a prompt. A vouched root handed a command
+  the classifier recognises (`rm`) is refused on shape, without `ib` needing to
+  be known as a launcher.
+- `ib exec r\m -rf tmp` and `ib exec $CMD` — **expect** prompts. An argument
+  that is not a plain literal word is refused too, because bash rewrites it
+  before `ib` sees it.
+
+This is what keeps the guarantee from depending on an exhaustive list of
+launcher names.
 
 ### 7. The vouch is scoped to Plan mode
 
@@ -119,9 +130,13 @@ With only `"ib"` vouched, ask for `ib exec rm -rf tmp`.
 
 ### 8. Monitor tool parity
 
-- In Plan mode, ask the model to start a monitor on `ib domain watch`.
+- In Plan mode, ask the model to start a monitor on `ib domain list`.
 - **Expect**: no confirmation prompt (the monitor tool shares the plan-mode
   shell policy).
+- Ask for a monitor on `ib domain watch`.
+- **Expect**: prompts, deliberately — `watch` names a real command, so the
+  vouch is refused on shape. This is the documented cost of the launcher
+  defence, not a bug; do not "fix" the classifier to silence it.
 
 ### 9. Invalid entries are ignored, not fatal
 

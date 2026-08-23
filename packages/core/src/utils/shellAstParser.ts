@@ -151,9 +151,13 @@ const WRITE_ROOT_COMMAND =
  *   `hash -p ./evil/git git && git status` turns a trusted root into an
  *   attacker-chosen binary.
  *
- * The launcher family cannot be enumerated exhaustively; `vouchedRootIsSafe`
- * below is the structural half of the defence. The state-planter family is
- * the enumerable set of bash builtins that mutate resolution state.
+ * Neither list closes its family on its own. A launcher can always be named
+ * something this file has never heard of, and an interpreter takes its payload
+ * as a code string or a script path rather than as a command name, so nothing
+ * in the argument text identifies it. What bounds the exposure is
+ * `vouchedRootIsSafe` below: it accepts a vouch only for an invocation whose
+ * shape the classifier can actually read. These lists are the floor under
+ * that rule, not a substitute for it.
  */
 export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // Shell interpreters and multi-call binaries.
@@ -171,6 +175,20 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'tcsh',
   'toybox',
   'zsh',
+  // Language interpreters. The payload is a code string or a script path, so
+  // no argument inspection can tell a read from a write.
+  'bun',
+  'deno',
+  'lua',
+  'node',
+  'osascript',
+  'perl',
+  'php',
+  'python',
+  'python3',
+  'ruby',
+  'tclsh',
+  'wish',
   // Privilege, namespace, scheduling, and process launchers.
   'at',
   'batch',
@@ -187,11 +205,14 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'pkexec',
   'runuser',
   'script',
+  'rsh',
   'setsid',
   'sg',
+  'ssh',
   'stdbuf',
   'su',
   'sudo',
+  'sudoedit',
   'time',
   'timeout',
   'unshare',
@@ -207,14 +228,20 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'command',
   'compgen',
   'complete',
+  'coproc',
   'enable',
   'eval',
   'exec',
+  'fc',
   'hash',
+  'history',
   'let',
   'set',
   'shopt',
   'source',
+  // `.` is the POSIX spelling of `source`; tree-sitter parses `. ./evil.sh`
+  // as an ordinary command node.
+  '.',
   'trap',
   'unalias',
 ]);
@@ -223,33 +250,56 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
 const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
 
 /**
- * Whether an argument names a command this file decides the safety of. A
- * vouched root that hands one of these to something else is a launcher,
- * whatever it happens to be called. Matched on the basename so a wrapped
- * `/bin/rm` counts too.
+ * Whether a word names a command this file decides the safety of. Matched on
+ * the basename, and on the basename with one trailing `.exe` removed, so a
+ * wrapped `/bin/rm` and a Windows-spelled `rm.exe` both count.
  */
-function namesAKnownCommand(argument: string): boolean {
-  const name = (argument.split(/[\\/]/).pop() ?? '').toLowerCase();
-  return (
-    READ_ONLY_ROOT_COMMANDS.has(name) ||
-    NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
-    WRITE_ROOT_COMMAND.test(name) ||
-    SPECIAL_ROOT_COMMAND.test(name)
+function namesAKnownCommand(word: string): boolean {
+  const basename = (word.split(/[\\/]/).pop() ?? '').toLowerCase();
+  return [basename, basename.replace(/\.exe$/, '')].some(
+    (name) =>
+      READ_ONLY_ROOT_COMMANDS.has(name) ||
+      NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
+      WRITE_ROOT_COMMAND.test(name) ||
+      SPECIAL_ROOT_COMMAND.test(name),
   );
 }
+
+/**
+ * Characters an argument may contain and still mean, at run time, exactly what
+ * it says here. Deliberately a whitelist: quoting, escaping, expansion and
+ * globbing are each an open-ended way to spell a word the shell rewrites
+ * before the binary sees it (`r\m`, `r'm'`, `$cmd`, `*` all reach argv as
+ * `rm`), and matching those forms one at a time never terminates.
+ */
+const LITERAL_ARGUMENT = /^[\w@%+=:,./-]+$/;
 
 /**
  * Whether a caller-vouched root may classify read-only for this invocation.
  *
  * A vouch says "this binary only reads"; it can never say "and so does
- * whatever I pass it". Since an unrecognised binary may be a launcher we have
- * never heard of, refuse the vouch as soon as an argument names a command
- * this file knows — `time rm -rf build` stays unknown even with `time`
- * vouched, and so does any future launcher wrapping a recognised command.
+ * whatever I pass it". The classifier cannot recognise every launcher by name
+ * — an unknown binary may be one, and an interpreter's payload is a code
+ * string, not a command name — so the vouch is honoured only for invocations
+ * it can actually read:
+ *
+ * - every argument is a plain literal word, so its text is what the binary
+ *   receives, and
+ * - no argument names a command this file knows, so a launcher we have never
+ *   heard of cannot use the vouch to smuggle one past the analysis, and
+ * - the root itself is not a known command under another spelling
+ *   (`git.exe`), which would otherwise skip the dispatch chain above.
+ *
  * Refusing costs a confirmation prompt; accepting wrongly costs the write.
  */
-function vouchedRootIsSafe(args: string[]): boolean {
-  return !args.some(namesAKnownCommand);
+function vouchedRootIsSafe(root: string, argNodes: SyntaxNode[]): boolean {
+  if (namesAKnownCommand(root)) return false;
+  return argNodes.every(
+    (node) =>
+      LITERAL_ARGUMENT.test(node.text) &&
+      !hasShellExpansion(node) &&
+      !namesAKnownCommand(node.text),
+  );
 }
 /** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
@@ -294,8 +344,11 @@ const UNIQ_VALUE_OPTIONS = new Set(
  */
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
 
-/** A command substitution that survived the substitution-node walk. */
-const HIDDEN_SUBSTITUTION = /\$\(|`/;
+/**
+ * A command or process substitution that survived the substitution-node walk.
+ * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)`.
+ */
+const HIDDEN_SUBSTITUTION = /\$\(|`|<\(|>\(/;
 
 /**
  * Map of root command → known sub-command sets.
@@ -1116,10 +1169,20 @@ function evaluateSubstitutions(
       }
       // tree-sitter-bash parses the pattern word of `${v%%…}`, `${v%…}`,
       // `${v##…}` and `${v#…}` as a single leaf, so a substitution inside it
-      // yields no command_substitution node even though bash runs it while
-      // expanding. Nothing was collected above, so any `$(`/backtick still
-      // present in an expansion is exactly that hidden channel.
+      // yields no node of its own even though bash runs it while expanding.
+      // Nothing was collected above, so an opener still present in an
+      // expansion is exactly that hidden channel.
       if (HIDDEN_SUBSTITUTION.test(expansion.text)) return 'unknown';
+    }
+    // A heredoc body is one leaf too, and bash expands it before feeding it to
+    // stdin — unless the delimiter is quoted, which makes the body inert.
+    for (const body of collectDescendants(node, new Set(['heredoc_body']))) {
+      if (!HIDDEN_SUBSTITUTION.test(body.text)) continue;
+      const delimiter = body.parent?.namedChildren.find(
+        (child) => child.type === 'heredoc_start',
+      );
+      if (delimiter && /['"]/.test(delimiter.text)) continue;
+      return 'unknown';
     }
     return 'read-only';
   }
@@ -1191,7 +1254,7 @@ function evaluateCommandSafety(
     // Terminal fallback: every root the classifier understands specially is
     // handled above, so a caller-supplied root can only ever add to the
     // built-in read-only set — never override a write classification.
-    result = vouchedRootIsSafe(args) ? 'read-only' : 'unknown';
+    result = vouchedRootIsSafe(root, argNodes) ? 'read-only' : 'unknown';
   } else {
     result = 'unknown';
   }

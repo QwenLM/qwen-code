@@ -534,11 +534,61 @@ describe('substitution hidden in an expansion pattern word', () => {
     },
   );
 
+  // bash runs `<(…)` and `>(…)` in a pattern word exactly as it runs `$(…)`,
+  // and tree-sitter emits no node for those either.
+  it.each(['%%', '%', '##', '#'])(
+    'treats a process substitution in ${var%so…} as unknown',
+    async (operator) => {
+      for (const opener of ['<(', '>(']) {
+        expect(
+          await classifyShellCommandSafety(
+            `echo \${HOME${operator}${opener}rm -rf build)}`,
+          ),
+        ).toBe('unknown');
+        expect(
+          await classifyShellCommandSafety(
+            `echo "\${HOME${operator}${opener}rm -rf build)}"`,
+          ),
+        ).toBe('unknown');
+      }
+    },
+  );
+
   it('does not flag expansions without a substitution', async () => {
     expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
       'read-only',
     );
     expect(await classifyShellCommandSafety('echo ${HOME}')).toBe('read-only');
+  });
+});
+
+describe('substitution hidden in a heredoc body', () => {
+  // The body is one leaf too, and bash expands it before feeding it to stdin.
+  it('treats an unquoted-delimiter body containing a substitution as unsafe', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n<(rm -rf build)\nEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+  });
+
+  it('leaves a quoted delimiter alone, which makes the body inert', async () => {
+    expect(
+      await classifyShellCommandSafety("cat <<'EOF'\n`rm -rf build`\nEOF"),
+    ).toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('cat <<"EOF"\n`rm -rf build`\nEOF'),
+    ).toBe('read-only');
+  });
+
+  it('does not flag a body without a substitution', async () => {
+    expect(await classifyShellCommandSafety('cat <<EOF\nplain\nEOF')).toBe(
+      'read-only',
+    );
   });
 });
 
@@ -1094,6 +1144,69 @@ describe('extraReadOnlyRoots', () => {
         vouched,
       ),
     ).toBe('read-only');
+  });
+
+  it('refuses a vouched root whose arguments are not plain literal words', async () => {
+    // Quoting, escaping, expansion and globbing are each an open-ended way to
+    // spell a word bash rewrites before the binary sees it, so the vouch is
+    // honoured only for arguments whose text is what actually runs.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      String.raw`obscurelauncher r\m -rf build`,
+      `obscurelauncher r'm' -rf build`,
+      `obscurelauncher r"m" -rf build`,
+      `obscurelauncher "r"m -rf build`,
+      'obscurelauncher $cmd -rf build',
+      'obscurelauncher ${cmd} -rf build',
+      'obscurelauncher * -rf build',
+      'obscurelauncher {rm,ls}',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+    // Plain words, including paths and option syntax, still classify.
+    expect(
+      await classifyShellCommandSafety(
+        'obscurelauncher --format=json get src/a.txt',
+        vouched,
+      ),
+    ).toBe('read-only');
+  });
+
+  it('refuses a vouched root that wraps a specially handled command', async () => {
+    // dd, kill, killall, pkill and tee have their own evaluators, so they are
+    // in none of the three sets namesAKnownCommand otherwise consults.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher dd of=disk.img',
+      'obscurelauncher kill -9 1',
+      'obscurelauncher killall node',
+      'obscurelauncher pkill -f test',
+      'obscurelauncher tee out.txt',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+  });
+
+  it('sees through a Windows .exe spelling of a known command', async () => {
+    // `.exe` names reach the terminal branch without matching any dispatch
+    // arm, so both the root and the argument check strip one trailing suffix.
+    expect(
+      await classifyShellCommandSafety('git.exe push origin main', {
+        extraReadOnlyRoots: new Set(['git.exe']),
+      }),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('rm.exe -rf build', {
+        extraReadOnlyRoots: new Set(['rm.exe']),
+      }),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('ib rm.exe -rf build', withIb),
+    ).toBe('unknown');
   });
 
   it('applies inside compound statements and subshells', async () => {

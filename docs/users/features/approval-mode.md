@@ -111,14 +111,15 @@ a built-in set of known-safe root commands (`cat`, `ls`, `grep`, `find`,
 deliberately good for one exact invocation only.
 
 If you have a CLI you know is read-only, list its root command name under
-`permissions.planMode.extraReadOnlyCommands`:
+`permissions.planMode.extraReadOnlyCommands`.
+
+In `.qwen/settings.json` (root command names only, the same shape as the
+built-in set):
 
 ```json
-// .qwen/settings.json
 {
   "permissions": {
     "planMode": {
-      // Root command names only — same shape as the built-in set.
       "extraReadOnlyCommands": ["ib"]
     }
   }
@@ -142,28 +143,39 @@ letting the model run unattended.
 | `ib domain list $(whoami)`  | prompts — command substitution stays unknown          |
 | `IB_TOKEN=x ib domain list` | prompts — environment-assignment prefix stays unknown |
 | `ib domain list \| badcmd`  | prompts — the pipe target is still unknown            |
-| `ib exec rm -rf build`      | prompts — see "launchers" below                       |
+| `ib exec rm -rf build`      | prompts — see "how a vouch is applied" below          |
 
 **What has no effect.** Three kinds of entry are ignored:
 
 - Commands Qwen Code already understands keep their built-in classification.
   Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
   `git push` read-only.
-- **Launchers** — shell and language interpreters, multi-call binaries, and
-  wrappers whose job is to run a command taken from their arguments (`bash`,
-  `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`, `nohup`, `timeout`,
-  `time`, `setsid`, `powershell`, and similar). Vouching one of these is not a
+- **Launchers** — shell interpreters, language interpreters, multi-call
+  binaries, and wrappers whose job is to run a command taken from their
+  arguments (`bash`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
+  `nohup`, `timeout`, `time`, `setsid`, `powershell`, `python3`, `node`,
+  `perl`, `ruby`, `ssh`, and similar). Vouching one of these is not a
   statement about that binary, it is a statement about whatever it is handed:
-  `time rm -rf build` would launder a write past the analysis. Qwen Code
-  cannot recognise every launcher by name, so it also refuses a vouched root
-  the moment one of its arguments names a command it does know — which is why
-  `ib exec rm -rf build` prompts even though `ib` is vouched and `ib exec` is
-  not otherwise special. The cost of that is an occasional extra prompt when a
-  CLI's own sub-command happens to share a name with a real command.
+  `time rm -rf build` and `python3 -c "…"` would launder a write past the
+  analysis.
 - **Shell builtins that rebind name resolution** (`hash`, `alias`, `unalias`,
   `bind`, `complete`, `enable`, `set`, `shopt`, and similar). One of these can
   change what a _later_ command in the same line resolves to, so vouching
   `hash` would quietly vouch for whatever it points `git` at.
+
+**How a vouch is applied.** Qwen Code cannot recognise every launcher by name,
+so the vouch is honoured only for an invocation it can read literally:
+
+- every argument must be a plain word — quoting, escaping, variables, and
+  globs are each an open-ended way to spell something else (`r\m`, `r'm'`,
+  `$cmd` and `*` all reach the binary as `rm`), so `ib $cmd` prompts;
+- no argument may name a command Qwen Code knows, which is why
+  `ib exec rm -rf build` prompts even though `ib` is vouched and `ib exec` is
+  not otherwise special.
+
+The cost is an occasional extra prompt — when a CLI's own sub-command shares a
+name with a real command, or when an argument needs quoting. Prompting costs a
+keystroke; accepting wrongly costs the write.
 
 Anything that is not a bare command name (a path, a command with arguments, or
 a string containing shell metacharacters) is also ignored, and so is the whole

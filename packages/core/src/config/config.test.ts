@@ -9057,6 +9057,19 @@ describe('setApprovalMode with folder trust', () => {
         expect(normalizePlanModeReadOnlyRoots(malformed)).toEqual(new Set());
       }
     });
+
+    it('drops non-string elements of an otherwise valid array', () => {
+      // Same threat model as above, one level down: a hand-written mixed array
+      // must not reach entry.trim() and throw during startup.
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          'ib',
+          42,
+          null,
+          { ib: true },
+        ] as unknown as string[]),
+      ).toEqual(new Set(['ib']));
+    });
   });
 
   describe('getPlanModeReadOnlyRoots', () => {

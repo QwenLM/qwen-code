@@ -111,18 +111,37 @@ no caller can vouch them back in:
   attacker-chosen binary.
 
 The state-planter family is an enumerable set of bash builtins. The launcher
-family is not — review demonstrated 16 missing names across two rounds — so the
-list is only half the defence. The other half is structural: a vouched root is
-refused the moment one of its arguments names a command the classifier knows
-(`vouchedRootIsSafe`), matched on the basename. That closes the demonstrated
-shape (`<launcher> <recognised write command>`) for launchers nobody has
-enumerated, at the cost of an occasional extra prompt when a CLI's own
-sub-command shares a name with a real command. Refusing costs a prompt;
-accepting wrongly costs the write.
+family is not: review demonstrated 16 missing names in one round and a further
+batch of language interpreters in the next, and an interpreter cannot be caught
+by inspecting arguments at all — `python3 evil.py` names no command, it names a
+file. A list can therefore only be the floor. What bounds the exposure is
+`vouchedRootIsSafe`, which honours a vouch only for an invocation the
+classifier can actually read:
 
-Residual: a launcher wrapping something the classifier does not recognise
-(`time ./script.sh`) still classifies read-only if that launcher is vouched and
-absent from the list. That is the documented whole-binary scope of a vouch.
+- **Every argument is a plain literal word.** The previous round's rule matched
+  argument _text_ against the shell's quoting, escaping and expansion surface,
+  which is unbounded in the wrong direction: `r\m`, `r'm'`, `"r"m`, `$cmd`,
+  `${cmd}`, `*` and `{rm,ls}` all reach argv as `rm` while matching no
+  known-command name. Enumerating those forms does not terminate either, so
+  the rule is inverted — a whitelist of literal characters (`LITERAL_ARGUMENT`)
+  plus the existing `hasShellExpansion`. Only a word whose text is what the
+  binary receives can be reasoned about at all.
+- **No argument names a command the classifier knows.** Only literal words
+  reach this check now, so text equals runtime value when it runs.
+- **The root is not a known command under another spelling.** `git.exe` matches
+  no dispatch arm above, so without this `git.exe push` would reach the vouch
+  branch and classify read-only. `namesAKnownCommand` strips one trailing
+  `.exe` in both places. Deliberately narrow: `.exe` is not stripped before the
+  dispatch chain, so this cannot widen anything to read-only, only refuse.
+
+Cost: an extra prompt when a CLI's own sub-command shares a name with a real
+command, or when an argument needs quoting. Refusing costs a prompt; accepting
+wrongly costs the write.
+
+Residual: a launcher absent from the list, wrapping something the classifier
+does not recognise (`mylauncher ./script.sh` — not `time`, which the list
+covers), still classifies read-only under a vouch. That is the documented
+whole-binary scope of a vouch.
 
 ### Substitutions hidden in expansion pattern words
 
@@ -132,8 +151,14 @@ tree-sitter-bash parses the pattern word of `${v%%…}`, `${v%…}`, `${v##…}`
 substitution walker therefore missed it, and `echo ${HOME%%$(rm -rf build)}`
 classified read-only — a pre-existing hole for built-in roots that the vouch
 would have widened to arbitrary user-named ones. `evaluateSubstitutions` now
-treats any `$(`/backtick still present in an expansion, after the substitution
-walk collected nothing, as exactly that hidden channel.
+treats any substitution opener still present in an expansion, after the
+substitution walk collected nothing, as exactly that hidden channel.
+
+Two more leaves have the same shape and are handled in the same branch:
+`<(…)`/`>(…)` in a pattern word, which bash runs exactly as it runs `$(…)`;
+and a heredoc body, which bash expands before feeding it to stdin unless the
+delimiter is quoted (`cat <<EOF` with a backtick payload classified read-only
+before this change, with no vouch involved).
 
 ### Mode scoping
 

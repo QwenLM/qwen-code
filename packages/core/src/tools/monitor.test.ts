@@ -554,11 +554,11 @@ describe('MonitorTool', () => {
         mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
       ).mockReturnValue(roots);
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
-      const invocation = createInvocation({ command: 'ib domain watch' });
+      const invocation = createInvocation({ command: 'ib domain list' });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
       expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
-        'ib domain watch',
+        'ib domain list',
         expect.any(String),
         { extraReadOnlyRoots: roots },
       );
