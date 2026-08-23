@@ -45,7 +45,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -66,7 +66,9 @@ import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
+import { getTaskActivityKey } from './utils/taskActivity';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   loadVoiceProviders,
@@ -169,6 +171,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
@@ -276,10 +279,7 @@ import {
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
-import {
-  backgroundShellTaskId,
-  isBackgroundSubAgentToolCall,
-} from './adapters/toolClassification';
+import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -1381,38 +1381,7 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
-function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'monitor') return true;
-  if (backgroundShellTaskId(tool) !== undefined) return true;
-  if (tool.args?.is_background !== true) return false;
-  return (
-    name === 'shell' ||
-    name === 'bash' ||
-    name === 'run_shell_command' ||
-    name === 'exec'
-  );
-}
-
-export function getTaskActivityKey(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  const visit = (tools: readonly ACPToolCall[]) => {
-    for (const tool of tools) {
-      if (
-        isBackgroundTaskToolCall(tool) ||
-        isBackgroundSubAgentToolCall(tool)
-      ) {
-        parts.push(`${tool.callId}:${tool.status}`);
-      }
-      if (tool.subTools) visit(tool.subTools);
-    }
-  };
-  for (const message of messages) {
-    if (message.role !== 'tool_group') continue;
-    visit(message.tools);
-  }
-  return parts.join('|');
-}
+export { getTaskActivityKey } from './utils/taskActivity';
 
 export function mergeMonitorTaskSnapshot(
   current: DaemonSessionMonitorTaskStatus,
@@ -1534,7 +1503,7 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
 
 export function getEnvironmentAgentTasks(
   messages: readonly Message[],
-  sessionTasks: readonly DaemonSessionTaskStatus[],
+  sessionTasks: readonly DaemonSessionTaskWithWorkflowStatus[],
 ): EnvironmentAgentTask[] {
   const liveAgents = sessionTasks.filter(
     (task): task is DaemonSessionAgentTaskStatus => task.kind === 'agent',
@@ -1727,7 +1696,7 @@ function findToolCall(
 }
 
 function mapToWebShellTaskInfo(
-  task: DaemonSessionTaskStatus,
+  task: DaemonSessionTaskWithWorkflowStatus,
 ): WebShellTaskInfo {
   const base = {
     id: task.id,
@@ -1767,6 +1736,17 @@ function mapToWebShellTaskInfo(
         command: task.command,
         pid: task.pid,
         exitCode: task.exitCode,
+      };
+    case 'workflow':
+      return {
+        ...base,
+        kind: 'workflow',
+        status: task.status,
+        currentPhase: task.currentPhase ?? undefined,
+        agentsDispatched: task.agentsDispatched,
+        agentsCompleted: task.agentsCompleted,
+        tokensSpent: task.tokensSpent,
+        tokenBudgetTotal: task.tokenBudgetTotal ?? undefined,
       };
     default:
       return task satisfies never;
@@ -2465,6 +2445,13 @@ export function App({
       ordinaryWorkspaces,
     ],
   );
+  const workspaceWorkflowsEnabled =
+    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
+      ?.workflowsEnabled ?? false;
+  const workflowsEnabled = connection.sessionId
+    ? (connection.supportedCommands?.workflowsEnabled ??
+      workspaceWorkflowsEnabled)
+    : workspaceWorkflowsEnabled;
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
@@ -4095,6 +4082,7 @@ export function App({
     taskActivityKey,
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
+    workflowsEnabled,
   );
   const terminalBackgroundShellTaskIdsKey = useMemo(
     () =>
@@ -4846,12 +4834,11 @@ export function App({
   const [gitDialog, setGitDialog] = useState<
     { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
   >(undefined);
-  // Main content view. The scheduled-tasks page replaces the chat pane inline
-  // (not a modal overlay), mirroring the reference design; creating or opening
-  // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
-  // is one of the activePanel values below.)
+  // Main content view. Full-page management views replace the chat pane inline
+  // (not as modal overlays); creating or opening a chat returns to 'chat'.
+  // Daemon Status is one of the activePanel values below.
   const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'goals' | 'split'
+    'chat' | 'scheduledTasks' | 'workflows' | 'goals' | 'split'
   >('chat');
   const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
@@ -5142,6 +5129,16 @@ export function App({
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
+  const openWorkflows = useCallback(() => {
+    if (!workflowsEnabled) return;
+    setActivePanel(null);
+    setMainView('workflows');
+  }, [workflowsEnabled]);
+  useEffect(() => {
+    if (mainView === 'workflows' && !workflowsEnabled) {
+      setMainView('chat');
+    }
+  }, [mainView, workflowsEnabled]);
   const openGoals = useCallback(() => {
     setActivePanel(null);
     setMainView('goals');
@@ -5414,12 +5411,16 @@ export function App({
     // need a pending-approval signal plumbed up through SplitView. Escape or
     // the toolbar exits fullscreen and reveals them.
     if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // Scheduled Tasks, Workflows, and Goals are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+    if (
+      mainView === 'scheduledTasks' ||
+      mainView === 'workflows' ||
+      mainView === 'goals'
+    ) {
       setMainView('chat');
     }
   }, [
@@ -8813,8 +8814,10 @@ export function App({
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     const owner = sessionOwnerGuard.capture();
-    sessionActions
-      .getTasks()
+    const request = workflowsEnabled
+      ? sessionActions.getWorkflowTasks()
+      : sessionActions.getTasks();
+    request
       .then((snapshot) => {
         if (!owner.isCurrent()) return;
         setTasksDialogMessage({ snapshot });
@@ -8829,6 +8832,7 @@ export function App({
     requireActiveSessionForLocalCommand,
     sessionActions,
     sessionOwnerGuard,
+    workflowsEnabled,
   ]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -8836,7 +8840,7 @@ export function App({
     setBackgroundTasksRefreshTrigger((value) => value + 1);
   }, [requireActiveSessionForLocalCommand]);
   const openEnvironmentTask = useCallback(
-    (task: DaemonSessionTaskStatus) => {
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
       if (task.kind === 'monitor' || task.kind === 'shell') {
         if (!artifactPanelOpenRef.current) {
           preserveEnvironmentPanelOnArtifactOpenRef.current = true;
@@ -9324,6 +9328,14 @@ export function App({
           }
           if (cmd === 'tasks') {
             openEnvironmentTasksPanel();
+            return true;
+          }
+          if (
+            cmd === 'workflows' &&
+            workflowsEnabled &&
+            text.slice(match[0].length).trim().length === 0
+          ) {
+            openWorkflows();
             return true;
           }
           if (cmd === 'goal') {
@@ -10217,6 +10229,8 @@ export function App({
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
+      openWorkflows,
+      workflowsEnabled,
       createNewSession,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -11877,6 +11891,10 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  onOpenWorkflows={() => {
+                    closeMobileDrawer();
+                    openWorkflows();
+                  }}
                   onOpenGoals={() => {
                     closeMobileDrawer();
                     openGoals();
@@ -12367,6 +12385,42 @@ export function App({
                   </div>
                 </div>
               )}
+              {mainView === 'workflows' && workflowsEnabled && (
+                <div
+                  className={styles.fullPage}
+                  data-testid="workflow-runs-page"
+                >
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('workflowRuns.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <WorkflowRunsPage />
+                  </div>
+                </div>
+              )}
               {mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
@@ -12713,11 +12767,16 @@ export function App({
                                 }
                               />
                             );
+                            const messageListWithWorkflowDetails = (
+                              <WorkflowDetailsProvider tasks={sessionTasks}>
+                                {messageListContent}
+                              </WorkflowDetailsProvider>
+                            );
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                               >
-                                {messageListContent}
+                                {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
                             );
                             const messageList = monitorDetailsSupported ? (

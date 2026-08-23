@@ -32,6 +32,7 @@ import {
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -41,6 +42,7 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
@@ -61,6 +63,7 @@ import {
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
+import { getTaskActivityKey } from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
@@ -270,6 +273,17 @@ export function ChatPane({
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const taskActivityKey = useMemo(
+    () => getTaskActivityKey(messages),
+    [messages],
+  );
+  const sessionTasks = useBackgroundTasks(
+    connection.sessionId,
+    taskActivityKey,
+    connection.status === 'connected',
+    0,
+    sessionWorkflowEnabled,
+  );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
@@ -1252,49 +1266,53 @@ export function ChatPane({
           onOpen={openMonitorDetails}
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
-            <MessageList
-              messages={messages}
-              pendingApproval={pendingToolApproval}
-              loadingTranscript={connection.loadingTranscript}
-              catchingUp={connection.catchingUp}
-              hasOlderHistory={transcriptHistory.hasMore}
-              loadingOlderHistory={transcriptHistory.loading}
-              historyCapacityReached={transcriptHistory.capacityReached}
-              historyPaginationError={transcriptHistory.paginationError}
-              onLoadOlderHistory={transcriptHistory.loadMore}
-              transcriptBlockCount={blocks.length}
-              transcriptActivity={store}
-              onReloadTranscript={
-                transcriptReloadSupported ? reloadTranscript : undefined
-              }
-              isResponding={isResponding}
-              workspaceCwd={connection.workspaceCwd || ''}
-              hideSessionTimeline
-              turnFileChanges={
-                visibleTurnOutputKinds.has('file')
-                  ? fileChangesByTurn
-                  : undefined
-              }
-              turnArtifacts={
-                visibleTurnOutputKinds.has('artifact')
-                  ? artifactsByTurn
-                  : undefined
-              }
-              turnScheduledTasks={
-                visibleTurnOutputKinds.has('scheduled_task')
-                  ? scheduledTasksByTurn
-                  : undefined
-              }
-              onTurnOutputOpen={handleRightPanelOpen}
-              onImagePreview={handleImagePreview}
-              onAttachmentPreview={handleAttachmentPreview}
-              onError={reportError}
-              generateContent={
-                connection.capabilities?.features.includes('session_generation')
-                  ? actions.generateSessionContent
-                  : undefined
-              }
-            />
+            <WorkflowDetailsProvider tasks={sessionTasks}>
+              <MessageList
+                messages={messages}
+                pendingApproval={pendingToolApproval}
+                loadingTranscript={connection.loadingTranscript}
+                catchingUp={connection.catchingUp}
+                hasOlderHistory={transcriptHistory.hasMore}
+                loadingOlderHistory={transcriptHistory.loading}
+                historyCapacityReached={transcriptHistory.capacityReached}
+                historyPaginationError={transcriptHistory.paginationError}
+                onLoadOlderHistory={transcriptHistory.loadMore}
+                transcriptBlockCount={blocks.length}
+                transcriptActivity={store}
+                onReloadTranscript={
+                  transcriptReloadSupported ? reloadTranscript : undefined
+                }
+                isResponding={isResponding}
+                workspaceCwd={connection.workspaceCwd || ''}
+                hideSessionTimeline
+                turnFileChanges={
+                  visibleTurnOutputKinds.has('file')
+                    ? fileChangesByTurn
+                    : undefined
+                }
+                turnArtifacts={
+                  visibleTurnOutputKinds.has('artifact')
+                    ? artifactsByTurn
+                    : undefined
+                }
+                turnScheduledTasks={
+                  visibleTurnOutputKinds.has('scheduled_task')
+                    ? scheduledTasksByTurn
+                    : undefined
+                }
+                onTurnOutputOpen={handleRightPanelOpen}
+                onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
+                onError={reportError}
+                generateContent={
+                  connection.capabilities?.features.includes(
+                    'session_generation',
+                  )
+                    ? actions.generateSessionContent
+                    : undefined
+                }
+              />
+            </WorkflowDetailsProvider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>

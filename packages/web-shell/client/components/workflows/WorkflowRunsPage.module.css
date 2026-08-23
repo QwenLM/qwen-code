@@ -1,0 +1,162 @@
+.root {
+  width: min(100%, 1160px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tabs {
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 2px 0 9px;
+}
+
+.content {
+  padding-top: 10px;
+}
+
+.loading,
+.error,
+.emptyState {
+  padding: 24px 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.savedList {
+  display: grid;
+  gap: 6px;
+}
+
+.savedCard {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  overflow: hidden;
+  padding: 9px 10px 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.savedCard::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--agent-blue-500);
+}
+
+.savedCard[data-scope='user']::before {
+  background: var(--agent-purple-600);
+}
+
+.savedIdentity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.savedName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.savedDescription,
+.savedEmptyDescription {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.savedEmpty {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--secondary) 58%, transparent);
+}
+
+.savedEmpty > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--agent-blue-500);
+}
+
+.savedEmptyTitle {
+  margin-bottom: 3px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.startingIcon {
+  animation: workflow-saved-spin 900ms linear infinite;
+}
+
+@keyframes workflow-saved-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startingIcon {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .root {
+    gap: 10px;
+  }
+
+  .toolbar {
+    align-items: flex-end;
+    overflow: hidden;
+  }
+
+  .toolbar > [role='tablist'] {
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .toolbar > button {
+    flex: 0 0 auto;
+  }
+
+  .savedCard {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .savedCard > button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}

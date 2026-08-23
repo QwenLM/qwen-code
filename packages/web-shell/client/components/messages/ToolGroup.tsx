@@ -33,7 +33,10 @@ import {
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
+import { useWorkflowDetails } from '../../workflowDetailsContext';
+import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
+import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
@@ -117,6 +120,7 @@ function openMonitorDetailsOnce(
 export function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
+  if (name === 'workflow') return true;
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
     return !!getWriteContent(tool) || hasEditContent(tool);
@@ -157,7 +161,8 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read_file' ||
     name === 'readfile' ||
     isSkillToolName(name) ||
-    isAskUserQuestionToolName(tool.toolName)
+    isAskUserQuestionToolName(tool.toolName) ||
+    name === 'workflow'
   );
 }
 
@@ -437,8 +442,38 @@ interface ToolLineProps {
   summaryOnly?: boolean;
   forceExpanded?: boolean;
   forceExpandable?: boolean;
+  detailsVisible?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
+}
+
+function WorkflowToolDetail({
+  tool,
+  displayName,
+  detail,
+  result,
+}: {
+  tool: ACPToolCall;
+  displayName: string;
+  detail: string;
+  result: string;
+}) {
+  const { t } = useI18n();
+  const workflowDetails = useWorkflowDetails();
+  const workflowTask = workflowDetails
+    ? findWorkflowTaskForTool(workflowDetails.tasks, tool)
+    : undefined;
+  return workflowTask ? (
+    <WorkflowExecutionView task={workflowTask} />
+  ) : (
+    <ToolExpandedCard title={displayName} detail={detail}>
+      <div className={styles.workflowFallback} role="status">
+        {tool.status === 'pending' || tool.status === 'in_progress'
+          ? t('workflow.inline.loading')
+          : result || t('workflow.inline.unavailable')}
+      </div>
+    </ToolExpandedCard>
+  );
 }
 
 function getAgentDisplayInfo(
@@ -994,6 +1029,7 @@ function areToolLinePropsEqual(
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
   if (prev.forceExpandable !== next.forceExpandable) return false;
+  if (prev.detailsVisible !== next.detailsVisible) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
@@ -1094,6 +1130,7 @@ export const ToolLine = memo(function ToolLine({
   summaryOnly = false,
   forceExpanded = false,
   forceExpandable = false,
+  detailsVisible = true,
   hideHeader = false,
   hideCollapsedOutput = false,
 }: ToolLineProps) {
@@ -1111,6 +1148,7 @@ export const ToolLine = memo(function ToolLine({
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
+  const isWorkflow = tool.toolName.toLowerCase() === 'workflow';
 
   useEffect(
     () => {
@@ -1490,15 +1528,24 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!isTodo && expanded && detailView && (
+      {!isTodo && expanded && detailView && (!isWorkflow || detailsVisible) && (
         <div
           className={
-            useMarkdownDetail
-              ? `${styles.lineDetail} ${styles.markdownLineDetail}`
-              : styles.lineDetail
+            isWorkflow
+              ? `${styles.lineDetail} ${styles.workflowLineDetail}`
+              : useMarkdownDetail
+                ? `${styles.lineDetail} ${styles.markdownLineDetail}`
+                : styles.lineDetail
           }
         >
-          {isRead ? (
+          {isWorkflow ? (
+            <WorkflowToolDetail
+              tool={tool}
+              displayName={displayName}
+              detail={expandedCardDetail}
+              result={result}
+            />
+          ) : isRead ? (
             <ToolExpandedCard title={displayName} status={tool.status}>
               <ExpandedReadContent tool={tool} />
             </ToolExpandedCard>
@@ -1756,6 +1803,8 @@ export const ToolGroup = memo(function ToolGroup({
           />
         </button>
         <div
+          aria-hidden={!chatExpanded}
+          inert={!chatExpanded ? true : undefined}
           className={
             chatExpanded
               ? styles.chatSummaryContentClip
@@ -1784,6 +1833,7 @@ export const ToolGroup = memo(function ToolGroup({
                     workspaceCwd={workspaceCwd}
                     summaryOnly={!singleTool || compactToolLines}
                     forceExpanded={!!singleTool && !compactToolLines}
+                    detailsVisible={chatExpanded}
                     hideHeader={!!singleTool && !compactToolLines}
                   />
                 </Fragment>

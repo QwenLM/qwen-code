@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import {
   useActions,
   useDaemonSessionOwnerGuard,
@@ -10,9 +10,18 @@ import { isSessionDisconnectedError } from '../utils/sessionErrors';
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
 
-function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
+function hasActiveTaskActivity(taskActivityKey: string): boolean {
+  return /:(?:pending|in_progress)(?:\||$)/.test(taskActivityKey);
+}
+
+function hasActiveTask(
+  tasks: readonly DaemonSessionTaskWithWorkflowStatus[],
+): boolean {
   return tasks.some(
-    (task) => task.status === 'running' || task.status === 'paused',
+    (task) =>
+      task.status === 'running' ||
+      task.status === 'pausing' ||
+      task.status === 'paused',
   );
 }
 
@@ -21,13 +30,14 @@ export function useBackgroundTasks(
   taskActivityKey: string,
   connected: boolean,
   refreshTrigger = 0,
-): DaemonSessionTaskStatus[] {
+  workflowsEnabled = false,
+): DaemonSessionTaskWithWorkflowStatus[] {
   const actions = useActions();
   const ownerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
   const owner = ownerRef.current;
-  const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
+  const [tasks, setTasks] = useState<DaemonSessionTaskWithWorkflowStatus[]>([]);
   const tasksOwnerRef = useRef(owner);
   const [pollingActive, setPollingActive] = useState(false);
   const [tasksPanelActive, setTasksPanelActive] = useState(false);
@@ -56,8 +66,10 @@ export function useBackgroundTasks(
     const refresh = () => {
       if (tasksRefreshInFlightRef.current === owner) return;
       tasksRefreshInFlightRef.current = owner;
-      actions
-        .getTasks({ silent: true })
+      const request = workflowsEnabled
+        ? actions.getWorkflowTasks({ silent: true })
+        : actions.getTasks({ silent: true });
+      request
         .then((snapshot) => {
           if (
             disposed ||
@@ -67,6 +79,7 @@ export function useBackgroundTasks(
             return;
           setTasks(snapshot.tasks);
           if (snapshot.tasks.length === 0) {
+            if (hasActiveTaskActivity(taskActivityKey)) return;
             emptyPollsRef.current += 1;
             if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
               setPollingActive(false);
@@ -99,14 +112,26 @@ export function useBackgroundTasks(
       disposed = true;
       clearInterval(id);
     };
-  }, [actions, connected, owner, pollingActive, sessionId, tasksPanelActive]);
+  }, [
+    actions,
+    connected,
+    owner,
+    pollingActive,
+    sessionId,
+    taskActivityKey,
+    tasksPanelActive,
+    workflowsEnabled,
+  ]);
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
 
   useEffect(() => {
     const onTasksPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ active?: boolean }>).detail;
+      const detail = (
+        event as CustomEvent<{ active?: boolean; sessionId?: string }>
+      ).detail;
+      if (detail?.sessionId !== sessionId) return;
       const active = detail?.active === true;
       setTasksPanelActive(active);
       if (!active && hasActiveTask(tasksRef.current)) {
@@ -116,7 +141,7 @@ export function useBackgroundTasks(
     window.addEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
     return () =>
       window.removeEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
-  }, []);
+  }, [sessionId]);
 
   return tasksOwnerRef.current === owner ? tasks : [];
 }

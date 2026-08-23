@@ -11,7 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
 } from '@qwen-code/sdk/daemon';
+import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
 import { useBackgroundTasks } from './useBackgroundTasks';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -26,6 +30,7 @@ const sdkMock = vi.hoisted(() => ({
   ownerGuard: { capture: vi.fn() },
   actions: {
     getTasks: vi.fn(),
+    getWorkflowTasks: vi.fn(),
   },
 }));
 
@@ -39,7 +44,8 @@ let container: HTMLDivElement | null = null;
 let sessionId: string | undefined = 'session-a';
 let taskActivityKey = 'monitor:running';
 let refreshTrigger = 0;
-let latestTasks: DaemonSessionTaskStatus[] = [];
+let workflowsEnabled = false;
+let latestTasks: DaemonSessionTaskWithWorkflowStatus[] = [];
 
 function deferred<T>(): Deferred<T> {
   let resolve: ((value: T) => void) | undefined;
@@ -57,6 +63,19 @@ function snapshot(
   return {
     v: 1,
     sessionId: id,
+    now: Date.now(),
+    tasks,
+  };
+}
+
+function workflowSnapshot(
+  id: string,
+  tasks: DaemonSessionTaskWithWorkflowStatus[] = [],
+): DaemonSessionWorkflowTasksStatus {
+  return {
+    v: 1,
+    sessionId: id,
+    now: Date.now(),
     tasks,
   };
 }
@@ -86,6 +105,7 @@ function Harness() {
     taskActivityKey,
     true,
     refreshTrigger,
+    workflowsEnabled,
   );
   return null;
 }
@@ -110,13 +130,52 @@ beforeEach(() => {
   sessionId = 'session-a';
   taskActivityKey = 'monitor:running';
   refreshTrigger = 0;
+  workflowsEnabled = false;
   latestTasks = [];
   sdkMock.actions.getTasks.mockReset();
+  sdkMock.actions.getWorkflowTasks.mockReset();
   sdkMock.ownerVersion = 0;
   sdkMock.ownerGuard.capture.mockImplementation(() => {
     const version = sdkMock.ownerVersion;
     return { isCurrent: () => sdkMock.ownerVersion === version };
   });
+});
+
+it('uses the opt-in task snapshot when workflows are enabled', async () => {
+  const workflow: DaemonSessionWorkflowTaskStatus = {
+    kind: 'workflow',
+    id: 'workflow-1',
+    label: 'review-and-fix',
+    description: 'Review and fix',
+    status: 'running',
+    startTime: Date.now(),
+    runtimeMs: 1,
+    isBackgrounded: true,
+    currentPhase: 'Review',
+    phaseVisits: [],
+    dispatches: [],
+    agentsDispatched: 0,
+    agentsCompleted: 0,
+    tokensSpent: 0,
+    tokenBudgetTotal: null,
+    recentLogs: [],
+    pendingApprovalCount: 0,
+  };
+  workflowsEnabled = true;
+  sdkMock.actions.getWorkflowTasks.mockResolvedValue({
+    v: 1,
+    sessionId: 'session-a',
+    now: Date.now(),
+    tasks: [workflow],
+  });
+
+  await renderHarness();
+
+  expect(sdkMock.actions.getWorkflowTasks).toHaveBeenCalledWith({
+    silent: true,
+  });
+  expect(sdkMock.actions.getTasks).not.toHaveBeenCalled();
+  expect(latestTasks).toEqual([workflow]);
 });
 
 afterEach(async () => {
@@ -132,6 +191,72 @@ afterEach(async () => {
 });
 
 describe('useBackgroundTasks', () => {
+  it('keeps polling while an active workflow is waiting to register', async () => {
+    taskActivityKey = 'workflow-call:in_progress';
+    workflowsEnabled = true;
+    const runningWorkflow = {
+      kind: 'workflow' as const,
+      id: 'wf-live',
+      label: 'Live workflow',
+      description: 'Live workflow',
+      status: 'running' as const,
+      startTime: Date.now(),
+      runtimeMs: 1,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    sdkMock.actions.getWorkflowTasks
+      .mockResolvedValueOnce(workflowSnapshot('session-a'))
+      .mockResolvedValueOnce(workflowSnapshot('session-a'))
+      .mockResolvedValue(workflowSnapshot('session-a', [runningWorkflow]));
+
+    await renderHarness();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(sdkMock.actions.getWorkflowTasks).toHaveBeenCalledTimes(3);
+    expect(latestTasks).toEqual([runningWorkflow]);
+  });
+
+  it('only pauses polling for a task panel in the same session', async () => {
+    const runningMonitor = monitor('monitor-a', 'running');
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-a', [runningMonitor]),
+    );
+    await renderHarness();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-b' },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-a' },
+        }),
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps polling after a transient task refresh failure', async () => {
     const runningMonitor = monitor('monitor-a', 'running');
     sdkMock.actions.getTasks

@@ -3,12 +3,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
-import { hasActiveAgents } from '../../adapters/toolClassification';
+import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
+import {
+  hasActiveAgents,
+  isSubAgentToolCall,
+} from '../../adapters/toolClassification';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -527,6 +532,18 @@ describe('tool output session links', () => {
 });
 
 describe('tool expandability', () => {
+  it('does not mistake workflow live output for a subagent panel', () => {
+    expect(
+      isSubAgentToolCall(
+        makeTool({
+          toolName: 'workflow',
+          status: 'in_progress',
+          subContent: '{"runId":"wf_expected"}',
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it('only marks tools with actual detail views as expandable by output', () => {
     expect(
       hasExpandableContent(
@@ -616,6 +633,83 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('expands a workflow tool into its live execution graph', () => {
+    const tool = makeTool({
+      toolName: 'workflow',
+      status: 'in_progress',
+      subContent: '```json\n{"runId":"wf_channel","status":"running"}\n```',
+    });
+    const task: DaemonSessionWorkflowTaskStatus = {
+      kind: 'workflow',
+      id: 'wf_channel',
+      label: 'Channel analysis',
+      description: 'Analyze channel packages',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: false,
+      currentPhase: 'Inspect',
+      phaseVisits: [
+        {
+          id: 'phase-inspect',
+          index: 0,
+          title: 'Inspect',
+          startedAt: 1_010,
+        },
+      ],
+      dispatches: [
+        {
+          id: 'dispatch-architecture',
+          phaseVisitId: 'phase-inspect',
+          label: 'Architecture Agent',
+          prompt: 'Inspect the channel architecture',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 120,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowDetailsProvider tasks={[task]}>
+            <ToolGroup tools={[tool]} />
+          </WorkflowDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    ) as HTMLElement;
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+    expect(content.className).toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('true');
+    expect(content.hasAttribute('inert')).toBe(true);
+    expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+    act(() => summary.click());
+
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+    expect(content.className).not.toContain('chatSummaryContentCollapsed');
+    expect(content.getAttribute('aria-hidden')).toBe('false');
+    expect(content.hasAttribute('inert')).toBe(false);
+    expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+    expect(container.textContent).toContain('Architecture Agent');
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({

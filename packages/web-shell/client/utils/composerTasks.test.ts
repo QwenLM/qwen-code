@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { isComposerTask } from './composerTasks';
 
 const base = {
@@ -13,7 +13,7 @@ const base = {
 
 describe('isComposerTask', () => {
   it('shows non-agent tasks and excludes agents', () => {
-    const tasks: Array<[DaemonSessionTaskStatus, boolean]> = [
+    const tasks: Array<[DaemonSessionTaskWithWorkflowStatus, boolean]> = [
       [
         {
           ...base,
@@ -49,6 +49,21 @@ describe('isComposerTask', () => {
           eventCount: 0,
           lastEventTime: 0,
           droppedLines: 0,
+        },
+        true,
+      ],
+      [
+        {
+          ...base,
+          kind: 'workflow',
+          isBackgrounded: true,
+          phaseVisits: [],
+          dispatches: [],
+          agentsDispatched: 0,
+          agentsCompleted: 0,
+          tokensSpent: 0,
+          recentLogs: [],
+          pendingApprovalCount: 0,
         },
         true,
       ],

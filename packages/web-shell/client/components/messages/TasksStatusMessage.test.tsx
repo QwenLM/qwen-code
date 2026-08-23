@@ -5,23 +5,31 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
-  DaemonSessionTaskStatus,
-  DaemonSessionTasksStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 
+type DaemonSessionTasksStatus = DaemonSessionWorkflowTasksStatus;
+
 // The panel only needs getTasks/cancelTask from the daemon SDK; mock the
 // hook so the unit test doesn't pull the whole connection graph. Hoisted
 // so tests can assert on / reprogram the mocks across renders.
-const { getTasksMock, cancelTaskMock } = vi.hoisted(() => ({
-  getTasksMock: vi.fn(),
-  cancelTaskMock: vi.fn(),
-}));
+const { getTasksMock, cancelTaskMock, controlWorkflowTaskMock } = vi.hoisted(
+  () => ({
+    getTasksMock: vi.fn(),
+    cancelTaskMock: vi.fn(),
+    controlWorkflowTaskMock: vi.fn(),
+  }),
+);
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useActions: () => ({
     getTasks: getTasksMock,
+    getWorkflowTasks: getTasksMock,
     cancelTask: cancelTaskMock,
+    controlWorkflowTask: controlWorkflowTaskMock,
   }),
 }));
 
@@ -41,6 +49,8 @@ afterEach(() => {
   mounted.length = 0;
   getTasksMock.mockReset();
   cancelTaskMock.mockReset();
+  controlWorkflowTaskMock.mockReset();
+  vi.useRealTimers();
 });
 
 function agentTask(
@@ -80,19 +90,67 @@ function monitorTask(
   };
 }
 
+function workflowTask(
+  overrides: Partial<DaemonSessionWorkflowTaskStatus> = {},
+): DaemonSessionWorkflowTaskStatus {
+  return {
+    kind: 'workflow',
+    id: 'workflow-1',
+    label: 'review-and-fix',
+    description: 'Review and fix',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    isBackgrounded: true,
+    currentPhase: 'Review',
+    phaseVisits: [
+      {
+        id: 'phase-1',
+        index: 0,
+        title: 'Review',
+        startedAt: 1_000,
+      },
+    ],
+    dispatches: [
+      {
+        id: 'dispatch-1',
+        phaseVisitId: 'phase-1',
+        label: 'Correctness',
+        prompt: 'Review behavior regressions',
+        status: 'running',
+        dependsOn: [],
+        queuedAt: 1_010,
+        startedAt: 1_020,
+      },
+    ],
+    agentsDispatched: 1,
+    agentsCompleted: 0,
+    tokensSpent: 120,
+    recentLogs: [],
+    pendingApprovalCount: 0,
+    pendingApprovals: [],
+    ...overrides,
+  };
+}
+
 function renderPanel(
-  tasks: DaemonSessionTaskStatus[],
+  tasks: DaemonSessionTaskWithWorkflowStatus[],
   options: {
     embedded?: boolean;
+    keyboardShortcuts?: boolean;
+    syncSnapshot?: boolean;
+    taskView?: 'all' | 'workflow-active' | 'workflow-history';
+    sessionId?: string;
+    onTasksChange?: (snapshot: DaemonSessionWorkflowTasksStatus) => void;
     planTodos?: readonly TodoItem[];
     agentTools?: readonly ACPToolCall[];
     onOpenSubagent?: (tool: ACPToolCall) => void;
     onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
   } = {},
 ): HTMLElement {
-  const snapshot: DaemonSessionTasksStatus = {
+  const snapshot: DaemonSessionWorkflowTasksStatus = {
     v: 1,
-    sessionId: 'session-1',
+    sessionId: options.sessionId ?? 'session-1',
     now: 10_000,
     tasks,
   };
@@ -106,11 +164,15 @@ function renderPanel(
         <TasksStatusMessage
           message={{ snapshot }}
           embedded={options.embedded}
+          keyboardShortcuts={options.keyboardShortcuts}
+          syncSnapshot={options.syncSnapshot}
+          taskView={options.taskView}
           manageActiveEvent={false}
           planTodos={options.planTodos}
           agentTools={options.agentTools}
           onOpenSubagent={options.onOpenSubagent}
           onOpenMonitor={options.onOpenMonitor}
+          onTasksChange={options.onTasksChange}
         />
       </I18nProvider>,
     );
@@ -151,6 +213,494 @@ describe('TasksStatusMessage monitor details', () => {
     });
 
     expect(container.textContent).toContain('tail -f server.log');
+  });
+});
+
+describe('TasksStatusMessage workflow details', () => {
+  it('makes embedded workflow rows keyboard-accessible', () => {
+    const container = renderPanel([workflowTask()], {
+      embedded: true,
+      keyboardShortcuts: false,
+      taskView: 'workflow-active',
+    });
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('review-and-fix'));
+
+    expect(row).toBeDefined();
+    expect(row?.tabIndex).toBe(0);
+    expect(row?.getAttribute('aria-expanded')).toBe('false');
+    act(() => {
+      row?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(row?.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain('Review behavior regressions');
+    expect(container.textContent).not.toContain('Runtime 5s');
+    expect(container.textContent?.match(/120 tokens/gi)).toHaveLength(1);
+  });
+
+  it('closes filtered detail instead of selecting a different workflow', () => {
+    const taskA = workflowTask({
+      id: 'workflow-a',
+      label: 'run-a',
+      startTime: 2_000,
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          id: 'dispatch-a',
+          prompt: 'prompt-for-a',
+        },
+      ],
+    });
+    const taskB = workflowTask({
+      id: 'workflow-b',
+      label: 'run-b',
+      startTime: 1_000,
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          id: 'dispatch-b',
+          prompt: 'prompt-for-b',
+        },
+      ],
+    });
+    const container = renderPanel([taskA, taskB], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+    });
+    const rowA = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('run-a'));
+    act(() => rowA?.click());
+    expect(container.textContent).toContain('prompt-for-a');
+
+    const nextSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      now: 11_000,
+      tasks: [{ ...taskA, status: 'completed', endTime: 11_000 }, taskB],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: nextSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const rowB = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('run-b'));
+    expect(rowB?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('prompt-for-a');
+    expect(container.textContent).not.toContain('prompt-for-b');
+  });
+
+  it('ignores a stale polling response from the previous session', async () => {
+    vi.useFakeTimers();
+    const onTasksChange = vi.fn();
+    let resolveSessionA!: (snapshot: DaemonSessionTasksStatus) => void;
+    const pendingSessionA = new Promise<DaemonSessionTasksStatus>((resolve) => {
+      resolveSessionA = resolve;
+    });
+    getTasksMock.mockReturnValueOnce(pendingSessionA);
+    const sessionATask = workflowTask({ id: 'workflow-a', label: 'run-a' });
+    const sessionBTask = workflowTask({ id: 'workflow-b', label: 'run-b' });
+    const container = renderPanel([sessionATask], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+      sessionId: 'session-a',
+      onTasksChange,
+    });
+    await act(async () => vi.advanceTimersByTime(3_000));
+
+    const sessionBSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-b',
+      now: 11_000,
+      tasks: [sessionBTask],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: sessionBSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+            onTasksChange={onTasksChange}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveSessionA({
+        v: 1,
+        sessionId: 'session-a',
+        now: 12_000,
+        tasks: [sessionATask],
+      });
+      await pendingSessionA;
+    });
+
+    expect(container.textContent).toContain('run-b');
+    expect(container.textContent).not.toContain('run-a');
+    expect(onTasksChange).not.toHaveBeenCalled();
+  });
+
+  it('opens the live graph and stops the workflow through the task API', async () => {
+    const task = workflowTask();
+    cancelTaskMock.mockResolvedValue({ cancelled: true });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_100,
+      tasks: [{ ...task, status: 'cancelled' }],
+    });
+    const container = renderPanel([task]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Review behavior regressions');
+    const stop = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Stop');
+    expect(stop).toBeDefined();
+
+    await act(async () => stop!.click());
+
+    expect(cancelTaskMock).toHaveBeenCalledWith('workflow-1', 'workflow');
+  });
+
+  it('pauses and resumes a background workflow through the task API', async () => {
+    const task = workflowTask();
+    controlWorkflowTaskMock.mockResolvedValue({
+      changed: true,
+      status: 'pausing',
+    });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_100,
+      tasks: [{ ...task, status: 'pausing' }],
+    });
+    const container = renderPanel([task]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+    const pause = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Pause');
+
+    await act(async () => pause!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith('workflow-1', 'pause');
+
+    controlWorkflowTaskMock.mockResolvedValue({
+      changed: true,
+      status: 'running',
+    });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_200,
+      tasks: [{ ...task, status: 'running' }],
+    });
+    const pausedContainer = renderPanel([workflowTask({ status: 'paused' })]);
+    const pausedRow = Array.from(pausedContainer.querySelectorAll('span')).find(
+      (node) => node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => pausedRow?.click());
+    const resume = Array.from(
+      pausedContainer.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Resume');
+
+    await act(async () => resume!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenLastCalledWith(
+      'workflow-1',
+      'resume',
+    );
+  });
+
+  it('ignores a workflow action that settles after switching sessions', async () => {
+    let resolveControl!: (value: {
+      changed: boolean;
+      status: 'pausing';
+    }) => void;
+    controlWorkflowTaskMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveControl = resolve;
+      }),
+    );
+    const sessionATask = workflowTask({ id: 'workflow-a', label: 'run-a' });
+    const sessionBTask = workflowTask({ id: 'workflow-b', label: 'run-b' });
+    const container = renderPanel([sessionATask], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+      sessionId: 'session-a',
+    });
+    const rowA = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('run-a'));
+    act(() => rowA?.click());
+    const pause = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Pause');
+    act(() => pause?.click());
+
+    const sessionBSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-b',
+      now: 11_000,
+      tasks: [sessionBTask],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: sessionBSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveControl({ changed: true, status: 'pausing' });
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('run-b');
+    expect(container.textContent).not.toContain('run-a');
+    expect(getTasksMock).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed workflow path and refreshes the graph', async () => {
+    const failed = workflowTask({
+      status: 'failed',
+      error: 'Architecture review failed',
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          status: 'failed',
+          error: 'Architecture review failed',
+        },
+      ],
+    });
+    controlWorkflowTaskMock.mockResolvedValue({
+      changed: true,
+      status: 'running',
+    });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_200,
+      tasks: [workflowTask()],
+    });
+    const container = renderPanel([failed]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Retry failed path');
+    expect(retry).toBeDefined();
+
+    await act(async () => retry!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith('workflow-1', 'retry');
+    expect(getTasksMock).toHaveBeenCalledOnce();
+  });
+
+  it('reruns a failed workflow from scratch and opens the new run', async () => {
+    const failed = workflowTask({
+      status: 'failed',
+      error: 'Architecture review failed',
+    });
+    const rerun = workflowTask({
+      id: 'workflow-2',
+      sourceRunId: failed.id,
+      startMode: 'rerun',
+      startTime: 2_000,
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          id: 'dispatch-2',
+          prompt: 'Fresh run agent',
+        },
+      ],
+    });
+    controlWorkflowTaskMock.mockResolvedValue({
+      changed: true,
+      status: 'running',
+      taskId: rerun.id,
+    });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_200,
+      tasks: [failed, rerun, agentTask('newer-agent', { startTime: 3_000 })],
+    });
+    const container = renderPanel([failed]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    );
+    expect(
+      buttons.find((button) => button.textContent === 'Retry failed path'),
+    ).toBeDefined();
+    const rerunAll = buttons.find(
+      (button) => button.textContent === 'Rerun all',
+    );
+    expect(rerunAll).toBeDefined();
+
+    await act(async () => rerunAll!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith('workflow-1', 'rerun');
+    expect(container.textContent).toContain('Fresh run agent');
+    expect(container.textContent).toContain('Compare runs');
+  });
+
+  it('offers a full rerun, but not a path retry, after completion', () => {
+    const container = renderPanel([
+      workflowTask({ status: 'completed', endTime: 9_000 }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Rerun all');
+    expect(container.textContent).not.toContain('Retry failed path');
+  });
+
+  it('shows saved workflow history while keeping restored runs read-only', () => {
+    const current = workflowTask({ id: 'workflow-current' });
+    const historical = workflowTask({
+      id: 'workflow-saved',
+      isHistorical: true,
+      status: 'failed',
+      startTime: 500,
+      endTime: 1_000,
+      runtimeMs: 500,
+    });
+    const container = renderPanel([current, historical]);
+    const currentRow = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => currentRow?.click());
+    const history = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Run history (1)');
+    expect(history).toBeDefined();
+    act(() => history!.click());
+
+    expect(container.textContent).toContain('workflow-saved');
+
+    const savedContainer = renderPanel([historical]);
+    const savedRow = Array.from(savedContainer.querySelectorAll('span')).find(
+      (node) => node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => savedRow?.click());
+
+    expect(savedContainer.textContent).toContain('Saved run · read-only');
+    expect(savedContainer.textContent).not.toContain('Retry failed path');
+    expect(savedContainer.textContent).not.toContain('Rerun all');
+  });
+
+  it('deletes a restored run after confirmation and refreshes the task list', async () => {
+    const historical = workflowTask({
+      id: 'wf-abcd',
+      isHistorical: true,
+      status: 'failed',
+      startTime: 500,
+      endTime: 1_000,
+      runtimeMs: 500,
+    });
+    controlWorkflowTaskMock.mockResolvedValue({ changed: true });
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 2_000,
+      tasks: [],
+    });
+    const container = renderPanel([historical]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    const remove = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Delete saved run',
+    );
+    act(() => remove?.click());
+    expect(controlWorkflowTaskMock).not.toHaveBeenCalled();
+    const confirm = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Confirm delete',
+    );
+    await act(async () => confirm?.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith(
+      'wf-abcd',
+      'delete-history',
+    );
+    expect(getTasksMock).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('Saved run · read-only');
+  });
+});
+
+describe('TasksStatusMessage paused agent controls', () => {
+  it('keeps the abandon hint distinct from workflow stop', () => {
+    const container = renderPanel([
+      agentTask('paused-agent', { status: 'paused' }),
+    ]);
+
+    expect(container.textContent).toContain('x abandon');
+    expect(container.textContent).not.toContain('x stop');
   });
 });
 
