@@ -80,6 +80,59 @@ function readVSCodeWebviewTheme(): 'dark' | 'light' {
   return kind.includes('light') ? 'light' : 'dark';
 }
 
+/**
+ * Keep a failed lazy chunk load from blanking the whole panel. The
+ * transcript renderer ships as a content-hashed dynamic import, so a
+ * webview retained across an extension auto-update can request chunk
+ * hashes that no longer exist in the new bundle. Suspense does not catch
+ * the rejected import — React rethrows it and unmounts the entire root —
+ * so catch it here and show a recoverable error state instead.
+ */
+class TranscriptErrorBoundary extends React.Component<
+  { children?: React.ReactNode },
+  { hasError: boolean }
+> {
+  state: { hasError: boolean } = { hasError: false };
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  private handleReload = () => {
+    // A full webview reload re-requests the HTML entry and picks up the
+    // current bundle, which is the reliable recovery when the stale
+    // webview is pinned to chunk hashes that no longer exist.
+    window.location.reload();
+  };
+
+  render(): React.ReactNode {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+    return (
+      <div
+        data-testid="transcript-load-error"
+        className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center"
+      >
+        <span
+          className="text-sm"
+          style={{ color: 'var(--app-secondary-foreground)' }}
+        >
+          The conversation timeline failed to load.
+        </span>
+        <button
+          type="button"
+          onClick={this.handleReload}
+          className="text-sm underline"
+          style={{ color: 'var(--app-secondary-foreground)' }}
+        >
+          Reload panel
+        </button>
+      </div>
+    );
+  }
+}
+
 export const App: React.FC = () => {
   const vscode = useVSCode();
 
@@ -1015,36 +1068,38 @@ export const App: React.FC = () => {
             <EmptyState isAuthenticated />
           )
         ) : (
-          <React.Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center">
-                <span className="border-primary inline-block h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-              </div>
-            }
-          >
-            <WebShellTranscriptLazy
-              blocks={transcriptBlocks}
-              theme={webShellTheme}
-              // WebShellTranscript hardcodes isResponding={false}, so
-              // MessageList's auto-collapse would treat the in-progress
-              // turn as completed and collapse it mid-response. Disable
-              // collapsing until a live isResponding prop is plumbed
-              // through; the pre-PR timeline was always fully expanded.
-              collapseCompletedTurns={false}
-              // The composer is an absolutely-positioned overlay at the
-              // bottom of the chat container; MessageList reserves
-              // clearance through --web-shell-bottom-panel-inset (padding
-              // and scroll-padding bottom). Nothing else in this package
-              // sets the variable, so the transcript tail would be hidden
-              // under the input box. 140px restores the pb-[140px]
-              // clearance the old scroll container provided.
-              style={
-                {
-                  '--web-shell-bottom-panel-inset': '140px',
-                } as React.CSSProperties
+          <TranscriptErrorBoundary>
+            <React.Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center">
+                  <span className="border-primary inline-block h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
+                </div>
               }
-            />
-          </React.Suspense>
+            >
+              <WebShellTranscriptLazy
+                blocks={transcriptBlocks}
+                theme={webShellTheme}
+                // WebShellTranscript hardcodes isResponding={false}, so
+                // MessageList's auto-collapse would treat the in-progress
+                // turn as completed and collapse it mid-response. Disable
+                // collapsing until a live isResponding prop is plumbed
+                // through; the pre-PR timeline was always fully expanded.
+                collapseCompletedTurns={false}
+                // The composer is an absolutely-positioned overlay at the
+                // bottom of the chat container; MessageList reserves
+                // clearance through --web-shell-bottom-panel-inset (padding
+                // and scroll-padding bottom). Nothing else in this package
+                // sets the variable, so the transcript tail would be hidden
+                // under the input box. 140px restores the pb-[140px]
+                // clearance the old scroll container provided.
+                style={
+                  {
+                    '--web-shell-bottom-panel-inset': '140px',
+                  } as React.CSSProperties
+                }
+              />
+            </React.Suspense>
+          </TranscriptErrorBoundary>
         )}
         {(localNotices.length > 0 || insightProgress || insightReportPath) && (
           <div
