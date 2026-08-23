@@ -138,6 +138,50 @@ describe('ReportFindingsTool', () => {
     ]);
   });
 
+  it('orders the file and id axes by code units, not locale collation', async () => {
+    // Mixed-case names are where ICU collation and code-unit order disagree
+    // ('a' collates before 'B' but ranks after it by code unit); every other
+    // fixture in this suite is lowercase ASCII, where the two coincide. Each
+    // pair arrives lower-sorting first, so a dropped axis (stable sort keeps
+    // input order) or one reverted to localeCompare flips the expected order.
+    const result = await run({
+      findings: [
+        finding({
+          id: 'a-1',
+          file: 'a.ts',
+          summary: 'lowercase file',
+          failureScenario: 'tie',
+        }),
+        finding({
+          id: 'B-1',
+          file: 'B.ts',
+          summary: 'uppercase file',
+          failureScenario: 'tie',
+        }),
+        finding({
+          id: 'a-2',
+          file: 'z.ts',
+          line: 7,
+          summary: 'lowercase id',
+          failureScenario: 'tie',
+        }),
+        finding({
+          id: 'B-2',
+          file: 'z.ts',
+          line: 7,
+          summary: 'uppercase id',
+          failureScenario: 'tie',
+        }),
+      ],
+    });
+    expect(displayOf(result).findings.map((f) => f.summary)).toEqual([
+      'uppercase file',
+      'lowercase file',
+      'uppercase id',
+      'lowercase id',
+    ]);
+  });
+
   it('derives shortSummary from summary, prefers a supplied one, and compresses both', async () => {
     // Pins both branches of the `raw.shortSummary?.trim() || raw.summary`
     // derivation by exact value: the derived label must be the compressed
