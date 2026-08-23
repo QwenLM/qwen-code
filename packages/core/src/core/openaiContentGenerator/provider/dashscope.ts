@@ -393,11 +393,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // A request-level reasoning_effort (samplingParams) beats the config
     // tier: dashscopeExtras is spread after requestWithTokenLimits below, so
     // without this copy the tier would clobber the request-level override.
-    if (
-      'reasoning_effort' in requestParams &&
-      'reasoning_effort' in modelEffortConfig
-    ) {
-      modelEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
+    // Nullish values must not copy: only tiered-qwen requests are sanitized
+    // above, so a nullish knob on any other model would otherwise clobber
+    // the clamped tier with null on the wire.
+    const requestEffort = requestParams['reasoning_effort'];
+    if (requestEffort != null && 'reasoning_effort' in modelEffortConfig) {
+      modelEffortConfig['reasoning_effort'] = requestEffort;
     }
     const hasModelEffortConfig = Object.keys(modelEffortConfig).length > 0;
     const shouldStripNestedEffort = hasModelEffortConfig || !!modelReasoning;

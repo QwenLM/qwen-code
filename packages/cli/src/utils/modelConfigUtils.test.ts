@@ -597,6 +597,49 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('attributes the merged model.reasoningEffort tier to settings', () => {
+      const settings = makeMockSettings({
+        model: { name: 'preset-model', reasoningEffort: 'high' },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'preset-model',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { budget_tokens: 4096 },
+        },
+        sources: {
+          reasoning: {
+            kind: 'modelProviders',
+            authType: AuthType.USE_OPENAI,
+            modelId: 'preset-model',
+          },
+        },
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({
+        budget_tokens: 4096,
+        effort: 'high',
+      });
+      // The tier comes from settings.model.reasoningEffort; the session must
+      // treat it as user-authored even when a preset supplied the rest of
+      // the `reasoning` object.
+      expect(result.sources['reasoning']).toEqual(
+        expect.objectContaining({
+          kind: 'settings',
+          settingsPath: 'model.reasoningEffort',
+        }),
+      );
+    });
+
     describe('provider disambiguation by settings.model.baseUrl', () => {
       const tokenPlan: ProviderModelConfig = {
         id: 'qwen3.7-max',

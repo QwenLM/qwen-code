@@ -4905,6 +4905,94 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('restores the user effort on a standalone auth refresh under a preset disable', async () => {
+      // The user cleared a preset disable and chose a tier, so the session
+      // carries the tier while the model's preset still resolves
+      // `reasoning: false`. A standalone refreshAuth (/auth re-login, ACP
+      // authenticate/session-reload, provider-settings resync) re-applies
+      // the preset disable; restoring the tier must clear it instead of
+      // no-oping on it.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'low' } },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'glm-5.2',
+          authType,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('low');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'low',
+      });
+    });
+
+    it('keeps a user-cleared preset disable cleared across an auth refresh', async () => {
+      // The user explicitly chose default/on ("Thinking on") for a model
+      // whose preset disables reasoning. That cleared state is distinct from
+      // "never touched" and must survive a standalone refreshAuth that
+      // re-applies the preset disable.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+        generationConfigSources: {
+          reasoning: { kind: 'modelProviders' },
+        },
+      });
+      config.setReasoningDisabled(false);
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k2.6',
+          authType,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+    });
+
+    it('does not force-apply an effort that was discarded under a disable', async () => {
+      // setReasoningEffort no-ops while thinking is explicitly disabled and
+      // surfaces report the discard; the rejected tier must not be recorded
+      // as an override a later rebuild would then force-apply.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      config.setReasoningEffort('high');
+      expect(config.getReasoningEffort()).toBeUndefined();
+
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+    });
+
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
       // Regression for the model-switch path: switchModel() runs
       // applyResolvedModelDefaults() (which overwrites modelsConfig's
@@ -5025,6 +5113,40 @@ describe('Server Config (config.ts)', () => {
         clearDisabled: true,
         targetReasoning: { effort: 'low' as const },
         expected: { effort: 'low' as const },
+      },
+      {
+        name: 'keeps a user-cleared disable cleared against a target preset disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        clearDisabled: true,
+        targetReasoning: false as const,
+        expected: undefined,
+      },
+      {
+        name: 'keeps a user-cleared disable cleared against a target preset disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        clearDisabled: true,
+        targetReasoning: false as const,
+        expected: undefined,
+      },
+      {
+        name: 'keeps a target preset disable over a preset-derived tier on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        initialReasoning: { effort: 'high' as const },
+        initialSource: 'modelProviders' as const,
+        targetReasoning: false as const,
+        expected: false as const,
+      },
+      {
+        name: 'keeps a target preset disable over a preset-derived tier on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        initialReasoning: { effort: 'high' as const },
+        initialSource: 'modelProviders' as const,
+        targetReasoning: false as const,
+        expected: false as const,
       },
     ])(
       '$name',

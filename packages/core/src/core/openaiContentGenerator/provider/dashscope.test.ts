@@ -944,6 +944,34 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it('keeps the clamped tier when a registry model request carries a nullish reasoning_effort', () => {
+      // Registry models (glm-5.2, deepseek-v4-* on Alibaba hosts) are not
+      // tiered-qwen wire models, so their request params skip the nullish
+      // knob sanitization. A nullish samplingParams reasoning_effort passes
+      // the `'reasoning_effort' in requestParams` test and must not clobber
+      // the clamped config tier with null on the wire.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning_effort: null,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('high');
+    });
+
     it.each([
       {
         name: 'extra_body thinking_budget over request-level effort',

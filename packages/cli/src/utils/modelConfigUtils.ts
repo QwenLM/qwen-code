@@ -13,6 +13,7 @@ import {
   REASONING_EFFORT_TIERS,
   resolveModelConfig,
   resolveProviderProtocol,
+  settingsSource,
   type ModelConfigSourcesInput,
   type ModelProvidersConfig,
   type ProviderModelConfig,
@@ -440,6 +441,10 @@ export function resolveCliGenerationConfig(
       ...(generationConfig.reasoning ?? {}),
       effort: reasoningEffort,
     };
+    // The merged tier comes from settings.model.reasoningEffort even when the
+    // `reasoning` object itself resolved elsewhere; re-attribute it so the
+    // session treats the tier as user-authored, not preset-derived.
+    resolved.sources['reasoning'] = settingsSource('model.reasoningEffort');
   }
 
   return {

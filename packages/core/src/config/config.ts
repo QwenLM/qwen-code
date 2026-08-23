@@ -1845,7 +1845,19 @@ export class Config {
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
-  private reasoningDisabledByUser = false;
+  /**
+   * The reasoning override the user explicitly chose for this session, or
+   * undefined when the control was never touched and the model/provider
+   * default stands. Config rebuilds re-resolve model defaults — including a
+   * preset `reasoning: false` — and would drop the choice, so it is tracked
+   * here rather than inferred from the live config (which also carries
+   * preset-derived values) and re-applied after every rebuild.
+   */
+  private reasoningOverride:
+    | { type: 'disabled' }
+    | { type: 'effort'; effort: ReasoningEffort }
+    | { type: 'default' }
+    | undefined;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
@@ -2490,9 +2502,21 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
-    this.reasoningDisabledByUser =
-      params.generationConfig?.reasoning === false &&
-      params.generationConfigSources?.['reasoning']?.kind !== 'modelProviders';
+    // Only user-authored boot state becomes a session override; preset
+    // values re-resolve on every rebuild and must not leak across models.
+    if (
+      params.generationConfigSources?.['reasoning']?.kind !== 'modelProviders'
+    ) {
+      const bootReasoning = params.generationConfig?.reasoning;
+      if (bootReasoning === false) {
+        this.reasoningOverride = { type: 'disabled' };
+      } else if (bootReasoning?.effort) {
+        this.reasoningOverride = {
+          type: 'effort',
+          effort: bootReasoning.effort,
+        };
+      }
+    }
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -3769,18 +3793,6 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    // The session reasoning override is NOT a provider field, but
-    // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
-    // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
-    // provider preset's value (undefined for reasoning). Capture the user
-    // effort or disabled state before the sync wipes it and re-apply it after
-    // the config is rebuilt.
-    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
-    const priorReasoningEffort = priorReasoning
-      ? priorReasoning.effort
-      : undefined;
-    const priorReasoningDisabled = this.reasoningDisabledByUser;
-
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
@@ -3811,12 +3823,10 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning override that the provider sync above wiped.
-    if (priorReasoningDisabled) {
-      this.setReasoningDisabled(true);
-    } else if (priorReasoningEffort) {
-      this.setReasoningEffort(priorReasoningEffort);
-    }
+    // The sync above re-resolves model defaults (including a preset
+    // `reasoning: false`), which would drop the session reasoning override;
+    // re-apply it.
+    this.restoreReasoningOverride();
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -4633,6 +4643,18 @@ export class Config {
    * cannot silently re-enable it.
    */
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    // Under an explicit `reasoning: false` the tier does not land
+    // (applyEffort no-ops) and callers report the discard; do not record an
+    // override a later rebuild would then force-apply. The live config is
+    // undefined before the first auth, so fall back to the rebuildable source.
+    const reasoningNow =
+      this.contentGeneratorConfig?.reasoning ??
+      this.modelsConfig?.getGenerationConfig().reasoning;
+    if (reasoningNow !== false) {
+      this.reasoningOverride = effort
+        ? { type: 'effort', effort }
+        : { type: 'default' };
+    }
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {
@@ -4666,7 +4688,9 @@ export class Config {
   }
 
   setReasoningDisabled(disabled: boolean): void {
-    this.reasoningDisabledByUser = disabled;
+    this.reasoningOverride = disabled
+      ? { type: 'disabled' }
+      : { type: 'default' };
     const reasoning = disabled ? false : undefined;
     const applyDisabled = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
@@ -4681,6 +4705,29 @@ export class Config {
       applyDisabled(runtimeCfg);
     }
     applyDisabled(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
+   * Re-apply the session reasoning override after a config rebuild. The
+   * rebuild re-resolves model defaults — a re-applied preset
+   * `reasoning: false` would otherwise pin thinking off against the user's
+   * choice (and no-op an effort restore).
+   */
+  private restoreReasoningOverride(): void {
+    const override = this.reasoningOverride;
+    if (!override) {
+      return;
+    }
+    if (override.type === 'disabled') {
+      this.setReasoningDisabled(true);
+      return;
+    }
+    if (this.contentGeneratorConfig.reasoning === false) {
+      this.setReasoningDisabled(false);
+    }
+    if (override.type === 'effort') {
+      this.setReasoningEffort(override.effort);
+    }
   }
 
   /**
@@ -4843,13 +4890,6 @@ export class Config {
       return;
     }
 
-    // Capture the session override before the rebuild so switching models does
-    // not silently drop it. A model preset can also supply `reasoning: false`,
-    // so disabled state must use the explicit-user marker rather than the live
-    // value alone.
-    const priorReasoningEffort = this.getReasoningEffort();
-    const priorReasoningDisabled = this.reasoningDisabledByUser;
-
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.
@@ -4940,40 +4980,14 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningDisabled) {
-        this.setReasoningDisabled(true);
-      } else if (priorReasoningEffort) {
-        // A target-model preset `reasoning: false` would make the restore a
-        // no-op and pin thinking off without the user flag; clear it so the
-        // explicit user tier wins.
-        if (this.contentGeneratorConfig.reasoning === false) {
-          this.setReasoningDisabled(false);
-        }
-        this.setReasoningEffort(priorReasoningEffort);
-      }
+      this.restoreReasoningOverride();
       resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
-    // Full refresh path. `refreshAuth` re-applies the reasoning override it
-    // captures, but on a model *switch* that source is already stale: the
-    // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
-    // modelsConfig's `reasoning` with the new model's preset (undefined for most
-    // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
-    // cannot restore the choice. Re-apply here from the still-intact live
-    // contentGeneratorConfig captured above.
+    // Full refresh path. `refreshAuth` re-applies the session reasoning
+    // override after the rebuild, so nothing further needs restoring here.
     await this.refreshAuth(authType);
-    if (priorReasoningDisabled) {
-      this.setReasoningDisabled(true);
-    } else if (priorReasoningEffort) {
-      // Same preset-disable hole as the hot-update path above: the rebuild
-      // can leave the target preset's `reasoning: false` in place, which
-      // would no-op the effort restore.
-      if (this.contentGeneratorConfig.reasoning === false) {
-        this.setReasoningDisabled(false);
-      }
-      this.setReasoningEffort(priorReasoningEffort);
-    }
   }
 
   /**

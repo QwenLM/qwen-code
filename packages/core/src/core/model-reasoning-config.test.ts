@@ -120,6 +120,16 @@ describe('resolveModelReasoningConfiguration', () => {
       baseUrl: STANDARD,
       efforts: ['low', 'high', 'max'],
     },
+    {
+      modelId: 'deepseek-v4-pro',
+      baseUrl: STANDARD,
+      efforts: ['high', 'max'],
+    },
+    {
+      modelId: 'deepseek-v4-flash',
+      baseUrl: STANDARD,
+      efforts: ['high', 'max'],
+    },
   ])(
     'registers $modelId on its Alibaba route',
     ({ modelId, baseUrl, efforts }) => {
@@ -322,6 +332,13 @@ describe('resolveModelReasoningConfiguration', () => {
         baseUrl: TOKEN_PLAN,
       }),
     ).toEqual({ thinking: true, toggleOnly: true });
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'kimi-k2.5',
+        authType: OPENAI,
+        baseUrl: TOKEN_PLAN,
+      }),
+    ).toEqual({ thinking: true, toggleOnly: true });
     for (const baseUrl of [TOKEN_PLAN, CODING_PLAN]) {
       expect(
         resolveModelReasoningConfiguration({
@@ -357,6 +374,19 @@ describe('resolveModelReasoningConfiguration', () => {
       }),
     ).toBeUndefined();
   });
+
+  it.each(['https://evilz.ai/v1', 'https://api.bigmodel.cn.evil.example/v1'])(
+    'does not leak ZAI controls to the lookalike host %s',
+    (baseUrl) => {
+      expect(
+        resolveModelReasoningConfiguration({
+          modelId: 'glm-5.2',
+          authType: OPENAI,
+          baseUrl,
+        }),
+      ).toBeUndefined();
+    },
+  );
 });
 
 describe('classifyModelReasoningEndpoint', () => {
