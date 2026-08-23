@@ -57,6 +57,7 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
+  INERT_GIT_ARGS,
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -123,23 +124,23 @@ export interface ScratchTreeArgs {
 }
 
 /**
- * `git`, with the user's hooks out of the way.
+ * `git`, with the repo-local command surfaces out of the way.
  *
  * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
  * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
  * `post-checkout` from there, which means this command would run whatever hooks
  * that repository has (and whatever a probe managed to write into it) as a side
- * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
- * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * `filter.<name>.smudge|clean|process` commands are config-driven, and a
- * checkout runs whichever ones an attributes file selects. `runScratchTree`
- * detects that surface in the repository's own config and refuses rather than
- * run it (see
- * `localFilterRefusal`). What a probe does with its own shell is the probe's
- * business, and the report says plainly that the common dir is shared rather
- * than isolated.
+ * effect of creating or resetting a tree; `INERT_GIT_ARGS` points
+ * `core.hooksPath` at a path that holds no hooks. The same checkouts run a
+ * repo-local `core.fsmonitor` — a third config-driven command surface the
+ * filter screen does not read — so the args empty it too. Content FILTERS are
+ * the surface neither override reaches — `filter.<name>.smudge|clean|process`
+ * commands are config-driven, and a checkout runs whichever ones an attributes
+ * file selects — and `runScratchTree` detects that surface in the repository's
+ * own config and refuses rather than run it (see `localFilterRefusal`). What a
+ * probe does with its own shell is the probe's business, and the report says
+ * plainly that the common dir is shared rather than isolated.
  */
-const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
 function gitOut(cwd: string, ...args: string[]): string {
   // `ls-files -v` prints a line per tracked file and `clean` a line per removal;
@@ -150,7 +151,7 @@ function gitOut(cwd: string, ...args: string[]): string {
   // the ENTIRE identity gate at once — both sides of every comparison see the
   // same override, so no check can detect it — and the head sha itself comes
   // back from the wrong repository.
-  const r = spawnSync('git', [...NO_HOOKS, ...args], {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,

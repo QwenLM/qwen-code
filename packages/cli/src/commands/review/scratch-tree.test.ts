@@ -91,10 +91,10 @@ describe('runScratchTree', () => {
   });
 
   it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
-    // NO_HOOKS covers hooks only; a checkout still runs a configured
-    // smudge/clean filter, and the common dir the planting surface lives in
-    // is never wiped — so the refusal names the surface instead of running
-    // whatever it holds.
+    // The inert spawn args cover hooks and fsmonitor only; a checkout still
+    // runs a configured smudge/clean filter, and the common dir the planting
+    // surface lives in is never wiped — so the refusal names the surface
+    // instead of running whatever it holds.
     const pwned = join(repo, 'PWNED-smudge');
     git(worktree, 'config', 'filter.evil.smudge', `touch ${pwned}`);
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
@@ -133,6 +133,32 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.clean');
     expect(run().available).toBe(true);
+  });
+
+  it('empties core.fsmonitor on every spawn — a planted command never fires', () => {
+    // The screen matches filter keys only, so a fsmonitor-only plant passes
+    // it clean — the checkouts themselves must not run it. Both the rebuild
+    // path's `worktree add --detach` and the reuse path's
+    // `checkout --force --detach` fire a repo-local `core.fsmonitor`
+    // (measured live), so every spawn carries the empty override.
+    const pwned = join(repo, 'PWNED-scratch-fsmonitor');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+    );
+
+    const first = run();
+
+    expect(first.available).toBe(true);
+    expect(existsSync(pwned)).toBe(false);
+
+    // The reuse path's reset rewrites every tracked file — the second spawn
+    // set the override must cover.
+    const second = run();
+
+    expect(second.available).toBe(true);
+    expect(second.note).toContain('reusing');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {

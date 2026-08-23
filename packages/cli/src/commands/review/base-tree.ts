@@ -56,6 +56,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
+  INERT_GIT_ARGS,
   localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -275,7 +276,30 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
       sweep = discardWorktree(worktree, tree);
-      git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
+      // Re-screen beside the add, after the sweep: this is the only screened
+      // checkout that overlaps LIVE probes — the lock excludes other base-tree
+      // builders, not shards running attacker code, and the sweep's completion
+      // is the public signal a watcher plants on. A filter landing between the
+      // screen above and the add below executed in the creation checkout the
+      // screen certified clean (measured: 6/6 race iterations pwned); the
+      // re-screen narrows that window to the gap between itself and the add.
+      const rescreenRefusal = localFilterRefusal(
+        worktree,
+        "the base tree's creation checkout",
+      );
+      if (rescreenRefusal) return unavailable(rescreenRefusal);
+      // INERT_GIT_ARGS: the screen reads filters only, while `worktree add`
+      // also fires `post-checkout` from the shared common hooks dir and runs
+      // a repo-local `core.fsmonitor` — both plantable, both measured live.
+      git(
+        worktree,
+        ...INERT_GIT_ARGS,
+        'worktree',
+        'add',
+        '--detach',
+        tree,
+        baseSha,
+      );
     } catch (e) {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),

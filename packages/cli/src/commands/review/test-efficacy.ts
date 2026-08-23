@@ -72,6 +72,7 @@ import { probeWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
   exposeDependencies,
+  INERT_GIT_ARGS,
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -1290,19 +1291,9 @@ interface TestEfficacyArgs {
 // resets, the revert's checkout — so the mutations would land in whichever
 // repository the environment names while every check against the tree passes
 // silently. The trees this file touches are chosen by the paths it is given.
-//
-// The two checkouts this helper serves — the probe tree's creation and the
-// revert's — are the ones `localFilterRefusal` certifies, and that screen
-// reads FILTERS only. Both shapes still fire the other two config-execution
-// surfaces: `worktree add` and a pathspec checkout run `post-checkout` from
-// the shared common hooks dir, and both run a repo-local `core.fsmonitor` —
-// so the spawn empties them the way the restore's `inert` array always has.
-const INERT_GIT_ARGS = [
-  '-c',
-  'core.hooksPath=/dev/null/no-hooks',
-  '-c',
-  'core.fsmonitor=',
-];
+// INERT_GIT_ARGS beside the screen: the two checkouts this helper serves are
+// certified for FILTERS only, and both shapes still fire the other two
+// config-execution surfaces (see the constant's own docstring).
 function git(cwd: string, ...args: string[]): void {
   const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,

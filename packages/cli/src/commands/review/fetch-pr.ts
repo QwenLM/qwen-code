@@ -38,7 +38,11 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { localFilterRefusal, sanitizedGitEnv } from './lib/worktree.js';
+import {
+  INERT_GIT_ARGS,
+  localFilterRefusal,
+  sanitizedGitEnv,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -974,7 +978,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    screen runs inside the tree this call creates, so none exists yet in
     //    this run. A screen hit refuses the fetch the way the probe-creation
     //    screen refuses its checkout; the rollback below then removes the
-    //    fetched ref and the outer catch releases the lease.
+    //    fetched ref and the outer catch releases the lease. The spawn
+    //    carries INERT_GIT_ARGS because the screen reads filters only, while
+    //    `worktree add` ALSO fires `post-checkout` from the shared common
+    //    hooks dir and runs a repo-local `core.fsmonitor` — both plantable
+    //    with one write each, both measured live on this exact shape.
     try {
       const filterRefusal = localFilterRefusal(
         process.cwd(),
@@ -982,7 +990,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
       if (filterRefusal) throw new Error(filterRefusal);
       mkdirSync(dirname(wt), { recursive: true });
-      git('worktree', 'add', wt, ref);
+      git(...INERT_GIT_ARGS, 'worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
         execFileSync('git', ['branch', '-D', ref], {

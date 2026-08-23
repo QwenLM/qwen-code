@@ -561,19 +561,39 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 }
 
 /**
+ * The `-c` overrides every checkout spawn in this pipeline carries. The
+ * screen below reads FILTERS only; hooks and fsmonitor are the two other
+ * config-driven command surfaces a checkout executes — `worktree add` and a
+ * pathspec checkout both fire `post-checkout` from the shared common hooks
+ * dir, and both run a repo-local `core.fsmonitor` (measured live, on the
+ * branch and the `--detach` forms) — and neither is visible to the screen.
+ * Emptying both at the spawn is the half of the boundary the screen cannot
+ * carry; the screen is the half the spawn cannot carry. A probe plants a
+ * `.git/hooks/post-checkout` or a `[core] fsmonitor` into the never-wiped
+ * common dir with the same facility as the filter plant — one write — so a
+ * spawn without these overrides simply moves the persistence channel this
+ * PR closes from a config key to a hook file or a fsmonitor command.
+ */
+export const INERT_GIT_ARGS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
+
+/**
  * The refusal for a checkout about to run through a repo-local content filter —
- * or through a repo-local config file the screen could not read — and null
- * when the screen came back clean. `checkout` is the noun phrase naming the
- * checkout being authorised ("this tree's restore", "the revert checkout"); it
- * lands in the message verbatim.
+ * or through a repo-local config file the screen could not read or expand —
+ * and null when the screen came back clean. `checkout` is the noun phrase
+ * naming the checkout being authorised ("this tree's restore", "the revert
+ * checkout"); it lands in the message verbatim.
  *
  * Every checkout in this pipeline EXECUTES these filters — the scratch tree's
  * reset and rebuild, the probe tree's creation, per-run restore and revert
  * checkouts, the base tree's creation checkout, and the review worktree's own
- * creation checkout — each is screened before it runs. Where a spawn disables
- * hooks that covers hooks and not filters; the base tree's and the review
- * worktree's creation checkouts keep the user's own hooks, which no screen
- * here reads. The planting
+ * creation checkout — each is screened before it runs, and each spawn carries
+ * `INERT_GIT_ARGS` beside the screen: hooks and fsmonitor are config-driven
+ * surfaces too, and no screen here reads them. The planting
  * surface is two plain writes a probe can make into the COMMON dir this
  * command's report calls shared: `git config filter.evil.smudge CMD` and one
  * line appended to `$(git rev-parse --git-path info/attributes)`. discard and
@@ -584,13 +604,15 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
  * filters in the user's global config (git-lfs is the common one) are the
  * user's own contract, exactly like any git command they run — while a probe's
  * planting surface is the repo-local files. `--file` likewise does not expand
- * `include.path`/`includeIf.*.path`, so a filter planted behind an include is
- * invisible here; the origin-scoped follow-up tracked on this PR closes that —
- * `--includes` or merged config would follow the include into the user's
- * global config and re-import `filter.lfs.clean`, the permanent-refusal
- * failure. The state cannot be told apart from a filter the user set
- * deliberately, and cannot be safely wiped, so a hit is a refusal upstream,
- * not a cleanup here.
+ * `include.path`/`includeIf.*.path` while the checkout's merged read DOES, so
+ * a filter planted behind an include would EXECUTE unseen: any include
+ * directive in the candidates refuses the checkout fail-closed until the
+ * origin-scoped follow-up tracked on this PR lands — a merged read with
+ * `--show-origin` refusing only repo-local hits. (`--includes` or plain merged
+ * config now would follow an include into the user's global config and
+ * re-import `filter.lfs.clean`, the permanent-refusal failure.) The state
+ * cannot be told apart from a filter the user set deliberately, and cannot be
+ * safely wiped, so a hit is a refusal upstream, not a cleanup here.
  */
 export function localFilterRefusal(
   worktree: string,
@@ -626,6 +648,7 @@ export function localFilterRefusal(
     // No linked worktrees registered: the two candidates above are all of it.
   }
   const filters: Array<{ key: string; file: string }> = [];
+  const includes: Array<{ key: string; file: string }> = [];
   // Neither a config key nor a path can carry NUL, so the pair separator is
   // unambiguous — and an O(1) dedup, because a padded config can hand this
   // loop tens of thousands of keys.
@@ -639,6 +662,15 @@ export function localFilterRefusal(
     // screen that could not read a file cannot certify the checkout that will.
     try {
       accessSync(file, constants.R_OK);
+      // A FIFO passes both checks above and then blocks the `--file` spawn
+      // forever (no timeout on it, and none a writer answers), hanging every
+      // later review before its first checkout — one `mkfifo`+rename into the
+      // never-wiped common dir, the same write class as the filter plant.
+      // Git parses only regular files here, so anything else fails closed.
+      if (!lstatSync(file).isFile()) {
+        unreadable.push({ file, detail: 'not a regular file' });
+        continue;
+      }
     } catch (e) {
       unreadable.push({
         file,
@@ -656,7 +688,10 @@ export function localFilterRefusal(
         // `process` beside the pair: it is the third executable key (a
         // long-running filter git speaks a protocol to), and enumerating two
         // of three is how the first cut of this screen read as complete.
-        '^filter\\..*\\.(smudge|clean|process)$',
+        // Include directives ride along: `--file` does not expand them while
+        // the checkout's merged read does, so anything behind one EXECUTES
+        // unseen (the docstring's fail-closed interim, measured live).
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path)$',
       ],
       {
         cwd: worktree,
@@ -693,11 +728,12 @@ export function localFilterRefusal(
         // move — `git config --local --get-regexp '^filter\.'` in the review
         // worktree — can see.
         seen.add(pair);
-        filters.push({ key, file });
+        (key.startsWith('filter.') ? filters : includes).push({ key, file });
       }
     }
   }
-  if (filters.length === 0 && unreadable.length === 0) return null;
+  if (filters.length === 0 && unreadable.length === 0 && includes.length === 0)
+    return null;
   // Keys and paths arrive from config files a probe can write, so both go
   // through `inertPath` the way `scratch-tree`'s note always has: a caught
   // attacker still controls the bytes naming the catch, and they reach the
@@ -708,6 +744,15 @@ export function localFilterRefusal(
       `the repository's local config defines content filter(s) ${filters
         .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
         .join(', ')} — ${checkout} would EXECUTE them`,
+    );
+  }
+  if (includes.length > 0) {
+    parts.push(
+      `the repository's local config names include directive(s) ${includes
+        .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
+        .join(', ')} — the screen reads these files without expanding ` +
+        'includes, and the checkout reads merged config, which does: a ' +
+        `content filter behind one would EXECUTE unseen in ${checkout}`,
     );
   }
   if (unreadable.length > 0) {

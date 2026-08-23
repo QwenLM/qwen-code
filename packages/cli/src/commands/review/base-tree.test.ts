@@ -15,10 +15,11 @@
 // actually succeeded, since an A/B against a half-built tree measures the build,
 // not the diff.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   utimesSync,
   mkdtempSync,
   mkdirSync,
@@ -31,6 +32,25 @@ import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
 import type { BuildTestReport } from './build-test.js';
+
+// The race witness needs a writer landing BETWEEN the opening screen and the
+// creation add; the sweep is the code that runs between them, so it is the
+// seam. Defaults to the real implementation — every other test runs it.
+const seam = vi.hoisted(() => ({
+  realDiscard: undefined as ((...args: unknown[]) => unknown) | undefined,
+  beforeDiscard: undefined as (() => void) | undefined,
+}));
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  seam.realDiscard = actual.discardWorktree as (...a: unknown[]) => unknown;
+  return {
+    ...actual,
+    discardWorktree: (...args: unknown[]) => {
+      seam.beforeDiscard?.();
+      return seam.realDiscard!(...args);
+    },
+  };
+});
 
 const okBuild = {
   ok: true,
@@ -95,7 +115,10 @@ describe('runBaseTree', () => {
     git(repo, 'worktree', 'add', '--detach', '-q', worktree, headSha);
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    seam.beforeDiscard = undefined;
+    rmSync(repo, { recursive: true, force: true });
+  });
 
   it('creates a sibling worktree holding the BASE commit, not the head', () => {
     const r = run();
@@ -137,6 +160,71 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(false);
     expect(r.note).toContain('content filter');
     expect(builds).toHaveLength(0);
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('the creation checkout is INERT — a planted post-checkout hook never fires', () => {
+    // The screen certifies FILTERS only; `worktree add` still fires
+    // `post-checkout` from the shared common hooks dir (measured live, git
+    // 2.39 and 2.43, on this exact `--detach` shape). A probe writes the
+    // hook with the same facility as the filter plant — one write + chmod —
+    // so the creation spawn must carry the inert overrides too.
+    const pwned = join(repo, 'PWNED-base-hook');
+    mkdirSync(join(repo, '.git', 'hooks'), { recursive: true });
+    writeFileSync(
+      join(repo, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\ntouch ${pwned}\n`,
+    );
+    chmodSync(join(repo, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    const r = run();
+
+    // Inert is not "the build failed": the tree came up and the build ran.
+    expect(r.available).toBe(true);
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('the creation checkout empties core.fsmonitor — a planted command never fires', () => {
+    // The screen's regex matches filter keys only, so a fsmonitor-only plant
+    // passes it clean — and `worktree add --detach` runs a repo-local
+    // `core.fsmonitor` (measured live). The override empties the key at the
+    // spawn, the way the probe tree's creation always has.
+    const pwned = join(repo, 'PWNED-base-fsmonitor');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('re-screens after the sweep — a plant between the screen and the add is refused', () => {
+    // The lock excludes other base-tree builders, not shards running attacker
+    // code: a concurrent probe can land the two-write plant the instant the
+    // stale tree's sweep finishes — after the opening screen read, before
+    // the creation add re-parses the config (measured live: 6/6 race
+    // iterations executed the plant). The seam stands in for that writer.
+    const pwned = join(repo, 'PWNED-base-race');
+    seam.beforeDiscard = () => {
+      appendFileSync(
+        join(repo, '.git', 'config'),
+        `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      );
+      mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=evil\n',
+      );
+    };
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('content filter');
     expect(existsSync(pwned)).toBe(false);
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });

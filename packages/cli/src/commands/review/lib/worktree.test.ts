@@ -31,6 +31,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
+  localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -1395,5 +1396,90 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('localFilterRefusal', () => {
+  // Real repo + linked worktree: the production shape fetch-pr screens
+  // against. The screen's whole job is what a REAL `git config --file` sees,
+  // so a mocked spawn could not measure it.
+  let repo: string;
+  let tree: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+  const gitRepo = (...args: string[]) =>
+    execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-filter-screen-'));
+    gitRepo('init', '-q', '-b', 'main');
+    gitRepo('config', 'user.email', 't@t.t');
+    gitRepo('config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'head');
+    tree = join(repo, '.qwen', 'tmp', 'review-wt');
+    mkdirSync(dirname(tree), { recursive: true });
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
+  });
+
+  afterEach(() => {
+    gitIsolation.dispose();
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('answers null on a clean repository', () => {
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED on a non-regular candidate file — the FIFO shape',
+    () => {
+      // The weaponized shape is a FIFO: it passes existsSync and
+      // accessSync(R_OK), and the `--file` spawn carries no timeout a writer
+      // would answer, so one `mkfifo`+rename into the never-wiped common dir
+      // blocks every later review before its first checkout. The gate that
+      // closes it refuses EVERY non-regular file; a symlink to /dev/null
+      // exercises that same gate without hanging this test the way a real
+      // FIFO hangs the mutant. Planted in a fake worktree admin entry, the
+      // way a probe plants it: the screen readdirs every registered
+      // worktree's admin dir (git honours those files only with
+      // extensions.worktreeConfig on; the screen reads them always).
+      const admin = join(repo, '.git', 'worktrees', 'planted');
+      mkdirSync(admin, { recursive: true });
+      symlinkSync('/dev/null', join(admin, 'config.worktree'));
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('not a regular file');
+      expect(r).toContain(join(admin, 'config.worktree'));
+      expect(r).toContain('the probe checkout');
+    },
+  );
+
+  it('refuses an include directive — the screen cannot see what it expands', () => {
+    // `--file` does not expand `include.path`/`includeIf.*.path` while the
+    // checkout's merged read DOES: a filter planted behind the include
+    // below is invisible to the screen and EXECUTES in the certified
+    // checkout (measured live). Until the origin-scoped follow-up lands,
+    // any include directive in the candidates refuses fail-closed.
+    const behind = join(repo, 'behind-include.config');
+    writeFileSync(
+      behind,
+      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+    );
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[include]\n\tpath = ${behind}\n`,
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('include directive');
+    expect(r).toContain('include.path');
+    expect(r).toContain('the probe checkout');
   });
 });

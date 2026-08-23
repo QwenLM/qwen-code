@@ -617,6 +617,25 @@ describe('fetch-pr report assembly', () => {
     expect(clearReviewWorktreeLeaseIfOwned).toHaveBeenCalled();
   });
 
+  it('runs the creation checkout INERT — hooks and fsmonitor emptied at the spawn', async () => {
+    // The screen certifies FILTERS only; `worktree add` still fires
+    // `post-checkout` from the shared common hooks dir and runs a repo-local
+    // `core.fsmonitor` (measured live, both surfaces, on this exact shape).
+    // This checkout is the pipeline's FIRST — it must carry the same
+    // overrides the probe-tree spawns carry.
+    await reportFor({});
+    const addCall = producerMocks.git.mock.calls.find(
+      (args: unknown[]) => args.includes('worktree') && args.includes('add'),
+    );
+    expect(addCall).toBeDefined();
+    expect(addCall!.slice(0, 4)).toEqual([
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+    ]);
+  });
+
   it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {
     // `--` ends option parsing, but a leading `+` or `src:dst` shape still
     // parses as a (force) refspec after it — same channels as
@@ -1082,7 +1101,9 @@ describe('fetch-pr report assembly', () => {
 
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
-        if (args[0] === 'worktree') throw new Error('disk full');
+        // The creation add carries the inert `-c` overrides ahead of the
+        // subcommand, so match the pair anywhere in the argv.
+        if (args.includes('worktree')) throw new Error('disk full');
         return args[0] === 'rev-parse' ? 'f00df00d' : '';
       });
 
