@@ -1094,6 +1094,10 @@ describe('ProviderSetupSteps', () => {
     }
 
     const submitModelIds = vi.fn();
+    // `priv` is the flow's actual post-resolution state for this scenario:
+    // the caret move back into the comma-terminated segment is navigation,
+    // not an edit, so the flow's prune dropped the unserved built-in before
+    // this re-derive runs.
     const after = createModelIdsFlow({ modelIds: 'priv', submitModelIds });
     const afterState = after.state as unknown as Record<string, unknown>;
     afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];

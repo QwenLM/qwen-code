@@ -185,6 +185,11 @@ export function useProviderSetupFlow(
   const liveModelIdsRef = useRef('');
   const modelIdsEditInProgressRef = useRef(false);
   const activeCustomModelIdRef = useRef<string | undefined>(undefined);
+  // The caret resting in a token is not proof the user is editing it: an
+  // arrow-key move back over a comma-terminated id reports it too. Latched
+  // true only by a text edit, so the prune's keep clause protects tokens
+  // being typed, not tokens merely navigated to.
+  const activeTokenEditTouchedRef = useRef(false);
   const customModelIdsRef = useRef<string[]>([]);
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
@@ -223,6 +228,7 @@ export function useProviderSetupFlow(
       }
       modelIdsEditInProgressRef.current = true;
       activeCustomModelIdRef.current = context?.activeCustomModelId;
+      activeTokenEditTouchedRef.current = true;
       liveModelIdsRef.current = value;
       setModelIds(value);
     },
@@ -263,7 +269,15 @@ export function useProviderSetupFlow(
         : ids.filter((id) => id !== injected);
     const before = strip(normalizeModelIds(displayedModelIdsRef.current));
     const after = strip(normalizeModelIds(committed));
-    const removed = new Set(before.filter((id) => !after.includes(id)));
+    // A before-id that grew into a longer after-id is a token still being
+    // typed — the buffer passes through the shorter id on its way to it —
+    // not a removal. Reading the growth as a removal would delete a default
+    // the user never unchecked from the baseline.
+    const removed = new Set(
+      before.filter(
+        (id) => !after.includes(id) && !after.some((a) => a.startsWith(id)),
+      ),
+    );
     const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
       (id) => !removed.has(id),
     );
@@ -356,7 +370,9 @@ export function useProviderSetupFlow(
         (id) =>
           served.has(id) ||
           !builtIn.has(id) ||
-          (editInProgress && id === activeCustomModelIdRef.current),
+          (editInProgress &&
+            activeTokenEditTouchedRef.current &&
+            id === activeCustomModelIdRef.current),
       );
       // Pruning everything would leave the step with nothing checked and no
       // way to submit; fall back to the provider's first live model. That is
@@ -700,6 +716,9 @@ export function useProviderSetupFlow(
 
   const changeActiveCustomModelId = useCallback((value?: string) => {
     activeCustomModelIdRef.current = value;
+    // Navigation is not editing: an arrow-key or focus move must not leave
+    // the token the caret lands in protected by the keep clause.
+    activeTokenEditTouchedRef.current = false;
   }, []);
 
   const submitModelIds = useCallback(

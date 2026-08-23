@@ -894,6 +894,113 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(ids).toContain('my-dep');
   });
 
+  it('prunes a comma-terminated token the caret only moved back into', async () => {
+    // The keep clause protects the token the user is editing, but caret
+    // position alone is not proof of editing: the user terminated
+    // RETIRED_ID with a comma (the last edit), then arrowed back into it —
+    // pure navigation. A lookup resolving in that window must prune the
+    // unserved built-in instead of shielding it for Enter to install.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type `<RETIRED_ID>, priv`; the last edit lands in `priv`.
+    act(() =>
+      result.current.changeModelIds(`${result.current.state.modelIds}, priv`, {
+        customModelIds: [RETIRED_ID, 'priv'],
+        activeCustomModelId: 'priv',
+      }),
+    );
+    // Arrow back into the terminated id — a caret move, not an edit.
+    act(() => result.current.changeActiveCustomModelId(RETIRED_ID));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    const ids = normalizeModelIds(result.current.state.modelIds);
+    expect(ids).not.toContain(RETIRED_ID);
+    expect(ids).toContain('priv');
+  });
+
+  it('keeps a default banked when its transient freeze only grew', async () => {
+    // The lookup resolves on the exact keystroke where the buffer reads
+    // exactly RETIRED_ID, so the keep clause freezes the transient token
+    // into the authorship reference point. The user keeps typing and it
+    // grows into `<RETIRED_ID>-latest`; the commit delta must not read that
+    // growth as a removal of RETIRED_ID — it was checked by default and
+    // never unchecked, yet the next pair change restores from the baseline,
+    // so an endpoint that serves it showed it silently missing.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type one character at a time, the way the step syncs each keystroke,
+    // and resolve on the keystroke where the buffer's token is exactly
+    // RETIRED_ID. The re-derive then dedupes the token being typed against
+    // its checkbox, so the later compositions carry only the still-checked
+    // defaults plus the growing custom token.
+    const typed = `${RETIRED_ID}-latest`;
+    const defaults = normalizeModelIds(result.current.state.modelIds);
+    for (let at = 1; at <= typed.length; at += 1) {
+      const buffer = typed.slice(0, at);
+      const composed =
+        at <= RETIRED_ID.length
+          ? [...defaults, buffer]
+          : [...defaults.filter((id) => id !== RETIRED_ID), buffer];
+      act(() =>
+        result.current.changeModelIds(composed.join(', '), {
+          customModelIds: [buffer],
+          activeCustomModelId: buffer,
+        }),
+      );
+      if (at !== RETIRED_ID.length) continue;
+      await act(async () => {
+        resolveLookup(discovered(SERVED_IDS));
+      });
+      await waitFor(() =>
+        expect(result.current.state.discoveryStatus).toBe('success'),
+      );
+    }
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // The default the user never unchecked comes back checked on an
+    // endpoint that serves it, beside the id they actually typed.
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain(RETIRED_ID);
+    expect(restored).toContain(typed);
+  });
+
   it('banks an in-flight recommendation removal without banking typed prefixes', async () => {
     let resolveLookup!: (value: ModelDiscoveryResult) => void;
     fetchProviderModelIdsMock
