@@ -267,6 +267,37 @@ describe('backfillWorkspaceSessionPrs', () => {
     }
   }
 
+  // Like seedTranscriptBranches, but with exact branch names — the
+  // default-branch hazard needs 'main' itself, not the b-<i> pattern.
+  async function seedTranscriptBranchNames(
+    sessionId: string,
+    names: readonly string[],
+  ): Promise<void> {
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    let index = 0;
+    for (const name of names) {
+      index += 1;
+      await fsp.appendFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-branch-${index}`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: name,
+        })}\n`,
+        'utf8',
+      );
+    }
+  }
+
   async function seedWorktreeSidecar(
     sessionId: string,
     slug: string,
@@ -396,38 +427,47 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.[0]).toMatchObject({ number: 44, state: 'open' });
   });
 
-  it('resolves the git remote at most once per workspace', async () => {
-    // A PATH shim stands in for git and records every spawn: with gh
-    // unavailable and no resolvable remote, three unresolved convention
-    // candidates must cost one blocking lookup, not one per session.
-    const shimDir = path.join(workspaceCwd, 'git-shim');
-    const spawnLog = path.join(workspaceCwd, 'git-spawns.log');
-    await fsp.mkdir(shimDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(shimDir, 'git'),
-      `#!/bin/sh\necho "$@" >> "${spawnLog}"\nexit 1\n`,
-    );
-    await fsp.chmod(path.join(shimDir, 'git'), 0o755);
-    await seedSession(SESSION_B);
-    await seedWorktreeSidecar(SESSION_B, 'pr-1', 'worktree-pr-1');
-    await seedSession(SESSION_C);
-    await seedWorktreeSidecar(SESSION_C, 'pr-2', 'worktree-pr-2');
-    await seedSession(SESSION_D);
-    await seedWorktreeSidecar(SESSION_D, 'pr-3', 'worktree-pr-3');
-    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
-    const previousPath = process.env['PATH'];
-    process.env['PATH'] = `${shimDir}${path.delimiter}${previousPath ?? ''}`;
+  // A `git` shim needs a shell script, which Windows cannot execute as a
+  // bare `git` on PATH; the memoization it pins is platform-independent.
+  it.skipIf(process.platform === 'win32')(
+    'resolves the git remote at most once per workspace',
+    async () => {
+      // A PATH shim stands in for git and records every spawn: with gh
+      // unavailable and no resolvable remote, three unresolved convention
+      // candidates must cost one blocking lookup, not one per session.
+      const shimDir = path.join(workspaceCwd, 'git-shim');
+      const spawnLog = path.join(workspaceCwd, 'git-spawns.log');
+      await fsp.mkdir(shimDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(shimDir, 'git'),
+        `#!/bin/sh\necho "$@" >> "${spawnLog}"\nexit 1\n`,
+      );
+      await fsp.chmod(path.join(shimDir, 'git'), 0o755);
+      await seedSession(SESSION_B);
+      await seedWorktreeSidecar(SESSION_B, 'pr-1', 'worktree-pr-1');
+      await seedSession(SESSION_C);
+      await seedWorktreeSidecar(SESSION_C, 'pr-2', 'worktree-pr-2');
+      await seedSession(SESSION_D);
+      await seedWorktreeSidecar(SESSION_D, 'pr-3', 'worktree-pr-3');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'cli_unavailable',
+      });
+      const previousPath = process.env['PATH'];
+      process.env['PATH'] = `${shimDir}${path.delimiter}${previousPath ?? ''}`;
 
-    try {
-      const result = await backfillWorkspaceSessionPrs(runtime);
+      try {
+        const result = await backfillWorkspaceSessionPrs(runtime);
 
-      expect(result).toMatchObject({ bound: 0, unresolved: 3 });
-      const spawns = (await fsp.readFile(spawnLog, 'utf8')).trim().split('\n');
-      expect(spawns).toEqual(['remote get-url origin']);
-    } finally {
-      process.env['PATH'] = previousPath;
-    }
-  });
+        expect(result).toMatchObject({ bound: 0, unresolved: 3 });
+        const spawns = (await fsp.readFile(spawnLog, 'utf8'))
+          .trim()
+          .split('\n');
+        expect(spawns).toEqual(['remote get-url origin']);
+      } finally {
+        process.env['PATH'] = previousPath;
+      }
+    },
+  );
 
   it('falls back to the remote web URL when gh is unavailable', async () => {
     execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
@@ -655,6 +695,39 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
     expect(prs?.map((entry) => entry.number)).toEqual([250]);
+  });
+
+  it('never binds a session through the repository default branch', async () => {
+    // Fork PRs opened from the fork's default branch carry that bare name
+    // as headRefName (gh does not qualify it by owner); mapping it would
+    // bind every session run on the default branch to an unrelated
+    // contributor's PR — the highest-numbered one.
+    execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
+    execSync(
+      'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main',
+      { cwd: workspaceCwd, stdio: 'pipe' },
+    );
+    await seedSession(SESSION_A);
+    await seedTranscriptBranchNames(SESSION_A, ['main']);
+    await seedSession(SESSION_B);
+    await seedTranscriptBranchNames(SESSION_B, ['feat-x']);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9199, 'main'), pr(31, 'feat-x')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 2, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    const prsB = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+    );
+    expect(prsB?.map((entry) => entry.number)).toEqual([31]);
   });
 
   it('keeps the convention number bound when candidates exceed the cap', async () => {

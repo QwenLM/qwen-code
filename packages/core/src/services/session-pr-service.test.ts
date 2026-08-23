@@ -222,25 +222,27 @@ describe('updateSessionPrStates', () => {
       filePath,
       new Map([[100, 'merged']]),
     );
-    expect(updated?.map((p) => p.number)).toEqual([100, 101]);
-    expect(updated?.[0]?.state).toBe('merged');
-    expect(updated?.[0]?.createdAt).toBe(entry(100).createdAt);
-    expect(updated?.[1]?.state).toBe('open');
+    expect(updated).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(persisted?.[1]?.state).toBe('open');
   });
 
-  it('returns null without writing when nothing changes', async () => {
+  it('returns 0 without writing when nothing changes', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
-  it('returns null when the sidecar is absent', async () => {
+  it('returns 0 when the sidecar is absent', async () => {
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
@@ -249,7 +251,7 @@ describe('updateSessionPrStates', () => {
       updateSessionPrStates(filePath, new Map([[100, 'merged']])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
-    expect(updated?.[0]?.state).toBe('merged');
+    expect(updated).toBe(1);
     expect(prs?.map((p) => p.number)).toEqual([100, 101]);
     // Whichever ran second read the first's write — nothing was clobbered.
     const persisted = await readSessionPrs(filePath);

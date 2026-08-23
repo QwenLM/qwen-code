@@ -140,9 +140,7 @@ export async function refreshWorkspaceSessionPrStates(
     }
     if (states.size === 0) continue;
     try {
-      if (await updateSessionPrStates(target.prPath, states)) {
-        updated += states.size;
-      }
+      updated += await updateSessionPrStates(target.prPath, states);
     } catch {
       // One unwritable sidecar must not starve the rest of the sweep.
     }

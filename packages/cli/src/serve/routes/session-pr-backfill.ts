@@ -12,6 +12,7 @@ import type { Application, RequestHandler } from 'express';
 import {
   SESSION_PR_LIST_LIMIT,
   fetchGitHubPullRequests,
+  getDefaultBranch,
   readSessionPrs,
   readWorktreeSession,
   replaceSessionPrs,
@@ -230,6 +231,20 @@ export async function backfillWorkspaceSessionPrs(
     { state: 'all', limit: 500, slim: true },
   );
   if (prs.kind === 'ok') {
+    // A session run on the repository's default branch cannot be attributed
+    // to a PR by branch name: fork PRs opened from the fork's default branch
+    // carry that same bare name as their headRefName (gh does not qualify it
+    // by owner), so mapping it would bind every such session to an unrelated
+    // contributor's PR — the highest-numbered one.
+    let defaultBranch: string | undefined;
+    if (candidates.some((candidate) => candidate.branches.length > 0)) {
+      // Local ref read only — no credentials needed, so the ambient env
+      // applies (gitEnv falls back to process.env), like getRemoteWebUrl.
+      const defaultRef = await getDefaultBranch(runtime.workspaceCwd);
+      if (defaultRef) {
+        defaultBranch = defaultRef.slice(defaultRef.indexOf('/') + 1);
+      }
+    }
     for (const pr of prs.pullRequests) {
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
@@ -239,7 +254,11 @@ export async function backfillWorkspaceSessionPrs(
       // order — the slim field set omits updatedAt, so no sort order is
       // guaranteed to survive parsing.
       const mapped = branchToNumber.get(pr.headRefName);
-      if (pr.headRefName && (mapped === undefined || pr.number > mapped)) {
+      if (
+        pr.headRefName &&
+        pr.headRefName !== defaultBranch &&
+        (mapped === undefined || pr.number > mapped)
+      ) {
         branchToNumber.set(pr.headRefName, pr.number);
       }
     }
