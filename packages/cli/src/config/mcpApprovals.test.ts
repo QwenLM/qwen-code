@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { hashMcpServerConfig } from '@qwen-code/qwen-code-core';
 import {
   loadMcpApprovals,
   getPendingGatedMcpServers,
@@ -41,6 +42,10 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  /** Keys are stored case-folded on win32 (issue #9775), verbatim elsewhere. */
+  const expectedStoredKey = (p: string) =>
+    os.platform() === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+
   it('is pending with no stored decision', () => {
     const approvals = loadMcpApprovals();
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('pending');
@@ -71,7 +76,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(dir, MCP_APPROVALS_FILENAME), 'utf-8'),
     );
-    const record = onDisk[path.resolve(projectRoot)]['slack'];
+    const record = onDisk[expectedStoredKey(projectRoot)]['slack'];
     expect(record.status).toBe('approved');
     expect(record.hash).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -87,7 +92,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(dir, MCP_APPROVALS_FILENAME), 'utf-8'),
     );
-    const projectRecord = onDisk[path.resolve(projectRoot)];
+    const projectRecord = onDisk[expectedStoredKey(projectRoot)];
     const record = Object.getOwnPropertyDescriptor(
       projectRecord,
       '__proto__',
@@ -175,6 +180,125 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     await approvals.setState(projectRoot, 'slack', server, 'approved');
     expect(approvals.getState('/work/other-repo', 'slack', server)).toBe(
       'pending',
+    );
+  });
+
+  // Windows paths are case-insensitive: the CLI stores `process.cwd()` as
+  // typed while IDE integrations pass VS Code's lowercased `fsPath` (issue
+  // #9775). These cases only apply where the filesystem folds case.
+  const itOnWin32 = os.platform() === 'win32' ? it : it.skip;
+
+  describe('win32 project-root casing (issue #9775)', () => {
+    /** Same directory, drive-letter casing flipped (`C:\...` <-> `c:\...`). */
+    function flipDriveCase(p: string): string {
+      return p.charAt(0) === p.charAt(0).toUpperCase()
+        ? p.charAt(0).toLowerCase() + p.slice(1)
+        : p.charAt(0).toUpperCase() + p.slice(1);
+    }
+
+    itOnWin32('matches an approval across drive-letter casing', async () => {
+      const approvals = loadMcpApprovals();
+      await approvals.setState(dir, 'slack', server, 'approved');
+      const variant = flipDriveCase(path.resolve(dir));
+      expect(fs.existsSync(variant)).toBe(true);
+      expect(approvals.getState(variant, 'slack', server)).toBe('approved');
+    });
+
+    itOnWin32(
+      'matches decisions stored by older builds under legacy cased keys',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({
+            [flipDriveCase(resolvedDir)]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        expect(loadMcpApprovals().getState(resolvedDir, 'slack', server)).toBe(
+          'approved',
+        );
+      },
+    );
+
+    itOnWin32(
+      'merges duplicate-cased keys for the same project at load time',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        const workspaceServer: MCPServerConfig = {
+          command: 'node',
+          args: ['ws.js'],
+          scope: 'workspace',
+        };
+        fs.writeFileSync(
+          path.join(dir, MCP_APPROVALS_FILENAME),
+          JSON.stringify({
+            [flipDriveCase(resolvedDir)]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+            [resolvedDir]: {
+              ws: {
+                hash: hashMcpServerConfig(workspaceServer),
+                status: 'rejected',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        const approvals = loadMcpApprovals();
+        expect(approvals.getState(resolvedDir, 'slack', server)).toBe(
+          'approved',
+        );
+        expect(approvals.getState(resolvedDir, 'ws', workspaceServer)).toBe(
+          'rejected',
+        );
+      },
+    );
+
+    itOnWin32(
+      'rewrites migrated keys in normalized form on the next save',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        const workspaceServer: MCPServerConfig = {
+          command: 'node',
+          args: ['ws.js'],
+          scope: 'workspace',
+        };
+        const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({
+            [flipDriveCase(resolvedDir)]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        await loadMcpApprovals().setState(
+          resolvedDir,
+          'ws',
+          workspaceServer,
+          'approved',
+        );
+        const onDisk = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        expect(Object.keys(onDisk)).toEqual([resolvedDir.toLowerCase()]);
+        expect(Object.keys(onDisk[resolvedDir.toLowerCase()]).sort()).toEqual([
+          'slack',
+          'ws',
+        ]);
+      },
     );
   });
 

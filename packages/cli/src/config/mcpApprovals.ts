@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   getErrorMessage,
@@ -54,9 +55,54 @@ export function getMcpApprovalsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), MCP_APPROVALS_FILENAME);
 }
 
-/** Keys are stored normalized so the same project resolves consistently. */
+/**
+ * Keys are stored normalized so the same project resolves consistently. On
+ * Windows, paths are case-insensitive but the entry points that produce a
+ * project root disagree on casing: the CLI keeps `process.cwd()` as typed
+ * (`D:\project`) while IDE integrations hand over VS Code's
+ * `workspaceFolders[0].uri.fsPath`, which lowercases the drive letter
+ * (`d:\project`). Fold case on win32 — same convention as
+ * `getProjectHash()`/`sanitizeCwd()`. See issue #9775.
+ */
 function normalizeProjectRoot(projectRoot: string): string {
-  return path.resolve(projectRoot);
+  const resolved = path.resolve(projectRoot);
+  return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isApprovalRecordMap(
+  value: unknown,
+): value is Record<string, McpApprovalRecord> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Approvals written by older builds may key a project by a differently-cased
+ * path than {@link normalizeProjectRoot} now produces (e.g. an uppercased
+ * drive letter recorded by the CLI). Fold stored keys to match at load time so
+ * those decisions aren't orphaned; duplicates that differ only in case merge
+ * into one entry and are rewritten in normalized form on the next save.
+ */
+function normalizeStoredProjectKeys(
+  config: McpApprovalsConfig,
+): McpApprovalsConfig {
+  if (os.platform() !== 'win32') {
+    return config;
+  }
+  const normalized: McpApprovalsConfig = Object.create(null);
+  for (const [key, value] of Object.entries(config)) {
+    // Stored keys are already absolute and separator-normalized; fold case
+    // only — re-resolving here could rewrite foreign keys (e.g. POSIX paths
+    // synced onto a Windows machine) into unrelated local ones.
+    const projectKey = key.toLowerCase();
+    const existing = normalized[projectKey];
+    normalized[projectKey] =
+      isApprovalRecordMap(existing) && isApprovalRecordMap(value)
+        ? { ...existing, ...value }
+        : isApprovalRecordMap(value) || !isApprovalRecordMap(existing)
+          ? value
+          : existing;
+  }
+  return normalized;
 }
 
 export class LoadedMcpApprovals {
@@ -141,7 +187,7 @@ export function loadMcpApprovals(): LoadedMcpApprovals {
           path: filePath,
         });
       } else {
-        config = parsed as McpApprovalsConfig;
+        config = normalizeStoredProjectKeys(parsed as McpApprovalsConfig);
       }
     }
   } catch (error: unknown) {
