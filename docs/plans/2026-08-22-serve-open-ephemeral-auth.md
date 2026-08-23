@@ -15,12 +15,21 @@ add persistent storage, a new authentication protocol, a public
 reuse the existing runtime bearer and Web Shell fragment flow end to end.
 
 The implementation PR starts from fresh `main`. It may touch the two CLI serve
-entry paths, one shared helper, targeted tests, and the existing user/developer
-documentation. It must not broaden into the pair-token and revocation work in
-#4514.
+entry paths, one ephemeral-auth helper, one pure token-selection leaf, targeted
+tests, and the existing user/developer documentation. It must not broaden into
+the pair-token and revocation work in #4514.
 
 ## Phase 1: Shared ephemeral-token decision
 
+- Extract the existing selection and normalization into a small
+  `packages/cli/src/serve/serve-token.ts` leaf. Its pure operation accepts the
+  option token and environment, owns the
+  `optionToken ?? env[QWEN_SERVER_TOKEN_ENV]` precedence, trims the selected
+  string, and maps an empty result to `undefined`.
+- Make both `runQwenServe()` and the ephemeral-auth helper call that operation.
+  Neither caller may re-derive the precedence or trimming rule. This extraction
+  changes no token source or runtime behavior; it makes future precedence
+  changes authoritative in one place.
 - Add a small `packages/cli/src/serve/open-ephemeral-auth.ts` helper shared by
   the yargs handler and fast path.
 - Expose one operation that receives the resolved `ServeOptions` object and the
@@ -32,9 +41,8 @@ documentation. It must not broaden into the pair-token and revocation work in
   Shell assets resolve; `shouldLaunchBrowser()` is true; and the currently
   selected token is empty after trim. Reuse `isLoopbackBind()` rather than
   copying its accepted hostnames or its full `127.0.0.0/8` behavior.
-- Match `runQwenServe()` token selection exactly: use `options.token` when it is
-  not `undefined`, otherwise use `QWEN_SERVER_TOKEN`, then trim. Do not let a
-  generated token replace a non-empty configured token.
+- Call the shared token selector and generate only when it returns `undefined`.
+  Do not let a generated token replace a non-empty configured token.
 - Generate `randomBytes(32).toString('base64url')` and assign it only to
   `options.token`. Do not set `process.env`, write a credential file, add a
   token store, or expose the value in a diagnostic.
@@ -107,8 +115,8 @@ documentation. It must not broaden into the pair-token and revocation work in
 
 ## Unit test matrix
 
-Add collocated tests for the shared helper and extend the existing command and
-fast-path suites.
+Add collocated tests for the shared selector and helper, and extend the existing
+command and fast-path suites.
 
 | Scenario                                                                         | Expected result                                                       |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
@@ -131,6 +139,11 @@ Also verify:
 
 - The yargs and fast paths invoke the same decision after their environment
   bootstrap.
+- `runQwenServe()` and the generation helper both import the shared selector;
+  no caller retains a duplicate precedence or trimming implementation.
+- Selector tests preserve the current choose-before-trim order, including that
+  a whitespace-only option value shadows a non-empty environment value and
+  then normalizes to `undefined`.
 - Workspace/home settings that supply `QWEN_SERVER_TOKEN` suppress generation
   on the fast path.
 - Generation leaves `process.env.QWEN_SERVER_TOKEN` absent or byte-for-byte
@@ -150,6 +163,7 @@ Run targeted tests from the CLI package:
 ```bash
 cd packages/cli
 npx vitest run \
+  src/serve/serve-token.test.ts \
   src/serve/open-ephemeral-auth.test.ts \
   src/commands/serve.test.ts \
   src/serve/fast-path.test.ts \
