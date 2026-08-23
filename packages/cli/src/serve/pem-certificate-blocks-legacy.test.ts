@@ -45,6 +45,7 @@ describe('legacy certificate loader oracle', () => {
   });
 
   it.each([
+    ['a leading UTF-8 BOM', `\uFEFF${ROOT_PEM}`, 1],
     ['leading prose', `# exported by secret manager\n${ROOT_PEM}`, 1],
     ['trailing prose', `${ROOT_PEM}# end of export\n`, 1],
     ['inter-block prose', `${ROOT_PEM}# second trust anchor\n${ROOT_PEM}`, 2],
@@ -59,8 +60,20 @@ describe('legacy certificate loader oracle', () => {
       1,
     ],
     ['blank line between certificates', `${ROOT_PEM}\n${ROOT_PEM}`, 2],
+    ['a trailing NUL', `${ROOT_PEM.trimEnd()}\0`, 1],
+    ['a trailing NUL before newline', `${ROOT_PEM.trimEnd()}\0\n`, 1],
+    [
+      'a NUL-delimited second certificate',
+      `${ROOT_PEM.trimEnd()}\0\n${SECOND_ROOT_PEM}`,
+      2,
+    ],
   ])('accepts %s around loadable certificates', (_name, contents, count) => {
     expect(extractCertificateBlocks(contents)).toHaveLength(count);
+    expect(spawnSync).toHaveBeenCalledOnce();
+  });
+
+  it('stops at a leading NUL even when the loader emits no warning', () => {
+    expect(extractCertificateBlocks(`\0\n${ROOT_PEM}`)).toBeUndefined();
     expect(spawnSync).toHaveBeenCalledOnce();
   });
 

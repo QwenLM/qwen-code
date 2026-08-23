@@ -28,6 +28,8 @@ const STRICT_CERTIFICATE_BLOCK =
   /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END CERTIFICATE-----[ \t]*(?:\r?\n|$)/gm;
 const LEGACY_SILENT_STOP_HEADER_BLOCK =
   /^-----BEGIN ([^\r\n]*:[^\r\n]*)-----[ \t]*\r?\n[\s\S]*?^-----END \1-----[ \t]*(?:\r?\n|$)/m;
+const LEGACY_CERTIFICATE_END_NUL =
+  /^(-----END CERTIFICATE-----[ \t]*)\0(?=\r?\n|$)/gm;
 
 /** A block the loader takes, in canonical PEM and as its parsed certificate. */
 interface ScannedCertificateBlock {
@@ -36,9 +38,17 @@ interface ScannedCertificateBlock {
 }
 
 function legacyCertificateBlocks(contents: string): ScannedCertificateBlock[] {
-  const silentStop = contents.search(LEGACY_SILENT_STOP_HEADER_BLOCK);
+  // The legacy line reader skips only a file-start BOM, accepts NUL after an
+  // END line, and silently stops at every other NUL.
+  const loaderInput = (
+    contents.startsWith('\uFEFF') ? contents.slice(1) : contents
+  ).replace(LEGACY_CERTIFICATE_END_NUL, '$1');
+  const nulStop = loaderInput.indexOf('\0');
+  const nulPrefix =
+    nulStop === -1 ? loaderInput : loaderInput.slice(0, nulStop);
+  const silentStop = nulPrefix.search(LEGACY_SILENT_STOP_HEADER_BLOCK);
   const loadablePrefix =
-    silentStop === -1 ? contents : contents.slice(0, silentStop);
+    silentStop === -1 ? nulPrefix : nulPrefix.slice(0, silentStop);
   const blocks: ScannedCertificateBlock[] = [];
   for (const match of loadablePrefix.matchAll(STRICT_CERTIFICATE_BLOCK)) {
     try {
