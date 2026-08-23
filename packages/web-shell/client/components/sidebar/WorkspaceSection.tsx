@@ -6,7 +6,10 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonClient,
+  DaemonSessionGroupCatalog,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonChannelsSnapshot,
   DaemonChannelTypeCatalog,
@@ -36,6 +39,7 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
@@ -51,7 +55,7 @@ function cx(...classes: Array<string | false | undefined>): string {
 // A synthetic fallback workspace (daemon reports no workspaces and the
 // connection has no cwd) carries a display name in `cwd`, which is neither, so
 // qualifying a request with it would only ever 400.
-function isAbsolutePath(cwd: string): boolean {
+export function isAbsolutePath(cwd: string): boolean {
   return (
     cwd.startsWith('/') || cwd.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(cwd)
   );
@@ -85,6 +89,9 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   loadErrorLabel: string;
   organizationEnabled: boolean;
+  sessionCatalogRequestsEnabled?: boolean;
+  sessionGroupCatalog?: DaemonSessionGroupCatalog;
+  sessionLiveStateEnabled?: boolean;
   sourceType?: string;
   channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
@@ -100,6 +107,7 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -129,6 +137,9 @@ export function WorkspaceSection({
   noSessionsLabel,
   loadErrorLabel,
   organizationEnabled,
+  sessionCatalogRequestsEnabled = true,
+  sessionGroupCatalog,
+  sessionLiveStateEnabled = false,
   sourceType,
   channelGroupingEnabled = false,
   ungroupedLabel,
@@ -138,6 +149,7 @@ export function WorkspaceSection({
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  mapSession,
   showSessionDetails = true,
   headerActions,
   onRenameGroup,
@@ -219,9 +231,14 @@ export function WorkspaceSection({
     [organizationEnabled, sourceType, workspace.cwd],
   );
   const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
-    autoLoad: true,
+    autoLoad: sessionCatalogRequestsEnabled && !sessionLiveStateEnabled,
     enabled: sessionsEnabled && sessionsVisible,
-    ...(sessionsVisible && !readOnly ? { pollIntervalMs: 10_000 } : {}),
+    ...(sessionCatalogRequestsEnabled &&
+    sessionsVisible &&
+    !readOnly &&
+    !sessionLiveStateEnabled
+      ? { pollIntervalMs: 10_000 }
+      : {}),
   });
   const {
     page: sessionsPage,
@@ -238,6 +255,8 @@ export function WorkspaceSection({
     previousSessionsActiveRef.current = sessionsActive;
     previousReadOnlyRef.current = readOnly;
     if (
+      sessionCatalogRequestsEnabled &&
+      !sessionLiveStateEnabled &&
       sessionsActive &&
       (!wasActive || wasReadOnly !== readOnly) &&
       sessionsPage &&
@@ -245,7 +264,15 @@ export function WorkspaceSection({
     ) {
       void reloadSessions().catch(() => undefined);
     }
-  }, [readOnly, reloadSessions, sessionsActive, sessionsPage, sessionsStale]);
+  }, [
+    readOnly,
+    reloadSessions,
+    sessionCatalogRequestsEnabled,
+    sessionLiveStateEnabled,
+    sessionsActive,
+    sessionsPage,
+    sessionsStale,
+  ]);
   const sessions = sessionsResult.sessions;
   const loadError = Boolean(sessionsResult.error);
 
@@ -265,6 +292,13 @@ export function WorkspaceSection({
       channelGroupingEnabled
     ) {
       setGroups([]);
+      return;
+    }
+    if (!sessionCatalogRequestsEnabled) return;
+    if (sessionLiveStateEnabled) {
+      // Live-state owns group freshness here; while its catalog is pending
+      // there is no valid group data, so clear rather than render stale.
+      setGroups(sessionGroupCatalog?.groups ?? []);
       return;
     }
     let cancelled = false;
@@ -287,6 +321,9 @@ export function WorkspaceSection({
     organizationEnabled,
     reloadToken,
     renderSessions,
+    sessionCatalogRequestsEnabled,
+    sessionGroupCatalog,
+    sessionLiveStateEnabled,
     workspace.cwd,
   ]);
 
@@ -394,15 +431,19 @@ export function WorkspaceSection({
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return sessions.filter((session) => {
-      if (excludePinned && session.isPinned) return false;
-      if (!query) return true;
-      const label = (session.displayName || '').toLowerCase();
-      return (
-        label.includes(query) || session.sessionId.toLowerCase().includes(query)
-      );
-    });
-  }, [excludePinned, searchQuery, sessions]);
+    return sessions
+      .map((session) => mapSession?.(session) ?? session)
+      .filter((session) => {
+        if (excludePinned && session.isPinned) return false;
+        if (!query) return true;
+        const label = (session.displayName || '').toLowerCase();
+        return (
+          label.includes(query) ||
+          session.sessionId.toLowerCase().includes(query) ||
+          sessionMatchesGitQuery(session, query)
+        );
+      });
+  }, [excludePinned, mapSession, searchQuery, sessions]);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions

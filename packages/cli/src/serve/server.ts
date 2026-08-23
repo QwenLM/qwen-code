@@ -66,6 +66,7 @@ import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
+  createSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   type AcpSessionBridge,
@@ -77,6 +78,7 @@ import {
   type ChannelWebhookConfigSource,
   type ServeOptions,
 } from './types.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
@@ -181,7 +183,10 @@ import {
   parseClientIdHeader,
   safeBody,
 } from './server/request-helpers.js';
-import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
@@ -1014,10 +1019,15 @@ export function createServeApp(
   const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
+  const acpChildArgs = acpChildExtraArgs(opts);
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      sessionAttachmentsRoot: path.join(
+        new Storage(boundWorkspace).getProjectTempDir(),
+        'attachments',
+      ),
       maxSessions: opts.maxSessions,
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
@@ -1036,6 +1046,16 @@ export function createServeApp(
       initializeTimeoutMs: opts.initializeTimeoutMs,
       sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+      ...(opts.restoreAskUserQuestion === true
+        ? { restoreAskUserQuestion: true }
+        : {}),
+      ...(acpChildArgs
+        ? {
+            channelFactory: createSpawnChannelFactory({
+              extraArgs: acpChildArgs,
+            }),
+          }
+        : {}),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1721,6 +1741,12 @@ export function createServeApp(
   }
 
   installAccessLogMiddleware(app, daemonLog);
+
+  // Capture the caller trace id BEFORE authenticate / rate limiter / body
+  // parser: those layers short-circuit (401/429/400) before the telemetry
+  // middleware ever runs, and the access log still needs the captured id
+  // to join their log lines (and 404s) with the caller's trace.
+  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an

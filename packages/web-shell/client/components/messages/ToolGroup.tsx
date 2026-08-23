@@ -1,6 +1,7 @@
 import {
   Fragment,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -1181,36 +1182,53 @@ export const ToolLine = memo(function ToolLine({
     ]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded =
-      forceExpanded || expanded || !!hasApproval || !!hasSubToolApproval;
+    const showExpanded = forceExpanded || expanded || !!hasSubToolApproval;
+    // While the agent's own launch approval is pending there is nothing to
+    // show yet — keep the row compact and non-openable; the approval dialog
+    // is the single source of interaction.
+    const approvalPending = !!hasApproval;
     const panel = (
       <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
     );
     if (subagentDetails && !hideHeader) {
+      const rowContent = (
+        <>
+          <AgentIcon />
+          <StatusIcon status={isComplete ? info.status : tool.status} />
+          <span className={styles.lineName}>{displayName}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: 'agent',
+              tool,
+              displayName,
+              description: info.description
+                ? truncateText(info.description, 60)
+                : '',
+              elapsed: isComplete ? completeMeta : runningMeta,
+              workspaceCwd,
+            }}
+          />
+        </>
+      );
       return (
         <div className={styles.line}>
-          <button
-            type="button"
-            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-            onClick={() => subagentDetails.onOpen(tool)}
-          >
-            <AgentIcon />
-            <StatusIcon status={isComplete ? info.status : tool.status} />
-            <span className={styles.lineName}>{displayName}</span>
-            <ToolHeaderExtra
-              info={{
-                kind: 'agent',
-                tool,
-                displayName,
-                description: info.description
-                  ? truncateText(info.description, 60)
-                  : '',
-                elapsed: isComplete ? completeMeta : runningMeta,
-                workspaceCwd,
-              }}
-            />
-            <span className={styles.lineChevronRight} aria-hidden="true" />
-          </button>
+          {approvalPending ? (
+            <div
+              className={`${styles.lineMain} ${styles.lineButton}`}
+              aria-disabled="true"
+            >
+              {rowContent}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+              onClick={() => subagentDetails.onOpen(tool)}
+            >
+              {rowContent}
+              <span className={styles.lineChevronRight} aria-hidden="true" />
+            </button>
+          )}
         </div>
       );
     }
@@ -1218,8 +1236,10 @@ export const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         {!hideHeader && (
           <div
-            className={`${styles.lineMain} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
+            className={`${styles.lineMain} ${
+              approvalPending ? '' : styles.lineExpandable
+            }`}
+            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1236,12 +1256,14 @@ export const ToolLine = memo(function ToolLine({
                 workspaceCwd,
               }}
             />
-            <span
-              className={
-                expanded ? styles.lineChevronDown : styles.lineChevronRight
-              }
-              aria-hidden="true"
-            />
+            {!approvalPending && (
+              <span
+                className={
+                  expanded ? styles.lineChevronDown : styles.lineChevronRight
+                }
+                aria-hidden="true"
+              />
+            )}
           </div>
         )}
         {showExpanded && (
@@ -1505,7 +1527,77 @@ export const ToolLine = memo(function ToolLine({
   );
 }, areToolLinePropsEqual);
 
-function ThoughtLine({
+interface ThoughtLineHeaderProps {
+  isStreaming?: boolean;
+  expanded: boolean;
+  /**
+   * Thought content for the zh-CN translate button. Omitted while streaming —
+   * the button is hidden then — so streamed content growth does not defeat the
+   * header's memo boundary.
+   */
+  translateContent?: string;
+  generateContent?: SessionContentGenerator;
+  onToggle: () => void;
+}
+
+const ThoughtLineHeader = memo(function ThoughtLineHeader({
+  isStreaming,
+  expanded,
+  translateContent,
+  generateContent,
+  onToggle,
+}: ThoughtLineHeaderProps) {
+  const { language, t } = useI18n();
+  return (
+    <div
+      className={`${styles.chatSummaryThoughtHeader}${
+        expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+      }`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={onToggle}
+      onKeyDown={(event) => {
+        // Only the container itself toggles; keys pressed inside nested
+        // controls (the translate button) keep their own behavior.
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onToggle();
+      }}
+    >
+      <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
+        <ThinkingDoneIcon />
+      </span>
+      <span
+        className={`${styles.chatSummaryThoughtLabel}${
+          isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
+        }`}
+      >
+        {t(isStreaming ? 'thinking.running' : 'thinking.done')}
+      </span>
+      {language === 'zh-CN' &&
+        translateContent !== undefined &&
+        generateContent && (
+          <ThinkingTranslateButton
+            content={translateContent}
+            generateContent={generateContent}
+            className={styles.chatSummaryThoughtTranslate}
+          />
+        )}
+      <span
+        className={
+          expanded
+            ? styles.chatSummaryThoughtChevronDown
+            : styles.chatSummaryThoughtChevronRight
+        }
+        aria-hidden="true"
+      />
+    </div>
+  );
+});
+
+const ThoughtLine = memo(function ThoughtLine({
   content,
   isStreaming,
   generateContent,
@@ -1514,53 +1606,17 @@ function ThoughtLine({
   isStreaming?: boolean;
   generateContent?: SessionContentGenerator;
 }) {
-  const { language, t } = useI18n();
   const [expanded, setExpanded] = useState(false);
+  const handleToggle = useCallback(() => setExpanded((value) => !value), []);
   return (
     <div className={styles.chatSummaryThought}>
-      <div
-        className={`${styles.chatSummaryThoughtHeader}${
-          expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
-        }`}
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        onKeyDown={(event) => {
-          // Only the container itself toggles; keys pressed inside nested
-          // controls (the translate button) keep their own behavior.
-          if (event.target !== event.currentTarget) return;
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          setExpanded((value) => !value);
-        }}
-      >
-        <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
-          <ThinkingDoneIcon />
-        </span>
-        <span
-          className={`${styles.chatSummaryThoughtLabel}${
-            isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
-          }`}
-        >
-          {t(isStreaming ? 'thinking.running' : 'thinking.done')}
-        </span>
-        {language === 'zh-CN' && !isStreaming && generateContent && (
-          <ThinkingTranslateButton
-            content={content}
-            generateContent={generateContent}
-            className={styles.chatSummaryThoughtTranslate}
-          />
-        )}
-        <span
-          className={
-            expanded
-              ? styles.chatSummaryThoughtChevronDown
-              : styles.chatSummaryThoughtChevronRight
-          }
-          aria-hidden="true"
-        />
-      </div>
+      <ThoughtLineHeader
+        isStreaming={isStreaming}
+        expanded={expanded}
+        translateContent={isStreaming ? undefined : content}
+        generateContent={generateContent}
+        onToggle={handleToggle}
+      />
       {expanded && (
         <div className={styles.chatSummaryThoughtContent}>
           <Markdown content={content} source="thinking" />
@@ -1568,7 +1624,7 @@ function ThoughtLine({
       )}
     </div>
   );
-}
+});
 
 export const ToolGroup = memo(function ToolGroup({
   tools,

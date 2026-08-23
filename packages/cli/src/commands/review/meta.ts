@@ -50,22 +50,41 @@ export function runMeta(args: MetaArgs): MetaResult {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
-  const platform = getPlatformReader();
-  platform.ensureAuthenticated();
+  const platform = getPlatformReader({ host: args.host });
 
   let host: string;
   let ownerRepo: string;
   if (args.repo !== undefined) {
-    // Explicit repo: the host comes from the flag/env, defaulting to
-    // github.com — there is no URL to derive it from. Gate it the same way
-    // the discovery branch does: `resolveGhHost` also reads the GH_HOST env
-    // and never validates, so an unroutable env value (underscore intranet
-    // alias) must not be emitted as the host label while every sibling
-    // rejects it when welded back as --host. An env-sourced failure is
-    // environmental (exit 1), a --host typo was already classified exit 2 by
-    // the handler's own setGhHost.
+    // Explicit repo: the host comes from the flag/env. On GitHub it may
+    // default to github.com; on any other platform there is NO default —
+    // emitting `platform: 'aone'` beside `host: 'github.com'` would hand a
+    // consumer a contradiction (feeding the host back flips detection to
+    // GitHub and retargets at the same-named repo), so require `--host`.
+    // The gate is the FLAG, not the resolved value: `resolveGhHost` also
+    // inherits the GH_HOST env, and counting that fallback as a host source
+    // off GitHub would leave the contradiction intact (an operator's
+    // standard GHE export beside an Aone target). Everything here is pure
+    // resolution and validation, so it all runs before the auth gate —
+    // detection is read-only, and `a1 auth login` cannot fix a missing
+    // `--host` either.
     ownerRepo = args.repo;
+    // An empty-string flag is a missing flag: resolveGhHost treats it as
+    // unset and falls through to the env, which must not bypass the guard.
+    if (
+      (args.host === undefined || args.host.trim() === '') &&
+      platform.kind !== 'github'
+    ) {
+      throw new TypeError(
+        `--repo on a ${platform.kind} target needs --host — there is no default host off GitHub`,
+      );
+    }
     host = resolveGhHost(args.host) ?? 'github.com';
+    // Gate it the same way the discovery branch does: `resolveGhHost` also
+    // reads the GH_HOST env and never validates, so an unroutable env value
+    // (underscore intranet alias) must not be emitted as the host label while
+    // every sibling rejects it when welded back as --host. An env-sourced
+    // failure is environmental (exit 1), a --host typo was already classified
+    // exit 2 by the handler's own setGhHost.
     if (!HOSTNAME_RE.test(host)) {
       throw new Error(
         `cannot route at the ${
@@ -73,7 +92,9 @@ export function runMeta(args: MetaArgs): MetaResult {
         } ${JSON.stringify(host)} — not a hostname the review subcommands accept`,
       );
     }
+    platform.ensureAuthenticated();
   } else {
+    platform.ensureAuthenticated();
     const id = platform.resolveRepo();
     ownerRepo = `${id.owner}/${id.repo}`;
     host = id.host;
@@ -86,7 +107,18 @@ export function runMeta(args: MetaArgs): MetaResult {
     // environmental condition, not a --host typo, so name the actual source
     // and fail in the runtime class (exit 1), never as a usage error that
     // blames a flag the caller never passed.
-    const routed = resolveGhHost(args.host) ?? id.host;
+    //
+    // Off GitHub the env half of that precedence is DROPPED: the Aone
+    // reader never routes a gh call, so an operator's ambient GH_HOST
+    // export (the standard GHE pattern) beside an Aone-origin clone must
+    // not override the discovered host — it would veto a valid Aone
+    // invocation at the HOSTNAME_RE gate below (the explicit-`--repo`
+    // branch's no-default-host guard names the same interference class).
+    // Only an explicit --host flag overrides discovery there.
+    const routed =
+      (platform.kind === 'github'
+        ? resolveGhHost(args.host)
+        : (args.host ?? '').trim() || undefined) ?? id.host;
     if (!HOSTNAME_RE.test(routed)) {
       throw new Error(
         `cannot route at the ${
@@ -126,7 +158,7 @@ export const metaCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The PR host (GitHub Enterprise). Omitted: inherit GH_HOST, else github.com.',
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       }),
   handler: (argv) => {
     const prNumber = argv['pr_number'] as number | undefined;

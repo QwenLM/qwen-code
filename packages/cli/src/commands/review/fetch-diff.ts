@@ -25,6 +25,8 @@ interface FetchDiffArgs {
   prNumber: number;
   repo: string;
   out: string;
+  /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
+  host?: string;
 }
 
 export interface FetchDiffResult {
@@ -45,7 +47,7 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
   // fetch — classify it before fetching.
   assertWritableOutPath(args.out);
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 
   // ghRaw keeps the diff's trailing bytes; normalise exactly one trailing
@@ -86,7 +88,7 @@ export const fetchDiffCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The PR host (GitHub Enterprise). Omitted: inherit GH_HOST, else github.com.',
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       })
       .option('out', {
         type: 'string',
@@ -113,6 +115,7 @@ export const fetchDiffCommand: CommandModule = {
         prNumber,
         repo: String(argv['repo']),
         out: String(argv['out']),
+        host,
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {

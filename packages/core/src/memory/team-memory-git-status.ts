@@ -4,21 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isGitIgnored } from '../utils/git-ignore.js';
 import { findGitRoot } from '../utils/gitUtils.js';
 import { getTeamAutoMemoryIndexPath, getTeamAutoMemoryRoot } from './paths.js';
 
 const debugLogger = createDebugLogger('TEAM_MEMORY_GIT_STATUS');
-const GIT_TIMEOUT_MS = 5_000;
 
 /**
  * Returns true when `filePath` is git-ignored in the repo at `gitRoot`.
- * Uses `git check-ignore` (exit 0 = ignored, 1 = not). Best-effort: any other
- * outcome (git missing, fatal error) is treated as not-ignored so we never warn
- * on a false signal. The path need not exist — check-ignore evaluates the
- * ignore rules against the pathname.
+ * The path need not exist — check-ignore evaluates the ignore rules against
+ * the pathname.
  *
  * We check a representative FILE we would write (the team index), not the
  * directory: a `!.qwen/team-memory/` re-include is a directory-form negation
@@ -28,16 +25,11 @@ const GIT_TIMEOUT_MS = 5_000;
  */
 function isTeamFileGitIgnored(gitRoot: string, filePath: string): boolean {
   const rel = path.relative(gitRoot, filePath) || '.';
-  try {
-    execFileSync('git', ['check-ignore', '--quiet', '--', rel], {
-      cwd: gitRoot,
-      stdio: 'ignore',
-      timeout: GIT_TIMEOUT_MS,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  // Errors are treated as not-ignored: at THIS call site a false signal must
+  // never produce a user-facing warning (missed warnings are the accepted
+  // trade-off) — the same error→not-ignored default the shared probe
+  // documents.
+  return isGitIgnored(gitRoot, rel);
 }
 
 /**
