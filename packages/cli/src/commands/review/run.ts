@@ -86,6 +86,19 @@ export interface RunReviewResult {
    */
   expectedComposedName: string;
   reportPath: string | null;
+  /**
+   * The stop sidecar's count of the cache ledger's open Criticals — 0 when
+   * the round composed a verdict or the ledger held none. Informational on
+   * its own: an undated count is the stale-ledger shape and never gates.
+   */
+  openBlockers: number;
+  /**
+   * True only when a stop's open blockers were DATED against this tree: the
+   * capture compared the cache's recorded per-file state with the working
+   * tree and found it byte-identical, so the blockers still stand. Under
+   * `--fail-on request-changes` such a stop exits 3.
+   */
+  blockersStand: boolean;
   childExitCode: number | null;
   childSignal: string | null;
   timedOut: boolean;
@@ -209,6 +222,20 @@ function stopNameFor(cls: RunTargetClass): string {
   return `qwen-review-${planStemFor(cls)}-stop.json`;
 }
 
+/** The stop sidecar's verdict-bearing shape. */
+interface StopVerdict {
+  reason: string;
+  /** The cache ledger's open-Critical count — undated, never a gate alone. */
+  openBlockers: number;
+  /**
+   * The capture compared the cache's recorded per-file state with the
+   * working tree and found it byte-identical, so the open blockers still
+   * stand in THIS tree. False — or absent, a sidecar from before the field —
+   * leaves the count informational only.
+   */
+  blockersStand: boolean;
+}
+
 /**
  * The sidecar's verdict, fenced by the run that asks.
  *
@@ -217,19 +244,35 @@ function stopNameFor(cls: RunTargetClass): string {
  * review whose path flattens alike writes the same file — and its verdict
  * would decide this run's exit code. Absent stamp, foreign stamp,
  * unreadable or not JSON: no claim either way.
+ *
+ * The blocker state rides the same fence: a foreign run's open-Critical
+ * count would otherwise decide this run's gate. An undated count
+ * (`blockersStand` false or absent) never blocks — it is the stale-ledger
+ * shape, where the blocker was fixed and committed but the ledger, which a
+ * stop never rewrites, still says `open`.
  */
-function readStopSidecar(
-  path: string,
-  runId: string,
-): { reason: string } | null {
+function readStopSidecar(path: string, runId: string): StopVerdict | null {
   try {
     const stop = JSON.parse(readFileSync(path, 'utf8')) as {
       reason?: unknown;
       runId?: unknown;
+      openBlockers?: unknown;
+      blockersStand?: unknown;
     };
     if (stop.runId !== runId) return null;
     if (typeof stop.reason !== 'string' || stop.reason === '') return null;
-    return { reason: stop.reason };
+    const rawBlockers = stop.openBlockers;
+    const openBlockers =
+      typeof rawBlockers === 'number' &&
+      Number.isFinite(rawBlockers) &&
+      rawBlockers > 0
+        ? Math.floor(rawBlockers)
+        : 0;
+    return {
+      reason: stop.reason,
+      openBlockers,
+      blockersStand: openBlockers > 0 && stop.blockersStand === true,
+    };
   } catch {
     return null;
   }
@@ -252,7 +295,7 @@ function nothingToReviewFrom(
   cls: RunTargetClass,
   cutoffMs: number,
   runId: string,
-): { reason: string } | null {
+): StopVerdict | null {
   const found = newestArtifactSince(
     REVIEW_TMP_DIR,
     new RegExp(`^${escapeRe(stopNameFor(cls))}$`),
@@ -417,17 +460,24 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. 3, not 2 — yargs
- * exits 1 on usage errors and some shells reserve 2, so a CI gate can tell
- * "review is blocking" from "the tool broke" without parsing anything.
+ * --fail-on request-changes AND either the event is REQUEST_CHANGES or the
+ * round stopped with `standingBlockers` — open Criticals the capture DATED
+ * against the tree (a stop carries no composed verdict; an undated ledger
+ * count is the stale-ledger false positive and never blocks). 3, not 2 —
+ * yargs exits 1 on usage errors and some shells reserve 2, so a CI gate can
+ * tell "review is blocking" from "the tool broke" without parsing anything.
  */
 export function exitCodeFor(
   completed: boolean,
   event: string | null,
   failOn: 'none' | 'request-changes',
+  standingBlockers = 0,
 ): number {
   if (!completed) return 1;
-  if (failOn === 'request-changes' && event === 'REQUEST_CHANGES') return 3;
+  if (failOn === 'request-changes') {
+    if (event === 'REQUEST_CHANGES') return 3;
+    if (event === null && standingBlockers > 0) return 3;
+  }
   return 0;
 }
 
@@ -623,7 +673,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // session. The post-close read alone turned that foreign stamp or missing
   // file into "Review did not complete" over a round the capture decided.
   const stopPattern = new RegExp(`^${escapeRe(stopNameFor(targetClass))}$`);
-  let capturedStop: { reason: string } | null = null;
+  let capturedStop: StopVerdict | null = null;
   const captureTimer = setInterval(() => {
     if (capturedStop === null) {
       const stopHit = newestArtifactSince(
@@ -736,22 +786,29 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
-  // A stop carries NO synthesised verdict, deliberately.
+  // A stop carries NO synthesised event, deliberately — what it carries is
+  // the ledger's open-blocker count DATED against this tree: the capture
+  // compared the cache's recorded per-file state with the working tree, and
+  // `blockersStand` is true only where they byte-compare equal, so a
+  // blocker it names still stands in THIS tree. Under `--fail-on` such a
+  // stop exits 3, closing the hole where a user who commits without fixing
+  // a Critical leaves a permanently clean tree, and every later stop
+  // rendered the blocker as standing while the gate exited 0 — passed the
+  // moment the author stopped touching the tree.
   //
-  // An earlier attempt mapped the cache's open-Critical count to
-  // REQUEST_CHANGES, reasoning that a stop round rendering standing blockers
-  // should not pass `--fail-on`. It is the wrong direction of wrong. The
-  // ledger is only rewritten by a round that writes the cache, and a stop
-  // round does not — so once a user FIXES the blocker and commits (the
-  // ordinary workflow), every later round reads the same stale `open` entry,
-  // fails the gate over code that no longer contains the defect, and nothing
-  // the user can do clears it. A false failure that no action clears is worse
-  // than a false pass beside a rendered blocker list, and the CLI cannot tell
-  // the two cases apart: both leave a clean tree and a moved HEAD.
-  //
-  // The real answer to the gate question is a composed verdict on the stop
-  // path — a verdict the model produces after re-ruling the ledger, not one
-  // this process invents from a file it cannot date against the code.
+  // The DATING is what keeps this from the stale-ledger false positive an
+  // undated count fell to: the ledger is rewritten only by a round that
+  // writes the cache, a stop never does, and once the user FIXES the
+  // blocker and commits, the fixed bytes no longer match the recorded state
+  // — the count stops standing, and no action the user takes is blocked for
+  // ever. The residual is a false PASS (a blocker that still stands in a
+  // tree that ALSO moved elsewhere reads as undatable), never a false
+  // failure no action clears, and the stop's rendered blocker list still
+  // names it. A composed verdict on the stop path — the model re-ruling the
+  // ledger — remains the stronger answer; this is the one the process can
+  // prove.
+  const standingBlockers =
+    stop !== null && stop.blockersStand ? stop.openBlockers : 0;
 
   const result: RunReviewResult = {
     completed,
@@ -765,6 +822,8 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     composedPath: composedPath ? resolve(composedPath) : null,
     expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
+    openBlockers: stop?.openBlockers ?? 0,
+    blockersStand: stop?.blockersStand ?? false,
     childExitCode,
     childSignal,
     timedOut,
@@ -775,7 +834,12 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // (EPIPE once the pipe reader exits), and the exit code — not the prose — is
   // the contract a CI gate reads. A throw must not downgrade a blocking verdict
   // (exit 3) to yargs' generic failure (exit 1).
-  process.exitCode = exitCodeFor(completed, result.event, args.failOn);
+  process.exitCode = exitCodeFor(
+    completed,
+    result.event,
+    args.failOn,
+    standingBlockers,
+  );
 
   try {
     if (args.json) {

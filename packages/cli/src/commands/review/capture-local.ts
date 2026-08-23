@@ -314,17 +314,19 @@ function resolveCachePath(
 }
 
 /**
- * How many blockers the cached ledger still holds open — REPORTING only.
+ * How many blockers the cached ledger still holds open.
  *
- * `run` deliberately does not turn this into a verdict: the ledger is
- * rewritten only by a round that writes the cache, and a stop round does not,
- * so a blocker the user has since FIXED and committed stays `open` for ever.
- * Mapped to an exit code it produced a failure no action could clear. It is
- * here because the orchestrator's stop branches render these entries, and a
- * count beside them tells a human reader whether the round had any.
+ * A raw count — undated, and never a gate on its own: the ledger is
+ * rewritten only by a round that writes the cache, and a stop round does
+ * not, so a blocker the user has since FIXED and committed stays `open` in
+ * it for ever. Mapped straight to an exit code it produced a failure no
+ * action could clear. `run` gates on it only beside the DATED state the
+ * sidecar carries (`blockersStand`, from `blockerStateStillMatchesTree`
+ * below), which tells the fixed-and-committed shape from the
+ * committed-without-fixing one where the count cannot.
  *
- * A decided stop is not necessarily a CLEAN one: SKILL.md's two stop branches
- * both open by rendering the cache's still-open findings, and the common shape
+ * A decided stop is not necessarily a CLEAN one: SKILL.md's stop branches
+ * open by rendering the cache's still-open findings, and the common shape
  * is a user who commits without fixing a Critical — leaving a permanently
  * clean tree that stops every later round. Without this the stop reached
  * `qwen review run` with no verdict at all, so `--fail-on request-changes`
@@ -357,6 +359,39 @@ function openBlockersInCache(
   } catch {
     return 0;
   }
+}
+
+/**
+ * Whether the cache's recorded per-file state still byte-compares equal to
+ * the working tree — the DATE a stop's open blockers are held against.
+ *
+ * The ledger count alone cannot gate: a blocker fixed and committed stays
+ * `open` in it for ever, because a stop never rewrites the ledger. The
+ * state comparison tells the two shapes apart where the count cannot — a
+ * fix moves the fixed file's bytes, a commit without the fix does not.
+ * True only when EVERY cached path still hashes to its recorded identity;
+ * an UNHASHABLE on either side, a deletion, or any moved byte withholds it.
+ * An undatable blocker costs a false PASS beside the rendered blocker list,
+ * never a false failure no action clears.
+ */
+function blockerStateStillMatchesTree(
+  repoRoot: string,
+  cacheArg: string | undefined,
+  target: string,
+  source: string | undefined,
+): boolean {
+  const path =
+    cacheArg !== undefined
+      ? resolveCachePath(cacheArg, target, source)
+      : cachePathFor(target, source);
+  if (path === null) return false;
+  const cache = readLocalCache(path);
+  if (cache === null) return false;
+  const paths = Object.keys(cache.files);
+  if (paths.length === 0) return false;
+  return (
+    changedSince(cache.files, hashWorktreeFiles(repoRoot, paths)).length === 0
+  );
 }
 
 /**
@@ -806,12 +841,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
   if (nothingToReview) {
+    const openBlockers = openBlockersInCache(args.cache, target, sourcePath);
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
         {
           ...nothingToReview,
-          openBlockers: openBlockersInCache(args.cache, target, sourcePath),
+          openBlockers,
+          // Dated, not counted: true only where the cache's recorded state
+          // still byte-compares equal to this tree — see
+          // `blockerStateStillMatchesTree`. An undated count never gates.
+          blockersStand:
+            openBlockers > 0 &&
+            blockerStateStillMatchesTree(
+              capture.repoRoot,
+              args.cache,
+              target,
+              sourcePath,
+            ),
           // The parent's stamp, echoed back. This file decides `completed`
           // and can carry a REQUEST_CHANGES event, while its NAME is the
           // flattened target token — not injective, so a concurrent review

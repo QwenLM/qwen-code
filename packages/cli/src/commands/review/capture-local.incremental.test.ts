@@ -139,6 +139,32 @@ function promoteCandidate(plan: Plan, model: string): string {
   return cachePath;
 }
 
+/** Append an open Critical to a promoted cache's ledger. */
+function recordOpenCritical(cachePath: string): void {
+  const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  cache['findings'] = [
+    {
+      id: 'R1-1',
+      severity: 'Critical',
+      status: 'open',
+      file: CHANGED,
+      line: 1,
+      title: 'blocker',
+    },
+  ];
+  writeFileSync(cachePath, JSON.stringify(cache));
+}
+
+/** The stop sidecar the last capture wrote. */
+function stopSidecar(): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+  ) as Record<string, unknown>;
+}
+
 describe('capture-local — incremental local rounds', () => {
   it('round 1 writes a candidate covering every captured file', () => {
     seedDirtyTree();
@@ -632,6 +658,60 @@ describe('capture-local — the decided stops are machine-readable', () => {
     // Only the OPEN Criticals count: a fixed one is gone and a Suggestion
     // blocks nothing.
     expect(sidecar['openBlockers']).toBe(1);
+    // …but NOT dated: this hand-written cache carries no `files` map, so the
+    // recorded state cannot be compared against the tree. An undatable
+    // blocker fails OPEN — a false pass beside the rendered blocker list,
+    // never a false failure no action clears.
+    expect(sidecar['blockersStand']).toBe(false);
+  });
+
+  it('dates stop blockers: standing after a commit WITHOUT the fix', () => {
+    // R8-1: round 1 records an open Critical, Step 8 promotes the cache,
+    // the user commits WITHOUT fixing it — a permanently clean tree. Every
+    // later stop rendered the blocker as standing while `qwen review run
+    // --fail-on` exited 0: the gate passed the moment the author stopped
+    // touching the tree. The sidecar must carry those blockers as STANDING
+    // — the recorded state still byte-compares equal to the tree — so the
+    // gate can block on them.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
+
+    capture({ cache: cachePath, model: 'model-a' });
+    const sidecar = stopSidecar();
+    expect(sidecar['reason']).toBe('clean-tree');
+    expect(sidecar['openBlockers']).toBe(1);
+    expect(sidecar['blockersStand']).toBe(true);
+  });
+
+  it('dates stop blockers: not standing once the fix is committed', () => {
+    // The stale-ledger half: the user FIXED the blocker and committed. The
+    // ledger still says `open` — a stop round never rewrites it — but the
+    // recorded state no longer matches the tree, so the blockers must not
+    // stand: a gate that blocked here would fail over code that no longer
+    // contains the defect, and nothing the user does would clear it.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    write(CHANGED, 'export const v = 2;\n'); // the fix
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix the blocker');
+
+    capture({ cache: cachePath, model: 'model-a' });
+    const sidecar = stopSidecar();
+    expect(sidecar['reason']).toBe('clean-tree');
+    // The ledger is untouched by a stop…
+    expect(sidecar['openBlockers']).toBe(1);
+    // …but the recorded state moved, so the blockers do not stand.
+    expect(sidecar['blockersStand']).toBe(false);
   });
 
   it('marks a genuinely clean tree', () => {
