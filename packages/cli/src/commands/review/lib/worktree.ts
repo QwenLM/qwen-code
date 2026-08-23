@@ -570,6 +570,13 @@ function trackedIgnoreSources(
 }
 
 /**
+ * The residue list's default cap, exported so a caller that must name it —
+ * the only way to reach the sha parameter after it — names THIS module's
+ * default instead of restating a literal that could silently drift from it.
+ */
+export const RESIDUE_PATH_CAP = 12;
+
+/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
@@ -625,13 +632,21 @@ function trackedIgnoreSources(
  * checkout redirects every check into territory holding a completely genuine
  * worktree pair with the contamination committed — all of it resolving
  * through the link and agreeing with itself — so a path reached through a
- * link is refused. And a FORGED admin entry — hand-written to name this tree
- * back, which the round trip cannot tell from the entry `worktree add` wrote
- * — is refused when the caller supplies the commit the tree must hold: a
- * forge carrying the contamination as committed content cannot also reproduce
- * the fetched head sha, so a pinned `rev-parse HEAD` disagreeing with the
- * caller's record is a refusal. Callers without that record pass nothing and
- * keep the local gate alone.
+ * link is refused — the walk that finds one is bounded at the repository the
+ * common dir belongs to, and an answer whose common dir is no LITERAL
+ * ancestor of the tree path is refused before the walk: that is the shape a
+ * forge uses to steer the walk's own stop boundary, and no healthy review
+ * worktree takes it. And a FORGED admin entry — hand-written to name this
+ * tree back, which the round trip cannot tell from the entry `worktree add`
+ * wrote — is refused when the caller supplies the commit the tree must hold:
+ * a forge carrying the contamination as committed content cannot also
+ * reproduce the fetched head sha, so a pinned `rev-parse HEAD` disagreeing
+ * with the caller's record is a refusal. The record arrives read from disk,
+ * so it raises the plant's cost rather than making planting impossible.
+ * Callers without any record still get residue NAMED — a forge answers
+ * clean, never dirty, so a dirty report is conservative either way — but
+ * never a clean certification: an empty measurement no record anchored is
+ * refused as unmeasured.
  *
  * One blind spot the identity checks cannot close: `git status` never looks
  * INSIDE a committed gitlink (mode 160000), and untracked content there does
@@ -649,7 +664,7 @@ function trackedIgnoreSources(
  */
 export function worktreeResidue(
   cwd: string,
-  cap = 12,
+  cap = RESIDUE_PATH_CAP,
   expectedHeadSha?: string,
 ): WorktreeResidue {
   // A genuine review worktree carries its `.git` as a FILE naming its admin
@@ -700,21 +715,57 @@ export function worktreeResidue(
       typeof top.stdout === 'string' &&
       realpathSync(toplevel) === realpathSync(cwd);
     if (isWorktree) {
-      // First, no component of the path below the checkout may be a symlink —
-      // the leaf included. A link planted at the tree path or any ancestor
-      // below the checkout redirects the chdir into territory holding a
-      // completely genuine `git init` + `worktree add` pair with the
-      // contamination COMMITTED — no forged admin entry needed, the round trip
-      // below is real git state — and every check here resolves THROUGH the
-      // link and agrees with itself: `--show-toplevel` answers the physical
-      // forge path and the self-equality above holds. The walk is the one
-      // every sibling identity gate applies, bounded at the repository the
-      // common dir belongs to — above that is the user's own layout, and
-      // `/var` is a symlink on every macOS box. Measured: both shapes
-      // certified a mutant clean before the walk.
-      const redirected = lstatSync(cwd).isSymbolicLink()
-        ? resolve(cwd)
-        : redirectedAncestor(dirname(resolve(cwd)), dirname(commonDir));
+      // First, the leaf itself: a symlink AT the tree path redirects the
+      // chdir and every check after it. lstat, not realpath — canonicalising
+      // would resolve away the thing being looked for.
+      if (lstatSync(cwd).isSymbolicLink()) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            `the path resolves through a symlink (${resolve(cwd)}) — ` +
+            'every identity check resolves through it and agrees with ' +
+            'itself, while the commands below would measure wherever it ' +
+            'points',
+        };
+      }
+      // The walk below is bounded at the repository the common dir belongs
+      // to — above that is the user's own layout, and `/var` is a symlink on
+      // every macOS box. A bound only bounds when the tree's spelled path
+      // actually runs under it: a healthy review worktree sits under the
+      // checkout it answers to, and both spellings start in this process's
+      // resolved cwd. A repository answering from anywhere else — a forge
+      // whose common dir is steered so the walk's stop test fires before the
+      // planted link is ever lstat'd, a repo that merely names this path its
+      // `core.worktree` — is itself the suspect shape, and refusing it here
+      // is what keeps the walk from escaping its bound up into the
+      // filesystem's own links. Measured: through the steered boundary a
+      // completely genuine forge pair certified a mutant clean.
+      const spelled = resolve(cwd);
+      const bound = dirname(commonDir);
+      if (!spelled.startsWith(bound + sep)) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the repository answering for this path does not contain it — ' +
+            `its common dir's parent (${bound}) is no ancestor of the ` +
+            `tree path (${spelled}), a shape no healthy review worktree ` +
+            'takes, and the commands below would measure terrain this ' +
+            'gate cannot vouch for',
+        };
+      }
+      // And no component of the path below that checkout may be a symlink
+      // either. A link planted at any ancestor below the checkout redirects
+      // the chdir into territory holding a completely genuine `git init` +
+      // `worktree add` pair with the contamination COMMITTED — no forged
+      // admin entry needed, the round trip below is real git state — and
+      // every check here resolves THROUGH the link and agrees with itself:
+      // `--show-toplevel` answers the physical forge path and the
+      // self-equality above holds. The walk is the one every sibling
+      // identity gate applies. Measured: both shapes certified a mutant
+      // clean before the walk.
+      const redirected = redirectedAncestor(dirname(spelled), bound);
       if (redirected !== null) {
         return {
           paths: [],
@@ -726,11 +777,19 @@ export function worktreeResidue(
         };
       }
       // And the gitfile must name an admin entry that names this tree BACK.
-      // The pin below closes the window between this gate and the commands
-      // after it; it cannot help when the swap is already in place when the
-      // probe starts, because then the gate resolves the plant too — a
-      // repository whose `core.worktree` points here answers `--show-toplevel`
-      // with this path. `scratch-tree` gates its own reset on the round-trip
+      // The pin below freezes THIS identity for the commands after it, so a
+      // gitfile swapped after this gate cannot redirect them; it cannot help
+      // when the swap is already in place when the probe starts, because then
+      // the gate resolves the plant too — a repository whose `core.worktree`
+      // points here answers `--show-toplevel` with this path. And it freezes
+      // NAMES, not what they point at: a writer active between the pin and
+      // the measurement can still rewrite the pinned admin entry's HEAD,
+      // index and commondir — or swap the tree path itself — and every
+      // "pinned" command measures the swap. The pin raises that attack's
+      // cost — the swap must now land inside one function's window — it does
+      // not close it; closing wants a snapshot measured at gate time or a
+      // sandbox boundary (#9556). `scratch-tree` gates its own reset on the
+      // round-trip
       // for the same reason, and a planted standalone repo has no admin entry
       // to round-trip at all. The two shapes get distinct reasons: the
       // standalone repo has no `gitdir` file to "not point back", and whoever
@@ -755,10 +814,18 @@ export function worktreeResidue(
             'whose index the commands below would measure',
         };
       }
-      if (
-        realpathSync(dirname(resolve(gitDir, backpointer))) !==
-        realpathSync(cwd)
-      ) {
+      let pointsBack = false;
+      try {
+        pointsBack =
+          realpathSync(dirname(resolve(gitDir, backpointer))) ===
+          realpathSync(cwd);
+      } catch {
+        // A backpointer that does not resolve does not point back at this
+        // tree. Letting the ENOENT fall into the outer catch reported the
+        // shape as "not a git worktree" — a different and much vaguer thing
+        // than what was found.
+      }
+      if (!pointsBack) {
         return {
           paths: [],
           total: 0,
@@ -792,9 +859,12 @@ export function worktreeResidue(
       // beside a repo carrying the contamination as committed content passes
       // every local check and measures clean. The one thing the forge cannot
       // reproduce is the fetched head sha: committing the contamination moves
-      // its HEAD. Measured: through the forge the sha-less call certifies a
-      // mutant clean; pinned to the fetched sha, the same tree answers
-      // unmeasured.
+      // its HEAD. The record is only as anchored as the caller's read of it
+      // — a same-user writer who rewrites it feeds the pin the forge's own
+      // sha — so this is cost, not closure. Measured: through the forge the
+      // pinned call answers unmeasured, where round 1's unpinned probe
+      // certified a mutant clean; the sha-less probe refuses its own clean
+      // verdict for the same reason (see the end of this function).
       if (expectedHeadSha !== undefined) {
         const head = spawnSync('git', [...anchor, 'rev-parse', 'HEAD'], {
           cwd,
@@ -1069,6 +1139,24 @@ export function worktreeResidue(
       unmeasured:
         'the index carries skip-worktree or assume-unchanged bits, so `git ' +
         'status` cannot see edits to the tracked files they cover',
+    };
+  }
+  // A dirty report is conservative from any identity: a forge answers CLEAN,
+  // never dirty, so named paths point at the tree either way. A CLEAN report
+  // is the dangerous verdict, and without the caller's record nothing above
+  // distinguishes this tree from a forged pair whose index already holds the
+  // contamination as committed content — so an empty measurement no record
+  // anchored is refused rather than certified.
+  if (paths.length === 0 && expectedHeadSha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the caller brought no record of the commit this tree must hold, ' +
+        'and a clean status measured through an unanchored identity would ' +
+        'certify whichever index the .git gitfile names — a forged pair ' +
+        'answers clean — so an empty measurement is refused rather than ' +
+        'certified',
     };
   }
   return { paths: paths.slice(0, cap), total: paths.length };

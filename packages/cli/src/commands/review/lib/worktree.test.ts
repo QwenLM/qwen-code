@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -60,7 +61,7 @@ describe('worktreeResidue', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-residue-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-residue-')));
     gitRepo('init', '-q', '-b', 'main');
     gitRepo('config', 'user.email', 't@t.t');
     gitRepo('config', 'user.name', 't');
@@ -80,7 +81,13 @@ describe('worktreeResidue', () => {
   });
 
   it('is empty for the tree a review actually reads', () => {
-    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
+    const head = git('rev-parse', 'HEAD');
+    expect(worktreeResidue(tree, 12, head)).toEqual({ paths: [], total: 0 });
+    // Unpinned, the same empty measurement is refused, not certified: a
+    // forged pair answers clean too, and nothing local tells the two apart
+    // (#9557) — so a caller without the fetched sha gets unmeasured, never
+    // clean.
+    expect(worktreeResidue(tree).unmeasured).toContain('brought no record');
   });
 
   it('names a modified file and an untracked probe — the live #9207 shape', () => {
@@ -98,7 +105,10 @@ describe('worktreeResidue', () => {
     mkdirSync(join(tree, 'node_modules', 'vitest'), { recursive: true });
     mkdirSync(join(tree, 'dist'), { recursive: true });
     writeFileSync(join(tree, 'dist', 'out.js'), 'built\n');
-    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
+    expect(worktreeResidue(tree, 12, git('rev-parse', 'HEAD'))).toEqual({
+      paths: [],
+      total: 0,
+    });
   });
 
   it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
@@ -183,16 +193,18 @@ describe('worktreeResidue', () => {
     }
     // A clean tree carries no reason — that is what makes the two states
     // distinguishable at the renderers.
-    expect(worktreeResidue(tree).unmeasured).toBeUndefined();
+    expect(
+      worktreeResidue(tree, 12, git('rev-parse', 'HEAD')).unmeasured,
+    ).toBeUndefined();
   });
 
   it('says UNMEASURED for a gitfile swapped at a repo that answers for this path', () => {
     // The identity gate reads `--show-toplevel`, which prints the directory the
     // `.git` FILE sits in — whatever that file points at. A repository whose
     // `core.worktree` names this tree answers with this path, so the gate saw
-    // itself while every command after it measured the plant's index, which
-    // already holds the contamination as committed content. Measured: through
-    // discovery the swap reports a clean tree with the mutant on disk.
+    // itself while every command after it would measure the plant's index.
+    // Measured in round 1: through discovery the swap certified a mutant
+    // clean.
     writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
     // Genuine first, so the fixture is known to be measurable at all.
@@ -201,41 +213,15 @@ describe('worktreeResidue', () => {
       'a.ts',
     ]);
 
-    const forge = join(repo, 'forge');
-    mkdirSync(forge);
-    const fgit = (...args: string[]) =>
-      execFileSync(
-        'git',
-        [
-          '-c',
-          'user.email=t@t.t',
-          '-c',
-          'user.name=t',
-          '-c',
-          'commit.gpgsign=false',
-          ...args,
-        ],
-        { cwd: forge, encoding: 'utf8' },
-      );
-    fgit('init', '-q', '-b', 'main', '--template=', '.');
-    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
-    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
-    fgit('add', '-A');
-    fgit(
-      'commit',
-      '-qm',
-      'the mutant, as if it were the commit',
-      '--no-verify',
-    );
-    fgit('config', 'core.worktree', tree);
-    writeFileSync(join(tree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+    gitRepo('config', 'core.worktree', tree);
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
 
     const got = worktreeResidue(tree);
 
     expect(got.paths).toEqual([]);
-    // The shape with NO admin entry gets its own reason: there is no
-    // `gitdir` file here to "not point back", and the triager hunting one
-    // is the confusion the distinct message exists to spare.
+    // The shape with NO admin entry gets its own reason: a main checkout has
+    // no `gitdir` file to "not point back", and the triager hunting one is
+    // the confusion the distinct message exists to spare.
     expect(got.unmeasured).toContain('no admin entry');
   });
 
@@ -253,50 +239,54 @@ describe('worktreeResidue', () => {
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
     const expected = git('rev-parse', 'HEAD');
     // A genuine tree with the right sha still measures: the anchor must not
-    // become a refusal of its own.
+    // become a refusal of its own — in either case, the caller's guard
+    // admits an uppercase sha and the pin folds case on BOTH sides.
     expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
       '__probe__.test.ts',
       'a.ts',
     ]);
+    expect(
+      worktreeResidue(tree, 12, expected.toUpperCase()).paths.sort(),
+    ).toEqual(['__probe__.test.ts', 'a.ts']);
 
-    const forge = join(repo, 'forge');
-    mkdirSync(forge);
-    const fgit = (...args: string[]) =>
-      execFileSync(
-        'git',
-        [
-          '-c',
-          'user.email=t@t.t',
-          '-c',
-          'user.name=t',
-          '-c',
-          'commit.gpgsign=false',
-          ...args,
-        ],
-        { cwd: forge, encoding: 'utf8' },
-      );
-    fgit('init', '-q', '-b', 'main', '--template=', '.');
-    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
-    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
-    fgit('add', '-A');
-    fgit(
-      'commit',
-      '-qm',
-      'the mutant, as if it were the commit',
-      '--no-verify',
-    );
-    const admin = join(forge, '.git', 'worktrees', 'evil');
+    // The forge: the contamination committed into the REAL repository — its
+    // HEAD moves off the fetched sha — and an admin entry hand-written
+    // beside the tree's own. Same common dir, so every shape check passes;
+    // only the pin can still tell the entry from the one `worktree add`
+    // wrote.
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(repo, '__probe__.test.ts'), 'probe');
+    gitRepo('add', 'a.ts', '__probe__.test.ts');
+    gitRepo('commit', '-qm', 'the mutant, as if it were the commit');
+    const forgedHead = gitRepo('rev-parse', 'HEAD');
+    const admin = join(repo, '.git', 'worktrees', 'evil');
     mkdirSync(admin, { recursive: true });
     writeFileSync(join(admin, 'gitdir'), `${join(tree, '.git')}\n`);
     writeFileSync(join(admin, 'commondir'), '../..\n');
-    copyFileSync(join(forge, '.git', 'HEAD'), join(admin, 'HEAD'));
-    copyFileSync(join(forge, '.git', 'index'), join(admin, 'index'));
+    writeFileSync(join(admin, 'HEAD'), `${forgedHead}\n`);
+    copyFileSync(join(repo, '.git', 'index'), join(admin, 'index'));
     writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
 
-    const got = worktreeResidue(tree, 12, expected);
+    // Unpinned, the forge's index answers clean — and an unanchored clean
+    // verdict is exactly the one the probe refuses (#9557).
+    const unpinned = worktreeResidue(tree);
+    expect(unpinned.paths).toEqual([]);
+    expect(unpinned.unmeasured).toContain('brought no record');
 
-    expect(got.paths).toEqual([]);
-    expect(got.unmeasured).toContain('not the fetched PR head');
+    // Pinned to the fetched sha: the forge's HEAD is the mutant's commit.
+    const pinned = worktreeResidue(tree, 12, expected);
+    expect(pinned.paths).toEqual([]);
+    expect(pinned.unmeasured).toContain('not the fetched PR head');
+
+    // And a pinned identity whose HEAD cannot be read gets its own reason —
+    // the gate passed, so "not a git worktree" would misname it. An unborn
+    // HEAD (a ref to a branch with no commit) keeps discovery alive while
+    // the pinned `rev-parse HEAD` fails — a garbage HEAD file would fail
+    // discovery itself and land in the outer catch instead.
+    writeFileSync(join(admin, 'HEAD'), 'ref: refs/heads/nope\n');
+    expect(worktreeResidue(tree, 12, expected).unmeasured).toContain(
+      'could not read its own HEAD',
+    );
   });
 
   it('says UNMEASURED for a gitfile borrowing a SIBLING worktree’s admin entry', () => {
@@ -313,6 +303,24 @@ describe('worktreeResidue', () => {
       .trim()
       .replace(/^gitdir:\s*/, '');
     writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('does not point back');
+  });
+
+  it('says UNMEASURED — not "not a git worktree" — for a dangling backpointer', () => {
+    // The admin entry's `gitdir` file names a path that does not exist — a
+    // crash mid-`worktree add`, a cleanup gone wrong, a sloppy forge. `git
+    // rev-parse` still exits 0 in that state, so the path IS a worktree with
+    // an admin entry; an ENOENT out of the round-trip comparison must not
+    // land in the outer catch and be reported as the much vaguer "not a git
+    // worktree". Unresolvable is "does not point back" — same refusal.
+    const admin = readFileSync(join(tree, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    writeFileSync(join(admin, 'gitdir'), `${join(repo, 'gone', '.git')}\n`);
 
     const got = worktreeResidue(tree);
 
@@ -357,7 +365,7 @@ describe('worktreeResidue', () => {
       'a.ts',
     ]);
 
-    const outside = mkdtempSync(join(tmpdir(), 'qwen-redirect-'));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-redirect-')));
     try {
       const forgeRepo = join(outside, 'forge');
       mkdirSync(forgeRepo);
@@ -396,7 +404,10 @@ describe('worktreeResidue', () => {
       const got = worktreeResidue(tree);
 
       expect(got.paths).toEqual([]);
-      expect(got.unmeasured).toContain('resolves through a symlink');
+      // Refused before the symlink walk even runs: the territory's
+      // repository answers for a path it does not contain. The link is the
+      // mechanism; the boundary mismatch is the proof.
+      expect(got.unmeasured).toContain('does not contain it');
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -415,7 +426,7 @@ describe('worktreeResidue', () => {
       'a.ts',
     ]);
 
-    const outside = mkdtempSync(join(tmpdir(), 'qwen-redirect-'));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-redirect-')));
     try {
       const forgeRepo = join(outside, 'forge');
       mkdirSync(forgeRepo);
@@ -545,7 +556,7 @@ describe('worktreeResidue', () => {
     const fresh = join(repo, 'nested', 'wt-sub');
     gitRepo('worktree', 'add', '--detach', '-q', fresh, 'HEAD');
 
-    const got = worktreeResidue(fresh);
+    const got = worktreeResidue(fresh, 12, gitRepo('rev-parse', 'HEAD'));
     expect(got.unmeasured).toBeUndefined();
     expect(got).toEqual({ paths: [], total: 0 });
   });
@@ -787,7 +798,7 @@ describe('worktreeResidue — the blind sets', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-blind-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-blind-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
@@ -901,7 +912,7 @@ describe('worktreeResidue — index bits', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-bits-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-bits-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');

@@ -99,7 +99,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -1327,15 +1331,28 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  // Hand over the sha fetch-pr recorded: it is the one identity element a
-  // forge planted at the worktree cannot reproduce, and with it the probe
-  // refuses a forged admin entry (see worktreeResidue).
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
   const sha = report.fetchedSha;
-  return worktreeResidue(
-    resolve(wt),
-    12,
-    typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined,
-  );
+  if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
 }
 
 /**

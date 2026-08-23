@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -1479,7 +1480,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     // is launched, which makes this the one place the pipeline can notice that
     // the tree those agents are about to read is not the commit they think it
     // is. A real git worktree, because `git status` is the oracle.
-    const dir = mkdtempSync(join(tmpdir(), 'ap-residue-'));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ap-residue-')));
     // Ambient host git config (a global `commit.gpgsign` with no key, a
     // `core.hooksPath` that fails) makes the fixture commit throw and reddens
     // this test for reasons the branch never touched — the incident
@@ -1504,15 +1505,18 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
 
       const plan = join(dir, 'plan.json');
-      writeFileSync(
-        plan,
-        JSON.stringify({
-          ...PLAN,
-          worktreePath: wt,
-          prNumber: '9207',
-          ownerRepo: 'QwenLM/qwen-code',
-        }),
-      );
+      const writePlan = (fields: Record<string, unknown>) =>
+        writeFileSync(
+          plan,
+          JSON.stringify({
+            ...PLAN,
+            worktreePath: wt,
+            prNumber: '9207',
+            ownerRepo: 'QwenLM/qwen-code',
+            ...fields,
+          }),
+        );
+      writePlan({ fetchedSha: git('rev-parse', 'HEAD').trim() });
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan,
         roster: true,
@@ -1533,6 +1537,27 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(readFileSync(briefPath(plan, '1b'), 'utf8')).toContain(
         'And right now it is not clean',
       );
+
+      // The handover is the wiring under test: drop it and the brief degrades
+      // in one of two ways, both refused — a WRONG sha (the forge's own)
+      // reaches the pin and is refused there, a MISSING one fails closed
+      // before the probe runs, because every worktree-mode fetch writes the
+      // field and its absence means the plan was tampered with. Either way
+      // the brief carries the unmeasured sentence, never a clean verdict.
+      const briefOf = (fields: Record<string, unknown>) => {
+        writePlan(fields);
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        });
+        return readFileSync(briefPath(plan, '1a'), 'utf8');
+      };
+      const wrongSha = briefOf({ fetchedSha: `deadbeef${'0'.repeat(32)}` });
+      expect(wrongSha).toContain('Whether it is clean could not be measured');
+      expect(wrongSha).toContain('not the fetched PR head');
+      const noSha = briefOf({});
+      expect(noSha).toContain('Whether it is clean could not be measured');
+      expect(noSha).toContain('no usable record of the fetched head sha');
     } finally {
       rmSync(dir, { recursive: true, force: true });
       gitIsolation.dispose();

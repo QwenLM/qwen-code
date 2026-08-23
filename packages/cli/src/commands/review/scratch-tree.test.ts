@@ -28,6 +28,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -54,7 +55,7 @@ describe('runScratchTree', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
@@ -769,10 +770,16 @@ describe('runScratchTree', () => {
     },
   );
 
-  it('says nothing about residue when the shared worktree is clean', () => {
+  it('refuses a CLEAN shared worktree it measured without the fetched sha', () => {
+    // The probe's clean verdict is the dangerous one: a forged pair answers
+    // clean too, and this caller brings no record to pin the identity — so
+    // an empty measurement is unmeasured, never clean (#9557). The note is
+    // the fail-closed half: an unmeasured tree is not a clean one.
     const r = run();
     expect(r.sharedTreeResidue).toEqual([]);
     expect(r.note).not.toContain('NOT clean');
+    expect(r.sharedTreeUnmeasured).toContain('brought no record');
+    expect(r.note).toContain('could not be measured');
   });
 
   it('links the review worktree’s node_modules in, and says so', () => {
