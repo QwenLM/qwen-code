@@ -18,6 +18,7 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
   readonly overlayKeys: readonly string[];
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
+  readonly workflowsEnabledBySettings?: boolean;
   readonly envFilePaths?: readonly string[];
   readonly envFileReadFailed?: boolean;
   readonly envFileReadFailures?: ReadonlyArray<{
