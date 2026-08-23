@@ -126,6 +126,55 @@ describe('runTestDelta', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  it('refuses the base-side rerun under `required` instead of running it on the host', () => {
+    // The PR side now runs in a container with an env allowlist and no
+    // network. Running the base side on the host anyway does not just break
+    // the operator's `required` — it makes the two sides incomparable, and
+    // this file exists to compare them. So under `required` with no usable
+    // containment the answer is "not measured", never a delta between two
+    // differently-shaped runs.
+    vi.stubEnv('QWEN_REVIEW_SANDBOX', 'required');
+    let ran = 0;
+    try {
+      const r = runTestDelta({
+        report: writeReport([cmd({ output: ' FAIL  src/new.test.ts > x' })]),
+        baseline,
+        timeout: 60,
+        exec: (command) => {
+          ran += 1;
+          return cmd({ command, output: '' });
+        },
+      });
+      // The rerun did not happen at all — asserting only on the note would
+      // pass just as well with the host run still going ahead behind it.
+      expect(ran).toBe(0);
+      expect(r.entries).toEqual([]);
+      expect(r.netNew).toEqual([]);
+      // ...and it says so in the words that stop `netNew: []` from being read
+      // as "no regression".
+      expect(r.note).toContain('NOTHING was attributed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('measures the base side normally when no policy demands containment', () => {
+    // The other half of the gate: without `required` nothing changes, so the
+    // refusal above cannot be a blanket "test-delta stopped working".
+    let ran = 0;
+    const r = runTestDelta({
+      report: writeReport([cmd({ output: ' FAIL  src/new.test.ts > x' })]),
+      baseline,
+      timeout: 60,
+      exec: (command) => {
+        ran += 1;
+        return cmd({ command, output: '' });
+      },
+    });
+    expect(ran).toBe(1);
+    expect(r.entries).toHaveLength(1);
+  });
+
   it('attributes a PR-only failure as netNew and a both-sides failure as shared', () => {
     const r = runWith(
       [

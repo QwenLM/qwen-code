@@ -157,9 +157,76 @@ export function containerRuntime(force = false): ContainerRuntime | null {
   return probed;
 }
 
+/**
+ * Whether the runtime maps container uids through a USER NAMESPACE.
+ *
+ * Rootless podman (its default install mode) and rootless docker run the whole
+ * engine inside the invoking user's namespace: container uid 0 is the invoking
+ * host user, and every other container uid lands on a host SUBUID around
+ * 100000. So the `--user uid:gid` below, which is exactly right on a rootful
+ * engine, is exactly wrong here — the container process becomes a stranger to
+ * the host-created tree it is mounted on. `npm ci` cannot create `node_modules`
+ * inside it (host uid owns it at mode 755, the container is "other"), so the
+ * review reports an install failure with no evidence at all — strictly worse
+ * than the direct path this feature replaced. And what the container DOES
+ * create in the mount comes out subuid-owned, which the host sweeps cannot
+ * remove: the cross-run residue `--user` is here to prevent.
+ *
+ * Dropping `--user` under rootless is not a weakening. The container's root IS
+ * the invoking user on the host — the same uid `--user` was naming, reached the
+ * way this engine reaches it — so the files land host-owned and sweepable, and
+ * nothing gains a host privilege the operator did not already have.
+ *
+ * Unknown answers rootful, which keeps `--user`. The two failure directions are
+ * not symmetric: guessing rootful on a rootless host breaks the run loudly,
+ * while guessing rootless on a ROOTFUL one silently runs the reviewed code as
+ * real uid 0 with this mount writable, and leaves root-owned residue behind.
+ * A probe that cannot answer must not pick the silent one.
+ */
+export function runtimeIsRootless(runtime: ContainerRuntime): boolean {
+  const cached = rootlessProbed.get(runtime);
+  if (cached !== undefined) return cached;
+  let rootless = false;
+  try {
+    const r = spawnSync(runtime, ['info', '--format', '{{json .}}'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: runtimeClientEnv(),
+    });
+    rootless =
+      !r.error && r.status === 0 && hasRootlessMarker(String(r.stdout ?? ''));
+  } catch {
+    rootless = false;
+  }
+  rootlessProbed.set(runtime, rootless);
+  return rootless;
+}
+
+/**
+ * The whole `info` document is searched rather than one schema path, because
+ * the two runtimes spell this in unrelated places — docker as a
+ * `SecurityOptions` entry, podman as `Host.Security.Rootless` — and a
+ * per-runtime template that a version rename breaks would fail to the rootful
+ * answer without saying so. Verified against a live rootful docker: the word
+ * does not occur anywhere in its `info` document, so a marker hit is a
+ * positive statement, not an accident of some unrelated field.
+ */
+export function hasRootlessMarker(info: string): boolean {
+  return (
+    info.includes('"name=rootless"') ||
+    info.includes('"rootless":true') ||
+    info.includes('"Rootless":true')
+  );
+}
+
+const rootlessProbed = new Map<ContainerRuntime, boolean>();
+
 /** Test seam: forget the probed runtime. */
 export function resetContainerRuntimeProbe(): void {
   probed = undefined;
+  rootlessProbed.clear();
 }
 
 /** What a caller must do with one command. */
@@ -425,6 +492,13 @@ export interface ContainerCommandOptions {
   kind: CommandKind;
   runtime: ContainerRuntime;
   image: string;
+  /**
+   * Whether `runtime` maps uids through a user namespace — see
+   * `runtimeIsRootless`. Passed IN rather than probed here so the argv this
+   * builds stays a pure function of its inputs, and so both call sites answer
+   * the question once per review instead of once per command.
+   */
+  rootless: boolean;
 }
 
 /**
@@ -524,6 +598,9 @@ export function containerCommand(
   if (
     uid !== undefined &&
     gid !== undefined &&
+    // Rootless engines remap this uid to a host subuid, which is the one shape
+    // where naming it is worse than not — see `runtimeIsRootless`.
+    !opts.rootless &&
     // The opt-out is the operator's, not the repository's: a committed
     // `SANDBOX_SET_UID_GID=false` would put the container back to root and
     // leave root-owned residue the host cannot sweep.
@@ -585,7 +662,6 @@ export function reviewSandboxImage(
  */
 export function runtimeClientEnv(
   env: NodeJS.ProcessEnv = process.env,
-  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): NodeJS.ProcessEnv {
   const scrubbed = { ...env };
   // EVERY file-sourced key, not a list of the dangerous ones.
@@ -615,7 +691,7 @@ export function runtimeClientEnv(
   // `.env`, which `isFileSourcedEnvKey` cannot tell from the repository's own;
   // that one must move to their shell. Conservative on the right side.
   for (const key of Object.keys(scrubbed)) {
-    if (fileSourced(key)) delete scrubbed[key];
+    if (isFileSourcedEnvKey(key)) delete scrubbed[key];
   }
   return scrubbed;
 }

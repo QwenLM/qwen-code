@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
+  hasRootlessMarker,
   boxedRunLeftContainer,
   CONTAINER_HOME,
   containerEnv,
@@ -93,6 +94,7 @@ describe('values a repository must not be able to set', () => {
         kind: 'install',
         runtime: 'docker',
         image: 'example/image:tag',
+        rootless: false,
         name: 'qwen-review-test',
       });
       expect(args).toContain('--user');
@@ -170,6 +172,7 @@ describe('the operator opt-out still works', () => {
           kind: 'install',
           runtime: 'docker',
           image: 'example/image:tag',
+          rootless: false,
           name: 'qwen-review-test',
         });
         expect(args).not.toContain('--user');
@@ -263,7 +266,70 @@ describe('containerCommand', () => {
     runtime: 'docker' as const,
     image: 'example/image:tag',
     name: 'qwen-review-test',
+    rootless: false,
   };
+
+  it('drops --user on a rootless runtime and keeps it on a rootful one', () => {
+    // Rootless engines map the container's uid onto a host SUBUID, so naming
+    // the host uid here hands the container process an identity that owns
+    // nothing in the tree it is mounted on: `npm ci` cannot create
+    // `node_modules`, and whatever it does create comes out unsweepable. The
+    // container's root already IS the invoking user there, so the flag's job
+    // is done without it. On a rootful engine it is still the only thing
+    // between the reviewed code and real uid 0 on the mount.
+    if (process.getuid === undefined || process.getgid === undefined) return;
+    const cwd = join(tmpDir, 'review-pr-9');
+    const rootful = containerCommand('npm ci', {
+      ...base,
+      cwd,
+      kind: 'install',
+    });
+    expect(rootful.args).toContain('--user');
+    expect(rootful.args[rootful.args.indexOf('--user') + 1]).toBe(
+      `${process.getuid()}:${process.getgid()}`,
+    );
+
+    const rootless = containerCommand('npm ci', {
+      ...base,
+      cwd,
+      kind: 'install',
+      rootless: true,
+    });
+    expect(rootless.args).not.toContain('--user');
+    // Everything else is the SAME run — dropping --user must not quietly take
+    // the mount, the tmpfs HOME or the image with it.
+    expect(rootless.args).toContain('--volume');
+    expect(rootless.args).toContain('--tmpfs');
+    expect(rootless.args.at(-4)).toBe(base.image);
+  });
+
+  it("reads rootlessness out of either runtime's info document", () => {
+    // The negative case is a LIVE rootful docker's actual `info` output
+    // (docker 29.5.2), not a hand-written stub: the marker search only holds
+    // if the word genuinely does not occur in a rootful document, and a stub
+    // written by the same hand that wrote the matcher cannot show that.
+    expect(
+      hasRootlessMarker(
+        '{"SecurityOptions":["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"],"ServerVersion":"29.5.2","OperatingSystem":"Ubuntu 24.04.4 LTS"}',
+      ),
+    ).toBe(false);
+    // docker spells it as a security option...
+    expect(
+      hasRootlessMarker(
+        '{"SecurityOptions":["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]}',
+      ),
+    ).toBe(true);
+    // ...podman as a field under Host.Security, which is why this searches the
+    // document rather than one runtime's schema path.
+    expect(
+      hasRootlessMarker(
+        '{"host":{"security":{"rootless":true,"seccompEnabled":true}}}',
+      ),
+    ).toBe(true);
+    expect(hasRootlessMarker('{"host":{"security":{"rootless":false}}}')).toBe(
+      false,
+    );
+  });
 
   it('mounts the review temp dir, not the tree the command runs in', () => {
     // The dependency farm links OUT of every tree: each package in the probe
