@@ -61,7 +61,6 @@ const KIMI_API_MODELS = [
   {
     id: 'kimi-k2.6',
     contextWindowSize: 262144,
-    modalities: { image: true, video: true },
   },
 ];
 

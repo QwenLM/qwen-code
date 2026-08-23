@@ -236,6 +236,10 @@ describe('defaultModalities', () => {
       expect(m.audio).toBeUndefined();
     });
 
+    it('returns text-only for kimi-k2.6 (matches #5328 presets)', () => {
+      expect(defaultModalities('kimi-k2.6')).toEqual({});
+    });
+
     it('returns text-only for kimi-k2', () => {
       expect(defaultModalities('kimi-k2')).toEqual({});
     });

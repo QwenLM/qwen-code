@@ -80,6 +80,10 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // Moonshot / Kimi
   // -------------------
   [/^kimi-k3/, { image: true, video: true }],
+  // kimi-k2.6 is deliberately text-only, matching the Token Plan and Idealab
+  // presets (#5328); the generic kimi-k2.x rule below stays multimodal for
+  // genuinely multimodal siblings like kimi-k2.5.
+  [/^kimi-k2\.6/, {}],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 

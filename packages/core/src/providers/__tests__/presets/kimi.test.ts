@@ -73,7 +73,6 @@ const apiModels = [
   {
     id: 'kimi-k2.6',
     contextWindowSize: 262144,
-    modalities: { image: true, video: true },
   },
 ];
 
@@ -264,7 +263,6 @@ describe('kimiProvider', () => {
         id: 'kimi-k2.6',
         generationConfig: {
           contextWindowSize: 262144,
-          modalities: { image: true, video: true },
         },
       },
     ]);
