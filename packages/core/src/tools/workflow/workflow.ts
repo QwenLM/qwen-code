@@ -580,6 +580,18 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  */
 const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates subagents deterministically.
 
+**Only on an explicit request**
+
+Do not call this tool unless the user has asked for multi-agent orchestration. A run can dispatch up to ${DEFAULT_MAX_AGENTS_PER_RUN} subagents and spend tokens accordingly, so that scale has to be requested rather than inferred. It counts as requested when any of these holds:
+
+- The user's message contains the word \`workflow\`; a system reminder confirms it when it does.
+- The user asked for orchestration in their own words — run a workflow, fan out agents, orchestrate this with subagents.
+- A skill or slash command the user invoked instructs you to use this tool.
+- The user named a saved workflow to run, reached through \`workflow('<name>')\` or \`scriptPath\`.
+- The user asked to resume or continue an earlier run, which is \`resumeFromRunId\`.
+
+Otherwise do not call it, however well the task would parallelize. Do the work in the main loop, or spawn a single subagent for one self-contained piece. When a workflow would genuinely be the better tool, say in one sentence what it would fan out over and roughly how many agents that is, then let the user decide — and mention that including the word \`workflow\` next time skips the ask.
+
 **What a workflow is for**
 
 Reach for one to be comprehensive (decompose the work and cover every part in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold — migrations, audits, broad sweeps. The script is where that structure is encoded: what fans out, what verifies, what synthesizes. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.
