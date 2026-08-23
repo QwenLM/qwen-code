@@ -46,7 +46,7 @@ The response adds `resolvedConflicts`, containing IDs repaired by that request. 
 
 ## Writer and generation safety
 
-Daemon maintenance runs under the per-session lifecycle coordinator and writer lock. Damaged transcripts use the same writer lock with a maintenance sentinel because the normal writer proof intentionally rejects torn JSONL. Core still snapshots and verifies the actual transcript paths before committing the mutation.
+Daemon maintenance runs under the per-session lifecycle coordinator and writer lock. Damaged transcripts use the same writer lock with a maintenance sentinel because the normal writer proof intentionally rejects torn JSONL. The sentinel does not bypass a certified handoff: if transcript bytes change after a writer seals its lock, takeover continues to fail closed with `SessionTranscriptChangedError` and requires operator intervention. Core still snapshots and verifies the actual transcript paths before committing the mutation.
 
 The selected runtime generation is checked after coordinator acquisition, before the filesystem commit, and after the operation. A generation replacement therefore cannot silently redirect an in-flight mutation to another runtime.
 

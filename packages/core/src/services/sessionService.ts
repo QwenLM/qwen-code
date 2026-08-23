@@ -177,14 +177,12 @@ export class SessionStorageEntryError extends Error {
 
   constructor(
     readonly sessionId: string,
-    readonly reason: 'non_regular' | 'foreign_project' | 'unreadable_record',
+    readonly reason: 'non_regular' | 'foreign_project',
   ) {
     super(
       reason === 'non_regular'
         ? `Session storage entry for "${sessionId}" is not a regular file.`
-        : reason === 'foreign_project'
-          ? `Session "${sessionId}" belongs to a different workspace.`
-          : `Session storage entry for "${sessionId}" cannot be safely classified.`,
+        : `Session "${sessionId}" belongs to a different workspace.`,
     );
   }
 }
@@ -976,7 +974,6 @@ export class SessionService {
       const firstRecord = await this.readFirstMaintainableRecord(
         fileHandle,
         filePath,
-        sessionId,
       );
       if (firstRecord && typeof firstRecord.sessionId === 'string') {
         if (firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase()) {
@@ -1020,7 +1017,6 @@ export class SessionService {
   private async readFirstMaintainableRecord(
     fileHandle: fs.promises.FileHandle,
     filePath: string,
-    sessionId: string,
   ): Promise<Partial<ChatRecord> | undefined> {
     const buffer = Buffer.allocUnsafe(64 * 1024);
     const decoder = new TextDecoder();
@@ -1033,7 +1029,7 @@ export class SessionService {
       let newline = pending.indexOf('\n');
       const firstLineLength = newline >= 0 ? newline : pending.length;
       if (firstLineLength > MAX_MAINTAINABLE_FIRST_RECORD_BYTES) {
-        throw new SessionStorageEntryError(sessionId, 'unreadable_record');
+        return undefined;
       }
       while (newline >= 0) {
         const line = pending.slice(0, newline).trim();
@@ -2402,6 +2398,7 @@ export class SessionService {
           options.assertCanMutate?.();
           this.moveLedgerSidecar(activeLedger, archivedLedger);
         } catch (ledgerError) {
+          options.assertCanMutate?.();
           this.warn(
             `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
           );
@@ -2531,6 +2528,7 @@ export class SessionService {
           options.assertCanMutate?.();
           this.moveLedgerSidecar(archivedLedger, activeLedger);
         } catch (ledgerError) {
+          options.assertCanMutate?.();
           this.warn(
             `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
           );

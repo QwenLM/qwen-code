@@ -810,18 +810,53 @@ describe('SessionService lifecycle maintenance', () => {
     },
   );
 
-  it('rejects an oversized first physical record without buffering the whole file', async () => {
+  it('maintains an oversized first physical record without buffering the whole file', async () => {
     const { service, sessionId, paths } = createHarness('', 'active');
-    fs.writeFileSync(paths.active, 'x'.repeat(1024 * 1024 + 1));
+    const content = 'x'.repeat(1024 * 1024 + 1);
+    fs.writeFileSync(paths.active, content);
 
     await expect(
       service.getMaintainableSessionLocation(sessionId),
-    ).rejects.toMatchObject({
-      name: 'SessionStorageEntryError',
-      reason: 'unreadable_record',
+    ).resolves.toBe('active');
+    await expect(service.archiveSessions([sessionId])).resolves.toMatchObject({
+      archived: [sessionId],
+      errors: [],
     });
-    expect(fs.statSync(paths.active).size).toBe(1024 * 1024 + 1);
+    expect(fs.existsSync(paths.active)).toBe(false);
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(content);
   });
+
+  it.each(['archive', 'unarchive'] as const)(
+    'does not swallow a generation rejection at the %s ledger fence',
+    async (action) => {
+      const state = action === 'archive' ? 'active' : 'archived';
+      const { service, sessionId, paths } = createHarness('transcript', state);
+      const sourcePath = paths[state];
+      const destinationPath =
+        action === 'archive' ? paths.archived : paths.active;
+      const sourceLedger = sourcePath.replace(/\.jsonl$/, '.ledger.jsonl');
+      const destinationLedger = destinationPath.replace(
+        /\.jsonl$/,
+        '.ledger.jsonl',
+      );
+      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const generationChanged = new Error('generation changed');
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw generationChanged;
+        });
+
+      const result = await service[`${action}Sessions`]([sessionId], {
+        assertCanMutate,
+      });
+
+      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(fs.existsSync(sourceLedger)).toBe(true);
+      expect(fs.existsSync(destinationLedger)).toBe(false);
+    },
+  );
 
   it('rejects an in-place rewrite during ownership classification', async () => {
     const { service, sessionId, paths, cwd } = createHarness('', 'active');

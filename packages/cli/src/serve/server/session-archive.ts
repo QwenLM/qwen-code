@@ -340,7 +340,7 @@ function updateScheduledTaskForMaintenance(
   });
 }
 
-type DeleteOneResult =
+type DeleteOneResult = (
   | {
       kind: 'removed';
       mutationApplied: boolean;
@@ -353,7 +353,8 @@ type DeleteOneResult =
       kind: 'error';
       error: unknown;
       mutationApplied: boolean;
-    };
+    }
+) & { maintenanceError?: unknown };
 
 async function deletePersistedSessionWithLease(
   service: SessionService,
@@ -403,11 +404,13 @@ async function deletePersistedSessionWithLease(
       kind: 'error',
       error: mutation.error,
       mutationApplied: mutation.mutationApplied,
+      maintenanceError: mutation.maintenanceError,
     };
   }
   return {
     kind: mutation.value ?? 'notFound',
     mutationApplied: mutation.mutationApplied,
+    maintenanceError: mutation.maintenanceError,
   };
 }
 
@@ -479,6 +482,7 @@ export async function deleteDaemonSessions(params: {
                 kind: 'error' as const,
                 error,
                 mutationApplied: result.mutationApplied,
+                maintenanceError: result.maintenanceError,
               };
             }
           };
@@ -536,6 +540,9 @@ export async function deleteDaemonSessions(params: {
     } else {
       errors.push({ sessionId, error: errorMessage(result.error) });
     }
+    if (result.maintenanceError !== undefined) {
+      errors.push({ sessionId, error: result.maintenanceError });
+    }
   }
 
   return { removed, notFound, errors };
@@ -574,6 +581,9 @@ export async function deleteDaemonSessionIfOrphan(params: {
   // catalog revision through the lifecycle choke point; this conservative
   // extra mark covers the never-live orphan case and is protocol-permitted.
   bridge.markSessionCatalogChanged();
+  if (result.maintenanceError !== undefined) {
+    throw result.maintenanceError;
+  }
   return true;
 }
 
@@ -877,11 +887,13 @@ export async function archiveDaemonSessions(params: {
               kind: 'error' as const,
               error: mutation.error,
               mutationApplied: mutation.mutationApplied,
+              maintenanceError: mutation.maintenanceError,
             };
           }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
+            maintenanceError: mutation.maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -1071,6 +1083,7 @@ export async function unarchiveDaemonSessions(params: {
               kind: 'error' as const,
               error: mutation.error,
               mutationApplied: mutation.mutationApplied,
+              maintenanceError: mutation.maintenanceError,
             };
           }
           return {
