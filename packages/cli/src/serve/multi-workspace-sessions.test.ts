@@ -21,7 +21,6 @@ import {
 import {
   InvalidRewindTargetError,
   SessionBusyError,
-  SessionConflictError,
   SessionNotFoundError,
   type AcpSessionBridge,
   type BridgeClientRequestContext,
@@ -2143,7 +2142,7 @@ describe('multi-workspace session dispatch', () => {
         errors: [
           {
             sessionId,
-            error: new SessionConflictError(sessionId).message,
+            error: `Session "${sessionId}" exists in both active and archived directories. Retry with resolveConflicts: true to keep one copy.`,
           },
         ],
       });

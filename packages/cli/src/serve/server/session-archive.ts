@@ -313,7 +313,9 @@ async function classifySessionLocation(
 }
 
 function sessionLocationError(sessionId: string): SessionConflictError {
-  return new SessionConflictError(sessionId);
+  const error = new SessionConflictError(sessionId);
+  error.message = `Session "${sessionId}" exists in both active and archived directories. Retry with resolveConflicts: true to keep one copy.`;
+  return error;
 }
 
 function updateScheduledTaskForMaintenance(
