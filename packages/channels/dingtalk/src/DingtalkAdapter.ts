@@ -2127,6 +2127,36 @@ export class DingtalkChannel extends ChannelBase {
     else surface();
   }
 
+  /**
+   * R20-1: a background response is not a BlockStreamer in-turn send, but
+   * the base fallback routes it through `sendResponseMessage` all the same.
+   * Under block streaming that recorded its delivery failure on the
+   * turn-attribution queue — under the PREVIOUS turn's token between turns
+   * (no consumer ever matches: no apology, no failed turn, not even a log)
+   * and under the CURRENT turn's token mid-turn (an otherwise successful
+   * turn swept into an unearned apology). Deliver directly instead: a
+   * rejection propagates to ChannelBase's background-response listener and
+   * is logged, the visibility block-streaming-off has always had.
+   */
+  override async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      text.trim().length === 0
+    ) {
+      return;
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      await this.pushProactive(target, text);
+      return;
+    }
+    await this.deliverResponseMessage(target.chatId, text, sessionId);
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
@@ -2161,7 +2191,12 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
   ): Promise<void> {
     if (!this.webhooks.has(chatId)) {
-      await this.sendPreparedResponse(chatId, { text, files: [] }, sessionId);
+      // R20-2: mirror the `sendReply`/`sendFallbackReply` shortcut. Going
+      // through `sendPreparedResponse` let its residue-only early return
+      // fire before any delivery attempt, silently swallowing R18-1's
+      // missing-webhook throw for a whitespace-only response — the turn
+      // booked completed with nothing delivered.
+      await this.sendPreparedReply(chatId, text);
       return;
     }
     const prepared = await this.prepareOutgoingContent(text);

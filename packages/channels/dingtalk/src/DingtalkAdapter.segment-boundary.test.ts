@@ -1111,3 +1111,146 @@ describe('round-19 attribution and streaming delivery failures', () => {
     }
   });
 });
+
+describe('round-20 background-response and whitespace-only delivery', () => {
+  function pendingBoundaryFailuresMap(
+    channel: DingtalkChannelInstance,
+  ): Map<string, unknown> {
+    return (
+      channel as unknown as {
+        pendingBoundaryFailures: Map<string, unknown>;
+      }
+    ).pendingBoundaryFailures;
+  }
+
+  it('fails loud when a between-turns DM background delivery fails (R20-1)', async () => {
+    // R20-1: ChannelBase routes DM background responses through
+    // `sendResponseMessage`, whose streaming branch recorded the failure
+    // under the PREVIOUS turn's token — both consumers filter by identity,
+    // so between turns the failure vanished: no apology, no failed turn,
+    // not even a stderr log, while block-streaming-off logs the identical
+    // failure through ChannelBase's background-response listener. The
+    // dispatch must reject (the listener logs it) and record nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r201a-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        blockStreaming: 'on',
+      });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // Turn 1's single block POST succeeds; the background POST fails.
+      stubWebhookFetch(postBodies, (n) => (n === 0 ? 0 : 310000));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installPresenter(channel, 'unused');
+      let sessionId = '';
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sid: string,
+      ) => {
+        sessionId = sid;
+        return 'final answer';
+      };
+      await channel.handleInbound(envelopeWith('msg-r201a'));
+
+      // The turn has ended; the DM target survives it.
+      await expect(
+        channel.dispatchBackgroundResponse(sessionId, 'background result'),
+      ).rejects.toThrow('DingTalk sendMessage failed: API code 310000');
+      expect(pendingBoundaryFailuresMap(channel).size).toBe(0);
+      expect(stderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('boundary failure after turn end'),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a mid-turn background delivery failure off the turn (R20-1)', async () => {
+    // R20-1 inverse variant: recorded under the CURRENT turn's token, a
+    // mid-turn background failure made the turn-end sweep apologise for a
+    // turn whose own delivery succeeded. The dispatch itself must fail
+    // loud and leave the turn's queue untouched.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r201b-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        blockStreaming: 'on',
+      });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // The background dispatch POSTs first and fails; the turn's block
+      // POST succeeds.
+      stubWebhookFetch(postBodies, (n) => (n === 0 ? 310000 : 0));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installPresenter(channel, 'unused');
+      let backgroundError: unknown;
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sid: string,
+      ) => {
+        backgroundError = await channel
+          .dispatchBackgroundResponse(sid, 'background result')
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        return 'final answer';
+      };
+
+      await channel.handleInbound(envelopeWith('msg-r201b'));
+
+      expect(String(backgroundError)).toContain('API code 310000');
+      expect(pendingBoundaryFailuresMap(channel).size).toBe(0);
+      expect(stderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('boundary failure after turn end'),
+      );
+      expect(postBodies).not.toContainEqual(
+        expect.objectContaining({
+          markdown: expect.objectContaining({
+            text: expect.stringContaining('Sorry, something went wrong'),
+          }),
+        }),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails a card-less whitespace-only response on a webhook-less chat (R20-2)', async () => {
+    // R20-2: the no-webhook branch routed raw text through
+    // `sendPreparedResponse`, whose residue-only early return fired
+    // BEFORE any delivery attempt — silently swallowing the R18-1
+    // missing-webhook throw for a whitespace-only response. The turn
+    // booked completed with zero deliveries, while any non-whitespace text
+    // on the same chat failed the turn.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r202-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        interactiveCards: undefined,
+      });
+      const postBodies: Array<Record<string, unknown>> = [];
+      stubWebhookFetch(postBodies);
+      (bridge as unknown as { prompt: unknown }).prompt = async () => '   ';
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r202')),
+      ).rejects.toThrow(/no webhook/);
+      expect(postBodies).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
