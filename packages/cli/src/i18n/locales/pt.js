@@ -467,6 +467,7 @@ export default {
     'Linhas de Truncamento de Saída de Ferramenta',
   'Folder Trust': 'Confiança de Pasta',
   'Tool Schema Compliance': 'Conformidade de Tool Schema',
+  Unset: 'Não definido',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',

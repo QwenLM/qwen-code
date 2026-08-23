@@ -122,6 +122,9 @@ const mockLogExtensionDisable = vi.hoisted(() => vi.fn());
 const mockLogExtensionUpdateEvent = vi.hoisted(() => vi.fn());
 vi.mock('../telemetry/loggers.js', () => ({
   logExtensionEnable: mockLogExtensionEnable,
+  logExtensionInstallEvent: mockLogExtensionInstallEvent,
+  logExtensionUninstall: mockLogExtensionUninstall,
+  logExtensionDisable: mockLogExtensionDisable,
   logExtensionUpdateEvent: mockLogExtensionUpdateEvent,
 }));
 
