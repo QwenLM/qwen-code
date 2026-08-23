@@ -100,6 +100,36 @@ function runGit(
   }).then(({ stdout }) => stdout);
 }
 
+// runGit for commands that take their input on stdin (check-ignore
+// --stdin), where the number of paths is not bounded by argv limits.
+function runGitStdin(
+  cwd: string,
+  args: string[],
+  input: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      'git',
+      args,
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: 10 * 1024 * 1024,
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(stdout);
+        }
+      },
+    );
+    child.stdin!.end(input);
+  });
+}
+
 const SEPARATOR = '\x00';
 
 /**
@@ -627,23 +657,52 @@ async function aheadBehind(
 // git silently checks an incoming tracked file out over a local ignored
 // file of the same path, and neither the auto-stash (--include-untracked
 // skips ignored files) nor the force reset/clean protects them.
+//
+// The incoming-addition set is computed structurally, not by parsing
+// rendered diff text: the range starts at the merge base (with local
+// unpushed commits, HEAD..@{u} counts files the LOCAL commits deleted as
+// incoming additions and would refuse safe pulls), --no-renames turns
+// rename destinations into additions, and -z NUL-separates the paths and
+// suppresses C-quoting of non-ASCII names. Both commands run from the
+// repository toplevel: diff prints toplevel-relative paths, while
+// check-ignore resolves its input against the cwd.
 async function incomingIgnoredPaths(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string[]> {
-  const added = (
-    await runGit(
-      cwd,
-      ['diff', '--diff-filter=A', '--name-only', 'HEAD', '@{u}'],
-      env,
-    ).catch(() => '')
+  const toplevel = (
+    await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => '')
   ).trim();
+  if (!toplevel) return [];
+  const base =
+    (
+      await runGit(toplevel, ['merge-base', 'HEAD', '@{u}'], env).catch(
+        () => '',
+      )
+    ).trim() || 'HEAD';
+  const added = await runGit(
+    toplevel,
+    [
+      'diff',
+      '--no-renames',
+      '--diff-filter=A',
+      '--name-only',
+      '-z',
+      base,
+      '@{u}',
+    ],
+    env,
+  ).catch(() => '');
   if (!added) return [];
-  const paths = added.split('\n').filter(Boolean);
-  const ignored = (
-    await runGit(cwd, ['check-ignore', '--', ...paths], env).catch(() => '')
-  ).trim();
-  return ignored ? ignored.split('\n') : [];
+  const paths = added.split('\0').filter(Boolean);
+  if (paths.length === 0) return [];
+  const ignored = await runGitStdin(
+    toplevel,
+    ['check-ignore', '--stdin', '-z'],
+    `${paths.join('\0')}\0`,
+    env,
+  ).catch(() => '');
+  return ignored.split('\0').filter(Boolean);
 }
 
 function refusedIgnoredCollision(paths: string[]): GitPullFailure {
@@ -659,6 +718,29 @@ function gitFailureDetail(err: unknown): string {
     return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+// Concurrent pulls on one repository cross-apply each other's auto-stashes
+// (they share the single refs/stash LIFO), and one pull's failure recovery
+// aborts the merge or rebase another pull started. Serialize pulls per
+// resolved cwd with a promise chain.
+const pullLocks = new Map<string, Promise<void>>();
+
+function withPullLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(cwd);
+  const prev = pullLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(fn);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  pullLocks.set(key, tail);
+  void tail.then(() => {
+    if (pullLocks.get(key) === tail) {
+      pullLocks.delete(key);
+    }
+  });
+  return run;
 }
 
 async function classifyPullFailure(
@@ -714,6 +796,14 @@ export async function gitPull(
   if (opts?.stash && opts?.force) {
     throw new Error('stash and force are mutually exclusive');
   }
+  return withPullLock(cwd, () => gitPullInner(cwd, opts, env));
+}
+
+async function gitPullInner(
+  cwd: string,
+  opts?: GitPullOptions,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitPullResult> {
   if (opts?.fetchOnly) {
     const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);
     return { success: true, output: output.trim() };
@@ -749,13 +839,18 @@ export async function gitPull(
         'cannot discard changes: the workspace is a subdirectory of the git repository, and discarding is only supported at the repository root',
       );
     }
-    // Validate before destroying: a failing fetch or missing upstream must
-    // surface while the local changes are still intact, and a diverged
-    // branch is refused because the post-discard pull would have to merge
-    // the local commits and could wedge the repository mid-merge.
-    await runGit(cwd, ['fetch'], env);
+  }
+  // Fetch once, then probe and merge exactly the fetched tip. A bare
+  // `git pull` would re-fetch and merge whatever arrives between the probe
+  // and the merge, bypassing the collision probe; on the force path that
+  // re-fetch could also fail after the local changes were already
+  // discarded.
+  await runGit(cwd, ['fetch'], env);
+  if (opts?.force) {
     // Without a catch: a missing upstream must surface here, before
-    // anything is discarded.
+    // anything is discarded. A diverged branch is refused because the
+    // post-discard merge would have to merge the local commits and could
+    // wedge the repository mid-merge.
     const countsRaw = (
       await runGit(
         cwd,
@@ -772,22 +867,20 @@ export async function gitPull(
         'cannot discard changes and update: the branch has diverged from its upstream, so the update would still need to merge your local commits; merge or rebase them manually first',
       );
     }
-    const ignored = await incomingIgnoredPaths(cwd, env);
-    if (ignored.length > 0) {
-      throw refusedIgnoredCollision(ignored);
-    }
-    await runGit(cwd, ['reset', '--hard'], env);
-    await runGit(cwd, ['clean', '-fd'], env);
+  }
+  // Every pull shape refuses an incoming collision with local ignored
+  // files: ignored paths never appear in `git status`, so the plain path
+  // reads clean and would silently check the incoming file out over the
+  // local one.
+  const ignored = await incomingIgnoredPaths(cwd, env);
+  if (ignored.length > 0) {
+    throw refusedIgnoredCollision(ignored);
   }
   let stashed = false;
-  if (opts?.stash) {
-    // Fetch before stashing so the collision probe sees the incoming
-    // commits and any later failure surfaces while the tree is intact.
-    await runGit(cwd, ['fetch'], env);
-    const ignored = await incomingIgnoredPaths(cwd, env);
-    if (ignored.length > 0) {
-      throw refusedIgnoredCollision(ignored);
-    }
+  if (opts?.force) {
+    await runGit(cwd, ['reset', '--hard'], env);
+    await runGit(cwd, ['clean', '-fd'], env);
+  } else if (opts?.stash) {
     // Compare refs/stash before/after instead of parsing the push output,
     // which differs between git versions and locales.
     const before = await currentStashSha(cwd, env);
@@ -805,19 +898,20 @@ export async function gitPull(
     const after = await currentStashSha(cwd, env);
     stashed = after !== '' && after !== before;
   }
-  const args = ['pull'];
-  if (opts?.rebase) {
-    args.push('--rebase');
-  } else {
-    // Pin the merge default explicitly: on git builds without pull.rebase /
-    // pull.ff configured a bare `git pull` on divergent branches fatals
-    // with "Need to specify how to reconcile divergent branches". --no-edit
-    // keeps the merge-commit message from waiting on an editor.
-    args.push('--no-rebase', '--no-edit');
-  }
+  // Merge or rebase exactly the probed tip. --no-autostash neutralizes
+  // ambient merge.autostash/rebase.autostash config: an auto-stash inside
+  // the update can exit 0 on a pop conflict, leaving conflict markers in
+  // the tree and the user's changes stranded in a stash entry the caller
+  // never learns about.
   let output: string;
   try {
-    output = await runGit(cwd, args, env);
+    output = await runGit(
+      cwd,
+      opts?.rebase
+        ? ['rebase', '--no-autostash', '@{u}']
+        : ['merge', '--no-edit', '--no-autostash', '@{u}'],
+      env,
+    );
   } catch (err) {
     if (stashed || opts?.force) {
       // Never leave the repository wedged mid-merge: abort any partial

@@ -43,19 +43,34 @@ sending both is a 400):
   partial merge/rebase.
 
 Stash detection compares `refs/stash` before/after the push instead of
-parsing git output, which varies by version and locale. The pull itself
-passes `--no-rebase --no-edit` when rebase is not requested, so divergent
+parsing git output, which varies by version and locale. The update runs
+as an explicit fetch followed by a merge (or rebase) of exactly the
+fetched upstream tip, never as a bare `git pull`: re-fetching between
+the probe and the merge would let a commit pushed into that window
+bypass the probe, and on the force path could fail a fetch after the
+local changes were already discarded. The merge passes `--no-edit
+--no-autostash` (the rebase passes `--no-autostash`) so divergent
 branches merge instead of fataling on git builds without a `pull.rebase`
-/ `pull.ff` policy.
+/ `pull.ff` policy, and ambient `merge.autostash`/`rebase.autostash`
+config cannot silently move the user's changes through a stash the
+caller never learns about. Pulls are serialized per workspace cwd so
+overlapping pulls cannot cross-apply each other's auto-stashes (one
+shared `refs/stash`) or abort each other's in-progress merge.
 
 Pulls are refused while a merge or rebase is already in progress
 (`MERGE_HEAD` or the rebase state directories): the failure recovery
 aborts merge/rebase state indiscriminately, so it must only ever abort
-state the pull itself started. Stash and force pulls are also refused
-when the incoming commits add paths that exist locally as ignored files:
-git would silently check the incoming file out over the ignored one, and
-neither the auto-stash (`--include-untracked` skips ignored files) nor
-the force reset/clean protects it.
+state the pull itself started. Every pull shape — plain, stash, and
+force — is also refused when the incoming commits add paths that exist
+locally as ignored files: git would silently check the incoming file
+out over the ignored one (ignored paths never appear in `git status`,
+so even a plain pull reads clean), and neither the auto-stash
+(`--include-untracked` skips ignored files) nor the force reset/clean
+protects it. The incoming-addition set is computed relative to the
+merge base from the repository toplevel with `--no-renames -z` (rename
+destinations count as additions, non-ASCII names are not C-quoted, and
+unpushed local deletions are not counted as incoming additions), then
+matched against the ignore rules with `git check-ignore --stdin -z`.
 
 Failures are classified from repository state (`MERGE_HEAD`, rebase
 state, unmerged index entries, ahead/behind counts, dirtiness) into

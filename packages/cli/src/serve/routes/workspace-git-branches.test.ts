@@ -203,6 +203,12 @@ const tmpRoots: string[] = [];
 // variables that would redirect it; none of the pull shapes below depends
 // on the merge fast-forward policy, so no test is gated on it.
 const hermeticHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
+// Platform-neutral interactive-rebase sequence editor for the rebase
+// fixture: rewrites the first todo command to `edit` so the rebase stops.
+// `sed -i` without a backup extension is GNU-only and fails under BSD sed
+// (stock macOS), while node is already guaranteed everywhere these tests
+// run.
+const seqEditorScript = path.join(hermeticHome, 'seq-editor.js');
 const savedAmbientGitEnv: Record<string, string | undefined> = {};
 const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_CONFIG_COUNT',
@@ -210,10 +216,20 @@ const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_DIR',
   'GIT_WORK_TREE',
   'GIT_INDEX_FILE',
+  // Editor overrides resolve env-first, ahead of the repo-local
+  // sequence.editor the rebase fixture depends on.
+  'GIT_SEQUENCE_EDITOR',
+  'GIT_EDITOR',
 ];
 const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 beforeAll(() => {
   fs.writeFileSync(path.join(hermeticHome, 'gitconfig'), '');
+  fs.writeFileSync(
+    seqEditorScript,
+    "const fs = require('node:fs');\n" +
+      'const todo = process.argv[2];\n' +
+      "fs.writeFileSync(todo, fs.readFileSync(todo, 'utf8').replace(/^pick/, 'edit'));\n",
+  );
   for (const key of [
     'HOME',
     'USERPROFILE',
@@ -717,7 +733,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(dir, 'commit', '-q', '-m', 'second');
     // An interactive rebase stopped at an edit step: no unmerged entries,
     // so the old auto-stash recovery ran and aborted the user's rebase.
-    git(dir, 'config', 'sequence.editor', "sed -i '1s/^pick/edit/'");
+    git(dir, 'config', 'sequence.editor', `node "${seqEditorScript}"`);
     git(dir, 'rebase', '-i', 'HEAD~1');
     expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
     fs.writeFileSync(path.join(dir, 'a.txt'), 'uncommitted edit\n');
