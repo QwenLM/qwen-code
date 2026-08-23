@@ -5572,6 +5572,44 @@ describe('App session workflow', () => {
     expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
   });
 
+  it('strips a stale cockpit deep link when a controlled host takes over from chat', async () => {
+    // While settings load the gate is unresolved, so the deep link cannot
+    // enter the cockpit and the app stays on chat — the stale link survives.
+    // The takeover must strip it anyway: if the single commit that resolves
+    // the gate enabled also hands the view to the host, the later-declared
+    // reopen effect would read the stale link in that same commit and
+    // out-vote the host's split — the cockpit wins and the split never
+    // renders.
+    testState.settingsLoading = true;
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    // Precondition: the stale link survives while the gate is unresolved.
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    // One commit resolves the gate enabled AND hands the view to the host.
+    testState.settingsLoading = false;
+    testState.settings = [sessionWorkflowSetting()];
+    rerender({ sidebar: false, splitSessionIds: ['s1'] });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
   it('keeps the revision-bound plan approval in Chat', async () => {
     const approvedEntries = [
       {

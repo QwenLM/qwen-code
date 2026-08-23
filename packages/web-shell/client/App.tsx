@@ -5053,10 +5053,17 @@ export function App({
     if (requested.length > 0) {
       // A controlled host taking over the view is a cockpit departure too:
       // strip the ?view=cockpit deep link the way every interactive departure
-      // does. Otherwise the host later clearing the split lands on 'chat'
-      // while the stale link reopens the cockpit (and a shrink-fold would
-      // strand the link the same way).
-      if (mainViewRef.current === 'cockpit') {
+      // does — regardless of the current mainView. The strip must key on the
+      // URL state, not the view: when a stale link survives while the app is
+      // on 'chat' (settings still loading, or an approval suppressing the
+      // reopen effect), the later-declared reopen effect reads the stale link
+      // in this same commit and out-votes the host's setMainView('split')
+      // below — the cockpit wins and this effect never re-runs. Stripping
+      // synchronously here lands before that effect reads window.location.
+      // Otherwise the host later clearing the split lands on 'chat' while the
+      // stale link reopens the cockpit (and a shrink-fold would strand the
+      // link the same way).
+      if (cockpitViewRequested()) {
         updateCockpitLocation(false, true);
       }
       setActivePanel((prev) => (prev === null ? prev : null));
