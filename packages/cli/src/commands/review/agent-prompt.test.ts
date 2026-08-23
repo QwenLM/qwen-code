@@ -3904,7 +3904,7 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     // "silence is better than noise" read as a confidence bar lets Step 4 drop
     // real-but-uncertain findings instead of downgrading them. The counterweight
     // is the PLAUSIBLE-by-default list — a finding whose failure scenario names
-    // a realistic state the code does not exclude may not be refuted as
+    // a state the code does not exclude may not be refuted as
     // "too speculative" — and the bar that constrains rejection to what is
     // constructible from the code. Pin each shape and each ground: a paraphrase
     // that dropped any of them would reopen the leak silently.
