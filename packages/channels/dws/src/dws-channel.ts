@@ -115,6 +115,7 @@ interface DwsCursor {
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
   todoTasks?: PersistedTodoState[];
+  pairingNotifications?: string[];
   inboundFailures?: PersistedInboundFailure[];
 }
 
@@ -591,6 +592,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       imTargets: [],
       todosInitialized: false,
       todoTasks: [],
+      pairingNotifications: [],
     };
   }
 
@@ -648,6 +650,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       (cursor.todoTasks !== undefined &&
         (!Array.isArray(cursor.todoTasks) ||
           !cursor.todoTasks.every(isPersistedTodoState))) ||
+      (cursor.pairingNotifications !== undefined &&
+        (!Array.isArray(cursor.pairingNotifications) ||
+          !cursor.pairingNotifications.every(
+            (item) => typeof item === 'string' && Boolean(item),
+          ))) ||
       (cursor.inboundFailures !== undefined &&
         (!Array.isArray(cursor.inboundFailures) ||
           !cursor.inboundFailures.every(isPersistedInboundFailure)))
@@ -677,6 +684,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       imTargets: cursor.imTargets.slice(-MAX_IM_TARGETS),
       todosInitialized: cursor.todosInitialized ?? false,
       todoTasks: (cursor.todoTasks ?? []).slice(-MAX_TODO_STATES),
+      pairingNotifications: (cursor.pairingNotifications ?? []).slice(
+        -MAX_PROCESSED_ITEMS,
+      ),
       inboundFailures: (cursor.inboundFailures ?? []).slice(
         -MAX_PROCESSED_ITEMS,
       ),
@@ -718,6 +728,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.pendingMessages = [];
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
+      this.cursor.pairingNotifications = [];
       this.cursor.notificationWatermark = undefined;
       this.cursor.mentionWatermark = undefined;
       this.cursor.notificationCheckpoint = undefined;
@@ -848,6 +859,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         envelope.chatId,
         result.pairing,
         envelope.threadId,
+        envelope.senderId,
       )
         .then(() => false)
         .catch(() => false);
@@ -860,7 +872,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     chatId: string,
     result: CreatePairingRequestResult,
     threadId?: string,
+    senderId?: string,
   ): Promise<void> {
+    if (this.documentSet.has(chatId) || this.todoTargets.has(chatId)) {
+      // Threaded (todo/document) delivery has no server-side idempotency key,
+      // and the pairing code rotates whenever the pending request expires, so
+      // code-keyed in-memory dedup re-posted ~hourly and again after every
+      // restart. Dedup on a persisted (chat, sender, kind) marker instead.
+      const marker = [
+        chatId,
+        senderId ?? '',
+        'code' in result ? 'code' : result.rejected,
+      ].join('\0');
+      if ((this.cursor.pairingNotifications ?? []).includes(marker)) return;
+      await super.onPairingRequired(chatId, result, threadId);
+      this.rememberPairingNotification(marker);
+      return;
+    }
     const notificationKey =
       'code' in result
         ? `code\0${result.code}`
@@ -876,11 +904,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
     }
     try {
-      if (
-        'code' in result &&
-        !this.documentSet.has(chatId) &&
-        !this.todoTargets.has(chatId)
-      ) {
+      if ('code' in result) {
         const text = `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`;
         await this.sendImText(
           chatId,
@@ -1267,6 +1291,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     };
     const allowed = this.gate.isAllowed(senderId);
     await this.handleInbound(envelope);
+    if (allowed) this.clearPairingNotifications(chatId);
     return allowed;
   }
 
@@ -1276,6 +1301,25 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (existing) existing.fingerprint = fingerprint;
     else states.push({ taskId, fingerprint });
     this.cursor.todoTasks = states.slice(-MAX_TODO_STATES);
+  }
+
+  private rememberPairingNotification(marker: string): void {
+    const markers = this.cursor.pairingNotifications ?? [];
+    if (markers.includes(marker)) return;
+    this.cursor.pairingNotifications = [...markers, marker].slice(
+      -MAX_PROCESSED_ITEMS,
+    );
+    this.saveCursor();
+  }
+
+  private clearPairingNotifications(chatId: string): void {
+    const markers = this.cursor.pairingNotifications ?? [];
+    const remaining = markers.filter(
+      (marker) => !marker.startsWith(`${chatId}\0`),
+    );
+    if (remaining.length === markers.length) return;
+    this.cursor.pairingNotifications = remaining;
+    this.saveCursor();
   }
 
   private async startImSource(

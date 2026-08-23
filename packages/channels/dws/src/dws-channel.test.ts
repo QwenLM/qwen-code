@@ -2139,6 +2139,114 @@ describe('DwsChannel', () => {
     );
   });
 
+  // The pending pairing request behind a stuck todo expires after an hour and
+  // the gate mints a fresh code; the code-keyed in-memory dedup had never seen
+  // it, so the todo collected one duplicate pairing comment per expiry, plus
+  // one more per daemon restart.
+  it('keeps one todo pairing comment across pairing-code expiry and restarts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-20T08:00:00Z'));
+      const config = makeConfig({
+        watchTodos: true,
+        senderPolicy: 'pairing',
+      });
+      const name = 'sticky-todo-pairing-dws';
+      const client = new FakeDwsClient();
+      client.todoTasks = [todoTask('task-existing', 'Historical task')];
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        config,
+        name,
+      );
+      await channel.poll();
+      client.todoTasks = [
+        ...client.todoTasks,
+        todoTask('task-new', 'Pair before running'),
+      ];
+
+      await channel.poll();
+      await channel.poll();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+      const firstCode = client.addTodoComment.mock.calls[0]?.[1]?.match(
+        /pairing code is: ([A-Z0-9]+)/u,
+      )?.[1];
+      expect(firstCode).toBeDefined();
+
+      vi.setSystemTime(new Date('2026-08-20T09:01:00Z'));
+      await channel.poll();
+
+      const pending = new PairingStore(name, config.cwd).listPending();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?.code).not.toBe(firstCode);
+      expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+
+      channel.disconnect();
+      const restartedClient = new FakeDwsClient();
+      restartedClient.todoTasks = client.todoTasks;
+      const { channel: restarted } = await readyPolicyChannel(
+        restartedClient,
+        config,
+        name,
+      );
+      await restarted.poll();
+
+      expect(restartedClient.addTodoComment).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-notifies a revoked todo creator when the todo changes again', async () => {
+    const config = makeConfig({ watchTodos: true, senderPolicy: 'pairing' });
+    const name = 'revoked-todo-pairing-dws';
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(client, config, name);
+    await channel.poll();
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-new', 'Pair before running'),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+    const code = client.addTodoComment.mock.calls[0]?.[1]?.match(
+      /pairing code is: ([A-Z0-9]+)/u,
+    )?.[1];
+    expect(code).toBeDefined();
+
+    const store = new PairingStore(name, config.cwd);
+    expect(store.approve(code!)).not.toBeNull();
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    // The approved turn published its response to the todo thread.
+    expect(client.addTodoComment).toHaveBeenLastCalledWith(
+      'task-new',
+      'response',
+    );
+
+    expect(store.revoke('alice')).toBe(true);
+    client.todoTasks = [
+      todoTask('task-existing', 'Historical task'),
+      todoTask('task-new', 'Pair before running', { priority: 40 }),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    expect(client.addTodoComment).toHaveBeenCalledTimes(3);
+    expect(client.addTodoComment).toHaveBeenLastCalledWith(
+      'task-new',
+      expect.stringContaining('pairing code'),
+    );
+  });
+
   it('keeps polling when a direct pairing notification cannot be sent', async () => {
     const client = new FakeDwsClient();
     client.sendImMessage.mockRejectedValueOnce(
