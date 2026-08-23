@@ -3248,10 +3248,24 @@ function composeReviewBody(
   // is the safe direction).
   const isRelayedStopEntry = (entry: string): boolean =>
     canonicalStopEntries?.has(entry.trim()) ?? false;
-  const dimensionGapsAreDepthOnly = [
-    ...unreviewed,
-    ...splicedForBudgetPhrase,
-  ].every((entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry));
+  // The same subject-echo dedup the render path applies below (#7188's
+  // prefix match): a Step 4/5 floor gap the orchestrator relays into
+  // `unreviewedDimensions` is an echo of a structural coverage entry, not an
+  // independent line-coverage claim. Unfiltered it fails both exemptions
+  // here and flips `dimensionGapsAreDepthOnly` false — routing the cap onto
+  // the coverage axis for a run whose only doubt is the verification floor,
+  // the exact misrouting this derivation exists to remove.
+  const echoesCoverageEntry = (entry: string): boolean =>
+    coverageEntries.some(
+      (e) =>
+        entry === e.subject ||
+        (e !== budgetEntry && entry.startsWith(`${e.subject} — `)),
+    );
+  const dimensionGapsAreDepthOnly = [...unreviewed, ...splicedForBudgetPhrase]
+    .filter((entry) => !echoesCoverageEntry(entry))
+    .every(
+      (entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry),
+    );
 
   // The axis `unreviewed-dimension` lands on, derived from the facts that
   // fired it rather than read off its name: a doubt that any line was read

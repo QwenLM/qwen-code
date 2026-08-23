@@ -11579,4 +11579,44 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.coverage).toContain('unreviewed-dimension');
     expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
   });
+
+  it('puts a whiffed dimension on the coverage axis — the caller prose channel', () => {
+    // A whiffed agent made tool calls, so `coverageFromTranscripts` reports
+    // nothing — the orchestrator's entry is the ONLY detector, and it rides
+    // the `!dimensionGapsAreDepthOnly` disjunct. Deleting that disjunct
+    // routes the cap to the verification axis and tells an automated caller
+    // to re-verify instead of relaunching the whiffed agent.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['security — the agent whiffed twice'],
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
+
+  it('keeps a floor-only cap on the verification axis when the orchestrator echoes the gap', () => {
+    // The render path dedupes caller echoes of structural coverage entries
+    // by subject; the axis decision must too. Unfiltered, the echoed floor
+    // line fails both depth exemptions, flips `dimensionGapsAreDepthOnly`,
+    // and a caller routing repairs by axis relaunches Step 3 agents that
+    // read everything — for a run whose only doubt is the verification
+    // floor.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit — the reverse audit never ran'],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
 });

@@ -22,6 +22,7 @@ import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { buildReport, type Finding } from '../../utils/findings.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
+import { CHUNK_FAILURE_CLASSES } from './lib/coverage.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
 // can only run where the filesystem folds case. Probe once, at load time, so
@@ -552,10 +553,21 @@ describe('saveReviewArtifact', () => {
       posture: [],
       other: [],
     };
-    // Mixed on purpose: one covered chunk and one missing, so the
-    // `terminalState` beside it ('partial') and the classification below are
-    // both load-bearing in the round-trip.
-    const chunkLedger = [
+    // Every outcome and every failure class in one round-trip: the accept
+    // side must prove the boundary lets through all four closed
+    // `ChunkOutcome` values — a resumed run's verdict legitimately carries
+    // `recovered` entries — and every classification the sealed ledger can
+    // name, so a member dropped from `CHUNK_FAILURE_CLASSES` turns this
+    // fixture red at the read site instead of refusing a legitimate run in
+    // the field. The mix also keeps the `terminalState` beside it
+    // ('partial') load-bearing.
+    const chunkLedger: Array<{
+      id: number;
+      files: string[];
+      outcome: string;
+      classification?: string;
+      agents: string[];
+    }> = [
       { id: 1, files: ['src/a.ts'], outcome: 'covered', agents: ['chunk 1'] },
       {
         id: 2,
@@ -563,6 +575,54 @@ describe('saveReviewArtifact', () => {
         outcome: 'missing',
         classification: 'idle',
         agents: ['chunk 2'],
+      },
+      {
+        id: 3,
+        files: ['src/c.ts'],
+        outcome: 'recovered',
+        agents: ['chunk 3'],
+      },
+      {
+        id: 4,
+        files: ['src/d.ts'],
+        outcome: 'uncoverable',
+        classification: 'declared-uncoverable',
+        agents: ['chunk 4'],
+      },
+      {
+        id: 5,
+        files: ['src/e.ts'],
+        outcome: 'missing',
+        classification: 'no-agent',
+        agents: [],
+      },
+      {
+        id: 6,
+        files: ['src/f.ts'],
+        outcome: 'missing',
+        classification: 'blind-prompt',
+        agents: ['chunk 6'],
+      },
+      {
+        id: 7,
+        files: ['src/g.ts'],
+        outcome: 'missing',
+        classification: 'unopened',
+        agents: ['chunk 7'],
+      },
+      {
+        id: 8,
+        files: ['src/h.ts'],
+        outcome: 'missing',
+        classification: 'rewritten-prompt',
+        agents: ['chunk 8'],
+      },
+      {
+        id: 9,
+        files: ['src/i.ts'],
+        outcome: 'missing',
+        classification: 'unknown',
+        agents: ['chunk 9'],
       },
     ];
     const triple = { terminalState: 'partial', capAxes, chunkLedger };
@@ -577,6 +637,15 @@ describe('saveReviewArtifact', () => {
       expect(saved.terminalState).toBe('partial');
       expect(saved.capAxes).toEqual(capAxes);
       expect(saved.chunkLedger).toEqual(chunkLedger);
+      // Exhaustiveness at the read site, in both directions: every class the
+      // sealed ledger can name rides this fixture exactly once, so a member
+      // dropped from `CHUNK_FAILURE_CLASSES` fails here — and a class
+      // dropped from the fixture loses the round-trip that pins it.
+      expect(
+        [...new Set(chunkLedger.map((e) => e.classification))]
+          .filter((c): c is string => c !== undefined)
+          .sort(),
+      ).toEqual([...CHUNK_FAILURE_CLASSES].sort());
     });
 
     it('accepts an old composed file carrying none of the three, preserving the absence', () => {
@@ -609,9 +678,20 @@ describe('saveReviewArtifact', () => {
       expect(saved.chunkLedger).toEqual([]);
     });
 
+    // All six non-empty proper subsets: a mutant keying refusal on one
+    // field's presence passes any table listing only subsets that contain
+    // that field, and persists the mixed old-/new-shape verdict this rule
+    // exists to refuse.
     it.each([
-      ['one field of three', { terminalState: 'partial' }],
-      ['two fields of three', { terminalState: 'partial', capAxes }],
+      ['terminalState alone', { terminalState: 'partial' }],
+      ['capAxes alone', { capAxes }],
+      ['chunkLedger alone', { chunkLedger }],
+      ['terminalState + capAxes', { terminalState: 'partial', capAxes }],
+      [
+        'terminalState + chunkLedger',
+        { terminalState: 'partial', chunkLedger },
+      ],
+      ['capAxes + chunkLedger', { capAxes, chunkLedger }],
     ])(
       'refuses a partial triple (%s) — written together or not at all',
       (_label, partial) => {
@@ -673,6 +753,68 @@ describe('saveReviewArtifact', () => {
       ).toThrow(message);
       expect(existsSync(paths.out)).toBe(false);
     });
+
+    it.each([
+      [
+        'covered but carrying a failure class',
+        {
+          id: 10,
+          files: ['src/j.ts'],
+          outcome: 'covered',
+          classification: 'idle',
+          agents: ['chunk 10'],
+        },
+        /is covered but carries a failure class/,
+      ],
+      [
+        'recovered but carrying a failure class',
+        {
+          id: 10,
+          files: ['src/j.ts'],
+          outcome: 'recovered',
+          classification: 'idle',
+          agents: ['chunk 10'],
+        },
+        /is recovered but carries a failure class/,
+      ],
+      [
+        'missing with no classification',
+        {
+          id: 10,
+          files: ['src/j.ts'],
+          outcome: 'missing',
+          agents: ['chunk 10'],
+        },
+        /is missing with no classification/,
+      ],
+      [
+        'uncoverable with no classification',
+        {
+          id: 10,
+          files: ['src/j.ts'],
+          outcome: 'uncoverable',
+          agents: ['chunk 10'],
+        },
+        /is uncoverable with no classification/,
+      ],
+    ])(
+      'refuses a ledger entry %s — the pairing the live assertion enforces',
+      (_label, badEntry, message) => {
+        // The producer-side `assertChunkPartition` throws on both shapes;
+        // this boundary is the only gate the persisted side has.
+        const paths = fixture();
+        writeJson(paths.composed, {
+          ...verdict,
+          ...triple,
+          chunkLedger: [chunkLedger[0], badEntry],
+        });
+
+        expect(() =>
+          saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+        ).toThrow(message);
+        expect(existsSync(paths.out)).toBe(false);
+      },
+    );
 
     it('refuses a duplicate chunk id — a sealed ledger lists each chunk once', () => {
       const paths = fixture();

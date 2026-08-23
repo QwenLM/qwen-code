@@ -336,6 +336,13 @@ function coverageTriple(verdict: Record<string, unknown>): {
     // unchecked, though: the vocabulary is closed and the sibling fields here
     // are validated against theirs, so a hand-edited file's out-of-vocabulary
     // string is refused like every other malformed value.
+    //
+    // The pairing is the live ledger's own invariant, mirrored from
+    // `assertChunkPartition`: a failure class is WHY a chunk went uncovered,
+    // so it is owed exactly when the outcome says one went uncovered. A file
+    // shaped wrong on either side passes the vocabulary check but launders a
+    // contradiction the composing run could never have produced.
+    const needsCause = outcome === 'missing' || outcome === 'uncoverable';
     if (item['classification'] !== undefined) {
       if (
         typeof item['classification'] !== 'string' ||
@@ -347,9 +354,18 @@ function coverageTriple(verdict: Record<string, unknown>): {
           `Composed verdict.chunkLedger[${i}].classification must be one of ${CHUNK_FAILURE_CLASSES.join(' / ')}.`,
         );
       }
+      if (!needsCause) {
+        throw new Error(
+          `Composed verdict.chunkLedger[${i}] is ${outcome} but carries a failure class.`,
+        );
+      }
       parsed.classification = item[
         'classification'
       ] as ChunkCoverageItem['classification'];
+    } else if (needsCause) {
+      throw new Error(
+        `Composed verdict.chunkLedger[${i}] is ${outcome} with no classification.`,
+      );
     }
     return parsed;
   });

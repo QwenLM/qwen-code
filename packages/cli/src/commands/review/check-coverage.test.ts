@@ -3021,9 +3021,12 @@ describe('the chunk ledger', () => {
     // The CLI built good(2); the orchestrator delivered a prompt that
     // ALTERED one of its lines (adding lines is delivery, not rewrite —
     // `wasDeliveredVerbatim` permits it). The record worked but never read
-    // the diff, so the cause is the rewrite — the ternary above the
-    // unopened branch decides it, and a mutant dropping that ternary
-    // reports `unopened` here instead.
+    // the diff, so the cause is the rewrite. What pins that is the
+    // unconditional rewritten-prompt cause note recorded ahead of the
+    // unopened branch, plus `classify()` ordering rewritten-prompt above
+    // unopened: the ternary inside that branch re-notes the same cause, so
+    // a mutant replacing it with plain `'unopened'` keeps this test green,
+    // while deleting the earlier unconditional note flips it red.
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
@@ -3086,6 +3089,36 @@ describe('the chunk ledger', () => {
     // two are different facts and different repairs — one relaunches, the
     // other cannot be repaired at all.
     expect(entryFor(r, 1).outcome).toBe('covered');
+  });
+
+  it('ranks a declaration above a rewritten launch on the same chunk', () => {
+    // The two causes genuinely co-occur: a rewritten record that made one
+    // ranged diff read and then declared the chunk uncoverable notes both.
+    // The record never opened its brief, so the near-verbatim delivery
+    // branch cannot claim it — it stays rewritten — and a ranged read keeps
+    // it out of the unopened branch, so it lives to declare. `classify()`
+    // orders the declaration first — the agent's own verdict outranks the
+    // prompt defect, because nothing is repaired by relaunching a chunk no
+    // read can span. A mutant reordering the pair hands the operator
+    // "rebuild the prompt" for a chunk proven unreviewable, and only this
+    // fixture goes red.
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      {
+        calls: 1,
+        range: [0, 50],
+        opens: [],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'uncoverable',
+      classification: 'declared-uncoverable',
+    });
   });
 
   it('names the agent that owned a chunk, on success as well as failure', () => {
