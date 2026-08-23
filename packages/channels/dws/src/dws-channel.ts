@@ -1290,8 +1290,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       ].join('\n'),
     };
     const allowed = this.gate.isAllowed(senderId);
-    await this.handleInbound(envelope);
+    // Clear when the pairing is resolved, not when the turn succeeds: a
+    // failed turn must not leave a stale marker that suppresses a fresh
+    // pairing comment after the sender is later revoked (R16-1).
     if (allowed) this.clearPairingNotifications(chatId);
+    await this.handleInbound(envelope);
     return allowed;
   }
 

@@ -2247,6 +2247,57 @@ describe('DwsChannel', () => {
     );
   });
 
+  // R16-1: an approved creator whose turn fails must not keep the persisted
+  // pairing marker. The marker was cleared only after a *successful* turn, so a
+  // failed turn left it behind; after a later revocation the stale marker
+  // matched the fresh pairing result and suppressed the re-pairing comment,
+  // locking the creator out of the todo surface for this chat.
+  it('re-notifies a revoked todo creator whose approved turn failed', async () => {
+    const config = makeConfig({ watchTodos: true, senderPolicy: 'pairing' });
+    const name = 'failed-turn-todo-pairing-dws';
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(client, config, name);
+    await channel.poll();
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-new', 'Pair before running'),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+    const code = client.addTodoComment.mock.calls[0]?.[1]?.match(
+      /pairing code is: ([A-Z0-9]+)/u,
+    )?.[1];
+    expect(code).toBeDefined();
+
+    const store = new PairingStore(name, config.cwd);
+    expect(store.approve(code!)).not.toBeNull();
+    // The approved turn fails; the pairing marker must still be cleared.
+    bridge.prompt.mockRejectedValueOnce(new Error('turn failed'));
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+
+    expect(store.revoke('alice')).toBe(true);
+    client.todoTasks = [
+      todoTask('task-existing', 'Historical task'),
+      todoTask('task-new', 'Pair before running', { priority: 40 }),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    expect(client.addTodoComment).toHaveBeenCalledTimes(2);
+    expect(client.addTodoComment).toHaveBeenLastCalledWith(
+      'task-new',
+      expect.stringContaining('pairing code'),
+    );
+  });
+
   it('keeps polling when a direct pairing notification cannot be sent', async () => {
     const client = new FakeDwsClient();
     client.sendImMessage.mockRejectedValueOnce(
