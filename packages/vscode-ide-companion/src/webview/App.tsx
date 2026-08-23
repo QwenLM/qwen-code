@@ -74,6 +74,12 @@ const WebShellTranscriptLazy = React.lazy(() =>
   })),
 );
 
+/** Map VS Code's body theme attribute onto the transcript's dark/light prop. */
+function readVSCodeWebviewTheme(): 'dark' | 'light' {
+  const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
+  return kind.includes('light') ? 'light' : 'dark';
+}
+
 export const App: React.FC = () => {
   const vscode = useVSCode();
 
@@ -855,9 +861,22 @@ export const App: React.FC = () => {
     });
   }, [insightReportPath, vscode]);
 
-  const webShellTheme = useMemo<'dark' | 'light'>(() => {
-    const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
-    return kind.includes('light') ? 'light' : 'dark';
+  // VS Code applies color-theme changes to an open webview in place
+  // (updating data-vscode-theme-kind on <body> without reloading it), and
+  // the panel keeps its context while hidden, so a mount-time snapshot
+  // would go stale. Track the live value via a body-attribute observer.
+  const [webShellTheme, setWebShellTheme] = useState<'dark' | 'light'>(
+    readVSCodeWebviewTheme,
+  );
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setWebShellTheme(readVSCodeWebviewTheme());
+    });
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['data-vscode-theme-kind', 'class'],
+    });
+    return () => observer.disconnect();
   }, []);
   const transcriptBlocks = useAcpTranscript();
 

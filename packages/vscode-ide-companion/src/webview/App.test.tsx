@@ -1003,4 +1003,33 @@ describe('App /skills secondary picker', () => {
       '--web-shell-bottom-panel-inset': '140px',
     });
   });
+
+  it('tracks live VS Code color-theme changes on the transcript theme prop', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+    document.body.setAttribute('data-vscode-theme-kind', 'vscode-dark');
+
+    try {
+      const rendered = renderApp();
+      root = rendered.root;
+      container = rendered.container;
+
+      await act(async () => {});
+
+      expect(mockWebShellTranscriptProps.current).not.toBeNull();
+      expect(mockWebShellTranscriptProps.current!.theme).toBe('dark');
+
+      // VS Code applies a color-theme change to an open webview in place by
+      // updating the body attribute (no reload); the transcript theme must
+      // follow instead of staying on the mount-time snapshot.
+      await act(async () => {
+        document.body.setAttribute('data-vscode-theme-kind', 'vscode-light');
+        await Promise.resolve();
+      });
+
+      expect(mockWebShellTranscriptProps.current!.theme).toBe('light');
+    } finally {
+      document.body.removeAttribute('data-vscode-theme-kind');
+    }
+  });
 });
