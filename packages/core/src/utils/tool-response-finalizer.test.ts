@@ -17,7 +17,11 @@ import {
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
-import { buildStub, persistAndTruncateToolResult } from './truncation.js';
+import {
+  buildStub,
+  FULL_OUTPUT_DIGEST_LABEL,
+  persistAndTruncateToolResult,
+} from './truncation.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -907,6 +911,114 @@ describe('tool response finalization', () => {
       ] as string;
       expect(secondFit).toContain(BATCH_BUDGET_FIT_PREFIX);
       expect(fittedDigest(secondFit)).toBe(boardDigest(board));
+    });
+  });
+
+  describe('degenerate batch-budget fits stay content-dependent (issue #9450)', () => {
+    // The digest starts at offset BATCH_BUDGET_FIT_PREFIX.length + 1 +
+    // FULL_OUTPUT_DIGEST_LABEL.length (= 43), so pre-fix any per-slot
+    // allocation <= 43 sliced only constant header text: every oversized
+    // result fingerprinted identically regardless of content, and repeated
+    // polls of a CHANGING board false-halted on
+    // consecutive_identical_tool_calls under a small configured
+    // toolOutputBatchBudget.
+    const oversizedEntry = (callId: string, board: string) =>
+      entry(callId, [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'task_list',
+            response: { output: `${board}\n${'board line\n'.repeat(300)}` },
+          },
+        },
+      ]);
+
+    const fittedOutput = (entries: ToolResponseBudgetEntry[]) =>
+      entries[0].responseParts[0].functionResponse?.response?.['output'];
+
+    it('fingerprints distinct boards distinctly at allocations below the digest offset', () => {
+      // Single oversized slot: the whole budget is the slot's allocation.
+      const boardA = '#1 [in_progress] @peer-a — ship it';
+      const boardB = '#2 [completed] @peer-b — totally different board';
+
+      for (const budget of [21, 40, 43]) {
+        const fitA = fittedOutput(
+          enforceFunctionResponseBudget([oversizedEntry('a', boardA)], budget),
+        ) as string;
+        const fitB = fittedOutput(
+          enforceFunctionResponseBudget([oversizedEntry('b', boardB)], budget),
+        ) as string;
+        expect(fitA.length).toBeLessThanOrEqual(budget);
+        expect(fitB.length).toBeLessThanOrEqual(budget);
+        // Content-dependent from the first char past the digest label.
+        expect(fitA.startsWith(FULL_OUTPUT_DIGEST_LABEL)).toBe(true);
+        expect(fitA).not.toBe(fitB);
+      }
+    });
+
+    it('keeps the mid band (full digest, sliced header) content-dependent', () => {
+      // With an artifact note the header outruns the minimal prefix + digest
+      // line (107 chars), so allocations in [107, header.length) slice the
+      // header with the FULL digest present — that band must stay
+      // content-dependent too.
+      const midBandEntry = (callId: string, board: string) =>
+        entry(
+          callId,
+          [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'task_list',
+                response: { output: `${board}\n${'board line\n'.repeat(300)}` },
+              },
+            },
+          ],
+          [`/tmp/tool-results/${callId}.txt`],
+        );
+      // Same callId for both so the per-call artifact path is identical and
+      // only the board content (via the digest) can distinguish the fits.
+      const fitA = fittedOutput(
+        enforceFunctionResponseBudget(
+          [midBandEntry('a', '#1 [in_progress] @peer-a')],
+          130,
+        ),
+      ) as string;
+      const fitB = fittedOutput(
+        enforceFunctionResponseBudget(
+          [midBandEntry('a', '#2 [completed] @peer-b')],
+          130,
+        ),
+      ) as string;
+      expect(fitA.startsWith(BATCH_BUDGET_FIT_PREFIX)).toBe(true);
+      expect(fitA).toContain(FULL_OUTPUT_DIGEST_LABEL);
+      expect(fitA).not.toBe(fitB);
+    });
+
+    it('keeps identical content fingerprint-stable under a degenerate fit', () => {
+      const board = '#3 [in_progress] @peer-c — frozen board';
+      const fitOne = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('a', board)], 40),
+      ) as string;
+      const fitTwo = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('b', board)], 40),
+      ) as string;
+      expect(fitOne).toBe(fitTwo);
+    });
+
+    it('does not collapse many distinct boards into one constant text', () => {
+      // Reviewer witness shape: budget 500 over 12 oversized slots gives
+      // per-slot allocations of ~41 chars — below the digest offset — which
+      // pre-fix collapsed every board to the same constant slice.
+      const entries = Array.from({ length: 12 }, (_, index) =>
+        oversizedEntry(`call-${index}`, `board variant ${index} — distinct`),
+      );
+      const fitted = enforceFunctionResponseBudget(entries, 500).map(
+        (fittedEntry) =>
+          fittedEntry.responseParts[0].functionResponse?.response?.[
+            'output'
+          ] as string,
+      );
+      expect(new Set(fitted).size).toBe(12);
     });
   });
 });

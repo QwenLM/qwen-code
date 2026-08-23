@@ -231,8 +231,9 @@ function fitText(
   // embeds a per-call artifact path, so hashing the fitted output would
   // fingerprint every call uniquely and silently disable the result-aware
   // loop guards for exactly these oversized batch-budget results (issue
-  // #9450). The digest sits right after the constant prefix so it survives
-  // even when a tiny allocation slices the header.
+  // #9450). The digest sits right after the constant prefix; when even the
+  // header does not fit the allocation, the degenerate slice below takes
+  // the digest line itself so the fitted text stays content-dependent.
   //
   // Idempotence across nesting: the scheduler persists oversized results
   // BEFORE the batch budget runs, so the text fitted here can itself be an
@@ -258,11 +259,27 @@ function fitText(
             .map((file) => `- ${file}`)
             .join('\n')}`
       : undefined;
+  const minimalHeader = `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}`;
   const header = artifactNote
-    ? `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}\n${artifactNote}`
-    : `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}`;
+    ? `${minimalHeader}\n${artifactNote}`
+    : minimalHeader;
   if (header.length >= maxChars) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    // Degenerate allocation: the header does not fit whole. As long as the
+    // allocation holds prefix + digest line, slicing the header keeps the
+    // full digest (content-dependent). Below that, slicing the header would
+    // return only constant text — the prefix plus a fragment of the digest
+    // LABEL, whose digest starts at offset
+    // BATCH_BUDGET_FIT_PREFIX.length + 1 + FULL_OUTPUT_DIGEST_LABEL.length —
+    // so every oversized result would fingerprint identically regardless of
+    // content and a CHANGING board would false-halt on
+    // consecutive_identical_tool_calls under a small configured
+    // toolOutputBatchBudget (issue #9450). Slice the digest line itself
+    // instead so any allocation reaching past the label carries
+    // content-dependent digest characters.
+    return sliceStartWithoutBrokenSurrogate(
+      maxChars >= minimalHeader.length ? header : digestLine,
+      maxChars,
+    );
   }
 
   const separator = '\n\n';
