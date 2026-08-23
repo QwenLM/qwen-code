@@ -7096,11 +7096,23 @@ export class Config {
     this.workflowsEnabled = enabled;
   }
 
+  /**
+   * Pure gate check — MUST stay a read. This method is reached
+   * unconditionally by every revision read path
+   * (`getSessionWorkflowPlanRevision`, `isSessionWorkflowTodoContextActive`),
+   * including through `Object.create(base)` Config wrappers. An assignment
+   * here would land as an OWN property on such a wrapper and permanently
+   * shadow the session-global base value (a gate-off read in one subagent
+   * would then hide revisions the base approves later). Invalidation
+   * belongs in the explicit writers: `setSessionWorkflowEnabledProvider`
+   * below clears on an explicit gate change, and the read paths already
+   * gate on this method, so an off gate hides the revision without
+   * destroying it.
+   */
   isSessionWorkflowEnabled(): boolean {
-    const enabled =
-      this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled;
-    if (!enabled) this.sessionWorkflowPlanRevision = undefined;
-    return enabled;
+    return (
+      this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled
+    );
   }
 
   setSessionWorkflowEnabledProvider(provider?: () => boolean): void {
