@@ -42,6 +42,8 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -84,6 +86,13 @@ export interface RevertHunkReport {
    * runs first, so a refused revert never half-applies.
    */
   conflict?: string;
+  /**
+   * True when `applied` is false because the HARNESS failed (git unrunnable
+   * in --tree, killed by the timeout), not because the hunk was refused.
+   * The handler maps it to exit 2 (repair the invocation), never exit 1 (a
+   * real refusal a calling script records as a coupling fact).
+   */
+  harnessFailure?: boolean;
   /** What happened, one line, rendered to the verifier verbatim. */
   note: string;
 }
@@ -194,6 +203,35 @@ export function extractHunkPatch(
   return `${[...header, ...body].join('\n')}\n`;
 }
 
+/**
+ * Whether this section is a rename/copy whose prefixes we cannot rewrite.
+ *
+ * The rewrite above turns the old-side tokens into the new path with a
+ * standard `a/` prefix, which only works when the tokens carry `a/`/`b/` (or
+ * quoted). A diff captured with `--src-prefix`/`--dst-prefix` or `--no-prefix`
+ * has the SAME two-path shape but unstrippable tokens, so the rename metadata
+ * would be gone and the rewrite skipped — `git apply -R` would then move the
+ * file back while the report claims a content revert. The pipeline's own
+ * captures always use default prefixes; a non-standard one arrives only
+ * through arbitrary `--diff`, and refusing it is safe where mutating is not.
+ */
+export function renameSectionHasUnsupportedPrefix(
+  diffText: string,
+  file: DiffFile,
+): boolean {
+  if (file.renameFrom === undefined) return false;
+  const lines = diffText.split('\n');
+  const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  const tok = (pfx: string) =>
+    header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '';
+  const standard = (t: string) =>
+    t === '/dev/null' ||
+    t.startsWith('a/') ||
+    t.startsWith('b/') ||
+    t.startsWith('"');
+  return !standard(tok('--- ')) || !standard(tok('+++ '));
+}
+
 /** Split `<path>:<n>` from the RIGHT — a path may itself contain a colon. */
 export function parseHunkId(id: string): { path: string; n: number } | null {
   const i = id.lastIndexOf(':');
@@ -278,6 +316,13 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const entry = listHunks(diffText).find(
     (h) => h.path === sel.path && h.n === sel.n,
   )!;
+  if (renameSectionHasUnsupportedPrefix(diffText, file)) {
+    return {
+      applied: false,
+      hunk: entry,
+      note: `hunk ${args.hunk} sits in a rename section whose diff prefixes are not the standard a/ b/ — a reverse-apply would move the file rather than revert its content. Recapture the diff with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix); nothing was changed.`,
+    };
+  }
   const patch = extractHunkPatch(diffText, file, sel.n);
 
   const tree = resolve(args.tree);
@@ -287,9 +332,12 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // nothing else can have claimed.
   const dir = mkdtempSync(join(tmpdir(), 'qwen-review-revert-hunk-'));
   const patchPath = join(dir, 'hunk.patch');
-  writeFileSync(patchPath, patch, 'latin1');
   const exec = args.exec ?? gitApply;
   try {
+    // Inside the try: a patch-write failure (a full or quota-exhausted
+    // tmpdir mid-review) must not leak the fresh 0700 directory the finally
+    // sweeps.
+    writeFileSync(patchPath, patch, 'latin1');
     // `--check` first: a refused revert must leave the tree byte-identical,
     // or the verifier's next probe measures a half-mutation nothing reports.
     const check = exec(tree, ['apply', '-R', '--check', patchPath]);
@@ -297,6 +345,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       return {
         applied: false,
         hunk: entry,
+        harnessFailure: true,
         note: `could not run git in ${tree}: ${check.error ?? `killed by ${check.signal}`} — a harness failure, not a fact about the hunk. Check --tree and that git is on PATH; the tree is unchanged (nothing ran).`,
       };
     }
@@ -317,6 +366,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       return {
         applied: false,
         hunk: entry,
+        harnessFailure: true,
         note: `git apply was ${apply.error !== undefined ? `not runnable (${apply.error})` : `killed by ${apply.signal}`} after --check passed — a harness failure, not a fact about the hunk, and the tree may be PARTIALLY modified: reset the scratch tree before the next probe.`,
       };
     }
@@ -381,7 +431,19 @@ export const revertHunkCommand: CommandModule = {
       // refused-revert class, and a calling script would record a coupling
       // fact for a typo.
       const diffPath = resolve(String(argv['diff']));
-      if (!existsSync(diffPath) || !statSync(diffPath).isFile()) {
+      let diffReadable = existsSync(diffPath) && statSync(diffPath).isFile();
+      if (diffReadable) {
+        // isFile() does not imply readable — a mode-000 file (or one owned by
+        // another pipeline stage) exists and is a file yet throws EACCES on
+        // read. Probe R_OK so that surfaces as exit 2 here, not exit 1 from
+        // deep in the read.
+        try {
+          accessSync(diffPath, constants.R_OK);
+        } catch {
+          diffReadable = false;
+        }
+      }
+      if (!diffReadable) {
         writeStderrLineSafe(
           `revert-hunk: --diff ${JSON.stringify(String(argv['diff']))} is not a readable file — check the path.`,
         );
@@ -406,9 +468,12 @@ export const revertHunkCommand: CommandModule = {
           return;
         }
         const r = runRevertHunk({ diff: String(argv['diff']), tree, hunk });
-        // Same convention as `drive`'s not-observed exit: the JSON is the
-        // report, the code is the branch a calling script takes.
-        if (!r.applied) process.exitCode = 1;
+        // The JSON is the report; the exit code is the branch a calling
+        // script takes. A harness failure (git unrunnable, killed) is the
+        // repairable class — exit 2, like a mistyped --diff — never exit 1,
+        // which a script records as a real refusal / coupling fact.
+        if (r.harnessFailure) process.exitCode = 2;
+        else if (!r.applied) process.exitCode = 1;
         report = r;
       }
       const text = JSON.stringify(report, null, 2);

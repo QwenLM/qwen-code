@@ -1605,6 +1605,21 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     expect(findings[0].confidence).toBe('high');
   });
 
+  it('does NOT exempt a Critical re-raised through the measurement note’s own door', () => {
+    // The note tells the reader to "file it at Critical again"; a finding
+    // that does so still carries `heldByMeasurement`, and it must face the
+    // witness rule like any unexecuted Critical — the exemption is scoped to
+    // Suggestion precisely so this door does not become a witness bypass.
+    const reraised = {
+      ...critical,
+      severity: 'Critical' as const,
+      heldByMeasurement: { file: 'packages/x/foo.test.ts' },
+    };
+    const { findings, unwitnessed } = holdUnwitnessedFindings([reraised]);
+    expect(unwitnessed).toEqual(['w1']);
+    expect(findings[0].confidence).toBe('low');
+  });
+
   it('judges Suggestions on the same terms — they post to the PR too', () => {
     // The rule originally targeted Criticals only; an unexecuted claim rides
     // onto the author's screen through the Suggestion door on exactly the

@@ -624,14 +624,17 @@ export function holdUnwitnessedFindings(findings: readonly Finding[]): {
       (f.severity !== 'Critical' && f.severity !== 'Suggestion') ||
       f.confidence !== 'high' ||
       f.source !== 'review' ||
-      // A measurement-held finding is exempt, deliberately: test-delta just
-      // demoted it Critical→Suggestion on the promise that it STAYS in front
-      // of a human as a posted Suggestion whose note says how to re-raise
-      // it. Judging that Suggestion here would compose the two holds into a
-      // silent drop to terminal-only — and it is not the unexecuted claim
-      // this rule exists to stop, because the measurement that moved it IS a
-      // run's output, riding the finding as `heldByMeasurement`.
-      f.heldByMeasurement !== undefined ||
+      // A measurement-held SUGGESTION is exempt, deliberately: test-delta
+      // just demoted it Critical→Suggestion on the promise that it STAYS in
+      // front of a human as a posted Suggestion whose note says how to
+      // re-raise it. Judging it here would compose the two holds into a
+      // silent drop to terminal-only, and it is not the unexecuted claim
+      // this rule exists to stop — the measurement that moved it IS a run's
+      // output, riding as `heldByMeasurement`. Scoped to Suggestion on
+      // purpose: a finding re-raised to Critical through the note's own
+      // "file it at Critical again" door still carries the marker, and it
+      // must face the witness rule like any other unexecuted Critical.
+      (f.heldByMeasurement !== undefined && f.severity === 'Suggestion') ||
       (f.witness !== undefined && !isEmptyNotRunWitness(f.witness))
     ) {
       return f;

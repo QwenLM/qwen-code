@@ -502,17 +502,46 @@ describe('runRevertHunk', () => {
     expect(calls).toHaveLength(2);
     expect(r.applied).toBe(false);
     expect(r.note).toContain('PARTIALLY modified');
+    expect(r.conflict).toBeUndefined();
+    expect(r.harnessFailure).toBe(true);
   });
 
-  it('cleans its patch staging directory up, applied or refused', () => {
+  it('cleans its patch staging directory up on every outcome', () => {
     const countStaging = () =>
       readdirSync(tmpdir()).filter((d) =>
         d.startsWith('qwen-review-revert-hunk-'),
       ).length;
     const before = countStaging();
     const { dir, diffPath } = twoHunkFixture();
-    runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' });
+    runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' }); // applied
     runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' }); // refused
+    // The three harness-failure returns inside the try are the ones a
+    // per-branch cleanup would miss; the unconditional finally must catch
+    // them too.
+    runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:2',
+      exec: () => ({ status: null, stderr: '', error: 'ENOENT' }),
+    });
+    runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:2',
+      exec: (_c, a) =>
+        a.includes('--check')
+          ? { status: 0, stderr: '' }
+          : { status: null, stderr: '', signal: 'SIGKILL' },
+    });
+    runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:2',
+      exec: (_c, a) =>
+        a.includes('--check')
+          ? { status: 0, stderr: '' }
+          : { status: 1, stderr: 'patch does not apply' },
+    });
     expect(countStaging()).toBe(before);
   });
 
@@ -620,6 +649,18 @@ describe('the command wiring', () => {
       .mock.calls.at(-1)?.[0] as string;
     expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual(JSON.parse(printed));
 
+    // A not-yet-existing parent directory is created for --out — deleting
+    // the mkdir would ship green against an already-existing parent.
+    const nested = twoHunkFixture();
+    const nestedOut = join(tempDir('rh-out2-'), 'deep', 'nest', 'report.json');
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: nested.diffPath,
+      hunk: 'f.txt:1',
+      tree: nested.dir,
+      out: nestedOut,
+    });
+    expect(existsSync(nestedOut)).toBe(true);
+
     // A directory --out must be classified before the reverse-apply runs —
     // discovering EISDIR after it would leave a mutated tree behind a
     // failure exit nothing distinguishes.
@@ -634,6 +675,11 @@ describe('the command wiring', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(readFileSync(join(fresh.dir, 'f.txt'), 'utf8')).toBe(before);
+    // The outer catch's diagnostic is not silent — deleting the
+    // writeStderrLineSafe there would exit 2 with nothing said.
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('revert-hunk:'),
+    );
     process.exitCode = 0;
   });
 

@@ -192,6 +192,24 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
     );
   }
+  // An EMPTY or whitespace-only path flag is not the cwd: `resolve('')` is
+  // `process.cwd()`, so an unset `$BASE_TREE` would silently drive an arm in
+  // the caller's working directory — in the review pipeline, the very
+  // worktree concurrent agents are reading. demandOption accepts `''`, so
+  // this is caught here.
+  for (const [flag, p] of [
+    ['--arm-a', args.armA],
+    ['--arm-b', args.armB],
+    ...(args.sharedCwd !== undefined
+      ? ([['--shared-cwd', args.sharedCwd]] as const)
+      : []),
+  ] as const) {
+    if (p.trim() === '') {
+      return fail(
+        `${flag} is empty — an empty path resolves to the current working directory, which is never a tree to drive. Nothing was started.`,
+      );
+    }
+  }
   // Directories, not merely existing paths: `tmux new-session -c <a file>`
   // succeeds with a silent cwd fallback to $HOME, and the arm then reports
   // `completed` for a script that never ran in its tree — an A/B verdict
@@ -438,17 +456,22 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         return bail('not-ready', null);
       }
 
-      // Check-then-use closed: the pre-flight pinned each tree's realpath,
-      // and the pins are re-checked HERE — after arm a's whole drive window,
-      // during which the PR's own code ran. A root that vanished (tmux -c
-      // would fall back to $HOME) or now resolves elsewhere (a symlink swap)
-      // is a harness fact, and the arm must not be attributed to a tree it
-      // never ran in.
       const expectedRoot = arm === 'a' ? realA : realB;
-      if (realpathOf(root) !== expectedRoot) {
-        note = `arm ${arm}'s root ${JSON.stringify(root)} no longer resolves to the directory validated at start (${expectedRoot ?? 'gone'}) — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
-        return bail('unavailable', null);
-      }
+      // Re-check the pinned realpath right before EACH consumer, not once at
+      // the top: the shared-upstream startup and its readiness poll below
+      // are an up-to-two-minute window in which the arm's own (untrusted)
+      // shared daemon could delete the root — tmux -c then silently falls
+      // back to $HOME — or swap it for a symlink. `checkRoot` is called
+      // again immediately before `start(arm-…)`.
+      const checkRoot = (): AbArmReport | null => {
+        if (realpathOf(root) !== expectedRoot) {
+          note = `arm ${arm}'s root ${JSON.stringify(root)} no longer resolves to the directory validated at start (${expectedRoot ?? 'gone'}) — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
+          return bail('unavailable', null);
+        }
+        return null;
+      };
+      const rootGoneBeforeShared = checkRoot();
+      if (rootGoneBeforeShared) return rootGoneBeforeShared;
 
       // Shared upstream: one fresh instance per arm unless --shared-once, in
       // which case only arm `a` starts it and arm `b` inherits it running.
@@ -507,6 +530,8 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         }
       }
 
+      const rootGoneBeforeArm = checkRoot();
+      if (rootGoneBeforeArm) return rootGoneBeforeArm;
       const a = start(`arm-${arm}`, root, envPrefix(arm, root), args.script);
       if (a.error) {
         note = `tmux could not start arm ${arm}: ${a.error} — an environment gap, not a finding`;
@@ -521,8 +546,23 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         output = readIfThere(a.logPath);
         const rcText = readIfThere(a.rcPath);
         exitCode = rcText === '' ? null : sentinelExitCode(rcText);
-        if (exitCode !== null) {
-          // Re-read the log now that the sentinel is there: the read above
+        // Completion needs BOTH the sentinel AND the session gone. The
+        // sentinel alone is forgeable: the arm's own (untrusted) code, or a
+        // process that escaped its teardown, can plant `arm-<x>.rc` while the
+        // real script is still running — the same one-directional-signal trap
+        // the shared-liveness check closes. When the wrapper truly exits, its
+        // single-window session ends, so requiring `has-session` to fail
+        // rejects a plant made mid-drive and costs at most one extra poll on
+        // an honest finish. (It does not make the harness tamper-PROOF: a
+        // same-uid attacker reaches the tmux socket and could end the session
+        // too. Driving untrusted code cannot be fully isolated from that code
+        // at one uid — the residual exposure the whole review shares.)
+        if (
+          exitCode !== null &&
+          tmux('has-session', '-t', `arm-${arm}`).status !== 0
+        ) {
+          // Re-read the log now that the sentinel is there and the session
+          // has ended: the read above
           // happened BEFORE it, and the wrapper writes the sentinel from an
           // EXIT trap strictly after the script's last log write, so a final
           // write landing between the two reads is in the file but not in
@@ -700,7 +740,7 @@ export const abDriveCommand: CommandModule = {
       // Classify an unusable --out BEFORE the drives: both arms can take
       // minutes, and an EISDIR discovered after them throws the whole run's
       // evidence away.
-      if (a.out) assertWritableOutPath(a.out);
+      if (a.out !== undefined) assertWritableOutPath(a.out);
       const report = runAbDrive({
         ...a,
         armA: a['arm-a'],
@@ -723,10 +763,12 @@ export const abDriveCommand: CommandModule = {
       if (!report.observed) process.exitCode = 1;
     } catch (err) {
       writeStderrLine((err as Error).message);
-      // TypeError is the repairable-invocation class (`assertWritableOutPath`
-      // and the numeric coercions throw it); exit 2 matches revert-hunk and
-      // the other five callers of the same helper, so a calling script can
-      // tell "fix the flags" from "a run failed".
+      // TypeError is the repairable-invocation class — `assertWritableOutPath`
+      // is the one path here that throws it (the numeric budgets are
+      // validated inside `runAbDrive` and come back as a fail report, exit
+      // 1). Exit 2 matches revert-hunk and the other five callers of the
+      // helper, so a calling script can tell "fix the flags" from "a run
+      // failed".
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },

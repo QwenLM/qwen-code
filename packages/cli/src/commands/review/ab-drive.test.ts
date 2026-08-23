@@ -24,6 +24,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -103,6 +104,10 @@ function harness(opts: {
 }) {
   const log: string[][] = [];
   const bashCmds: string[] = [];
+  // Arm sessions that wrote a sentinel are "ended": a real wrapper's single
+  // window closes when its shell exits, so `has-session` fails afterwards —
+  // the second half of the completion gate. A hung arm keeps its session.
+  const endedSessions = new Set<string>();
   const sharedDies = (name: string) =>
     opts.deadShared === true ||
     (Array.isArray(opts.deadShared) && opts.deadShared.includes(name));
@@ -122,7 +127,9 @@ function harness(opts: {
       return ok();
     }
     if (cmd === 'tmux' && args[2] === 'has-session') {
-      return (opts.vanishedSessions ?? []).includes(args[4]) ? fail() : ok();
+      const target = args[4];
+      if ((opts.vanishedSessions ?? []).includes(target)) return fail();
+      return endedSessions.has(target) ? fail() : ok();
     }
     if (cmd === 'tmux' && args[2] === 'new-session') {
       const name = args[5];
@@ -140,6 +147,9 @@ function harness(opts: {
         if (write) {
           const rc = opts.rcBySession?.[name] ?? 0;
           writeFileSync(rcPath, `${DRIVE_SENTINEL} rc=${rc}\n`);
+          // A session that produced its sentinel has ended — the completion
+          // gate reads `has-session` failing as the second half of "done".
+          if (name.startsWith('arm-')) endedSessions.add(name);
         }
         if (name.startsWith('arm-')) {
           writeFileSync(
@@ -241,6 +251,19 @@ describe('runAbDrive, harnessed', () => {
     expect(r.note).toContain('same directory');
   });
 
+  it('refuses two DIFFERENT paths that resolve to one tree via symlink', () => {
+    // The guard uses realpathSync precisely so "two symlinks to one tree" is
+    // caught; a string-equality implementation would pass this.
+    const real = tempDir('ab-realdir-');
+    const linkParent = tempDir('ab-link-');
+    const link = join(linkParent, 'alias');
+    symlinkSync(real, link);
+    const h = harness({ server: 't' });
+    const r = runAbDrive(baseArgs({ armA: real, armB: link, exec: h.exec }));
+    expect(r.observed).toBe(false);
+    expect(r.note).toContain('same directory');
+  });
+
   it('re-validates a tree at its use site — a root swapped mid-run is a harness fact', () => {
     // The pre-flight runs before arm a's whole drive window, and the driven
     // code is the PR's own: a root removed (tmux -c falls back to $HOME) or
@@ -262,6 +285,24 @@ describe('runAbDrive, harnessed', () => {
     expect(h.events()).not.toContain('new:arm-b');
   });
 
+  it('re-validates --shared-cwd at its use site too', () => {
+    const sharedCwd = tempDir('ab-shcwd2-');
+    const args = baseArgs({ shared: 'run-daemon', sharedCwd });
+    const h = harness({
+      server: args.server,
+      onSession: (name) => {
+        // Delete the shared cwd after the keeper starts, before shared-a
+        // consumes it.
+        if (name === 'hold')
+          rmSync(sharedCwd, { recursive: true, force: true });
+      },
+    });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.a?.outcome).toBe('unavailable');
+    expect(r.note).toContain('--shared-cwd');
+    expect(r.note).toContain('no longer resolves');
+  });
+
   it('reclaims a stale server FIRST — and reports that it did', () => {
     // A prior run SIGKILLed before its `finally` leaves a server owning the
     // fixed session names; without the leading reclaim, this run's
@@ -276,6 +317,19 @@ describe('runAbDrive, harnessed', () => {
     expect(r.killedStale).toBe(true);
   });
 
+  it('reports killedStale=false when there was no stale server to reclaim', () => {
+    const args = baseArgs({});
+    // kill-server answers non-zero (nothing to kill) — the normal case.
+    const base = harness({ server: args.server });
+    const exec = (cmd: string, a: string[]): ExecResult => {
+      if (cmd === 'tmux' && a[2] === 'kill-server')
+        return { status: 1, stdout: '', stderr: 'no server' };
+      return base.exec(cmd, a);
+    };
+    const r = runAbDrive({ ...args, exec });
+    expect(r.killedStale).toBe(false);
+  });
+
   it('reports the environment gap when the keeper session cannot start', () => {
     const args = baseArgs({});
     const h = harness({ server: args.server, failSessions: ['hold'] });
@@ -287,6 +341,10 @@ describe('runAbDrive, harnessed', () => {
 
   it('drives both arms with one script and pairs the captures', () => {
     const args = baseArgs({});
+    const runDirs = () =>
+      readdirSync(tmpdir()).filter((d) => d.startsWith('qwen-review-ab-drive-'))
+        .length;
+    const before = runDirs();
     const h = harness({ server: args.server });
     const r = runAbDrive({ ...args, exec: h.exec });
     expect(r.observed).toBe(true);
@@ -303,6 +361,8 @@ describe('runAbDrive, harnessed', () => {
     // Cleanup is unconditional and last — a leaked server is the next run's
     // wrong observation.
     expect(h.log.at(-1)).toEqual(['tmux', '-L', args.server, 'kill-server']);
+    // The mkdtemp'd run dir is swept on the success path too.
+    expect(runDirs()).toBe(before);
   });
 
   it('carries each arm script’s own exit code — never a fabricated zero', () => {
@@ -448,6 +508,9 @@ describe('runAbDrive, harnessed', () => {
     expect(r1.a?.outcome).toBe('unavailable');
     expect(r1.b?.outcome).toBe('completed');
     expect(r1.observed).toBe(false);
+    // Arm b still gets its OWN fresh instance — a mutant that skips shared-b
+    // after shared-a's failure would drive arm b against no upstream.
+    expect(h1.events()).toContain('new:shared-b');
 
     const once = baseArgs({ shared: 'run-daemon', sharedOnce: true });
     const h2 = harness({ server: once.server, failSessions: ['shared-a'] });
@@ -772,9 +835,22 @@ describe.skipIf(!hasTmux || process.platform === 'win32')(
       writeFileSync(filePath, '{}');
       process.exitCode = 0;
       (abDriveCommand.handler as (a: unknown) => void)(
-        handlerArgs({ 'arm-a': filePath, 'arm-b': tempDir('ab-wire-g-') }),
+        handlerArgs({
+          'arm-a': tempDir('ab-wire-na-a-'),
+          'arm-b': tempDir('ab-wire-na-b-'),
+          shared: 'true',
+        }),
       );
+      // A not-observed run exits 1 AND still prints its report — the report
+      // is the repair pointer, and suppressing it on this path strands the
+      // caller.
       expect(process.exitCode).toBe(1);
+      const naPrinted = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.at(-1)?.[0] as string;
+      expect((JSON.parse(naPrinted) as { observed: boolean }).observed).toBe(
+        false,
+      );
 
       // The repairable-invocation class, matching every sibling caller of
       // assertWritableOutPath — and it must fire BEFORE the arms drive.
