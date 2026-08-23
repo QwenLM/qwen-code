@@ -12321,23 +12321,22 @@ class QwenAgent implements Agent {
           (merged as { experimental?: { sessionWorkflow?: unknown } })
             .experimental?.sessionWorkflow === true;
         const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
-        // Diff against the live override too: the UI write path
-        // (workspaceSessionWorkflow) pins the override without updating
-        // `this.settings`, so a merged↔merged diff alone misses a disk change
-        // that contradicts a UI-pinned value — the gate would stay stuck
-        // against the file until daemon restart.
-        if (
-          reloadedSessionWorkflow !== readSessionWorkflow(oldMerged) ||
-          (this.sessionWorkflowEnabledOverride !== undefined &&
-            reloadedSessionWorkflow !== this.sessionWorkflowEnabledOverride)
-        ) {
-          // The diff above can fire against a stale `this.settings` view (the
-          // UI write path pins the override without updating it), so the
-          // no-op decision is made per live session inside the helper.
-          this.applySessionWorkflowOverrideToLiveSessions(
-            reloadedSessionWorkflow,
-          );
-        }
+        // Apply the reloaded gate to live sessions unconditionally. A
+        // merged↔merged diff against `oldMerged` is unreliable here:
+        // `this.settings` is a replaceable "latest loaded" cache that many
+        // handlers swap for a fresh loadSettings instance, and after such a
+        // swap the diff compares two fresh views of the same disk state and
+        // misses a flip the live sessions (which still hold their own,
+        // now-stale LoadedSettings) never saw. The helper makes the no-op
+        // decision per live session — comparing the reloaded disk value
+        // against each session's effective gate — so calling it on every
+        // reload is idempotent, re-pins only the sessions that actually
+        // change, and keeps the daemon-held override equal to the disk
+        // truth (which also covers a disk state that contradicts a
+        // UI-pinned override).
+        this.applySessionWorkflowOverrideToLiveSessions(
+          reloadedSessionWorkflow,
+        );
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
