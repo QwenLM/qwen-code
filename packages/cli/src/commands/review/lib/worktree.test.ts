@@ -32,7 +32,6 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
-  containedUnderCheckout,
   discardWorktree,
   exposeDependencies,
   sanitizedGitEnv,
@@ -376,7 +375,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(admin, 'gitdir'), `${join(alias, '.git')}\n`);
 
     writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
-    const got = worktreeResidue(tree);
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
 
     expect(got.unmeasured).toBeUndefined();
     expect(got.paths).toEqual(['__probe__.test.ts']);
@@ -408,10 +407,10 @@ describe('worktreeResidue', () => {
       const got = worktreeResidue(tree);
 
       expect(got.paths).toEqual([]);
-      // Refused before the symlink walk even runs: the territory's
-      // repository answers for a path it does not contain. The link is the
-      // mechanism; the boundary mismatch is the proof.
-      expect(got.unmeasured).toContain('does not contain it');
+      // The walk refuses it: the territory's common dir is no ancestor of
+      // the spelled path, so the walk lstats every component up to the
+      // root and finds the planted link on the way.
+      expect(got.unmeasured).toContain('resolves through a symlink');
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -446,44 +445,16 @@ describe('worktreeResidue', () => {
     }
   });
 
-  it('canonicalises the bound before the containment prefix test', () => {
-    // The gate's two sides arrive in different spellings — on Windows git
-    // renders `--git-common-dir` with forward slashes while the caller's
-    // resolved path carries backslashes, so no literal prefix match ever
-    // succeeds across that and the fallback must resolve the bound as well
-    // as the tree path. A POSIX lane cannot spell a separator mismatch —
-    // git's discovery chdir canonicalises there too — so a link-carried
-    // bound stands in: a spelling the resolution must translate before the
-    // prefix test can see through it, the same call's work on both hosts.
-    const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-bound-')));
-    try {
-      const checkout = join(home, 'repo');
-      const wt = join(checkout, '.qwen', 'tmp', 'review-wt');
-      mkdirSync(wt, { recursive: true });
-      const linked = join(home, 'alias');
-      symlinkSync(checkout, linked);
-
-      expect(containedUnderCheckout(wt, linked)).toBe(true);
-      // The literal test still answers first when the spellings agree.
-      expect(containedUnderCheckout(wt, checkout)).toBe(true);
-      // A bound from elsewhere stays refused in both spellings — including
-      // one nothing can resolve: the refusal fails closed.
-      const elsewhere = join(home, 'elsewhere');
-      mkdirSync(elsewhere);
-      expect(containedUnderCheckout(wt, elsewhere)).toBe(false);
-      expect(containedUnderCheckout(wt, join(home, 'absent'))).toBe(false);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
   it('says UNMEASURED when an INTERMEDIATE ancestor is a symlink the earlier gates cannot see', () => {
-    // The walk's own witness: both sibling shapes refuse at earlier gates —
-    // the boundary check and the leaf lstat — so deleting the walk alone
-    // shipped green (measured). This shape passes every gate above it: the
-    // leaf is a real directory, the self-equality holds because both sides
-    // resolve through the same link, and the moved tree's gitfile still names
-    // the REAL repo's admin entry, so the common dir is the repo and the
+    // The walk's own witness: the sibling redirect shape refuses at the
+    // walk itself (its common dir is no ancestor, so the walk climbs to
+    // the root and meets the link), the leaf-link shape refuses at the
+    // leaf lstat, and deleting the walk turns the redirect test red —
+    // before the containment refusal was removed it shipped green
+    // (measured). This shape passes every gate above it: the leaf is a
+    // real directory, the self-equality holds because both sides resolve
+    // through the same link, and the moved tree's gitfile still names the
+    // REAL repo's admin entry, so the common dir is the repo and the
     // tree's literal path runs under it. Only the walk can refuse it.
     expect(worktreeResidue(tree, 12, git('rev-parse', 'HEAD'))).toEqual({
       paths: [],
@@ -687,7 +658,7 @@ describe('worktreeResidue', () => {
     const nested = join(repo, 'nested', 'wt');
     git('worktree', 'add', '--detach', '-q', nested, 'HEAD');
     writeFileSync(join(nested, '__probe__.test.ts'), 'x');
-    const healthy = worktreeResidue(nested);
+    const healthy = worktreeResidue(nested, 12, git('rev-parse', 'HEAD'));
     expect(healthy.unmeasured).toBeUndefined();
     expect(healthy.paths).toEqual(['__probe__.test.ts']);
   });
@@ -725,7 +696,7 @@ describe('worktreeResidue', () => {
     // The blindness this closes: `status` exits 0 with zero bytes.
     expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
 
-    const got = worktreeResidue(tree);
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
     expect(got.paths).toEqual(['__probe__.test.ts']);
     expect(got.total).toBe(1);
     expect(got.unmeasured).toBeUndefined();
@@ -760,7 +731,7 @@ describe('worktreeResidue', () => {
     // ...and one real leftover standing in the middle of all of it.
     writeFileSync(join(tree, '__probe__.test.ts'), 'x');
 
-    const got = worktreeResidue(tree);
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
 
     expect(got.paths).toEqual(['__probe__.test.ts']);
     expect(got.total).toBe(1);
@@ -816,7 +787,7 @@ describe('worktreeResidue', () => {
     // The blindness this closes: `status` exits 0 with zero bytes.
     expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
 
-    const got = worktreeResidue(tree);
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
 
     expect(got.paths.sort()).toEqual([
       'probe_dir/.gitignore',
@@ -860,6 +831,152 @@ describe('worktreeResidue', () => {
       expect(got.total).toBe(1);
     },
   );
+
+  it('says UNMEASURED for a sha-less caller even when a dirty decoy is present', () => {
+    // The no-record refusal cannot be conditional on the measured list being
+    // empty: a forged pair can commit the contamination and leave an
+    // unrelated untracked decoy, and the decoy alone is what the
+    // measurement then reports — the committed contamination is by
+    // construction absent from any residue list. Dirty paths still point at
+    // the tree either way, so they are kept for diagnostics; the clean
+    // certificate is what the unanchored identity forfeits.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    git('add', 'a.ts');
+    git('commit', '-qm', 'the mutant, committed');
+    writeFileSync(join(tree, 'dirty-decoy.txt'), 'decoy\n');
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual(['dirty-decoy.txt']);
+    expect(got.total).toBe(1);
+    expect(got.unmeasured).toContain('brought no record');
+  });
+
+  // Windows filesystems refuse a `\n` inside a name, so the fixture the
+  // misparse needs cannot exist there — the same convention as the other
+  // POSIX-only shapes in this suite.
+  it.skipIf(process.platform === 'win32')(
+    'measures a worktree below a directory whose name carries a newline',
+    () => {
+      // The discovery answers are three arbitrary filesystem paths, so a
+      // newline-delimited parse of one combined answer misreads any
+      // directory that carries one: extra records, misassigned
+      // gitdir/commondir, and a genuine worktree reported as not one. Each
+      // value gets its own query.
+      const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-nl-')));
+      try {
+        const nlRepo = join(home, 'dir\nwith-newline', 'repo');
+        mkdirSync(nlRepo, { recursive: true });
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: nlRepo });
+        execFileSync('git', ['config', 'user.email', 't@t.t'], {
+          cwd: nlRepo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: nlRepo });
+        writeFileSync(join(nlRepo, 'a.ts'), 'x\n');
+        execFileSync('git', ['add', '-A'], { cwd: nlRepo });
+        execFileSync('git', ['commit', '-qm', 'head'], { cwd: nlRepo });
+        const wt = join(nlRepo, '.qwen', 'tmp', 'review-wt');
+        mkdirSync(dirname(wt), { recursive: true });
+        execFileSync('git', ['worktree', 'add', '--detach', '-q', wt, 'HEAD'], {
+          cwd: nlRepo,
+        });
+        const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: wt,
+          encoding: 'utf8',
+        }).trim();
+
+        expect(worktreeResidue(wt, 12, head)).toEqual({
+          paths: [],
+          total: 0,
+        });
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('measures a review worktree under a checkout that is itself a linked worktree', () => {
+    // `fetch-pr` creates the review worktree from the process cwd with no
+    // main-checkout requirement, so the cwd may itself be a linked worktree:
+    // the review tree's common dir then belongs to the MAIN checkout, whose
+    // parent is a sibling of the tree's path, not an ancestor. The identity
+    // checks — round trip, sha pin, the symlink walk — all hold that shape,
+    // so the measurement must answer rather than refuse.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-sib-')));
+    try {
+      const main = join(home, 'main');
+      mkdirSync(main);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: main });
+      execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: main });
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: main });
+      writeFileSync(join(main, 'a.ts'), 'x\n');
+      execFileSync('git', ['add', '-A'], { cwd: main });
+      execFileSync('git', ['commit', '-qm', 'head'], { cwd: main });
+      const sib = join(home, 'sib');
+      execFileSync('git', ['worktree', 'add', '--detach', '-q', sib, 'HEAD'], {
+        cwd: main,
+      });
+      const wt = join(sib, '.qwen', 'tmp', 'review-wt');
+      mkdirSync(dirname(wt), { recursive: true });
+      execFileSync('git', ['worktree', 'add', '--detach', '-q', wt, 'HEAD'], {
+        cwd: sib,
+      });
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: wt,
+        encoding: 'utf8',
+      }).trim();
+
+      expect(worktreeResidue(wt, 12, head)).toEqual({ paths: [], total: 0 });
+      // And the measurement is the tree's: residue written there is named.
+      writeFileSync(join(wt, '__probe__.test.ts'), 'probe');
+      expect(worktreeResidue(wt, 12, head).paths).toEqual([
+        '__probe__.test.ts',
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('measures a review worktree of a --separate-git-dir checkout', () => {
+    // In the layout `git init --separate-git-dir` creates, the common dir
+    // intentionally lives outside the checkout, so its parent is no
+    // ancestor of the review tree's path — a supported repository shape the
+    // probe must measure, not refuse.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-sep-')));
+    try {
+      const checkout = join(home, 'checkout');
+      const gitDir = join(home, 'elsewhere', 'repo.git');
+      mkdirSync(join(home, 'elsewhere'));
+      execFileSync('git', [
+        'init',
+        '-q',
+        '-b',
+        'main',
+        `--separate-git-dir=${gitDir}`,
+        checkout,
+      ]);
+      execFileSync('git', ['config', 'user.email', 't@t.t'], {
+        cwd: checkout,
+      });
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: checkout });
+      writeFileSync(join(checkout, 'a.ts'), 'x\n');
+      execFileSync('git', ['add', '-A'], { cwd: checkout });
+      execFileSync('git', ['commit', '-qm', 'head'], { cwd: checkout });
+      const wt = join(checkout, '.qwen', 'tmp', 'review-wt');
+      mkdirSync(dirname(wt), { recursive: true });
+      execFileSync('git', ['worktree', 'add', '--detach', '-q', wt, 'HEAD'], {
+        cwd: checkout,
+      });
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: wt,
+        encoding: 'utf8',
+      }).trim();
+
+      expect(worktreeResidue(wt, 12, head)).toEqual({ paths: [], total: 0 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('worktreeResidue — the blind sets', () => {

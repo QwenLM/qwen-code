@@ -130,6 +130,8 @@ export function redirectedAncestor(
     // never matches and the walk climbs past the checkout into exactly the
     // system links this is not about. The symlink test above it stays lstat —
     // canonicalising THAT would resolve away the thing being looked for.
+    // Where the stop is no ancestor of the walk's path neither stop test
+    // fires and the walk lstats every component up to the filesystem root.
     const stop = resolve(stopAt);
     let stopReal = stop;
     try {
@@ -153,28 +155,6 @@ export function redirectedAncestor(
     // the caller's own absent-path handling answers that case.
     return null;
   }
-}
-
-/**
- * Whether the tree's path runs under the checkout its common dir belongs to,
- * read across the spellings its two sides carry: the caller's path as
- * spelled, the common dir as git's discovery resolved it — on Windows,
- * forward slashes against Node's backslashes. Resolving BOTH sides
- * canonicalises a linked spelling and a platform's two renderings of the
- * same directory alike; the literal test stays first so an unresolvable
- * side still answers.
- */
-export function containedUnderCheckout(
-  spelled: string,
-  bound: string,
-): boolean {
-  if (spelled.startsWith(bound + sep)) return true;
-  try {
-    return realpathSync(spelled).startsWith(realpathSync(bound) + sep);
-  } catch {
-    // Unresolvable: the literal test is the whole containment test.
-  }
-  return false;
 }
 
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
@@ -650,15 +630,16 @@ export const RESIDUE_PATH_CAP = 12;
  * planted repo from the tree it replaced: a genuine review worktree holds its
  * `.git` as a gitFILE naming its admin entry, and anything else is refused as
  * unmeasured rather than certified clean. Two further shapes fail closed on
- * the same principle. A symlink at the tree path or any ancestor below the
- * checkout redirects every check into territory holding a completely genuine
- * worktree pair with the contamination committed — all of it resolving
- * through the link and agreeing with itself — so a path reached through a
- * link is refused — the walk that finds one is bounded at the repository the
- * common dir belongs to, and an answer whose common dir is no ancestor of
- * the tree path in the caller's spelling OR its resolution is refused before
- * the walk: that is the shape a forge uses to steer the walk's own stop
- * boundary, and no healthy review worktree takes it. And a FORGED admin
+ * the same principle. A symlink at the tree path or any ancestor redirects
+ * every check into territory holding a completely genuine worktree pair
+ * with the contamination committed — all of it resolving through the link
+ * and agreeing with itself — so a path reached through a link is refused.
+ * The walk that finds one stops at the repository the common dir belongs to
+ * where that contains the tree; where it does not — a review worktree under
+ * a checkout that is itself a linked worktree, a `--separate-git-dir`
+ * clone — git puts no constraint on where a linked worktree lives, so the
+ * walk lstats every component up to the filesystem root instead, and the
+ * round trip and the sha pin below hold the layout. And a FORGED admin
  * entry — hand-written to name this tree back, which the round trip
  * cannot tell from the entry `worktree add` wrote — is refused when the
  * caller supplies the commit the tree must hold:
@@ -667,9 +648,11 @@ export const RESIDUE_PATH_CAP = 12;
  * with the caller's record is a refusal. The record arrives read from disk,
  * so it raises the plant's cost rather than making planting impossible.
  * Callers without any record still get residue NAMED — a forge answers
- * clean, never dirty, so a dirty report is conservative either way — but
- * never a clean certification: an empty measurement no record anchored is
- * refused as unmeasured.
+ * clean, never dirty, so dirty readings still point at the tree — but
+ * never a verdict: without the record nothing separates the tree from a
+ * forged pair whose index already holds the contamination as committed
+ * content, so the measurement is refused as unmeasured, the paths
+ * retained for the reader to act on.
  *
  * One blind spot the identity checks cannot close: `git status` never looks
  * INSIDE a committed gitlink (mode 160000), and untracked content there does
@@ -717,27 +700,38 @@ export function worktreeResidue(
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
   // one's. Fail closed the way a loud git failure below does.
-  const top = spawnSync(
-    'git',
-    [
-      'rev-parse',
-      '--path-format=absolute',
-      '--show-toplevel',
-      '--git-dir',
-      '--git-common-dir',
-    ],
-    { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
+  // One invocation per value: the answers are three arbitrary filesystem
+  // paths, and a POSIX name may carry a newline, so no combined
+  // newline-delimited answer can be split unambiguously — a healthy
+  // worktree below a directory whose name holds one parses to extra
+  // records, misassigns gitDir/commondir, and reports the checkout as not
+  // a worktree. Measured with exactly such a directory.
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
+      cwd,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    // Remove only git's terminal record delimiter: every other byte
+    // belongs to the path, so neither a split nor a trim is a parse here.
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
+  const toplevel = discover('--show-toplevel');
+  const gitDir = discover('--git-dir');
+  const commonDir = discover('--git-common-dir');
   let isWorktree = false;
   let anchor: string[] = [];
   try {
-    const [toplevel, gitDir, commonDir] = (top.stdout ?? '').trim().split('\n');
-    isWorktree =
-      !top.error &&
-      top.status === 0 &&
-      typeof top.stdout === 'string' &&
-      realpathSync(toplevel) === realpathSync(cwd);
-    if (isWorktree) {
+    if (
+      toplevel !== null &&
+      gitDir !== null &&
+      commonDir !== null &&
+      realpathSync(toplevel) === realpathSync(cwd)
+    ) {
+      isWorktree = true;
       // First, the leaf itself: a symlink AT the tree path redirects the
       // chdir and every check after it. lstat, not realpath — canonicalising
       // would resolve away the thing being looked for.
@@ -752,50 +746,30 @@ export function worktreeResidue(
             'points',
         };
       }
-      // The walk below is bounded at the repository the common dir belongs
-      // to — above that is the user's own layout, and `/var` is a symlink on
-      // every macOS box. A bound only bounds when the tree's path actually
-      // runs under it, and the two sides of that test carry DIFFERENT
-      // spellings: the caller's path as spelled, the common dir as git's
-      // discovery resolved it — on Windows, forward slashes against Node's
-      // backslashes. A tree reached through a link ABOVE the checkout —
-      // `/tmp` on every macOS box, a linked home — fails the literal test
-      // while remaining the healthy shape, so resolving BOTH sides decides
-      // that case, and the walk still lstats every spelled component under
-      // the bound either way. Contained in NEITHER spelling is the suspect
-      // shape — a forge whose common dir is steered so the walk's stop test
-      // fires before the planted link is ever lstat'd, a repo that merely
-      // names this path its `core.worktree` — and refusing it here is what
-      // keeps the walk from escaping its bound up into the filesystem's own
-      // links. Measured: through the steered boundary a completely genuine
-      // forge pair certified a mutant clean, and comparing the tree against
-      // the bound's own spelling refused every healthy tree on a host whose
-      // checkout carries a link above the repository — on Windows, where the
-      // separators alone never match, every tree on every run.
+      // No component of the path may be a symlink: a link planted at any
+      // ancestor redirects the chdir into territory holding a completely
+      // genuine `git init` + `worktree add` pair with the contamination
+      // COMMITTED — no forged admin entry needed, the round trip below is
+      // real git state — and every check here resolves THROUGH the link
+      // and agrees with itself: `--show-toplevel` answers the physical
+      // forge path and the self-equality above holds. Measured: the shape
+      // certified a mutant clean before the walk. The walk's stop is the
+      // checkout the common dir belongs to — above that is the user's own
+      // layout, and `/var` is a symlink on every macOS box — and where the
+      // bound IS an ancestor of the tree path it lstats every component
+      // between them and stops there. Where it is NOT, the stop test never
+      // fires and the walk lstats every component up to the filesystem
+      // root instead: git puts no constraint on where a linked worktree
+      // lives — a review worktree under a checkout that is itself a linked
+      // worktree has the MAIN checkout's common dir, a sibling of its
+      // path, and a `--separate-git-dir` clone's lives wherever the user
+      // put it — so those layouts are held by the round trip and the sha
+      // pin below, not refused here. Refusing them on the bound alone was
+      // a false positive measured against both; the walk catches a
+      // redirect in either layout, and a steered bound buys a forge
+      // nothing the pin and the no-record refusal do not already cost it.
       const spelled = resolve(cwd);
       const bound = dirname(commonDir);
-      if (!containedUnderCheckout(spelled, bound)) {
-        return {
-          paths: [],
-          total: 0,
-          unmeasured:
-            'the repository answering for this path does not contain it — ' +
-            `its common dir's parent (${bound}) is no ancestor of the ` +
-            `tree path (${spelled}), a shape no healthy review worktree ` +
-            'takes, and the commands below would measure terrain this ' +
-            'gate cannot vouch for',
-        };
-      }
-      // And no component of the path below that checkout may be a symlink
-      // either. A link planted at any ancestor below the checkout redirects
-      // the chdir into territory holding a completely genuine `git init` +
-      // `worktree add` pair with the contamination COMMITTED — no forged
-      // admin entry needed, the round trip below is real git state — and
-      // every check here resolves THROUGH the link and agrees with itself:
-      // `--show-toplevel` answers the physical forge path and the
-      // self-equality above holds. The walk is the one every sibling
-      // identity gate applies. Measured: both shapes certified a mutant
-      // clean before the walk.
       const redirected = redirectedAncestor(dirname(spelled), bound);
       if (redirected !== null) {
         return {
@@ -1172,21 +1146,25 @@ export function worktreeResidue(
         'status` cannot see edits to the tracked files they cover',
     };
   }
-  // A dirty report is conservative from any identity: a forge answers CLEAN,
-  // never dirty, so named paths point at the tree either way. A CLEAN report
-  // is the dangerous verdict, and without the caller's record nothing above
-  // distinguishes this tree from a forged pair whose index already holds the
-  // contamination as committed content — so an empty measurement no record
-  // anchored is refused rather than certified.
-  if (paths.length === 0 && expectedHeadSha === undefined) {
+  // Without the caller's record nothing above distinguishes this tree from
+  // a forged pair whose index already holds the contamination as committed
+  // content, so a measurement no record anchored is refused rather than
+  // certified — clean or dirty. The named paths are kept either way: a
+  // forge answers CLEAN, never dirty, so dirty readings still point at the
+  // tree and the reader can act on them. And the refusal cannot wait for
+  // an EMPTY measurement: a forged pair commits the contamination and
+  // leaves one unrelated untracked decoy, and the decoy alone is what the
+  // residue list then carries — the committed mutant is absent from any
+  // such list by construction.
+  if (expectedHeadSha === undefined) {
     return {
-      paths: [],
-      total: 0,
+      paths: paths.slice(0, cap),
+      total: paths.length,
       unmeasured:
         'the caller brought no record of the commit this tree must hold, ' +
-        'and a clean status measured through an unanchored identity would ' +
+        'and a status measured through an unanchored identity would ' +
         'certify whichever index the .git gitfile names — a forged pair ' +
-        'answers clean — so an empty measurement is refused rather than ' +
+        'answers clean — so the measurement is refused rather than ' +
         'certified',
     };
   }

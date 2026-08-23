@@ -1327,10 +1327,18 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
  * malformed answers nothing rather than a broken anchor: every worktree-mode
  * fetch writes the field, so both call sites fail closed on that absence,
  * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
  */
 function fetchedShaOf(report: PlanReport): string | undefined {
   const sha = report.fetchedSha;
-  return typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha)
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
     ? sha
     : undefined;
 }

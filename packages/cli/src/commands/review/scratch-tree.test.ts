@@ -701,7 +701,11 @@ describe('runScratchTree', () => {
     writeFileSync(join(worktree, 'a.ts'), 'export const x = 2;\n');
     writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
 
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.available).toBe(true);
     expect(r.sharedTreeResidue.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
     expect(r.sharedTreeResidueTotal).toBe(2);
@@ -716,7 +720,11 @@ describe('runScratchTree', () => {
     for (let i = 0; i < 13; i++) {
       writeFileSync(join(worktree, `f${i}.ts`), 'x\n');
     }
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.sharedTreeResidueTotal).toBe(13);
     expect(r.sharedTreeResidue).toHaveLength(12);
     expect(r.note).toContain('1 more paths not listed here');
@@ -734,7 +742,11 @@ describe('runScratchTree', () => {
       cwd: worktree,
     });
 
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.sharedTreeResidue.sort()).toEqual([
       '.gitignore',
       'a.ts',
@@ -808,17 +820,66 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('could not be measured');
   });
 
-  it('refuses a shared worktree whose HEAD is not the fetched sha it brought', () => {
-    // The pin-mismatch signal the anchor exists for: a forged pair that
-    // commits the contamination cannot also reproduce the fetched head sha.
+  it('refuses BEFORE any reset or creation when the worktree is not at the fetched sha it brought', () => {
+    // The pin-mismatch signal the anchor exists for: the shared tree at B
+    // while the plan records reviewed commit A used to proceed with
+    // reset/creation at B and report `available: true`, handing a verifier
+    // an available tree at code other than the reviewed head with the
+    // mismatch disclosed only inside a NOTE. The refusal must come first —
+    // no reset, no creation, no path.
     const r = runScratchTree({
       worktree,
       label: 'verify--round-1--wrong-sha',
       fetchedSha: `deadbeef${'0'.repeat(32)}`,
     });
+    expect(r.available).toBe(false);
+    expect(r.path).toBeUndefined();
+    expect(r.note).toContain('not the fetched PR head');
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--wrong-sha')),
+    ).toBe(false);
+  });
+
+  it('refuses a fetched sha that is not a full Git object ID', () => {
+    // The record arrives over a CLI flag and is welded into commands a
+    // verifier copies; a shape the pin cannot compare is refused before it
+    // reaches anything — neither the 39-hex truncation nor a non-hex string
+    // is a commit. Full object IDs are 40 hex (SHA-1) or 64 hex (SHA-256).
+    for (const sha of ['not-a-sha', 'a'.repeat(39), 'g'.repeat(40)]) {
+      const r = runScratchTree({
+        worktree,
+        label: 'verify--bad-sha',
+        fetchedSha: sha,
+      });
+      expect(r.available).toBe(false);
+      expect(r.path).toBeUndefined();
+      expect(r.note).toContain('not a full Git object ID');
+    }
+    // A 64-hex value IS the shape — on this SHA-1 tree it reaches the
+    // mismatch refusal, proving the validator admitted it.
+    const sha256Shape = runScratchTree({
+      worktree,
+      label: 'verify--sha256-shape',
+      fetchedSha: 'ab'.repeat(32),
+    });
+    expect(sha256Shape.available).toBe(false);
+    expect(sha256Shape.note).toContain('not the fetched PR head');
+    expect(sha256Shape.note).not.toContain('not a full Git object ID');
+  });
+
+  it('folds case when comparing the fetched sha, like the residue pin', () => {
+    // The plan records `git rev-parse` verbatim and a caller may carry it
+    // uppercase; the pin folds case on both sides, so the scratch-tree
+    // validation must too — an uppercase record of the RIGHT commit is not
+    // a mismatch.
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--upper-sha',
+      fetchedSha: headSha.toUpperCase(),
+    });
+    expect(r.available).toBe(true);
     expect(r.sharedTreeResidue).toEqual([]);
-    expect(r.sharedTreeUnmeasured).toContain('not the fetched PR head');
-    expect(r.note).toContain('could not be measured');
+    expect(r.sharedTreeUnmeasured).toBeUndefined();
   });
 
   it('links the review worktree’s node_modules in, and says so', () => {
@@ -872,7 +933,11 @@ describe('runScratchTree', () => {
       const parent = join(repo, '.qwen', 'tmp');
       chmodSync(parent, 0o555); // `git worktree add` cannot create the directory
       try {
-        const r = runScratchTree({ worktree, label: 'verify--round-1--zzz' });
+        const r = runScratchTree({
+          worktree,
+          label: 'verify--round-1--zzz',
+          fetchedSha: headSha,
+        });
         expect(r.available).toBe(false);
         expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
         // The total belongs to the same report: a list longer than its own total
@@ -932,7 +997,8 @@ describe('runScratchTree', () => {
           `deadbeef${'0'.repeat(32)}`,
         ]),
       );
-      expect(forged.sharedTreeUnmeasured).toContain('not the fetched PR head');
+      expect(forged.available).toBe(false);
+      expect(forged.note).toContain('not the fetched PR head');
     });
   });
 
