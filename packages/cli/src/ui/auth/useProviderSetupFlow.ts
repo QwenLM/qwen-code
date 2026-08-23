@@ -209,21 +209,23 @@ export function useProviderSetupFlow(
   // of any edit before that edit becomes the authored baseline.
   const injectedModelIdRef = useRef<string | null>(null);
   // The id the keep clause shielded during an in-flight edit, plus the
-  // custom ids on screen when the shield fired. The shield freezes it into
-  // the authorship reference point; typing on past it drops it from the
-  // committed selection, and the commit delta must not read that as a
-  // removal. The user can also DELETE the shielded token though, which is
-  // one — so the exemption is limited to growth, and the growth evidence
-  // is latched into the edit stream, not re-derived at commit:
-  // `editModelIds` sees every edit and clears the freeze at the first one
-  // whose customs hold neither the id nor a strict extension of it that
-  // was not already on screen at the freeze (a twin is not growth). The
-  // freeze surviving to a commit therefore means the token grew in place
-  // on every edit since the shield fired; a deletion followed by a fresh
-  // retype passes through an edit holding neither, and clears it.
+  // custom ids on screen when the shield fired and the value the shielded
+  // occurrence has held since. The shield freezes it into the authorship
+  // reference point; typing on past it drops it from the committed
+  // selection, and the commit delta must not read that as a removal. The
+  // user can also DELETE the shielded token though, which is one — so the
+  // exemption is limited to growth, and the growth evidence is latched
+  // into the edit stream, attributed to the occurrence: `editModelIds`
+  // follows the occurrence's value edit by edit and clears the freeze at
+  // the first edit where that value leaves the buffer and no successor
+  // appears in that same edit. A strict extension typed into ANOTHER
+  // segment sat in the buffer before the value left, so its survival is
+  // not growth; a deletion followed by a fresh retype passes through an
+  // edit where the value leaves with no successor, and clears the freeze.
   const frozenTokenRef = useRef<{
     id: string;
     customs: string[];
+    value: string;
   } | null>(null);
   // Ids the user deleted from the screen during an edit a resolve then
   // advanced the reference point over. Such a deletion carries no
@@ -249,23 +251,31 @@ export function useProviderSetupFlow(
       // at commit distinguish that from a genuine retype. An actual removal is
       // still decisive immediately so unchecking and rechecking can endorse it.
       const customModelIds = context?.customModelIds ?? [];
+      const prevCustoms = customModelIdsRef.current;
       customModelIdsRef.current = customModelIds;
-      // Growth evidence for a frozen token is latched here, edit by edit:
-      // the freeze clears at the first edit whose customs hold neither the
-      // frozen id nor a fresh strict extension of it, so a deletion clears
-      // it and a later retype cannot read as growth the freeze never saw.
+      // Growth evidence for a frozen token is latched here, edit by edit,
+      // and attributed to the frozen occurrence. The occurrence survives
+      // an edit while the buffer still holds the value it last held; when
+      // that value leaves the buffer, only a value appearing in THIS edit
+      // can be the occurrence edited onward — a strict extension already
+      // sitting in another segment is a different token, and its survival
+      // does not shield the occurrence's deletion. A deletion therefore
+      // clears the freeze, and a later retype cannot read as growth the
+      // freeze never saw.
       const frozen = frozenTokenRef.current;
-      if (
-        frozen !== null &&
-        !customModelIds.includes(frozen.id) &&
-        !customModelIds.some(
+      if (frozen !== null && !customModelIds.includes(frozen.value)) {
+        const grown = customModelIds.find(
           (custom) =>
-            custom !== frozen.id &&
             custom.startsWith(frozen.id) &&
-            !frozen.customs.includes(custom),
-        )
-      ) {
-        frozenTokenRef.current = null;
+            (custom === frozen.id ||
+              (!frozen.customs.includes(custom) &&
+                !prevCustoms.includes(custom))),
+        );
+        if (grown === undefined) {
+          frozenTokenRef.current = null;
+        } else {
+          frozen.value = grown;
+        }
       }
       const injected = injectedModelIdRef.current;
       if (injected !== null && !normalizeModelIds(value).includes(injected)) {
@@ -336,11 +346,11 @@ export function useProviderSetupFlow(
     // unchecked anything. The shielded token can also be deleted outright,
     // though, and that IS a removal: the exemption rests on the freeze
     // surviving to here, which the latch in `editModelIds` maintains — a
-    // deletion passes through an edit whose customs hold neither the id
-    // nor a fresh extension of it, and clears the freeze on the spot.
-    // Provenance, not string shape: a removed id that merely prefixes a
-    // surviving one is a rename or a deleted prefix twin, and both are
-    // genuine removals.
+    // deletion passes through an edit where the occurrence's value leaves
+    // the buffer with no successor appearing in its place, and clears the
+    // freeze on the spot. Provenance, not string shape: a removed id that
+    // merely prefixes a surviving one is a rename or a deleted prefix
+    // twin, and both are genuine removals.
     const frozen = frozenTokenRef.current;
     const exemptFrozenId = frozen !== null ? frozen.id : null;
     const removed = new Set(
@@ -474,6 +484,7 @@ export function useProviderSetupFlow(
           frozenTokenRef.current = {
             id,
             customs: customModelIdsRef.current,
+            value: id,
           };
           kept.push(id);
         }
