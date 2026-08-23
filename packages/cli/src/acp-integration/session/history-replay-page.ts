@@ -7,6 +7,7 @@
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
+  lastHistoryContentFromRecords,
   restorableAskUserQuestionCallIds,
   type ChatRecord,
   type Config,
@@ -273,21 +274,24 @@ export async function collectHistoryReplayUpdates({
   const updates: SessionUpdate[] = [];
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
-    // `getChat()` THROWS 'Chat not initialized' when startChat never ran —
-    // optional chaining cannot catch that, and the bootstrap config used for
-    // non-live sessions is deliberately never chat-initialized. An
-    // uninitialized chat has no re-hung question in this process anyway, so
-    // guarding on isInitialized() is semantically right, not just
-    // throw-avoidance.
-    const replayClient = config?.getGeminiClient?.();
-    const skipFinalizeCallIds =
+    // Prefer live chat when it is initialized (authoritative after startChat
+    // preserve). Cold bulk replay runs before startChat — `getChat()` throws
+    // — so fall back to the transcript tail instead of finalizing the
+    // dangling question that load is about to re-hang.
+    let skipFinalizeCallIds: Set<string> | undefined;
+    if (
       suppressRestoreAskUserQuestion !== true &&
-      config?.getRestoreAskUserQuestion?.() === true &&
-      replayClient?.isInitialized?.() === true
-        ? restorableAskUserQuestionCallIds(
-            replayClient.getChat().peekLastHistoryEntry(),
-          )
-        : undefined;
+      config?.getRestoreAskUserQuestion?.() === true
+    ) {
+      const replayClient = config.getGeminiClient?.();
+      const lastHistoryContent =
+        replayClient?.isInitialized?.() === true
+          ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
+            lastHistoryContentFromRecords(records))
+          : lastHistoryContentFromRecords(records);
+      skipFinalizeCallIds =
+        restorableAskUserQuestionCallIds(lastHistoryContent);
+    }
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config, limits),
     ).replay(records, gaps, {

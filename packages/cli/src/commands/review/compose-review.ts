@@ -858,7 +858,7 @@ export interface ComposeReviewResult {
    * not-reviewed disclosures (the model's own inputs), a diagnosis derived
    * from the side file has no other copy anywhere. Ranking it last does not
    * retire this copy — it makes it the one that matters, because the rounds
-   * that reach rank 3 are the rounds that shed everything.
+   * that reach trim rank 3 are the rounds that shed everything.
    */
   convergence?: { en: string; zh: string };
   /**
@@ -1638,19 +1638,29 @@ export function aboveChurnBar(
  * **It counts DEFECTS, and it must not borrow the posting trend's words.**
  * The same body carries the convergence diagnosis, which counts inline
  * comments POSTED for the first time — and the two numbers legitimately
- * differ: a fix-induced defect re-reported under the id it came from is
- * newly identified here and a re-post there, so a round can newly identify
- * six defects while posting two first-time comments. Both readings are
- * right; what broke was the vocabulary, when this sentence said "findings
- * first filed" beside the diagnosis's "reported for the first time" and one
- * body published two numbers under one phrase. Hence "defects … newly
- * identified" — distinct words for a distinct quantity.
+ * differ: this count takes every finding the round newly identified, the
+ * trend only those that reached the pull request as a first-time comment, so
+ * a round can newly identify six defects while posting fewer than six
+ * first-time comments (some ride body Criticals, some deferrals). Both
+ * readings are right; what broke was the vocabulary, when this sentence said
+ * "findings first filed" beside the diagnosis's "reported for the first
+ * time" and one body published two numbers under one phrase. Hence "defects
+ * … newly identified" — distinct words for a distinct quantity.
  *
- * Do NOT "reconcile" the two by changing either count. Excluding carried-id
- * re-reports from `fresh` would put `induced` outside it and every such
- * census would be refused as impossible; counting them as first-time POSTS
- * would tell the volume trend a re-post is new work, which is the reading
- * `isFreshDraft` exists to refuse. The divergence is the design.
+ * Do NOT "reconcile" the two by changing either count WHOLESALE. Excluding
+ * carried-id re-reports from `fresh` would put `induced` outside it and
+ * every such census would be refused as impossible; and reading a carried id
+ * as first-time work by inference would tell the volume trend that every
+ * re-assertion of a standing finding is new work, which is the reading
+ * `isFreshDraft` exists to refuse.
+ *
+ * What DID change (#9674) is narrower than either, and is not an inference:
+ * a fix-induced re-report is MARKED as such in the comment body, and the
+ * trend counts a marked one as first-time. That is a distinction the round
+ * asserts, not one the id implies — an unmarked carried id is still a
+ * re-post to the trend, exactly as before. The divergence between the two
+ * counts is still the design; only the false premise that a carried id can
+ * mean just one thing is gone.
  */
 export function nonConvergenceCritical(
   census: { fresh: number; induced: number },
@@ -3367,7 +3377,7 @@ function composeReviewBody(
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
    * Rank 1 has a second durable copy (each deferral is a `D<round>-<n>`
-   * entry in the findings artifact) and rank 3 has one too (the composed
+   * entry in the findings artifact) and trim rank 3 has one too (the composed
    * result carries the paragraph, and the command prints it as
    * `CONVERGENCE:`); a trimmed disclosure section survives nowhere but the
    * terminal summary, so ask for it there rather than pointing at an
@@ -3823,8 +3833,12 @@ function composeReviewBody(
     cannotTell.length === 0
       ? []
       : [
-          // Deliberately untagged (rank 3, spent first by the last-resort
-          // cut). These entries are open blockers the review could not
+          // Deliberately untagged, so `keep` defaults to 3 and the
+          // last-resort cut spends it first. That 3 is the CUT's axis, not a
+          // `trim` rank — the two share the number and mean opposite things:
+          // `trim: 3` is the LAST rank the ladder sheds, while `keep: 3` is
+          // the FIRST thing the cut below the ladder spends.
+          // These entries are open blockers the review could not
           // clear — and every one of them was DELIVERED to the author in
           // the round that raised it, where this round's body Criticals are
           // the only copy that exists. So when the cut has to choose, it
@@ -5263,8 +5277,9 @@ export const composeReviewCommand: CommandModule = {
     // (findings artifact) or the not-reviewed disclosures (the model's own
     // inputs) it has no other copy anywhere — so the notice's "read them in
     // the terminal report" was a false record until this line existed. Last
-    // does not mean safe: a body that reaches rank 3 has already shed every
-    // other rank, which is exactly when this line is the only copy left.
+    // does not mean safe: a body that reaches trim rank 3 has already shed
+    // every other rank, which is exactly when this line is the only copy
+    // left.
     if (result.convergence) {
       writeStderrLine(`CONVERGENCE: ${result.convergence.en}`);
     }
@@ -5278,12 +5293,35 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
- * The first line of what follows the severity marker, minus any carried id.
- * A carried-forward finding names its ORIGINAL id right after the marker —
- * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
- * here is what makes the machine ledger agree with the report it rides in,
- * instead of renumbering the entry to a fresh `R<round>-<n>` the report
- * never used.
+ * The fix-induced marking, read from the head of the CLAIM — after the id and
+ * its separator, never inside the id grammar.
+ *
+ * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
+ * `idFor`, so widening it to swallow a parenthetical would put the ledger's
+ * carry on the same regex as a model-written adjective: a spelling or spacing
+ * the wider grammar failed to anticipate (`R1-2(Fix-Induced):`) would stop
+ * matching the id at all, and the finding would be silently renumbered — the
+ * exact failure "one finding, one name" exists to prevent. Read here, the id
+ * is already in hand and nothing about this token can cost it: an unrecognised
+ * marking leaves the draft counted as a re-post, which is what every round did
+ * before this existed.
+ *
+ * Case-insensitive, and tolerant of inner spacing, because it governs only
+ * whether a comment counts as first-time work — never which finding it is.
+ */
+const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+
+/**
+ * The id a claim line carries, whether that id fronts a NEW defect, and the
+ * claim itself with both stripped.
+ *
+ * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
+ * re-reports two different things under a previous entry's id: a finding that
+ * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
+ * is new work wearing the id of the entry whose fix produced it. The volume
+ * trend counts comments posted for the first time, and reading the id alone
+ * called both of them re-posts, so the trend's baseline fell on exactly the
+ * churning pull requests where new work was not falling at all.
  *
  * Module-level rather than a closure inside the ledger builder, because the
  * builder is no longer its only consumer: the convergence diagnosis reads the
@@ -5291,12 +5329,23 @@ export const composeReviewCommand: CommandModule = {
  * a second restatement would let one end call a comment carried while the
  * other calls it new.
  */
-function readClaim(rest: string): { id?: string; title: string } {
+function readClaim(rest: string): {
+  id?: string;
+  fixInduced: boolean;
+  title: string;
+} {
   const line = rest.split('\n')[0].trim();
   const carried = LEDGER_ID_READBACK.exec(line);
+  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
+  // Only ever a marking on a CARRIED id. On a fresh finding there is no
+  // entry for the defect to have been induced by, so the token would be
+  // decoration — and honouring it there would let a stray parenthetical add
+  // a first-time count the round already gets for that comment anyway.
+  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
   return {
     id: carried?.[1],
-    title: (carried ? line.slice(carried[0].length) : line).trim(),
+    fixInduced: marked !== null,
+    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
   };
 }
 
@@ -5379,7 +5428,7 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
   const seen = new Set<string>();
   for (const c of drafted as Array<{ path?: unknown; body?: unknown }>) {
     if (severityOf(c) === null) continue;
-    const { id } = readClaim(ledgerClaimLine(c.body));
+    const { id, fixInduced } = readClaim(ledgerClaimLine(c.body));
     // The same length bound `idFor` applies before it will carry an id: an
     // id the serializer refuses is one no work list can hold, so treating it
     // as a re-post here would call a finding carried that the ledger mints
@@ -5392,6 +5441,12 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
     out.push({
       file: typeof c.path === 'string' ? c.path : '',
       ...(carried === undefined ? {} : { carriedId: carried }),
+      // Only alongside the id it qualifies. A second draft under an id this
+      // round already spent has its `carriedId` dropped just above — the
+      // ledger mints it a fresh one — so it is first-time work by the id
+      // alone, and carrying the marking without the id would state a
+      // relationship to an entry this comment no longer names.
+      ...(carried !== undefined && fixInduced ? { fixInduced: true } : {}),
     });
   }
   return out;

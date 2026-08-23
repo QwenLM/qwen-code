@@ -1815,9 +1815,11 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        const preserveCallIds = this.config.getRestoreAskUserQuestion?.()
-          ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
-          : undefined;
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
         this.repairOrphanedToolUseTurnsInHistory(
           undefined,
           preserveCallIds ? { preserveCallIds } : undefined,
