@@ -18,6 +18,53 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 >
 > **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
+### Image generation routes
+
+Set `supportsImageGeneration: true` when a route can be used by the built-in
+`image_gen` tool. This capability is independent from image input support such
+as `capabilities.vision` or `generationConfig.modalities.image`.
+
+Use `imageOnly: true` when the route is dedicated to image generation and must
+not appear in ordinary model selectors. For backward compatibility,
+`imageOnly: true` also implies image-generation capability, so existing settings
+do not need to be migrated.
+
+A dual-role route can be selected both as the main model and through
+`/model --image`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "omni-model",
+        "envKey": "MODEL_API_KEY",
+        "baseUrl": "https://gateway.example.com/model-api",
+        "supportsImageGeneration": true
+      }
+    ]
+  }
+}
+```
+
+A dedicated image route sets both fields. The legacy form with only
+`imageOnly: true` remains valid:
+
+```json
+{
+  "id": "image-model",
+  "envKey": "MODEL_API_KEY",
+  "baseUrl": "https://images.example.com/api/v1",
+  "supportsImageGeneration": true,
+  "imageOnly": true
+}
+```
+
+The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
+`envKey`. Image generation uses the same endpoint and credential as the route;
+if chat and image generation require different endpoints or credentials,
+configure two routes instead.
+
 ## Configuration Examples by Auth Type
 
 Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations.

@@ -74,7 +74,7 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { isValidSessionId } from './session-id.js';
+import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -174,6 +174,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -738,6 +739,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
+          default: false,
+        })
+        .option('restore-ask-user-question', {
+          type: 'boolean',
+          description:
+            'On daemon session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result',
           default: false,
         })
         .option('channel', {
@@ -2068,12 +2075,26 @@ export async function loadCliConfig(
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
-    // Check if session ID is already in use
+    // Check if session ID is already in use — case-insensitively: a legacy
+    // mixed-case transcript still occupies the id, and creating a
+    // case-only twin would make both spellings permanently unrestorable.
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExistsInAnyState(
-      argv['sessionId'],
-    );
-    if (exists) {
+    let occupied: boolean;
+    try {
+      occupied =
+        (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
+        undefined;
+    } catch (error) {
+      // Any read failure leaves the id unproven, and the resolver propagates
+      // non-ENOENT errors. Assume occupied, as the previous existence check
+      // did: startup must reach the guarded conflict message and honour
+      // `throwOnSessionIdConflict` rather than die on a raw errno.
+      debugLogger.debug(
+        `Session id occupancy check failed for ${argv['sessionId']}: ${error}`,
+      );
+      occupied = true;
+    }
+    if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       if (throwOnSessionIdConflict) {
         throw new SessionIdConflictError(argv['sessionId'], message);
@@ -2081,7 +2102,7 @@ export async function loadCliConfig(
       writeStderrLine(message);
       process.exit(1);
     }
-    sessionId = argv['sessionId'];
+    sessionId = normalizeSessionIdForLookup(argv['sessionId']);
   }
 
   const modelProvidersConfig = settings.modelProviders;
@@ -2268,10 +2289,18 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
+    // ask_user_question. In the plain TUI the flag would skip load-time
+    // orphan repair (client.ts) with nothing able to re-hang the question,
+    // leaving the resumed session wedged until the next send repairs it.
+    restoreAskUserQuestion:
+      (argv.acp || argv.experimentalAcp || false) &&
+      argv.restoreAskUserQuestion === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
@@ -2345,6 +2374,7 @@ export async function loadCliConfig(
     trustedFolder,
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
+    workflowsEnabled: settings.tools?.workflowsEnabled,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,

@@ -15,6 +15,70 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+/** Goal v2 wire types, duplicated here to keep the SDK independent of Core. */
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'usage_limited'
+  | 'complete';
+
+export type GoalActivity = 'idle' | 'running' | 'verifying';
+
+export interface TranscriptCursor {
+  recordId: string | null;
+}
+
+/**
+ * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
+ * `lastReason` — that stays the human-readable half, this is the half a client
+ * may key behavior off (an evidence-limited Goal cannot be resumed).
+ */
+export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+
+export interface GoalRecord {
+  goalId: string;
+  revision: number;
+  objective: string;
+  status: GoalStatus;
+  evidenceCursor: TranscriptCursor;
+  turnCount: number;
+  activeTimeMs: number;
+  createdAt: number;
+  updatedAt: number;
+  lastReason?: string;
+  limitKind?: GoalLimitKind;
+}
+
+export interface GoalSnapshotV2 {
+  v: 2;
+  goal: GoalRecord | null;
+  activity: GoalActivity;
+  clearedGoal?: {
+    goalId: string;
+    revision: number;
+    updatedAt: number;
+  };
+}
+
+export type GoalControlRequest =
+  | { action: 'create'; objective: string }
+  | {
+      action: 'replace' | 'edit';
+      objective: string;
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'pause' | 'resume' | 'clear';
+      expectedGoalId: string;
+      expectedRevision: number;
+    };
+
+export interface GoalStateResponse {
+  snapshot: GoalSnapshotV2;
+}
+
 export interface DaemonProtocolVersions {
   current: string;
   supported: string[];
@@ -960,6 +1024,12 @@ export interface DaemonBranchInfo {
   baseBranch: string;
 }
 
+/** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */
+export interface DaemonSessionPrInfo {
+  number: number;
+  url: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -1203,6 +1273,8 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /** Present when GitHub PRs have been bound to the session (last = latest). */
+  prs?: DaemonSessionPrInfo[];
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -1392,6 +1464,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
 }
 
 type OpenStringUnion<T extends string> = T | (string & {});
@@ -1406,6 +1479,7 @@ export type KnownDaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactKind =
@@ -3938,14 +4012,14 @@ export interface PromptTextContent {
   text: string;
 }
 
-export type DaemonSessionMediaReference = Record<string, unknown> & {
-  type: 'image';
-  mediaId: string;
+export type DaemonSessionAttachmentReference = Record<string, unknown> & {
+  type: 'image' | 'resource';
+  attachmentId: string;
   mimeType: string;
   size: number;
 };
 
-export interface DaemonSessionMediaData {
+export interface DaemonSessionAttachmentData {
   data: string;
   mimeType: string;
 }

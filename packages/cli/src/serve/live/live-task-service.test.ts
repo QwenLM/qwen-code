@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { LIVE_TASK_TOOL_NAMES } from '@qwen-code/acp-bridge/bridgeOptions';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -15,8 +16,8 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { LiveTaskService } from './live-task-service.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
+import { isLiveTaskToolName, LiveTaskService } from './live-task-service.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());
@@ -58,6 +59,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async getSessionLocation(sessionId: string) {
+        return (await this.sessionExists(sessionId)) ? 'active' : undefined;
+      }
+
       readParentSessionId(sessionId: string) {
         return Promise.resolve(parentSessions.get(sessionId));
       }
@@ -72,6 +77,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async readCreationMetadataIfReadable(
+        sessionId: string,
+        _state: 'active' | 'archived',
+      ) {
+        if (!(await this.sessionExists(sessionId))) return undefined;
+        return this.readCreationMetadata(sessionId);
+      }
+
       removeSession(sessionId: string) {
         removeSessionRuntimeBaseDirs.push(actual.Storage.getRuntimeBaseDir());
         return removeSessionMock(sessionId);
@@ -83,6 +96,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 vi.mock('../server/session-list.js', () => ({
   listWorkspaceSessionsForResponse,
 }));
+
+describe('isLiveTaskToolName', () => {
+  it('uses the ACP bridge tool-name contract', () => {
+    for (const name of LIVE_TASK_TOOL_NAMES) {
+      expect(isLiveTaskToolName(name)).toBe(true);
+    }
+    expect(isLiveTaskToolName('unknown_tool')).toBe(false);
+  });
+});
 
 function message(
   type: 'user' | 'assistant' | 'tool_result',

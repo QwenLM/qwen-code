@@ -25,10 +25,14 @@ import {
   writeWorktreeSessionMarker,
   writeWorktreeSession,
   readWorktreeSession,
+  readSessionPrs,
+  upsertSessionPr,
+  SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
+  parseGoalControlRequest,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
@@ -39,8 +43,9 @@ import {
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import express, {
@@ -51,7 +56,11 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  isValidSessionId,
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
@@ -91,9 +100,11 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -103,6 +114,11 @@ import {
   sessionExportFormatValues,
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
+import {
+  readRecentPromptTerminals,
+  reconcileDanglingPromptTerminals,
+  withPromptTerminals,
+} from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   omitSkillDetailsForSdkSurface,
@@ -216,23 +232,17 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
-// 256 matches the session media store's item cap, so a message can still
-// reference every stored item.
+// Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
 
-// SVG can carry scripts; this origin also hosts the daemon API and Web
-// Shell UI, and stored bytes are served back to browsers — raster formats
-// only. Compare the normalized media type: standards-conformant spelling
-// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
-// past an exact-string match.
+// SVG is allowed as an ordinary file resource but never as an inline image.
+// Compare the normalized media type so spelling variants cannot bypass the
+// image-block check.
 function isSvgMimeType(mimeType: string | undefined): boolean {
   return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
 }
 
-// Shared per-block validation for the prompt and mid-turn routes. SVG can
-// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
-// stored bytes are served back to browsers — raster formats only, matching
-// the upload route's policy.
+// Shared per-block validation for the prompt and mid-turn routes.
 type MediaBlockParseResult =
   | { valid: true; block: BridgePromptContentBlock }
   | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
@@ -244,32 +254,50 @@ function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
   const record = block as Record<string, unknown>;
   const type = record['type'];
   const data = record['data'];
-  const mediaId = record['mediaId'];
+  const attachmentId = record['attachmentId'];
   const mimeType = record['mimeType'];
   const size = record['size'];
   const inline = typeof data === 'string' && data.length > 0;
   const reference =
-    typeof mediaId === 'string' &&
-    mediaId.length > 0 &&
+    typeof attachmentId === 'string' &&
+    attachmentId.length > 0 &&
     typeof size === 'number' &&
     Number.isSafeInteger(size) &&
-    size > 0;
+    size >= 0 &&
+    (type !== 'image' || size > 0);
+  if (type === 'resource' && !reference) {
+    const resource = record['resource'];
+    if (typeof resource !== 'object' || resource === null) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    const value = resource as Record<string, unknown>;
+    const hasText = typeof value['text'] === 'string';
+    const hasBlob = typeof value['blob'] === 'string';
+    if (
+      typeof value['uri'] !== 'string' ||
+      value['uri'].length === 0 ||
+      hasText === hasBlob
+    ) {
+      return { valid: false, code: 'invalid-shape' };
+    }
+    return { valid: true, block: block as BridgePromptContentBlock };
+  }
   if (
-    type !== 'image' ||
-    inline === reference ||
+    (type !== 'image' && type !== 'resource') ||
+    (type === 'image' ? inline === reference : inline || !reference) ||
     typeof mimeType !== 'string' ||
-    !mimeType.startsWith(`${type}/`)
+    (type === 'image' && !mimeType.startsWith('image/'))
   ) {
     return { valid: false, code: 'invalid-shape' };
   }
-  if (isSvgMimeType(mimeType)) {
+  if (type === 'image' && isSvgMimeType(mimeType)) {
     return { valid: false, code: 'svg' };
   }
   return {
     valid: true,
     block: inline
       ? ({ type, data, mimeType } as BridgePromptContentBlock)
-      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+      : ({ type, attachmentId, mimeType, size } as BridgePromptContentBlock),
   };
 }
 
@@ -283,7 +311,7 @@ function mediaBlockParseError(
   if (code === 'svg') {
     return 'SVG images are not supported';
   }
-  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+  return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
@@ -1137,8 +1165,11 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      if (location === 'conflict') throw new SessionConflictError(sessionId);
-      if (
+      if (location === 'conflict') {
+        if (archiveState !== 'active') {
+          throw new SessionConflictError(sessionId);
+        }
+      } else if (
         location === undefined ||
         (archiveState !== 'any' && location !== archiveState)
       ) {
@@ -1146,7 +1177,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) throw new SessionNotFoundError(sessionId);
     }
@@ -1293,6 +1324,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             assertRuntimeGenerationOpen?.();
@@ -1621,19 +1653,20 @@ export function registerSessionRoutes(
   ): Promise<WorkspaceRuntime | undefined> => {
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
+      allowActiveConflict = false,
     ): Promise<boolean> => {
       const location = await assertSessionLoadable(
         runtime.workspaceCwd,
         sessionId,
         runtime.sessionRuntimeBaseDir,
+        { allowActiveConflict },
       );
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, (candidateId) =>
-          service.readCreationMetadata(candidateId),
-        )) !== undefined
+        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
+        undefined
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -1718,7 +1751,7 @@ export function registerSessionRoutes(
       const runtime = workspaceRegistry.primary;
       if (loadError === undefined) return runtime;
       try {
-        if (await activeInRuntime(runtime)) return runtime;
+        if (await activeInRuntime(runtime, true)) return runtime;
       } catch (err) {
         recordLoadError(err);
       }
@@ -1764,7 +1797,7 @@ export function registerSessionRoutes(
       }
       let active = false;
       try {
-        active = await activeInRuntime(liveOwner.runtime);
+        active = await activeInRuntime(liveOwner.runtime, true);
       } catch (err) {
         recordLoadError(err);
       }
@@ -1776,6 +1809,34 @@ export function registerSessionRoutes(
         return undefined;
       }
       if (active) {
+        if (isInternalWorkspaceRuntime(liveOwner.runtime)) {
+          const ordinaryCollisions: WorkspaceRuntime[] = [];
+          for (const ordinaryRuntime of workspaceRegistry.list()) {
+            const ordinaryService =
+              createWorkspaceRuntimeSessionService(ordinaryRuntime);
+            if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
+              ordinaryCollisions.push(ordinaryRuntime);
+            }
+          }
+          if (
+            internalEntry &&
+            internalGeneration &&
+            !assertCurrentInternalGeneration(
+              internalEntry,
+              internalGeneration,
+              res,
+            )
+          ) {
+            return undefined;
+          }
+          if (ordinaryCollisions.length > 0) {
+            sendAmbiguousSessionOwner(res, route, sessionId, [
+              liveOwner.runtime,
+              ...ordinaryCollisions,
+            ]);
+            return undefined;
+          }
+        }
         setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
         return liveOwner.runtime;
       }
@@ -1787,7 +1848,7 @@ export function registerSessionRoutes(
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
       try {
-        if (await activeInRuntime(runtime)) {
+        if (await activeInRuntime(runtime, true)) {
           return runtime;
         }
       } catch (err) {
@@ -1870,7 +1931,7 @@ export function registerSessionRoutes(
       if (!exists) continue;
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
@@ -1966,7 +2027,7 @@ export function registerSessionRoutes(
         if (!exists) continue;
         const metadata = await readLoadableLiveConversationMetadata(
           sessionId,
-          (candidateId) => service.readCreationMetadata(candidateId),
+          service,
         );
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
@@ -2021,7 +2082,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) {
         throw new SessionNotFoundError(sessionId);
@@ -2073,6 +2134,48 @@ export function registerSessionRoutes(
       return undefined;
     }
     return [...new Set(sessionIds as string[])];
+  };
+
+  // Mirrors the bridge's displayName control-character rule (ESLint forbids
+  // control-char regexes).
+  const hasControlCharacter = (value: string): boolean =>
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    });
+
+  // Tri-state: absent → undefined (skip); invalid → null (400 already sent);
+  // valid → the PR binding to apply.
+  const parseSessionPrBody = (
+    req: Request,
+    res: Response,
+  ): { number: number; url: string } | null | undefined => {
+    const raw: unknown = safeBody(req)['pr'];
+    if (raw === undefined) return undefined;
+    const candidate = raw as Record<string, unknown> | null;
+    const number = candidate?.['number'];
+    const url = candidate?.['url'];
+    if (
+      candidate === null ||
+      typeof candidate !== 'object' ||
+      typeof number !== 'number' ||
+      !Number.isInteger(number) ||
+      number <= 0 ||
+      typeof url !== 'string' ||
+      url.length > SESSION_PR_URL_MAX_LENGTH ||
+      !/^https?:\/\//i.test(url) ||
+      // The url lands in the bridge's stderr audit line — control
+      // characters would let a caller forge log lines.
+      hasControlCharacter(url)
+    ) {
+      res.status(400).json({
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        code: 'invalid_metadata',
+        field: 'pr',
+      });
+      return null;
+    }
+    return { number, url };
   };
 
   const serializeSessionErrors = (
@@ -2303,6 +2406,21 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    if (
+      isReservedStandaloneSessionSource({
+        sourceType:
+          typeof body['sourceType'] === 'string'
+            ? body['sourceType']
+            : undefined,
+      })
+    ) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned standalone sessions.',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
     const source = parseSessionSource(body['sourceType'], body['sourceId']);
     if ('error' in source) {
       res.status(400).json({
@@ -3073,12 +3191,28 @@ export function registerSessionRoutes(
           throw error;
         }
       }
+      let restoredStorageSessionId = sessionId;
       try {
+        // The coordinator canonicalizes lock keys (every case variant of a
+        // caller id contends on one key), so the request spelling alone
+        // covers the raw-spelled batch delete/archive/unarchive locks.
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
-            const location = await assertSessionLoadable(
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
+            const persistedSessionId = await resolveSessionIdForRestore(
+              sessionService,
+              sessionId,
+            );
+            if (persistedSessionId) {
+              restoredStorageSessionId = persistedSessionId;
+            } else if (isInternalWorkspaceRuntime(runtime)) {
+              throw new SessionNotFoundError(sessionId);
+            }
+            const location = await assertSessionRestorable(
               workspaceCwd,
+              restoredStorageSessionId,
               sessionId,
               runtime.sessionRuntimeBaseDir,
             );
@@ -3088,17 +3222,26 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
               runtime.provenance === 'live-conversation'
                 ? await readLoadableLiveConversationMetadata(
-                    sessionId,
-                    (candidateId) =>
-                      sessionService.readCreationMetadata(candidateId),
+                    restoredStorageSessionId,
+                    sessionService,
                   )
-                : await sessionService.readCreationMetadata(sessionId);
-            if (metadata === undefined) {
+                : await sessionService.readCreationMetadata(
+                    restoredStorageSessionId,
+                  );
+            // The reserved standalone source is hidden only on the internal
+            // Conversations runtime. Ordinary workspace restores keep
+            // loading legacy transcripts that happen to carry the reserved
+            // source string — create-side admission already blocks new ones,
+            // so every such transcript on an ordinary store predates the
+            // gate and must not become unreachable.
+            if (
+              metadata === undefined ||
+              (isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata))
+            ) {
               throw new SessionNotFoundError(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3119,6 +3262,10 @@ export function registerSessionRoutes(
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
               }
+              // Keyed on the canonical id, not the persisted spelling: the
+              // bridge registers the live entry under the canonical id, and
+              // every later materialize/discard call derives the directory
+              // from that same id.
               liveConversationCwd = await materialize(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3200,7 +3347,37 @@ export function registerSessionRoutes(
                 throw error;
               }
             }
-            return restored;
+            // Prompt terminal ledger: reconcile prompts left in_flight by
+            // a dead previous daemon before responding. Only the cold path
+            // (no live entry attached and no active prompt on a live entry)
+            // is eligible — an attached load has a live owner that will
+            // publish the real terminal itself, and live-conversation
+            // workspaces store transcripts outside the runtime layout this
+            // reconciliation reads. Gated on `action === 'load'` to match
+            // the load-mediation contract (resume keeps its exact
+            // pre-existing response shape).
+            if (
+              action === 'load' &&
+              !restored.attached &&
+              !restored.hasActivePrompt &&
+              runtime.provenance !== 'live-conversation'
+            ) {
+              try {
+                await reconcileDanglingPromptTerminals(
+                  sessionService,
+                  sessionId,
+                );
+              } catch {
+                // Best-effort: a failure leaves dangling prompts unknown
+                // (fail-closed) and must never fail the load itself.
+              }
+            }
+            return withPromptTerminals(
+              restored,
+              action === 'load'
+                ? readRecentPromptTerminals(sessionService, sessionId)
+                : undefined,
+            );
           },
         );
         try {
@@ -3259,7 +3436,7 @@ export function registerSessionRoutes(
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
-            ).getWorktreeSessionPath(sessionId),
+            ).getWorktreeSessionPath(restoredStorageSessionId),
           ).catch(() => null);
           if (sidecar) {
             // Defense-in-depth: resolve symlinks on both the target and
@@ -3867,6 +4044,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             const codec = getTranscriptCursorCodec(runtime);
@@ -4241,6 +4419,46 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/goal',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/goal',
+      async (req, res, sessionId, runtime) => {
+        const request = parseGoalControlRequest(safeBody(req));
+        if (!request) {
+          res.status(400).json({
+            error: 'Invalid Goal control request',
+            code: 'invalid_goal_control_request',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionGoal(
+              sessionId,
+              request,
+              clientId === undefined ? undefined : { clientId },
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/goal',
+    withOwnerReadSession(
+      'GET /session/:id/goal',
+      async (_req, res, sessionId, runtime) => {
+        const goal = await runtime.bridge.getSessionGoal(sessionId);
+        res.status(200).json({ snapshot: goal.snapshot });
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/goal/clear',
     mutate({ strict: true }),
     withOwnerMutableSession(
@@ -4281,9 +4499,9 @@ export function registerSessionRoutes(
   );
 
   app.post(
-    '/session/:id/media',
+    '/session/:id/attachments',
     mutate(),
-    express.raw({ type: 'image/*', limit: '8mb' }),
+    express.raw({ type: '*/*', limit: '8mb' }),
     ((error, _req, res, next) => {
       if (
         error &&
@@ -4297,44 +4515,55 @@ export function registerSessionRoutes(
       next(error);
     }) satisfies ErrorRequestHandler,
     withOwnerMutableSession(
-      'POST /session/:id/media',
+      'POST /session/:id/attachments',
       async (req, res, sessionId, runtime) => {
+        const name = req.query['name'];
         const contentType = req.headers['content-type']
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
-        // SVG can carry scripts; this origin also hosts the daemon API and
-        // Web Shell UI, and the bytes are served back to browsers, so an
-        // inline SVG would run same-origin. Raster formats only.
-        if (isSvgMimeType(contentType)) {
-          res.status(415).json({ error: 'SVG uploads are not supported' });
-          return;
-        }
         if (
+          typeof name !== 'string' ||
           !contentType ||
-          !contentType.startsWith('image/') ||
-          !Buffer.isBuffer(req.body) ||
-          req.body.byteLength === 0
+          !Buffer.isBuffer(req.body)
         ) {
           res.status(400).json({
             error:
-              'request body must contain image/* bytes with a matching Content-Type',
+              'request body, Content-Type, and name query parameter are required',
           });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (
+          req.body.length === 0 &&
+          [
+            'image/bmp',
+            'image/gif',
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+          ].includes(contentType)
+        ) {
+          res.status(400).json({ error: 'Image attachments cannot be empty' });
+          return;
+        }
         try {
-          const reference = await runtime.bridge.storeSessionMedia(
+          const reference = await runtime.bridge.storeSessionAttachment(
             sessionId,
             req.body,
             contentType,
             clientId !== undefined ? { clientId } : undefined,
+            name,
           );
           res.status(201).json(reference);
         } catch (error) {
           if (error instanceof RangeError) {
             res.status(413).json({ error: error.message });
+            return;
+          }
+          if (error instanceof TypeError) {
+            res.status(400).json({ error: error.message });
             return;
           }
           throw error;
@@ -4344,52 +4573,52 @@ export function registerSessionRoutes(
   );
 
   app.get(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     withOwnerReadSession(
-      'GET /session/:id/media/:mediaId',
+      'GET /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const media = await runtime.bridge.readSessionMedia(
+        const attachment = await runtime.bridge.readSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
-        if (!media) {
-          res.status(404).json({ error: 'session media not found' });
+        if (!attachment) {
+          res.status(404).json({ error: 'session attachment not found' });
           return;
         }
-        res.setHeader('Content-Type', media.mimeType);
-        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Content-Type', attachment.mimeType);
+        res.setHeader('Content-Length', String(attachment.data.byteLength));
         res.setHeader('Cache-Control', 'private, max-age=300');
         res.setHeader('Content-Disposition', 'attachment');
         res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.status(200).send(media.data);
+        res.status(200).send(attachment.data);
       },
     ),
   );
 
   app.delete(
-    '/session/:id/media/:mediaId',
+    '/session/:id/attachments/:attachmentId',
     mutate(),
     withOwnerMutableSession(
-      'DELETE /session/:id/media/:mediaId',
+      'DELETE /session/:id/attachments/:attachmentId',
       async (req, res, sessionId, runtime) => {
-        const mediaId = req.params['mediaId'];
-        if (!mediaId) {
-          res.status(400).json({ error: '`mediaId` is required' });
+        const attachmentId = req.params['attachmentId'];
+        if (!attachmentId) {
+          res.status(400).json({ error: '`attachmentId` is required' });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const removed = await runtime.bridge.removeSessionMedia(
+        const removed = await runtime.bridge.removeSessionAttachment(
           sessionId,
-          mediaId,
+          attachmentId,
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json({ removed });
@@ -5047,9 +5276,25 @@ export function registerSessionRoutes(
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
+    // Gate BEFORE runtime resolution (withOwnerMutableSession): a
+    // traversal id must be rejected identically on single- and
+    // multi-workspace daemons — runtime resolution would 404 it first on a
+    // multi-entry registry, making the error contract
+    // configuration-dependent.
+    (req, res, next) => {
+      const raw = req.params['id'];
+      if (raw && !isValidSessionId(normalizeSessionIdForLookup(raw))) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
+      next();
+    },
     withOwnerMutableSession(
       'PATCH /session/:id/metadata',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -5065,17 +5310,51 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const pr = parseSessionPrBody(req, res);
+        if (pr === null) return;
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
             : undefined;
         let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
         try {
+          const service = createWorkspaceRuntimeSessionService(runtime);
+          // Bridge entries are re-created without prs on daemon restart,
+          // close/reload, and archive/restore. Hydrate the persisted
+          // binding history before the mutation so the
+          // `session_metadata_updated` event the bridge publishes carries
+          // the full list, not just this daemon lifetime's bindings. The
+          // read is best-effort: readSessionPrs rethrows non-ENOENT I/O
+          // errors (EISDIR/EACCES/EIO), and an unreadable sidecar must
+          // degrade the event's history, not block a pr-less rename.
+          let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+          try {
+            hydratedPrs = await readSessionPrs(
+              service.getPrSessionPathForArchiveState(sessionId, 'active'),
+            );
+          } catch {
+            hydratedPrs = null;
+          }
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
+          // Bridge first: it resolves session liveness, client trust, and
+          // metadata content. Persisting the sidecar only after it succeeds
+          // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName },
+            { displayName, ...(pr ? { pr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
+          if (pr) {
+            const persistedPrs = (
+              await upsertSessionPr(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                pr,
+              )
+            ).map(({ number, url }) => ({ number, url }));
+            effective = { ...effective, prs: persistedPrs };
+          }
         } finally {
           invalidateSessionLists(runtime, ['active']);
         }
@@ -5093,10 +5372,20 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
+      // The session id is embedded in the sidecar filesystem path; reject
+      // anything that is not a session id before it can reach the chats
+      // directory.
+      if (!isValidSessionId(sessionId)) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       const rawDisplayName = safeBody(req)['displayName'];
-      if (typeof rawDisplayName !== 'string') {
+      if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
         res.status(400).json({
           error: '`displayName` must be a string',
           code: 'invalid_metadata',
@@ -5104,26 +5393,41 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const pr = parseSessionPrBody(req, res);
+      if (pr === null) return;
+      if (rawDisplayName === undefined && pr === undefined) {
+        res.status(400).json({
+          error: 'at least one of `displayName` or `pr` is required',
+          code: 'invalid_metadata',
+          field: 'displayName',
+        });
+        return;
+      }
       try {
-        const displayName = rawDisplayName.slice(0, 256);
-        if (displayName.trim() === '') {
-          // An empty name would append an empty custom_title record to
-          // persisted sessions, which the title readers disagree on.
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not be empty',
-          );
-        }
-        if (
-          Array.from(displayName).some((character) => {
-            const code = character.charCodeAt(0);
-            return code <= 31 || code === 127;
-          })
-        ) {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not contain control characters',
-          );
+        const displayName =
+          typeof rawDisplayName === 'string'
+            ? rawDisplayName.slice(0, 256)
+            : undefined;
+        if (displayName !== undefined) {
+          if (displayName.trim() === '') {
+            // An empty name would append an empty custom_title record to
+            // persisted sessions, which the title readers disagree on.
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not be empty',
+            );
+          }
+          if (
+            Array.from(displayName).some((character) => {
+              const code = character.charCodeAt(0);
+              return code <= 31 || code === 127;
+            })
+          ) {
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not contain control characters',
+            );
+          }
         }
         await archiveCoordinator.runExclusiveMany([sessionId], async () => {
           const assertRuntimeGenerationOpen =
@@ -5158,40 +5462,104 @@ export function registerSessionRoutes(
             return;
           }
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
-            let effective: { displayName?: string };
+            let effective: {
+              displayName?: string;
+              prs?: Array<{ number: number; url: string }>;
+            };
+            const service = createWorkspaceRuntimeSessionService(runtime);
             try {
+              // Bridge entries are re-created without prs on daemon
+              // restart, close/reload, and archive/restore. Hydrate the
+              // persisted binding history before the mutation so the
+              // `session_metadata_updated` event the bridge publishes
+              // carries the full list, not just this daemon lifetime's
+              // bindings. The read is best-effort: readSessionPrs rethrows
+              // non-ENOENT I/O errors (EISDIR/EACCES/EIO), and an
+              // unreadable sidecar must degrade the event's history, not
+              // block a pr-less rename.
+              let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+              try {
+                hydratedPrs = await readSessionPrs(
+                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                );
+              } catch {
+                hydratedPrs = null;
+              }
+              if (hydratedPrs && hydratedPrs.length > 0) {
+                runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+              }
+              // Bridge first: it resolves client trust and metadata
+              // content, and reports non-live sessions. Persisting the
+              // sidecar only after it succeeds keeps a rejected request
+              // from leaving a durable binding behind — and a live
+              // session's sidecar always lives in the active chats dir, so
+              // 'active' is known-correct here. Non-live sessions are
+              // handled by the fallback below, which persists at the
+              // located archive state.
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName },
+                { displayName, ...(pr ? { pr } : {}) },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
+              if (pr) {
+                const persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    pr,
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                assertRuntimeGenerationOpen?.();
+                effective = { ...effective, prs: persistedPrs };
+              }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
-              const service = createWorkspaceRuntimeSessionService(runtime);
               const location = await service.getSessionLocation(sessionId);
               assertRuntimeGenerationOpen?.();
               if (location === 'conflict') {
                 throw new SessionConflictError(sessionId);
               }
-              const renamed = location
-                ? await service.renameSession(
-                    sessionId,
-                    displayName,
-                    'manual',
-                    location,
-                  )
-                : false;
-              assertRuntimeGenerationOpen?.();
-              if (!renamed) {
+              if (!location) {
                 throw new SessionNotFoundError(sessionId);
               }
-              // The persisted rename appends a custom_title record the next
-              // catalog scan serves, so this fallback must advance the same
-              // catalog revision the live rename marks — otherwise
-              // version-watching clients keep the stale name.
+              effective = {};
+              // Persist the PR sidecar BEFORE the rename: the catalog bump
+              // below only runs when every write succeeds, so the write most
+              // likely to fail (the newer sidecar path) must run first — a
+              // failed sidecar write may not strand an already-persisted
+              // rename that the error response never announces.
+              if (pr) {
+                const persisted = await upsertSessionPr(
+                  service.getPrSessionPathForArchiveState(sessionId, location),
+                  pr,
+                );
+                assertRuntimeGenerationOpen?.();
+                effective.prs = persisted.map(({ number, url }) => ({
+                  number,
+                  url,
+                }));
+              }
+              if (displayName !== undefined) {
+                const renamed = await service.renameSession(
+                  sessionId,
+                  displayName,
+                  'manual',
+                  location,
+                );
+                assertRuntimeGenerationOpen?.();
+                if (!renamed) {
+                  throw new SessionNotFoundError(sessionId);
+                }
+                effective.displayName = displayName;
+              }
+              // The persisted mutation is picked up by the next catalog
+              // scan, so this fallback must advance the same catalog
+              // revision the live update marks — otherwise version-watching
+              // clients keep the stale metadata.
               runtime.bridge.markSessionCatalogChanged();
-              effective = { displayName: displayName || undefined };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
             res.status(200).json({ sessionId, ...effective });
@@ -6122,7 +6490,10 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
-          mediaBlocks ? { content: mediaBlocks } : undefined,
+          {
+            rejectIfIdle: true,
+            ...(mediaBlocks ? { content: mediaBlocks } : {}),
+          },
         );
         res.status(200).json(result);
       },
