@@ -1203,7 +1203,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
-              data: { sessionId, messages, session: sessionDetails },
+              data: {
+                sessionId,
+                messages,
+                session: sessionDetails,
+                // The fallback created a fresh ACP session whose live
+                // transcript frames carry the new id, not the archived one.
+                // Publish it so the transcript filter adopts the session
+                // that will actually stream instead of dropping every live
+                // frame.
+                liveSessionId: this.agentManager.currentSessionId ?? undefined,
+              },
             });
             this.sendToWebView({
               type: 'sessionLoadComplete',
