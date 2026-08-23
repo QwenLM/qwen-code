@@ -1608,17 +1608,8 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // failure as a tripwire that fires on every healthy run.
   const filterRefusal = localFilterRefusal(probeTree, "this tree's restore");
   if (filterRefusal) return filterRefusal;
-  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
-  // it lives in the tree they are cleaning: the residue probe empties it for
-  // exactly this reason and these two spawns were the ones still steerable.
-  const inert = [
-    '-c',
-    'core.hooksPath=/dev/null/no-hooks',
-    '-c',
-    'core.fsmonitor=',
-  ];
   for (const args of [
-    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    [...INERT_GIT_ARGS, 'checkout', '--force', 'HEAD', '--', '.'],
     // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
     // commit under test, so a plant named to match one of them (a committed
     // `.gitignore` line and a file to match it) survived every restore. The
@@ -1626,7 +1617,7 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // rather than built, and it is the only ignored thing in this tree the
     // probes cannot run without. Everything else ignored — a built `dist`, a
     // planted config — goes.
-    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
+    [...INERT_GIT_ARGS, 'clean', '-ffdx', '-e', 'node_modules'],
   ]) {
     const r = spawnSync('git', args, {
       cwd: probeTree,

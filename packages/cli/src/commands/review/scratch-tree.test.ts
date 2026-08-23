@@ -103,6 +103,8 @@ describe('runScratchTree', () => {
 
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.evil.smudge');
+    // The remediation tail belongs to the filter-hit variant.
+    expect(r.note).toContain('Remove the filter config');
     expect(existsSync(pwned)).toBe(false);
     expect(
       existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
@@ -133,6 +135,29 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.clean');
     expect(run().available).toBe(true);
+  });
+
+  it('refuses an include directive with the remediation that fits it', () => {
+    // Any include directive fails the screen closed until the origin-scoped
+    // follow-up lands; the note's tail must match THAT variant — there is no
+    // filter key to remove when the screen never looked behind the include.
+    const behind = join(repo, 'behind-include.config');
+    writeFileSync(
+      behind,
+      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED-include')}\n`,
+    );
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[include]\n\tpath = ${behind}\n`,
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive');
+    expect(r.note).toContain('Remove the include directive');
+    expect(r.note).not.toContain('Remove the filter config');
+    expect(existsSync(join(repo, 'PWNED-include'))).toBe(false);
   });
 
   it('empties core.fsmonitor on every spawn — a planted command never fires', () => {
@@ -219,7 +244,11 @@ describe('runScratchTree', () => {
     const r = run();
 
     expect(r.available).toBe(false);
-    expect(r.note).toContain('filter.evil.smudge');
+    // The refusal is BOUNDED — all 50,001 keys re-embedded in every probe
+    // detail upstream was the R2-7 shape — so the pinned properties are that
+    // the screen refuses and nothing runs, named through the first keys.
+    expect(r.note).toContain('filter.pad0.smudge');
+    expect(r.note).toContain('more filter keys');
     expect(existsSync(pwned)).toBe(false);
   });
 
@@ -251,6 +280,10 @@ describe('runScratchTree', () => {
         expect(unreadable.available).toBe(false);
         expect(unreadable.note).toContain('could not be read');
         expect(unreadable.note).toContain(scratchConfig);
+        // The remediation tail follows the variant: the screen found no
+        // filter to remove, only a file to make readable again.
+        expect(unreadable.note).not.toContain('Remove the filter config');
+        expect(unreadable.note).toContain('Restore read access');
       } finally {
         chmodSync(scratchConfig, 0o644);
       }
@@ -262,6 +295,42 @@ describe('runScratchTree', () => {
       expect(malformed.available).toBe(false);
       expect(malformed.note).toContain('could not be read');
       expect(malformed.note).toContain(scratchConfig);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a repository under a newline path with the remediation that fits it',
+    () => {
+      // The parse refusal is its own variant: its tail must not promise a
+      // filter to remove or read access to restore. Newlines are legal in
+      // POSIX directory names, forbidden on Windows, hence the skip. Swaps
+      // the describe-scope fixture for the newline one and restores it.
+      const [origRepo, origWorktree, origHeadSha] = [repo, worktree, headSha];
+      const base = mkdtempSync(join(tmpdir(), 'qwen-scratch-nl-'));
+      try {
+        repo = join(base, 'x\ny');
+        mkdirSync(repo, { recursive: true });
+        git(repo, 'init', '-q', '-b', 'main');
+        git(repo, 'config', 'user.email', 't@t.t');
+        git(repo, 'config', 'user.name', 't');
+        writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+        git(repo, 'add', '-A');
+        git(repo, 'commit', '-qm', 'head');
+        headSha = git(repo, 'rev-parse', 'HEAD');
+        worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+        mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+        git(repo, 'worktree', 'add', '--detach', '-q', worktree, headSha);
+
+        const r = run();
+
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('could not be parsed');
+        expect(r.note).not.toContain('Remove the filter config');
+        expect(r.note).not.toContain('Restore read access');
+      } finally {
+        [repo, worktree, headSha] = [origRepo, origWorktree, origHeadSha];
+        rmSync(base, { recursive: true, force: true });
+      }
     },
   );
 

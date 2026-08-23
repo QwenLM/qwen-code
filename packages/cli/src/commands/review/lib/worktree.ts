@@ -581,6 +581,28 @@ export const INERT_GIT_ARGS = [
   'core.fsmonitor=',
 ];
 
+// A padded config can hand this refusal tens of thousands of keys, and
+// test-efficacy re-embeds the full string in every probe's detail (its loops
+// continue past a refusal), so an unbounded enumeration buries the actionable
+// part of the report under megabytes of it. Name the first few pairs and
+// count the rest — an oncall's first move is `git config --local
+// --get-regexp`, which surfaces the whole set — the way the residue note
+// bounds its path list.
+const MAX_NAMED_SCREEN_KEYS = 8;
+function nameScreenKeys(
+  list: Array<{ key: string; file: string }>,
+  noun: string,
+): string {
+  const named = list
+    .slice(0, MAX_NAMED_SCREEN_KEYS)
+    .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
+    .join(', ');
+  const rest = list.length - MAX_NAMED_SCREEN_KEYS;
+  return rest > 0
+    ? `${named}, … and ${rest} more ${noun}${rest === 1 ? '' : 's'}`
+    : named;
+}
+
 /**
  * The refusal for a checkout about to run through a repo-local content filter —
  * or through a repo-local config file the screen could not read or expand —
@@ -626,7 +648,15 @@ export function localFilterRefusal(
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
     return null;
   }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  const lines = files.stdout.trim().split('\n');
+  // A newline in a directory component (legal in a path) splits one answer
+  // across two stdout lines: both destructured fragments misresolve, every
+  // candidate misses `existsSync`, and the screen would certify a checkout
+  // it read nothing of. Every other ambiguous state below fails closed.
+  if (lines.length !== 2) {
+    return `the repository's git directory layout could not be parsed (a repository path containing a newline), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
+  }
+  const [commonDir, gitDir] = lines;
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
@@ -684,6 +714,12 @@ export function localFilterRefusal(
         'config',
         '--file',
         file,
+        // `--name-only`: one bare key per line, no value. The key/value form
+        // forced `split(/\s+/)[0]`, which truncated any key whose subsection
+        // carries whitespace (`includeIf "gitdir:/a b/x/"` is ordinary on
+        // Windows/macOS user repos) to a fragment that exists nowhere
+        // verbatim and deduped distinct directives together.
+        '--name-only',
         '--get-regexp',
         // `process` beside the pair: it is the third executable key (a
         // long-running filter git speaks a protocol to), and enumerating two
@@ -718,8 +754,7 @@ export function localFilterRefusal(
       });
       continue;
     }
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
+    for (const key of r.stdout.split('\n')) {
       const pair = `${file}\u0000${key}`;
       if (key && !seen.has(pair)) {
         // The defining file rides along: with `extensions.worktreeConfig` a
@@ -741,16 +776,18 @@ export function localFilterRefusal(
   const parts: string[] = [];
   if (filters.length > 0) {
     parts.push(
-      `the repository's local config defines content filter(s) ${filters
-        .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
-        .join(', ')} — ${checkout} would EXECUTE them`,
+      `the repository's local config defines content filter(s) ${nameScreenKeys(
+        filters,
+        'filter key',
+      )} — ${checkout} would EXECUTE them`,
     );
   }
   if (includes.length > 0) {
     parts.push(
-      `the repository's local config names include directive(s) ${includes
-        .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
-        .join(', ')} — the screen reads these files without expanding ` +
+      `the repository's local config names include directive(s) ${nameScreenKeys(
+        includes,
+        'include directive',
+      )} — the screen reads these files without expanding ` +
         'includes, and the checkout reads merged config, which does: a ' +
         `content filter behind one would EXECUTE unseen in ${checkout}`,
     );

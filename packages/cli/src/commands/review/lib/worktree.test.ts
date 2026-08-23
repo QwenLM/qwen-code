@@ -1482,4 +1482,113 @@ describe('localFilterRefusal', () => {
     expect(r).toContain('include.path');
     expect(r).toContain('the probe checkout');
   });
+
+  it('refuses an includeIf directive too — the other spelling of the same hole', () => {
+    // The regex's `includeif\..+\.path` alternative had no witness: dropping
+    // it left the suite green while a `[includeIf "gitdir:…"]` plant passed
+    // the screen and EXECUTED behind the checkout's merged read. The screen
+    // reads the directive's key whatever its condition, so the plant shape is
+    // the include test's with the conditional spelling.
+    const behind = join(repo, 'behind-includeif.config');
+    writeFileSync(
+      behind,
+      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+    );
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[includeIf "gitdir:${repo}/"]\n\tpath = ${behind}\n`,
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('include directive');
+    expect(r).toContain('includeif.');
+  });
+
+  it('names a key whose subsection carries whitespace — never a truncated fragment', () => {
+    // `--get-regexp` prints `key value` per line, and taking the first
+    // whitespace token truncated such a key to a fragment that exists nowhere
+    // verbatim and deduped distinct directives together; `--name-only` prints
+    // one bare key per line, so the whole line is the key.
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[filter "my lfs"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('filter.my lfs.smudge');
+  });
+
+  it('flattens control characters a planted key carries — the catch is inert', () => {
+    // A caught attacker still controls the bytes naming the catch: a config
+    // subsection may hold any byte but NUL and newline, so an ESC sequence
+    // rides `--get-regexp` intact. `inertPath` must flatten it before the
+    // refusal reaches the terminal and the report.
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[filter "evil\u001b[31m"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).not.toContain('\u001b');
+    expect(r).toContain('filter.evil [31m.smudge');
+  });
+
+  it('caps the enumeration a padded config hands it — the refusal stays actable', () => {
+    // test-efficacy re-embeds the full refusal in every probe's detail, so an
+    // unbounded key list multiplies into megabytes of report; the message
+    // names the first few pairs and counts the rest.
+    const padding = Array.from(
+      { length: 12 },
+      (_, i) => `[filter "pad${i}"]\n\tsmudge = x`,
+    ).join('\n');
+    appendFileSync(join(repo, '.git', 'config'), `${padding}\n`);
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('filter.pad0.smudge');
+    expect(r).toContain('\u2026 and 4 more filter keys');
+    expect(r).not.toContain('filter.pad8.smudge');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED when the repository path contains a newline — never certifies a misparse',
+    () => {
+      // `rev-parse` prints the two paths as two stdout lines; a newline in a
+      // directory component splits one answer across two lines, every
+      // candidate misresolves, and the old parse certified a checkout it had
+      // read nothing of. The trigger is the user's own filesystem layout —
+      // newlines are legal in directory names on POSIX, only Windows forbids
+      // them, hence the skip — and the screen's contract is never to fail
+      // open. Separate fixture: the shared one cannot carry the newline.
+      const base = mkdtempSync(join(tmpdir(), 'qwen-filter-nl-'));
+      const nlRepo = join(base, 'x\ny');
+      mkdirSync(nlRepo, { recursive: true });
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: nlRepo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(nlRepo, 'a.ts'), 'export const x = 1;\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      g('config', 'filter.evil.smudge', `touch ${join(base, 'PWNED')}`);
+      const nlTree = join(nlRepo, 'wt');
+      g('worktree', 'add', '--detach', '-q', nlTree, 'HEAD');
+      try {
+        const r = localFilterRefusal(nlTree, 'the probe checkout');
+        expect(r).not.toBeNull();
+        expect(r).toContain('could not be parsed');
+        expect(r).toContain('the probe checkout');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });

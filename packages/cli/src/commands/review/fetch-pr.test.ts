@@ -602,10 +602,13 @@ describe('fetch-pr report assembly', () => {
       process.cwd(),
       "the review worktree's creation checkout",
     );
-    // The creation checkout itself never ran.
+    // The creation checkout itself never ran. `includes`, not positional:
+    // the spawn carries INERT_GIT_ARGS ahead of the subcommand, so a
+    // positional match never sees the add call and the ordering this test
+    // pins would go untested.
     expect(
       producerMocks.git.mock.calls.some(
-        (args: unknown[]) => args[0] === 'worktree' && args[1] === 'add',
+        (args: unknown[]) => args.includes('worktree') && args.includes('add'),
       ),
     ).toBe(false);
     // No report: the refusal is a hard stop, not a degraded review.

@@ -392,11 +392,21 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     'the checkouts this command runs',
   );
   if (filterRefusal) {
+    // The remediation follows the variant the screen named: a filter hit
+    // lists keys to remove; an include directive or an unreadable file found
+    // nothing to remove — their remedy is clearing the directive or restoring
+    // read access; a newline path cannot be parsed around at all.
+    const remediation = filterRefusal.includes('defines content filter(s)')
+      ? 'Remove the filter config — or the attributes file that uses it — if it is not yours.'
+      : filterRefusal.includes('names include directive(s)')
+        ? 'Remove the include directive — or the config file it points at — if it is not yours.'
+        : filterRefusal.includes('git directory layout could not be parsed')
+          ? "A newline in the repository's path leaves the screen unable to parse its own layout; it refuses rather than guess, and a path without a newline restores it."
+          : 'Restore read access to the named file — its permissions, or a non-regular file standing in for it — so the screen can certify.';
     return unavailable(
       `${filterRefusal} (hooks are disabled, filters are config-driven), and ` +
         'two plain writes into the common dir are enough to plant both the filter ' +
-        'and the attributes that select it. Remove the filter config — or the ' +
-        'attributes file that uses it — if it is not yours; until then no scratch ' +
+        `and the attributes that select it. ${remediation} Until then no scratch ` +
         'tree is safe to create or reset.',
     );
   }
