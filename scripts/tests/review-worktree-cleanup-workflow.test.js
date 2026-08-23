@@ -182,6 +182,39 @@ const runRemoveReviewTree = (workspace, ...args) =>
     { env: { ...process.env, GITHUB_WORKSPACE: workspace }, encoding: 'utf8' },
   );
 
+// The skip-warning fixture executes the whole step body with `git`
+// stubbed to a function whose `worktree list --porcelain` returns
+// hostile registrations: the echoes under test sit in the loop, not in
+// git, and the stub keeps the fixture free of real worktree state.
+const runReviewCleanStep = (workspace, hostileRegistrations) =>
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      [
+        'set -euo pipefail',
+        'git() {',
+        '  case " $* " in',
+        '    *" worktree list "*) printf \'%s\\n\' "$HOSTILE_REGISTRATIONS" ;;',
+        '  esac',
+        '}',
+        reviewCleanStep,
+      ].join('\n'),
+      'clean-review-worktrees',
+    ],
+    {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        GITHUB_WORKSPACE: workspace,
+        HOSTILE_REGISTRATIONS: hostileRegistrations
+          .map((path) => `worktree ${path}`)
+          .join('\n'),
+      },
+      encoding: 'utf8',
+    },
+  );
+
 // existsSync follows the link: a dangling leftover reports as absent while
 // the link itself still survives, so link presence is asserted via lstat.
 const linkExists = (path) => {
@@ -341,6 +374,25 @@ describe('review worktree cleanup steps', () => {
     }
     expect(
       reviewCleanCode.match(/\$\{abs\/\/\[\$'\\r\\n'\]\/ \}/g),
+    ).toHaveLength(2);
+    // The registered-worktree loop's two skip warnings reach the same
+    // stdout with an untrusted registered path, so the identical strip
+    // protects them: a bare `$worktree` there injects a standalone
+    // workflow-command line on the runner's stdout (executed by the
+    // CR-bearing-registration fixture below).
+    const skipWarningLines = reviewCleanCode
+      .split('\n')
+      .filter(
+        (line) =>
+          line.includes('skipping suspicious review worktree') ||
+          line.includes('skipping unexpected review worktree'),
+      );
+    expect(skipWarningLines).toHaveLength(2);
+    for (const line of skipWarningLines) {
+      expect(line).not.toMatch(/\$worktree\b/);
+    }
+    expect(
+      reviewCleanCode.match(/\$\{worktree\/\/\[\$'\\r\\n'\]\/ \}/g),
     ).toHaveLength(2);
     expect(reviewCleanCode).toContain("awk 'NR==1 {print $3}'");
     // The failure warning carries the deciding state (sudo probe + owner),
@@ -584,6 +636,41 @@ describe('review worktree cleanup steps', () => {
         expect(existsSync(leftover)).toBe(false);
       } finally {
         if (existsSync(leftover)) chmodSync(leftover, 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+  it.skipIf(!bashAvailable || !awkAvailable)(
+    'skip warnings keep a CR-bearing registered path on one runner line',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-skip-echo-fixture-'));
+      try {
+        // The step exits early without a checkout.
+        mkdirSync(join(fixture, '.git'));
+        const hostile = [
+          // `..` routes to the suspicious-skip echo; the other two fail
+          // the workspace prefix check and route to the unexpected-skip
+          // echo.
+          `${fixture}/.qwen/tmp/review-pr-1/../pwn\r::stop-commands::pwned`,
+          `/elsewhere/.qwen/tmp/review-pr-2\r::endgroup::`,
+          `/elsewhere/.qwen/tmp/review-pr-3\r::notice::forged/git`,
+        ];
+        const out = runReviewCleanStep(fixture, hostile);
+        expect(out.status).toBe(0);
+        // The runner splits step stdout on bare CR as well as LF and
+        // parses every line for workflow commands: the stripped path must
+        // stay inside its warning line, never surface a standalone `::`
+        // line.
+        const lines = out.stdout.split(/[\r\n]/).filter((line) => line);
+        expect(
+          lines.filter((line) => line.startsWith('::warning::skipping')),
+        ).toHaveLength(3);
+        expect(
+          lines.filter(
+            (line) => line.startsWith('::') && !line.startsWith('::warning::'),
+          ),
+        ).toEqual([]);
+      } finally {
         rmSync(fixture, { recursive: true, force: true });
       }
     },

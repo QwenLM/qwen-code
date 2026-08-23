@@ -1936,15 +1936,16 @@ jobs:
                 # Registered paths come from leftover git metadata and are
                 # untrusted: the awk filter above matched by substring, so reject
                 # `..` traversal and re-anchor to the review prefix before the
-                # destructive remove.
+                # destructive remove. The skip warnings strip CR/LF from the
+                # path for the same reason the ladder's warnings do (above).
                 case "$worktree" in
                   */../*|../*|*/..)
-                    echo "::warning::skipping suspicious review worktree path: $worktree"
+                    echo "::warning::skipping suspicious review worktree path: ${worktree//[$'\r\n']/ }"
                     continue
                     ;;
                   "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
                   *)
-                    echo "::warning::skipping unexpected review worktree path: $worktree"
+                    echo "::warning::skipping unexpected review worktree path: ${worktree//[$'\r\n']/ }"
                     continue
                     ;;
                 esac
