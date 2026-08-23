@@ -596,6 +596,17 @@ export function runtimeClientEnv(
     'CONTAINERS_CONF',
     'CONTAINERS_REGISTRIES_CONF',
     'CONTAINERS_STORAGE_CONF',
+    // The proxy family steers the client too: docker and podman honour these
+    // for every daemon call, so a repo-shipped `HTTPS_PROXY` interposes on the
+    // connection the direct selectors above were scrubbed to protect.
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'no_proxy',
   ]) {
     if (isFileSourcedEnvKey(key)) drop(key);
   }

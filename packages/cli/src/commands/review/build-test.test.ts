@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyHandOffPolicy,
   run,
   runBuildTest,
   type BuildTestReport,
@@ -4481,5 +4482,47 @@ describe('runBuildTest', () => {
       expect(calls).toEqual([]);
       expect(rep.note).toContain('Nothing to resume');
     });
+  });
+});
+
+describe('applyHandOffPolicy', () => {
+  const handOff = {
+    toolchain: 'unsupported' as const,
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    ok: true,
+    note: 'build-test could not scope this repo',
+  };
+
+  it('converts a hand-off to a refusal under `required`', () => {
+    // The hand-off tells the agent to install and build with its own shell,
+    // which nothing here contains. This conversion has been wrong twice — once
+    // as a precondition that was never true, once as a wrapper on two of the
+    // three routes that produce it — so what it produces is pinned here rather
+    // than left to the call site.
+    const got = applyHandOffPolicy(handOff, 'required');
+    expect(got.toolchain).toBe('refused');
+    // NOT `ok`, or a reader treats it as a clean hand-off and does by hand
+    // exactly what the policy refused.
+    expect(got.ok).toBe(false);
+    expect(got.note).toContain('do not run the commands by hand');
+    expect(got.build).toEqual([]);
+    expect(got.test).toEqual([]);
+  });
+
+  it('leaves a hand-off alone under the other policies', () => {
+    for (const policy of ['off', 'auto'] as const) {
+      expect(applyHandOffPolicy(handOff, policy)).toBe(handOff);
+    }
+  });
+
+  it('never converts a real run', () => {
+    const real = { ...handOff, toolchain: 'npm' as const };
+    expect(applyHandOffPolicy(real, 'required')).toBe(real);
   });
 });

@@ -111,6 +111,10 @@ describe('values a repository must not be able to set', () => {
     // moves the same steering one level down — a `DOCKER_CONFIG` naming a
     // config file that names the daemon.
     const selectors = [
+      'HTTP_PROXY',
+      'HTTPS_PROXY',
+      'ALL_PROXY',
+      'NO_PROXY',
       'DOCKER_HOST',
       'DOCKER_CERT_PATH',
       'DOCKER_TLS_VERIFY',

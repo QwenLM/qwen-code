@@ -1773,6 +1773,16 @@ function runProbeSuite(
         cwd: probeTree,
         encoding: 'utf8',
         timeout,
+        // SIGKILL, not the default SIGTERM, and only on the boxed branch.
+        // `spawnSync` sends its `killSignal` at the deadline and then WAITS for
+        // the child to exit — so an attached runtime client that forwards the
+        // signal and keeps waiting on a workload whose own trap ignores it
+        // never returns, and the `killContainer` below is never reached. That
+        // is what made the round-4 machinery unreachable rather than wrong.
+        // SIGKILL cannot be ignored, so the client dies, the call returns, and
+        // the container is then reaped BY NAME at the daemon — which is where
+        // the deadline had to be enforced all along.
+        killSignal: 'SIGKILL',
         maxBuffer: 64 * 1024 * 1024,
         // The RUNTIME CLIENT's environment, minus the daemon-selecting
         // variables a repository could have shipped in its own `.env` — the

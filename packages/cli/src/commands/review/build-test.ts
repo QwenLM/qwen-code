@@ -48,12 +48,14 @@ import {
   containerPathFor,
   handOffRefused,
   killContainer,
+  sandboxPolicy,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeClientEnv,
   sandboxVerdict,
   type CommandKind,
+  type SandboxPolicy,
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
@@ -401,6 +403,16 @@ export function run(
         encoding: 'utf8',
         timeout: deadlineMs,
         maxBuffer: 64 * 1024 * 1024,
+        // SIGKILL, not the default SIGTERM, and only on the boxed branch.
+        // `spawnSync` sends its `killSignal` at the deadline and then WAITS for
+        // the child to exit — so an attached runtime client that forwards the
+        // signal and keeps waiting on a workload whose own trap ignores it
+        // never returns, and the `killContainer` below is never reached. That
+        // is what made the round-4 machinery unreachable rather than wrong.
+        // SIGKILL cannot be ignored, so the client dies, the call returns, and
+        // the container is then reaped BY NAME at the daemon — which is where
+        // the deadline had to be enforced all along.
+        killSignal: 'SIGKILL',
         stdio: ['ignore', 'pipe', 'pipe'],
         // NOT `buildRunEnv()`: the container gets an allowlist instead (see
         // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
@@ -706,7 +718,53 @@ function previousReport(out: string | undefined): BuildTestReport {
   return parsed as BuildTestReport;
 }
 
-export function runBuildTest(args: BuildTestArgs): BuildTestReport {
+/**
+ * A report that says the phase ran nothing, and why.
+ *
+ * Module scope because two callers need it: the phase gate inside the run, and
+ * the hand-off conversion at the exit.
+ */
+function refusedReport(why: string): BuildTestReport {
+  return {
+    toolchain: 'refused',
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
+    // was found wrong; here something WAS — the phase could not be run under
+    // the policy in force — and a reader that treats this as a clean hand-off
+    // would go do by hand exactly what the policy just refused.
+    ok: false,
+    note:
+      `no build or test evidence: ${why}. This phase would have had to run ` +
+      `the reviewed repository's own commands, which is what the policy ` +
+      `forbids — so it ran nothing rather than running them unsandboxed. Do ` +
+      `not read this as a passing build, and do not run the commands by hand ` +
+      `to fill the gap.`,
+  };
+}
+
+/**
+ * The hand-off is an EXECUTION too, and it is the one that leaves this
+ * process: `unsupportedReport` tells the agent to install and build with its
+ * own shell — see the `toolchain: "unsupported"` rule in the brief — and that
+ * shell is contained by nothing here. The phase gate cannot catch it, because
+ * the gate passes exactly when a runtime answered and the tree is mountable,
+ * which is when a repo the adapters cannot scope still reaches the hand-off.
+ *
+ * At the ONE exit every report crosses, and that placement is the point. The
+ * first attempt tested a precondition (`!applicable` — the filtered adapter
+ * ARRAY, never falsy) and was dead code. The second wrapped the two
+ * `adapter.run` returns and missed the `!adapter` branch's own `unsupported`
+ * report. Both were the same mistake at different addresses: guarding routes
+ * one at a time in a function with several. There is exactly one place a
+ * report can reach a caller, so the conversion belongs there.
+ */
+function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
   // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
@@ -838,49 +896,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // reaches a spawn at all: a repo this adapter cannot scope is handed to the
   // AGENT's own shell (`unsupportedReport`), which would otherwise run the
   // install and the suite with nothing consulted.
-  const refusedReport = (why: string): BuildTestReport => ({
-    toolchain: 'refused',
-    affected: [],
-    buildSet: [],
-    widenedWith: [],
-    install: null,
-    build: [],
-    test: [],
-    timedOut: [],
-    // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
-    // was found wrong; here something WAS — the phase could not be run under
-    // the policy in force — and a reader that treats this as a clean hand-off
-    // would go do by hand exactly what the policy just refused.
-    ok: false,
-    note:
-      `no build or test evidence: ${why}. This phase would have had to run ` +
-      `the reviewed repository's own commands, which is what the policy ` +
-      `forbids — so it ran nothing rather than running them unsandboxed. Do ` +
-      `not read this as a passing build, and do not run the commands by hand ` +
-      `to fill the gap.`,
-  });
-  // The hand-off is an EXECUTION too, and it is the one that leaves this
-  // process: `unsupportedReport` tells the agent to install and build with its
-  // own shell — see the `toolchain: "unsupported"` rule in the brief — and that
-  // shell is contained by nothing here. The phase gate above cannot catch it,
-  // because it passes exactly when a runtime answered and the tree is
-  // mountable, which is when a yarn/pnpm/bun repo still reaches the hand-off.
-  //
-  // Judged on the RESULT rather than on preconditions. The first attempt tested
-  // `!applicable` before the run — and `applicable` is the filtered ADAPTER
-  // ARRAY, never falsy, so the gate was dead code that shipped green. There are
-  // also two routes to a hand-off (no adapter applies; an adapter applies and
-  // cannot scope, from inside the npm one), and only the report distinguishes
-  // neither from a real run.
-  const refusedIfHandedOff = (report: BuildTestReport): BuildTestReport =>
-    handOffRefused(report.toolchain)
-      ? refusedReport(
-          `review.sandbox is "required" and no toolchain adapter could scope ` +
-            `this repository, so the only remaining route was to hand its ` +
-            `install, build and test commands to an agent shell this policy ` +
-            `cannot contain`,
-        )
-      : report;
   const refusal = refuseUnsandboxedPhase(root);
   if (refusal && args.resume) {
     // THROW on a continuation, never return. The handler writes whatever this
@@ -952,10 +967,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // unsupported report before executing any command on every root where
     // applies() is false.
     if (existsSync(join(root, 'package.json'))) {
-      return refusedIfHandedOff({
-        ...npmToolchainAdapter.run(runArgs),
-        run: runIdentity,
-      });
+      return { ...npmToolchainAdapter.run(runArgs), run: runIdentity };
     }
     return {
       toolchain: 'unsupported',
@@ -973,7 +985,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'and give each command a deadline it can actually meet.',
     };
   }
-  return refusedIfHandedOff({ ...adapter.run(runArgs), run: runIdentity });
+  return { ...adapter.run(runArgs), run: runIdentity };
 }
 
 export const buildTestCommand: CommandModule = {
@@ -1070,3 +1082,30 @@ export const buildTestCommand: CommandModule = {
     }
   },
 };
+
+/**
+ * Turn a hand-off into a refusal when the policy forbids one.
+ *
+ * Exported and separate from `runBuildTest` so the conversion — the half that
+ * has been wrong twice, first as a dead precondition and then as a wrapper on
+ * two of the three routes — is reachable by a test without a live container
+ * runtime. What stays unpinned is only that `runBuildTest` calls it, which is
+ * one visible line rather than a branch hiding in a long function.
+ */
+export function applyHandOffPolicy(
+  report: BuildTestReport,
+  policy: SandboxPolicy = sandboxPolicy(),
+): BuildTestReport {
+  return handOffRefused(report.toolchain, policy)
+    ? refusedReport(
+        `review.sandbox is "required" and no toolchain adapter could scope ` +
+          `this repository, so the only remaining route was to hand its ` +
+          `install, build and test commands to an agent shell this policy ` +
+          `cannot contain`,
+      )
+    : report;
+}
+
+export function runBuildTest(args: BuildTestArgs): BuildTestReport {
+  return applyHandOffPolicy(runBuildTestUnguarded(args));
+}
