@@ -35,6 +35,8 @@ import {
   assertChunkPartition,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
+import { buildSelectionIdentity } from './lib/selection.js';
+import type { DiffChunk } from './lib/diff-plan.js';
 import {
   promptRecordDir,
   briefPath,
@@ -171,6 +173,11 @@ function transcript(
      * credit narrows to its ranged reads.
      */
     range?: [number, number];
+    /**
+     * The path the reads target. Defaults to the module's diff constant;
+     * the drift fixture binds its plan to a real file of its own.
+     */
+    toolPath?: string;
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -202,11 +209,11 @@ function transcript(
                 name: 'read_file',
                 args: opts.range
                   ? {
-                      file_path: DIFF,
+                      file_path: opts.toolPath ?? DIFF,
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: opts.toolPath ?? DIFF },
               },
             },
           ],
@@ -2902,6 +2909,42 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
   });
 });
 
+describe('coverage — a stale chunk id cannot break the partition', () => {
+  it('drops an Uncoverable declaration for a chunk the plan does not carry', () => {
+    // A re-plan left a launch block behind from the old chunking: the record
+    // says `chunk 9 of 2` over a 2-chunk plan and declares it unreachable.
+    // The plan's ledger can never contain 9, so the declaration is about
+    // nothing this run planned — it must be dropped rather than entered into
+    // `uncoverable`, which the partition assertion cross-checks against a
+    // ledger built only from planned ids. Before the membership check, this
+    // exact shape threw `ChunkPartitionError` (`uncoverable disagrees with the
+    // ledger — reported=[9] ledger=[]`), crashing `check-coverage` out of its
+    // structured fail-closed refusal and aborting `compose-review`'s whole
+    // coverage computation on a run that had covered every planned chunk.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript(
+      'stale',
+      `You are reviewing chunk 9 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      {
+        calls: 1,
+        range: [800, 100],
+        text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    // The stale record is still disclosed — as a prompt defect, which is
+    // what it is: no prompt was built for a chunk the plan does not carry.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 9');
+    expect(r.ok).toBe(false);
+  });
+});
+
 // The per-chunk ledger: the same walk's conclusions, keyed by CHUNK instead of
 // by agent.
 //
@@ -3031,6 +3074,111 @@ describe('the chunk ledger', () => {
     transcript('a2', good(2), { calls: 2 });
 
     expect(coverageFromTranscripts(plan(), ENV).selectionDrift).toBeNull();
+  });
+});
+
+describe('coverage — a drifted selection identity, end to end', () => {
+  // The plan carries a `selection` identity (as every capture command writes
+  // since lib/selection.ts) bound to a REAL diff file, and the file is
+  // rewritten after the agents ran. The non-null half of the drift check:
+  // coverage still computes — nothing caps on drift yet — but the report
+  // must carry the reason, and the handler must print it.
+  const diffText = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n';
+
+  /** A compliant fully-covered run over a plan with a real identity. */
+  function identityRun(): { p: string; diffPath: string } {
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(diffPath, diffText);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100 },
+      { id: 2, startLine: 101, endLine: 200 },
+    ];
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: buildSelectionIdentity(
+          diffText,
+          chunks as unknown as DiffChunk[],
+          200,
+        ),
+      }),
+    );
+    // The chunk prompts name the fixture's own diff path — `good()` names the
+    // module constant, a different (nonexistent) file.
+    const goodHere = (c: number) =>
+      `You are reviewing chunk ${c} of 2.\n` +
+      `read_file(file_path="${chunkBrief(c)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) built(p, c, goodHere(c));
+    satisfyRoster(p);
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    transcript('a1', goodHere(1), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', goodHere(2), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    return { p, diffPath };
+  }
+
+  it('reports the drift on the report without moving anything else', () => {
+    const { p, diffPath } = identityRun();
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.selectionDrift).toMatch(/diff file has changed/);
+    // Report-only: the same run still certifies what its transcripts prove.
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('prints the drift NOTE scoped to the whole report, exit unchanged', () => {
+    const { p, diffPath } = identityRun();
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const note = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find(
+          (l) => l.includes('NOTE:') && l.includes('diff file has changed'),
+        );
+      expect(note).toBeDefined();
+      // The caveat names the WHOLE report — the summary fraction above the
+      // NOTE is the very number the drift invalidates, so scoping it to "the
+      // coverage below" left the headline certifying moved chunk ranges.
+      expect(note).toContain('including the summary above');
+      expect(process.exitCode).toBe(prevExit);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 });
 

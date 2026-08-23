@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { buildDiffPlan } from './diff-plan.js';
 import { buildPlanReport, stringifyPlanReport } from './report.js';
 import { makeDiff } from './test-utils.js';
@@ -156,6 +157,19 @@ describe('buildPlanReport', () => {
     expect(report.docsDiffLines).toBe(plan.docsDiffLines);
     expect(report.generatedDiffLines).toBe(plan.generatedDiffLines);
     expect(report.chunks).toBe(plan.chunks);
+  });
+
+  it('records the diff text digest as the source-artifact identity', () => {
+    // The write side of the drift check: `selectionDrift` re-hashes the diff
+    // on disk and compares it to this field, so the field must be the digest
+    // of the VERY text the plan was chunked from. Wiring
+    // `buildSelectionIdentity` to any other input compiles fine and would
+    // surface only as drift false-positives on every real run.
+    const diff = editFile('src/a.ts', 3, 2);
+    const report = planReportOf(diff, () => 1000);
+    expect(report.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(diff, 'utf8').digest('hex'),
+    );
   });
 });
 

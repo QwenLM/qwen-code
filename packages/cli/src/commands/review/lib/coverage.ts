@@ -166,7 +166,9 @@ export class ChunkPartitionError extends Error {
  * Every planned chunk appears exactly once, and nothing else appears at all.
  *
  * Unreachable from any input: the sets this checks are built by one walk over
- * one plan. That is the reason to assert it rather than the reason not to — an
+ * one plan, and the only id that enters them from outside — a launch text's
+ * `chunk N of M`, on its way into `uncoverable` — is checked against the plan
+ * first. That is the reason to assert it rather than the reason not to — an
  * unreachable invariant is exactly the kind that stops holding silently, and
  * every coverage figure downstream is a ratio whose denominator is this set.
  */
@@ -1086,7 +1088,16 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
+      // The id comes from launch text the orchestrator wrote, which a
+      // re-plan (or a resumed attempt's transcripts from a re-chunked diff)
+      // can leave pointing at a chunk this PLAN does not carry. Such a
+      // declaration is about nothing this run planned — and entering it
+      // would put an id in `uncoverable` that the ledger, built only from
+      // planned ids, can never match, taking the partition assertion down
+      // on input that is stale, not contradictory. Drop it; the
+      // rewritten-launch disclosure above already names the record.
       if (
+        plan.chunks.some((c) => c.id === chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
         uncoverable.add(chunk);

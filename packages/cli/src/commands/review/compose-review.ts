@@ -877,10 +877,11 @@ export interface ComposeReviewResult {
   capAxes: CapAxes;
   /**
    * The per-chunk coverage ledger this run computed, or `[]` when coverage
-   * could not be computed at all (which is what `terminalState: 'failed'`
-   * says). Carried so the persisted artifact and the terminal summary read the
-   * SAME object rather than each recomputing coverage — two derivations of one
-   * number is how they come to disagree.
+   * could not be computed at all (the run-level failure case). Note
+   * `terminalState: 'failed'` is wider: it also reports a computed ledger in
+   * which no chunk was read. Carried so the persisted artifact and the
+   * terminal summary read the SAME object rather than each recomputing
+   * coverage — two derivations of one number is how they come to disagree.
    */
   chunkLedger: ChunkCoverageItem[];
   /** The table row before caps and downgrades — for the terminal report. */
@@ -2727,7 +2728,11 @@ function composeReviewBody(
       subjectZh: '覆盖情况',
       reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
-    coverageRunFailure = 'no plan was given';
+    // `coverageRunFailure` stays null on purpose: a run with no plan never
+    // attempted coverage, which is the `'skipped'` state. `'failed'` is
+    // reserved for a run whose coverage machinery ran and broke — setting
+    // the failure here would leave `'skipped'` unreachable and persist the
+    // two shapes identically.
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
     try {

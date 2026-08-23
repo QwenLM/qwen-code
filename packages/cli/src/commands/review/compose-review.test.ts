@@ -62,7 +62,10 @@ import {
   deriveTerminalState,
   groupCapAxes,
 } from './compose-review.js';
+import * as coverageModule from './lib/coverage.js';
 import type { ChunkCoverageItem } from './lib/coverage.js';
+import { buildSelectionIdentity } from './lib/selection.js';
+import type { DiffChunk } from './lib/diff-plan.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -167,9 +170,29 @@ function plan(
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
     reviewModelId?: string;
+    /**
+     * Record the plan's selection identity (lib/selection.ts) over the
+     * fixture diff — the shape every capture command writes. Off by default:
+     * most cases stand in for plans written before the field existed.
+     */
+    withSelection?: boolean;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
+  const chunks = [
+    {
+      id: 1,
+      startLine: 1,
+      endLine: 100,
+      files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
+    },
+    {
+      id: 2,
+      startLine: 101,
+      endLine: 200,
+      files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+    },
+  ];
   writeFileSync(
     p,
     JSON.stringify({
@@ -197,20 +220,16 @@ function plan(
       // renderer names THEM, never the chunk id, so the fixture carries them
       // too. The 3A fixture below stays file-less on purpose: it is the
       // pre-files plan shape, and the renderer must fall back to counting.
-      chunks: [
-        {
-          id: 1,
-          startLine: 1,
-          endLine: 100,
-          files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
-        },
-        {
-          id: 2,
-          startLine: 101,
-          endLine: 200,
-          files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
-        },
-      ],
+      ...(opts.withSelection
+        ? {
+            selection: buildSelectionIdentity(
+              readFileSync(DIFF, 'utf8'),
+              chunks as unknown as DiffChunk[],
+              5000,
+            ),
+          }
+        : {}),
+      chunks,
     }),
   );
   // Every high-effort review runs Step 4 (verify) and Step 5 (reverse audit), and
@@ -462,6 +481,7 @@ function coveredPlan(
     host?: string;
     fetchedSha?: string;
     reviewModelId?: string;
+    withSelection?: boolean;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -3610,6 +3630,11 @@ describe('coverage is recomputed, never accepted', () => {
     // No chunk universe to count means nothing countable was certified — the
     // opener says so instead of "Reviewed."
     expect(r.body).toMatch(/could not certify that any of this diff/);
+    // Coverage was never ATTEMPTED, which is the `'skipped'` state —
+    // `'failed'` is reserved for a run whose coverage machinery ran and
+    // broke. A no-plan run persisting in the failed shape would make the
+    // two indistinguishable in the artifact.
+    expect(r.terminalState).toBe('skipped');
   });
 
   it('caps when the agents made no tool call — whatever their prose said', () => {
@@ -11360,6 +11385,70 @@ describe('terminalState — coverage, not verdict', () => {
     expect(r.event).toBe('REQUEST_CHANGES');
     // A blocker, and the diff was still fully read.
     expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  it('lands in remediation, caps nothing, and moves no event', () => {
+    // A valid identity bound to the diff, and the diff rewritten AFTER the
+    // agents ran — the exact failure the identity exists to catch. Every
+    // existing drift test exercised only absence (identity-less plans); this
+    // is the non-null path across the compose surface: disclosed where the
+    // other repairs are, and wired to NOTHING that caps.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      withSelection: true,
+    });
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.remediation.join(' ')).toContain('selection drift:');
+    expect(r.remediation.join(' ')).toMatch(/diff file has changed/);
+    // Report-only by construction: the drift rides remediation, NOT
+    // coverageEntries — a push there would cap this fully-covered run's
+    // verdict on a check that has never fired on a real run.
+    expect(r.cappedBy).toEqual([]);
+    expect(r.event).toBe('APPROVE');
+    expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('the coverage-failure arms keep their distinct messages', () => {
+  it('renders the ledger-contradiction arm when coverage throws ChunkPartitionError', () => {
+    // A partition violation is a defect in coverage.ts, not an unusable plan
+    // or unreadable transcripts: folded into the generic else, an operator
+    // handed "the plan could not be used" goes to re-capture a diff that was
+    // never the problem — the exact misdirection this arm exists to prevent.
+    const p = coveredPlan();
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'probe — uncoverable disagrees with the ledger',
+        );
+      });
+    try {
+      const r = composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: p,
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain('the coverage ledger contradicted the plan');
+      expect(r.body).not.toContain('the plan could not be used');
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      // The run-level failure terminalState keys on: a coverage machinery
+      // break, not the nothing-was-planned 'skipped'.
+      expect(r.terminalState).toBe('failed');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

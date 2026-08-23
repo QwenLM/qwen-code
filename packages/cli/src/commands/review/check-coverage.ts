@@ -118,8 +118,9 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   // 7 was reviewed" is a statement about a chunk 7 that no longer exists.
   if (report.selectionDrift !== null) {
     writeStderrLine(
-      `NOTE: ${report.selectionDrift}. The chunk coverage below is reported ` +
-        `against the plan as written; it does not yet account for this.`,
+      `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
+        `including the summary above — is reported against the plan as ` +
+        `written; it does not yet account for this.`,
     );
   }
 

@@ -13,6 +13,9 @@
 // moved — the review certifies chunk 7 and the agent read a different one.
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildSelectionIdentity,
   selectionDigest,
@@ -36,6 +39,19 @@ const CHUNKS = [chunk(1, 1, 100), chunk(2, 101, 200)];
 const DIFF = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n';
 
 describe('selectionDigest', () => {
+  it('keeps its separator an escape in source: no raw NUL byte in the file', () => {
+    // The separator is a NUL by design (no `id:start-end` field can contain
+    // one), but it must be WRITTEN as an escape: a literal 0x00 in the source
+    // made git classify this whole module as binary — invisible in GitHub's
+    // diff view, unsearchable with git grep, unreviewable inline. The escape
+    // is byte-identical at runtime, so the digests below pin the behavior and
+    // this pins the file.
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), 'selection.ts'),
+    );
+    expect(src.includes(0)).toBe(false);
+  });
+
   it('is stable across the order the chunks were emitted in', () => {
     // The selection is a SET of ranges. A plan that listed the same chunks in
     // another order selected the same scope, and a digest that disagreed would
