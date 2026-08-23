@@ -585,47 +585,37 @@ export function reviewSandboxImage(
  */
 export function runtimeClientEnv(
   env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): NodeJS.ProcessEnv {
   const scrubbed = { ...env };
-  // Deleting is the half the round-3 case-fold missed. `isFileSourcedEnvKey`
-  // now answers case-insensitively on Windows, but `delete scrubbed['DOCKER_HOST']`
-  // does not remove a `docker_host` the loader wrote — and Windows resolves the
-  // two to the same variable for the child. So the deletion matches the same
-  // way the query does.
-  const drop = (key: string) => {
-    delete scrubbed[key];
-    if (process.platform !== 'win32') return;
-    const lower = key.toLowerCase();
-    for (const present of Object.keys(scrubbed)) {
-      if (present.toLowerCase() === lower) delete scrubbed[present];
-    }
-  };
-  for (const key of [
-    'DOCKER_HOST',
-    'DOCKER_CERT_PATH',
-    'DOCKER_TLS_VERIFY',
-    'DOCKER_CONTEXT',
-    'CONTAINER_HOST',
-    // Indirection counts as selection: these name a config FILE that in turn
-    // names the daemon, the registries and the runtime. Scrubbing the direct
-    // selectors and leaving these would move the same steering one level down.
-    'DOCKER_CONFIG',
-    'CONTAINERS_CONF',
-    'CONTAINERS_REGISTRIES_CONF',
-    'CONTAINERS_STORAGE_CONF',
-    // The proxy family steers the client too: docker and podman honour these
-    // for every daemon call, so a repo-shipped `HTTPS_PROXY` interposes on the
-    // connection the direct selectors above were scrubbed to protect.
-    'HTTP_PROXY',
-    'HTTPS_PROXY',
-    'ALL_PROXY',
-    'NO_PROXY',
-    'http_proxy',
-    'https_proxy',
-    'all_proxy',
-    'no_proxy',
-  ]) {
-    if (isFileSourcedEnvKey(key)) drop(key);
+  // EVERY file-sourced key, not a list of the dangerous ones.
+  //
+  // The list was the first design and it lost twice: it named the daemon
+  // selectors and missed the proxy family, then named those and missed
+  // `DOCKER_API_VERSION` — a value that does not select a daemon at all, it
+  // just makes every call to one fail, which under `auto` turns containment
+  // off silently because the availability probe reads a broken client as "no
+  // runtime". The class is not "variables that point somewhere else", it is
+  // "variables a repository can set that change what this client does", and
+  // that has no last entry: an incompatible API version, a proxy, a config
+  // path, a `PATH` naming a different `docker` binary.
+  //
+  // The client does not need repository-provided environment for anything. So
+  // the rule is provenance, not name: what the loader wrote from a file the
+  // reviewed checkout supplies does not reach the process that decides whether
+  // containment happened.
+  //
+  // Deleting is the right restore, not an approximation of one: the loader
+  // records a key as file-sourced only where the real environment had nothing
+  // (`isEffectivelyUnset` in config/environment.ts), so a file value never
+  // shadows an inherited one and dropping it returns the variable to exactly
+  // its pre-load state. The scrub therefore cannot cost the client a `PATH` or
+  // `HOME` from the operator's shell — those are set, so they are never
+  // file-sourced. What it does cost is a value the operator kept ONLY in a
+  // `.env`, which `isFileSourcedEnvKey` cannot tell from the repository's own;
+  // that one must move to their shell. Conservative on the right side.
+  for (const key of Object.keys(scrubbed)) {
+    if (fileSourced(key)) delete scrubbed[key];
   }
   return scrubbed;
 }

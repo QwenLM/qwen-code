@@ -107,11 +107,16 @@ describe('values a repository must not be able to set', () => {
     // availability probe and every `docker run` at a daemon it controls, so
     // `required` reads as satisfied and whatever that daemon returns is scored
     // as build, test and probe evidence.
-    // The whole set, not one key: the finding this pins was that the direct
-    // selectors were scrubbed and the config-INDIRECTION ones were not, which
-    // moves the same steering one level down — a `DOCKER_CONFIG` naming a
-    // config file that names the daemon.
+    // By PROVENANCE, not by name. The list was the first design and it lost
+    // twice — it named the daemon selectors and missed the proxy family, then
+    // named those and missed `DOCKER_API_VERSION`, which selects nothing and
+    // merely makes every call fail, turning `auto` containment off because the
+    // probe reads a broken client as "no runtime". So the fixture includes a
+    // key nobody would think to enumerate, and expects it gone too.
     const selectors = [
+      'DOCKER_API_VERSION',
+      'PATH',
+      'SOMETHING_NOBODY_ENUMERATED',
       'HTTP_PROXY',
       'HTTPS_PROXY',
       'ALL_PROXY',
@@ -138,7 +143,8 @@ describe('values a repository must not be able to set', () => {
       vi.unstubAllEnvs();
     }
     // An OPERATOR's own DOCKER_HOST — a remote engine, colima, rootless — is
-    // untouched; only the file-sourced one is dropped.
+    // untouched; only the file-sourced one is dropped. Without this half the
+    // scrub could be "delete everything" and still ship green.
     vi.stubEnv('DOCKER_HOST', 'unix:///run/user/1000/docker.sock');
     try {
       expect(runtimeClientEnv()['DOCKER_HOST']).toBe(
