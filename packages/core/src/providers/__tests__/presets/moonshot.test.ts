@@ -68,11 +68,16 @@ describe('moonshotProvider', () => {
     const plan = buildInstallPlan(moonshotProvider, {
       baseUrl: INTL_BASE_URL,
       apiKey: 'sk-moonshot',
-      modelIds: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'],
+      modelIds: [
+        'kimi-k3',
+        'kimi-k2.7-code',
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.6',
+      ],
     });
 
     const models = plan.modelProviders?.[0]?.models;
-    expect(models).toHaveLength(3);
+    expect(models).toHaveLength(4);
 
     // K3 always thinks: mandatory, never a plain enable_thinking toggle.
     expect(models?.[0]).toMatchObject({
@@ -96,8 +101,18 @@ describe('moonshotProvider', () => {
       },
     });
 
-    // K2.6 is text-only, matching modalityDefaults for that ID.
     expect(models?.[2]).toMatchObject({
+      id: 'kimi-k2.7-code-highspeed',
+      name: '[Kimi] kimi-k2.7-code-highspeed',
+      generationConfig: {
+        contextWindowSize: 262144,
+        extra_body: { enable_thinking: true },
+        modalities: { image: true, video: true },
+      },
+    });
+
+    // K2.6 is text-only, matching modalityDefaults for that ID.
+    expect(models?.[3]).toMatchObject({
       id: 'kimi-k2.6',
       name: '[Kimi] kimi-k2.6',
       generationConfig: {
@@ -105,7 +120,7 @@ describe('moonshotProvider', () => {
         extra_body: { enable_thinking: true },
       },
     });
-    expect(models?.[2]?.generationConfig?.modalities).toBeUndefined();
+    expect(models?.[3]?.generationConfig?.modalities).toBeUndefined();
   });
 
   it('falls back gracefully for unknown model IDs', () => {
