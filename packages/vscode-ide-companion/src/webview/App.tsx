@@ -32,6 +32,7 @@ import {
   PermissionDrawer,
   AskUserQuestionDialog,
   ImagePreview,
+  InsightProgressCard,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -113,6 +114,17 @@ export const App: React.FC = () => {
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
+  // /insight feedback: latest structured progress update and the generated
+  // report path, surfaced by the extension via insightProgress /
+  // insightReportReady messages.
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
 
   const [editMode, setEditMode] = useState<ApprovalModeValue>(
@@ -399,6 +411,12 @@ export const App: React.FC = () => {
     },
     setAccountInfo: (info) => {
       setAccountInfo(info);
+    },
+    setInsightProgress: (progress) => {
+      setInsightProgress(progress);
+    },
+    setInsightReportPath: (path) => {
+      setInsightReportPath(path);
     },
   });
 
@@ -825,6 +843,18 @@ export const App: React.FC = () => {
     [vscode],
   );
 
+  // Open the generated /insight report in the editor via the extension's
+  // existing `openInsightReport` handler.
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   const webShellTheme = useMemo<'dark' | 'light'>(() => {
     const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
     return kind.includes('light') ? 'light' : 'dark';
@@ -997,13 +1027,40 @@ export const App: React.FC = () => {
             />
           </React.Suspense>
         )}
-        {localNotices.length > 0 && (
+        {(localNotices.length > 0 || insightProgress || insightReportPath) && (
           <div
             data-testid="local-message-notices"
             // Above the 140px composer clearance so the notices sit right
             // over the input box without covering transcript content.
             className="absolute bottom-[150px] left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
           >
+            {insightProgress && (
+              <div data-testid="insight-progress">
+                <InsightProgressCard
+                  stage={insightProgress.stage}
+                  progress={insightProgress.progress}
+                  detail={insightProgress.detail}
+                />
+              </div>
+            )}
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  data-testid="insight-report-link"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
             {localNotices.map((notice, index) => (
               <div
                 key={`${notice.timestamp}-${index}`}
