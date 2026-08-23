@@ -330,6 +330,81 @@ describe('binding semantics through the real kernel', () => {
     expect(textOf(after.events)).toContain('still-usable');
   });
 
+  it('resolves bare packages from a symlinked cwd node_modules', async () => {
+    // pnpm / monorepo hoisting / shared CI caches make node_modules a symlink;
+    // the implicit cwd root must still resolve through it.
+    const store = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-node-repl-store-'),
+    );
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-node-repl-cwd-'));
+    const pkg = path.join(store, 'demo-symlinked');
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(
+      path.join(pkg, 'package.json'),
+      JSON.stringify({
+        name: 'demo-symlinked',
+        version: '1.0.0',
+        type: 'module',
+        exports: './index.mjs',
+      }),
+    );
+    fs.writeFileSync(
+      path.join(pkg, 'index.mjs'),
+      'export const value = "via-symlink";',
+    );
+    fs.symlinkSync(store, path.join(work, 'node_modules'), 'dir');
+
+    const manager = new NodeReplKernelManager({
+      cwd: work,
+      homeDir: os.homedir(),
+      tmpRootDir: fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-node-repl-sl-')),
+      policy: NodeReplSecurityPolicy.default(),
+      readableRoots: [work],
+    });
+    managers.push(manager);
+    try {
+      const r = await manager.exec({
+        code: 'const d = await import("demo-symlinked"); nodeRepl.write(d.value);',
+        timeoutMs: 30_000,
+      });
+      expect(r.status).toBe('ok');
+      expect(textOf(r.events).trim()).toBe('via-symlink');
+    } finally {
+      fs.rmSync(store, { recursive: true, force: true });
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the error code of a host builtin failure inside imported code', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-node-repl-dep-'));
+    const dep = path.join(dir, 'dep.mjs');
+    fs.writeFileSync(
+      dep,
+      [
+        "const fs = (await import('node:fs')).default;",
+        "fs.readFileSync('/no/such/file/here.json');",
+        'export const x = 1;',
+      ].join('\n'),
+    );
+    const manager = makeManager();
+    try {
+      const r = await manager.exec({
+        code: [
+          '{ let out = "none";',
+          `  try { await import(${JSON.stringify(dep)}); }`,
+          '  catch (e) { out = [e instanceof Error, e.code].join("|"); }',
+          '  nodeRepl.write(out); }',
+        ].join('\n'),
+        timeoutMs: 30_000,
+      });
+      expect(r.status).toBe('ok');
+      // ENOENT and instanceof must survive the loader's error wrapping.
+      expect(textOf(r.events).trim()).toBe('true|ENOENT');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves the class and properties of an error thrown by an imported module', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-node-repl-err-'));
     const modulePath = path.join(dir, 'thrower.mjs');

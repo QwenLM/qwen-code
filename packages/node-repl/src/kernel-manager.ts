@@ -36,6 +36,10 @@ const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
 const MAX_RAW_IMAGES = 64;
 const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
+// A real image MIME type is a few dozen chars; bound it so a malformed or
+// forged frame cannot carry an unbounded string that bypasses the image byte
+// budget and is later interpolated into (and tokenized within) a notice.
+const MAX_IMAGE_MIME_CHARS = 255;
 const CONSOLE_LEVELS = new Set(['log', 'info', 'warn', 'error', 'debug']);
 
 export interface NodeReplTextEvent {
@@ -645,7 +649,8 @@ export class NodeReplKernelManager {
         if (
           typeof message.execId !== 'string' ||
           typeof message.data !== 'string' ||
-          typeof message.mimeType !== 'string'
+          typeof message.mimeType !== 'string' ||
+          message.mimeType.length > MAX_IMAGE_MIME_CHARS
         ) {
           this.handleProtocolError(handle, new Error('invalid image frame'));
           return;

@@ -38,7 +38,23 @@ export function createModuleLoader(options) {
     } catch {
       // Keep the context-owned fallback.
     }
-    return new realmErrorConstructor(message);
+    const wrapped = new realmErrorConstructor(message);
+    // Carry over the diagnostically useful fields so a host-realm error thrown
+    // by imported code (e.g. an fs ENOENT) does not collapse to message-only:
+    // `catch (e) { if (e.code === 'ENOENT') ... }` is a ubiquitous Node idiom.
+    try {
+      if (error && typeof error === 'object') {
+        if (typeof error.name === 'string') wrapped.name = error.name;
+        if (error.code !== undefined) wrapped.code = error.code;
+        if (error.errno !== undefined) wrapped.errno = error.errno;
+        if (error.syscall !== undefined) wrapped.syscall = error.syscall;
+        if (error.cause !== undefined) wrapped.cause = error.cause;
+        if (typeof error.stack === 'string') wrapped.stack = error.stack;
+      }
+    } catch {
+      // A hostile getter must not defeat error wrapping.
+    }
+    return wrapped;
   }
 
   async function importDynamicSafely(specifier, record) {
@@ -105,16 +121,29 @@ export function createModuleLoader(options) {
       }
     }
     const cwdRoot = path.join(cellBaseDir, 'node_modules');
-    try {
-      const real = canonicalDirectory(cwdRoot);
-      if (
-        sameCanonicalPath(cwdRoot, real) &&
-        !roots.some((root) => sameCanonicalPath(root.canonicalPath, real))
-      ) {
-        roots.push({ path: cwdRoot, canonicalPath: real });
+    // Only apply the implicit zero-config root when the cwd node_modules is not
+    // itself a registered root: a registered entry carries a canonical baseline
+    // and its own re-link/revocation guard above, which the implicit branch
+    // must not undermine by independently following a swapped symlink.
+    const cwdRootIsRegistered = moduleRoots.some(
+      (candidate) => path.resolve(candidate.path) === cwdRoot,
+    );
+    if (!cwdRootIsRegistered) {
+      try {
+        // The implicit root has no registration-time baseline, so there is no
+        // re-link to guard against — resolve it and use the real target
+        // directly. Requiring cwdRoot === realpath(cwdRoot) wrongly dropped a
+        // symlinked node_modules, which is the norm under pnpm / monorepo
+        // hoisting / shared CI caches, breaking zero-config resolution.
+        const real = canonicalDirectory(cwdRoot);
+        if (
+          !roots.some((root) => sameCanonicalPath(root.canonicalPath, real))
+        ) {
+          roots.push({ path: cwdRoot, canonicalPath: real });
+        }
+      } catch {
+        // The working directory does not need to contain node_modules.
       }
-    } catch {
-      // The working directory does not need to contain node_modules.
     }
     return roots;
   }
