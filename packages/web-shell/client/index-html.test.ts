@@ -79,28 +79,47 @@ describe('React performance measure guard', () => {
 
   it('clears the measure timeline on a budget so entries cannot accumulate', () => {
     const measure = vi.fn(() => 'measure');
-    const clearMeasures = vi.fn();
-    const performance = installMeasureGuard(measure, clearMeasures);
+    const clearThis: unknown[] = [];
+    const clearMeasures = vi.fn(function (this: unknown) {
+      clearThis.push(this);
+    });
+    const fakePerformance = installMeasureGuard(measure, clearMeasures);
     const reactOptions = {
       start: 1,
       end: 2,
-      detail: { devtools: { track: 'Components ⚛' } },
+      // A non-Components track: the flood is dominated by lane/scheduler
+      // tracks, so the budget must count every React devtools measure.
+      detail: { devtools: { track: 'Blocking' } },
     };
 
     for (let i = 0; i < 16384; i += 1) {
-      performance.measure('React', reactOptions);
+      fakePerformance.measure('⏱ track', reactOptions);
     }
+    // The timeline is cleared with no name filter (React never names its
+    // measures) and with the performance object as receiver (a detached
+    // brand-checked clearMeasures throws Illegal invocation).
     expect(clearMeasures).toHaveBeenCalledTimes(1);
+    expect(clearMeasures).toHaveBeenCalledWith();
+    expect(clearThis).toEqual([fakePerformance]);
+    // Every React measure is still forwarded, detail stripped — including
+    // the one that triggers the clear.
+    expect(measure).toHaveBeenCalledTimes(16384);
+    expect(
+      (measure.mock.calls[16383]?.[1] as PerformanceMeasureOptions).detail,
+    ).toBeNull();
 
-    performance.measure('React', reactOptions);
-    expect(clearMeasures).toHaveBeenCalledTimes(1);
+    // The clear is not latched: a second full window clears again.
+    for (let i = 0; i < 16384; i += 1) {
+      fakePerformance.measure('⏱ track', reactOptions);
+    }
+    expect(clearMeasures).toHaveBeenCalledTimes(2);
 
     // Non-React measures do not count toward the budget.
     for (let i = 0; i < 16384 - 1; i += 1) {
-      performance.measure('custom-measure', {
+      fakePerformance.measure('custom-measure', {
         detail: { source: 'web-shell' },
       });
     }
-    expect(clearMeasures).toHaveBeenCalledTimes(1);
+    expect(clearMeasures).toHaveBeenCalledTimes(2);
   });
 });
