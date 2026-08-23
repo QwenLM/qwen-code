@@ -848,6 +848,7 @@ export function PlanExecutionView({
             <button
               type="button"
               className={styles.locateButton}
+              data-plan-interactive
               onClick={() => locateFocusTodo('smooth')}
             >
               {t('planExecution.locateCurrent')}
