@@ -25,6 +25,7 @@ const GOAL: GoalRecord = {
   evidenceCursor: { recordId: 'record-0' },
   turnCount: 4,
   activeTimeMs: 2000,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 200,
   lastReason: 'continuing',
@@ -257,6 +258,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -279,6 +281,7 @@ describe('createTranscriptReplayMachine', () => {
         ],
       },
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 400,
     };
     expect(
@@ -302,6 +305,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2900,
+      tokensUsed: 0,
       updatedAt: 500,
     };
     expect(
@@ -325,6 +329,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
@@ -332,6 +337,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -351,6 +357,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -377,6 +384,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -390,6 +398,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turnedOnce,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -403,6 +412,7 @@ describe('createTranscriptReplayMachine', () => {
       ...rejectedOnce,
       turnCount: GOAL.turnCount + 2,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -417,6 +427,7 @@ describe('createTranscriptReplayMachine', () => {
     const rejectedTwice: GoalRecord = {
       ...turnedTwice,
       activeTimeMs: 2400,
+      tokensUsed: 0,
       updatedAt: 330,
     };
     expect(
@@ -429,6 +440,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejectedTwice,
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 340,
     };
     expect(
