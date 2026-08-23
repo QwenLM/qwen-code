@@ -32,7 +32,6 @@ import {
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
-  browserLaunchIneligibilityReasons,
   MCP_BUDGET_WARN_FRACTION,
   MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
@@ -123,8 +122,8 @@ async function startLocalControl(
  * the `serve` handler so it is unit-testable. Best-effort:
  *  - gated on `--open` and the UI actually being mounted
  *    (`webShellMounted`); bare `--open` remains a no-op when
- *    `shouldLaunchBrowser()` is false, while `--ephemeral-auth` prints a
- *    reason and manual URL instead;
+ *    `shouldLaunchBrowser()` is false, while `--open-with-auth` prints a
+ *    manual URL instead;
  *  - wildcard bind hosts (`0.0.0.0` / `[::]`) are rewritten to loopback so the
  *    URL is client-addressable;
  *  - the token rides in the URL fragment (`#token=`), which is never sent to
@@ -168,10 +167,6 @@ export async function maybeOpenWebShellBrowser(
       target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
     }
     if (!shouldLaunch) {
-      const reasons = browserLaunchIneligibilityReasons();
-      writeStderrLine(
-        `qwen serve: browser auto-open unavailable (${reasons.join('; ')}).`,
-      );
       writeStderrLine(
         'Browser launch is not available in this environment. ' +
           `Please open this URL manually: ${target.toString()}`,
@@ -212,7 +207,7 @@ interface ServeArgs {
   'tls-key'?: string;
   web: boolean;
   open: boolean;
-  'ephemeral-auth': boolean;
+  'open-with-auth': boolean;
   'local-control': boolean;
   'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -382,11 +377,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
       })
-      .option('ephemeral-auth', {
+      .option('open-with-auth', {
         type: 'boolean',
         default: false,
         description:
-          'With --open on loopback, generate a temporary 256-bit bearer token when no explicit token is configured and deliver it to the Web Shell in the URL fragment. In headless environments, print the fragment URL for manual opening.',
+          'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
       })
       .option('local-control', {
         type: 'boolean',
@@ -400,9 +395,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
-        if (argv['ephemeral-auth'] === true && argv.open !== true) {
-          throw new Error('--ephemeral-auth requires --open.');
-        }
         // A wildcard or LAN primary bind already owns the port Local Control
         // needs on its selected address. Token and Origin settings remain
         // independent because the second listener owns those.
@@ -840,6 +832,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const externalToolGuardToken =
       process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] ?? '';
     delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+    const openWithAuth = argv['open-with-auth'];
+    const open = argv.open || openWithAuth;
 
     // Lazy-load the slim serve runner so the yargs fallback path does not pull
     // the public serve barrel, which also exports REST/ACP runtime modules.
@@ -849,7 +843,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,
-        mode: 'http-bridge' as const,
+        mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         ...(argv['max-total-sessions'] !== undefined
           ? { maxTotalSessions: argv['max-total-sessions'] }
@@ -939,12 +933,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { restoreAskUserQuestion: true }
           : {}),
         ...(channelSelection !== undefined ? { channelSelection } : {}),
-      };
-      if (argv['ephemeral-auth']) {
-        const { applyOpenEphemeralAuth } = await import(
-          '../serve/open-ephemeral-auth.js'
+      } satisfies Parameters<typeof runQwenServe>[0];
+      if (openWithAuth) {
+        const { applyOpenWithAuth } = await import(
+          '../serve/open-with-auth.js'
         );
-        applyOpenEphemeralAuth(serveOptions, argv.open, true);
+        applyOpenWithAuth(serveOptions);
       }
       const handle = await runQwenServe(serveOptions);
       // Open the Web Shell in a browser once the listener is up (best-effort;
@@ -960,7 +954,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw err;
         }
       }
-      await maybeOpenWebShellBrowser(handle, argv.open, argv['ephemeral-auth']);
+      await maybeOpenWebShellBrowser(handle, open, openWithAuth);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

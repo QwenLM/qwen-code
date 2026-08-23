@@ -11,36 +11,31 @@ import { resolveServeToken } from './serve-token.js';
 import type { ServeOptions } from './types.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 
-type OpenEphemeralAuthOptions = Pick<
+type OpenWithAuthOptions = Pick<
   ServeOptions,
   'hostname' | 'serveWebShell' | 'token'
 >;
 
-export function applyOpenEphemeralAuth(
-  options: OpenEphemeralAuthOptions,
-  open: boolean,
-  ephemeralAuth: boolean,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  if (!ephemeralAuth) return false;
-  if (!open) {
-    throw new Error('--ephemeral-auth requires --open.');
-  }
+export function applyOpenWithAuth(options: OpenWithAuthOptions): void {
   if (!isLoopbackBind(options.hostname)) {
-    throw new Error('--ephemeral-auth requires a loopback --hostname.');
+    throw new Error('--open-with-auth requires a loopback --hostname.');
   }
   if (options.serveWebShell === false) {
-    throw new Error('--ephemeral-auth requires the Web Shell; omit --no-web.');
+    throw new Error('--open-with-auth requires the Web Shell; omit --no-web.');
   }
   if (!resolveWebShellDir()) {
-    throw new Error('--ephemeral-auth requires built Web Shell assets.');
+    throw new Error('--open-with-auth requires built Web Shell assets.');
   }
-  if (resolveServeToken(options.token, env)) return false;
+
+  const configuredToken = resolveServeToken(options.token);
+  if (configuredToken) {
+    options.token = configuredToken;
+    return;
+  }
 
   options.token = randomBytes(32).toString('base64url');
   writeStderrLine(
-    'qwen serve: temporary bearer authentication enabled for this --open ' +
+    'qwen serve: temporary bearer authentication enabled for this Web Shell ' +
       'launch; use an explicit shared token for additional clients.',
   );
-  return true;
 }

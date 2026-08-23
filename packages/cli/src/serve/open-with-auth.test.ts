@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServeOptions } from './types.js';
-import { applyOpenEphemeralAuth } from './open-ephemeral-auth.js';
+import { applyOpenWithAuth } from './open-with-auth.js';
 
 const mockResolveWebShellDir = vi.hoisted(() =>
   vi.fn<() => string | undefined>(() => '/tmp/web-shell'),
@@ -25,26 +25,36 @@ function options(overrides: Partial<ServeOptions> = {}): ServeOptions {
   };
 }
 
-describe('applyOpenEphemeralAuth', () => {
+const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+
+describe('applyOpenWithAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockResolveWebShellDir.mockReturnValue('/tmp/web-shell');
+    delete process.env['QWEN_SERVER_TOKEN'];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalServerToken === undefined) {
+      delete process.env['QWEN_SERVER_TOKEN'];
+    } else {
+      process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
   });
 
   it('generates a 256-bit base64url token without mutating the environment', () => {
     const serveOptions = options();
-    const env: Record<string, string | undefined> = {};
-    const before = { ...env };
     const stderrWrites: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       stderrWrites.push(String(chunk));
       return true;
     });
 
-    expect(applyOpenEphemeralAuth(serveOptions, true, true, env)).toBe(true);
+    applyOpenWithAuth(serveOptions);
     expect(serveOptions.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(Buffer.from(serveOptions.token!, 'base64url')).toHaveLength(32);
-    expect(env).toEqual(before);
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(stderrWrites.join('')).toContain(
       'temporary bearer authentication enabled',
     );
@@ -52,88 +62,68 @@ describe('applyOpenEphemeralAuth', () => {
   });
 
   it('preserves an explicit option token over the environment', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'env-token';
     const serveOptions = options({ token: ' option-token ' });
 
-    expect(
-      applyOpenEphemeralAuth(serveOptions, true, true, {
-        QWEN_SERVER_TOKEN: 'env-token',
-      }),
-    ).toBe(false);
-    expect(serveOptions.token).toBe(' option-token ');
+    applyOpenWithAuth(serveOptions);
+
+    expect(serveOptions.token).toBe('option-token');
   });
 
   it('preserves an environment token when no option is set', () => {
+    process.env['QWEN_SERVER_TOKEN'] = ' env-token ';
     const serveOptions = options();
 
-    expect(
-      applyOpenEphemeralAuth(serveOptions, true, true, {
-        QWEN_SERVER_TOKEN: 'env-token',
-      }),
-    ).toBe(false);
-    expect(serveOptions.token).toBeUndefined();
+    applyOpenWithAuth(serveOptions);
+
+    expect(serveOptions.token).toBe('env-token');
   });
 
   it('treats an explicitly whitespace-only option as absent after it shadows the environment', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'env-token';
     const serveOptions = options({ token: '  ' });
 
-    expect(
-      applyOpenEphemeralAuth(serveOptions, true, true, {
-        QWEN_SERVER_TOKEN: 'env-token',
-      }),
-    ).toBe(true);
+    applyOpenWithAuth(serveOptions);
+
     expect(serveOptions.token).not.toBe('env-token');
+    expect(serveOptions.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it.each([
-    [options(), false, '--ephemeral-auth requires --open.'],
     [
       options({ hostname: '0.0.0.0' }),
-      true,
-      '--ephemeral-auth requires a loopback --hostname.',
+      '--open-with-auth requires a loopback --hostname.',
     ],
     [
       options({ serveWebShell: false }),
-      true,
-      '--ephemeral-auth requires the Web Shell; omit --no-web.',
+      '--open-with-auth requires the Web Shell; omit --no-web.',
     ],
-  ])('rejects an ineligible invocation', (serveOptions, open, message) => {
-    expect(() => applyOpenEphemeralAuth(serveOptions, open, true, {})).toThrow(
-      message,
-    );
+  ])('rejects an ineligible invocation', (serveOptions, message) => {
+    expect(() => applyOpenWithAuth(serveOptions)).toThrow(message);
   });
 
   it('requires built Web Shell assets', () => {
     mockResolveWebShellDir.mockReturnValue(undefined);
 
-    expect(() => applyOpenEphemeralAuth(options(), true, true, {})).toThrow(
-      '--ephemeral-auth requires built Web Shell assets.',
+    expect(() => applyOpenWithAuth(options())).toThrow(
+      '--open-with-auth requires built Web Shell assets.',
     );
   });
 
   it.each(['localhost', 'LOCALHOST', '127.0.0.1', '127.0.0.2', '::1', '[::1]'])(
     'accepts the existing loopback bind %s',
     (hostname) => {
-      expect(
-        applyOpenEphemeralAuth(options({ hostname }), true, true, {}),
-      ).toBe(true);
+      const serveOptions = options({ hostname });
+      applyOpenWithAuth(serveOptions);
+      expect(serveOptions.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     },
   );
 
   it('rejects non-loopback even when a token is already configured', () => {
     expect(() =>
-      applyOpenEphemeralAuth(
+      applyOpenWithAuth(
         options({ hostname: '192.168.1.2', token: 'configured' }),
-        true,
-        true,
-        {},
       ),
-    ).toThrow('--ephemeral-auth requires a loopback --hostname.');
-  });
-
-  it('is a no-op when the flag is disabled', () => {
-    const serveOptions = options({ hostname: '0.0.0.0' });
-
-    expect(applyOpenEphemeralAuth(serveOptions, false, false, {})).toBe(false);
-    expect(serveOptions.token).toBeUndefined();
+    ).toThrow('--open-with-auth requires a loopback --hostname.');
   });
 });

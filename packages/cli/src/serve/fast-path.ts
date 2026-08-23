@@ -21,7 +21,7 @@ type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 interface ParsedServeFastPath {
   kind: 'serve';
   open: boolean;
-  ephemeralAuth: boolean;
+  openWithAuth: boolean;
   httpBridge: boolean;
   options: ServeOptions;
 }
@@ -77,13 +77,13 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
 
 const BOOLEAN_OPTION_BY_FLAG = new Map<
   string,
-  keyof ServeOptions | 'open' | 'ephemeral-auth' | 'http-bridge'
+  keyof ServeOptions | 'open' | 'open-with-auth' | 'http-bridge'
 >([
   ['require-auth', 'requireAuth'],
   ['enable-session-shell', 'enableSessionShell'],
   ['web', 'serveWebShell'],
   ['open', 'open'],
-  ['ephemeral-auth', 'ephemeral-auth'],
+  ['open-with-auth', 'open-with-auth'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
@@ -179,10 +179,6 @@ function getRateLimitValidationError(options: ServeOptions): string | null {
 function getServeFastPathValidationError(
   parsed: ParsedServeFastPath,
 ): string | null {
-  if (parsed.ephemeralAuth && !parsed.open) {
-    return 'qwen serve: --ephemeral-auth requires --open.';
-  }
-
   const mcpClientBudget = parsed.options.mcpClientBudget;
   if (
     mcpClientBudget !== undefined &&
@@ -342,7 +338,7 @@ export function parseServeFastPathArgs(
     port: 4170,
   };
   let open = false;
-  let ephemeralAuth = false;
+  let openWithAuth = false;
   let httpBridge = true;
   let mcpBudgetModeRaw: string | undefined;
   let mcpClientBudget: number | undefined;
@@ -372,8 +368,8 @@ export function parseServeFastPathArgs(
       }
       if (booleanTarget === 'open') {
         open = value;
-      } else if (booleanTarget === 'ephemeral-auth') {
-        ephemeralAuth = value;
+      } else if (booleanTarget === 'open-with-auth') {
+        openWithAuth = value;
       } else if (booleanTarget === 'http-bridge') {
         httpBridge = value;
       } else {
@@ -492,13 +488,19 @@ export function parseServeFastPathArgs(
     options.rateLimit = explicitRateLimit;
   }
   applyRateLimitEnvDefaults(options, env);
-  return { kind: 'serve', open, ephemeralAuth, httpBridge, options };
+  return {
+    kind: 'serve',
+    open: open || openWithAuth,
+    openWithAuth,
+    httpBridge,
+    options,
+  };
 }
 
 async function maybeOpenWebShellBrowser(
   handle: RunHandle,
   open: boolean,
-  ephemeralAuth: boolean,
+  openWithAuth: boolean,
 ): Promise<void> {
   if (!open) return;
   try {
@@ -509,7 +511,7 @@ async function maybeOpenWebShellBrowser(
   const { maybeOpenWebShellBrowser: openBrowser } = await import(
     '../commands/serve.js'
   );
-  await openBrowser(handle, true, ephemeralAuth);
+  await openBrowser(handle, true, openWithAuth);
 }
 
 function emitHeadlessYoloWarning(
@@ -593,12 +595,10 @@ export async function tryRunServeFastPath(
 
   writeServeWarnings(parsed);
 
-  if (parsed.ephemeralAuth) {
+  if (parsed.openWithAuth) {
     try {
-      const { applyOpenEphemeralAuth } = await import(
-        './open-ephemeral-auth.js'
-      );
-      applyOpenEphemeralAuth(parsed.options, parsed.open, parsed.ephemeralAuth);
+      const { applyOpenWithAuth } = await import('./open-with-auth.js');
+      applyOpenWithAuth(parsed.options);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
@@ -620,7 +620,7 @@ export async function tryRunServeFastPath(
     } catch {
       // Keep the warning best-effort, matching the yargs serve handler.
     }
-    await maybeOpenWebShellBrowser(handle, parsed.open, parsed.ephemeralAuth);
+    await maybeOpenWebShellBrowser(handle, parsed.open, parsed.openWithAuth);
   } catch (err) {
     writeStderrLine(
       `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

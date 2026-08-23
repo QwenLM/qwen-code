@@ -536,7 +536,7 @@ describe('serve fast path argument parsing', () => {
 
     expect(parsed).toEqual({
       kind: 'serve',
-      ephemeralAuth: false,
+      openWithAuth: false,
       httpBridge: true,
       open: false,
       options: {
@@ -692,7 +692,7 @@ describe('serve fast path argument parsing', () => {
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
-      ['ephemeral-auth', ['--open', '--ephemeral-auth']],
+      ['open-with-auth', ['--open-with-auth']],
       ['local-control', ['--local-control']],
       ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
@@ -863,17 +863,23 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
-  it('keeps opt-in ephemeral auth on the fast path', () => {
-    const parsed = parseServeFastPathArgs([
-      'serve',
-      '--open',
-      '--ephemeral-auth',
-    ]);
+  it('keeps authenticated open on the fast path', () => {
+    const parsed = parseServeFastPathArgs(['serve', '--open-with-auth']);
 
     expect(parsed).toMatchObject({
       kind: 'serve',
       open: true,
-      ephemeralAuth: true,
+      openWithAuth: true,
+    });
+  });
+
+  it('lets authenticated open imply --open regardless of --no-open', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--open-with-auth', '--no-open']),
+    ).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
     });
   });
 
@@ -903,10 +909,6 @@ describe('serve fast path argument parsing', () => {
   });
 
   it.each([
-    [
-      ['serve', '--ephemeral-auth'],
-      'qwen serve: --ephemeral-auth requires --open.',
-    ],
     [
       ['serve', '--mcp-client-budget', '0'],
       'qwen serve: --mcp-client-budget must be a positive integer.',
