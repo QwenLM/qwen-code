@@ -2538,7 +2538,67 @@ describe('ArtifactPanel image preview tabs', () => {
   });
 });
 
-describe('ArtifactPanel download-only workspace artifacts', () => {
+describe('ArtifactPanel workspace artifact previews', () => {
+  it.each([
+    {
+      label: 'Markdown',
+      mimeType: 'text/markdown; charset=utf-8',
+      content: '# Charset Markdown',
+    },
+    {
+      label: 'HTML',
+      mimeType: 'text/html; charset=utf-8',
+      content: '<h1>Charset HTML</h1>',
+    },
+  ])('previews document-classified $label MIME types', async (testCase) => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: testCase.content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: testCase.content,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: `${testCase.label} preview`,
+          workspacePath: 'reports/preview',
+          mimeType: testCase.mimeType,
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-23T00:00:00.000Z',
+          updatedAt: '2026-08-23T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      'reports/preview',
+    );
+    if (testCase.label === 'Markdown') {
+      expect(container.querySelector('h1')?.textContent).toBe(
+        'Charset Markdown',
+      );
+    } else {
+      expect(
+        container.querySelector('iframe')?.getAttribute('srcdoc'),
+      ).toContain(testCase.content);
+    }
+  });
+
   it('renders a document artifact as download-only and does not preview it', async () => {
     mockWorkspaceActions.stat.mockResolvedValue({
       type: 'file',

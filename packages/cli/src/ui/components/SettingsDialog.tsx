@@ -10,7 +10,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
+import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
@@ -28,11 +28,11 @@ import {
   getNestedValue,
   getEffectiveValue,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+} from '../../config/settingsUtils.js';
 import {
   isAutoLanguage,
   writeOutputLanguageAndRegisterPath,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -56,7 +56,7 @@ import { StatsDialog } from './StatsDialog.js';
 import {
   getExtendedSystemInfo,
   type ExtendedSystemInfo,
-} from '../../utils/systemInfo.js';
+} from '../systemInfo.js';
 
 interface SettingsDialogProps {
   settings: LoadedSettings;
@@ -217,7 +217,15 @@ export function SettingsDialog({
   }, [selectedScope, settings, globalPendingChanges]);
 
   const generateSettingsItems = () => {
-    const settingKeys = getDialogSettingKeys();
+    // Workspace-restricted settings are stripped before the merge, so offering
+    // them under Workspace scope is a trap: the dialog renders from the raw
+    // scope file, so a toggle here would keep displaying the value it wrote
+    // while the feature stayed at its merged value, leaving a dead entry in
+    // the repo's .qwen/settings.json. They stay listed under the scopes that
+    // do honor them.
+    const settingKeys = getDialogSettingKeys({
+      excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
+    });
 
     return settingKeys.map((key: string) => {
       const definition = getSettingDefinition(key);
