@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
+import type { SessionContentGenerator } from './AssistantMessage';
 import { hasActiveAgents } from '../../adapters/toolClassification';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
@@ -89,6 +90,8 @@ function renderToolGroup(
   compactSummary = false,
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
+  language: 'en' | 'zh-CN' = 'en',
+  generateContent?: SessionContentGenerator,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -99,10 +102,11 @@ function renderToolGroup(
         tools={tools}
         thoughts={thoughts}
         compactSummary={compactSummary}
+        generateContent={generateContent}
       />
     );
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <WebShellCustomizationProvider value={customization}>
           {onOpenMonitor ? (
             <MonitorDetailsProvider onOpen={onOpenMonitor}>
@@ -1808,6 +1812,90 @@ describe('thinking rows in the compact summary', () => {
     // The pointer-styled row is the hit target, not just the label button.
     act(() => chevron.click());
     expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('does not toggle the folded thought on clicks inside the translation popover', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'request-1',
+        seq: 0,
+        text: '翻译结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 12,
+        outputTokens: 4,
+      };
+    });
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private thought for translation' }],
+      false,
+      undefined,
+      undefined,
+      'zh-CN',
+      generateContent,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    // The popover renders through a portal, but React events from it still
+    // bubble through the React tree into the header row.
+    const translateButton =
+      header.querySelector<HTMLButtonElement>('button[title="翻译"]');
+    expect(translateButton).not.toBeNull();
+    await act(async () => translateButton?.click());
+    expect(document.body.textContent).toContain('翻译结果');
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const translationContent = document.body.querySelector(
+      '[class*="translationContent"]',
+    ) as HTMLElement;
+    expect(translationContent).toBeTruthy();
+    act(() => translationContent.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const retranslateButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '重新翻译');
+    expect(retranslateButton).toBeTruthy();
+    await act(async () => retranslateButton?.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
   });
 
   it('keeps the single tool compact when thinking is folded in', () => {

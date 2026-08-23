@@ -1568,7 +1568,11 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
       className={`${styles.chatSummaryThoughtHeader}${
         expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
       }`}
-      onClick={onToggle}
+      onClick={(event) => {
+        if (event.currentTarget.contains(event.target as Node)) {
+          onToggle();
+        }
+      }}
     >
       <button
         type="button"
