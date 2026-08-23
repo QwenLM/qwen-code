@@ -68,6 +68,13 @@ export interface LocalCacheCandidate {
    * reads empty as a mismatch — an unverifiable contract is a failed one.
    */
   lastModelId: string;
+  /**
+   * Did the capture that wrote this include untracked files?
+   *
+   * A later round that sees LESS cannot certify this state: absent untracked
+   * paths would read as vanished rather than out of scope.
+   */
+  untracked?: boolean;
 }
 
 /**
@@ -288,11 +295,47 @@ export function renderingAttributes(
   // below would silently drop its `binary` flag from the identity, leaving
   // the identity still across a flip that changes the rendering.
   const diffDriverByPath = Object.create(null) as Record<string, string>;
+  /** Paths whose driver name did not survive the decode — see below. */
+  const undecodableDriver = new Set<string>();
   const f = raw.split('\0');
   for (let i = 0; i + 2 < f.length; i += 3) {
     const [path, attr, value] = [f[i], f[i + 1], f[i + 2]];
     if (path === undefined || attr === undefined || value === undefined) break;
-    if (attr === 'diff' && !ATTR_STATES.has(value)) {
+    if (attr === 'diff') {
+      // EVERY answer is a driver candidate: `set`, `unset` and `unspecified`
+      // are legal driver NAMES too (`data.bin diff=set`), answered by
+      // `check-attr` byte-identically to the like-spelled attribute states —
+      // **and so is the EMPTY one.** `*.dat diff=` is a legal attributes
+      // line, `check-attr --stdin -z` answers it with an empty value, and
+      // `git config diff..binary true` flips that section between readable
+      // hunks and "Binary files differ" with the mode and the blob standing
+      // still (verified against git 2.47.3). Excluding it was the same
+      // family's last entrance, left open by the fix that closed the others
+      // while its own comment claimed every answer was covered.
+      // Excluding those spellings left such a driver's `diff.<name>.binary`
+      // out of the fold — `git diff` flips the section between readable
+      // hunks and "Binary files differ" while the identity stands still.
+      // The fold below still asks the CONFIG first, so a plain state answer
+      // with no driver so named costs one probe and folds nothing.
+      if (value.includes('\ufffd')) {
+        // A driver NAME is bytes, and this stream was decoded: an invalid
+        // byte folded to U+FFFD, so the config probe would ask for
+        // `diff.<U+FFFD>.binary` (re-encoded as EF BF BD) and never match the
+        // raw-byte key git itself matches. Nothing would fold, and flipping
+        // that config would change the rendering with every identity
+        // component standing still. The same discipline this module applies
+        // to a decoded PATH: what cannot be named faithfully cannot be
+        // certified.
+        // Recorded, not written here: this loop appends one record at a
+        // time, so writing UNHASHABLE now would have the path's later
+        // `binary`/`text` records append onto it (`unhashable,binary=…`).
+        undecodableDriver.add(path);
+        // …and it is NOT recorded as a driver: probing
+        // `diff.<U+FFFD>.binary` spawns a `git config` that cannot match,
+        // and leaving the path in the map would let the fold below append
+        // onto the UNHASHABLE this earns it.
+        continue;
+      }
       drivers.add(value);
       diffDriverByPath[path] = value;
     }
@@ -301,6 +344,9 @@ export function renderingAttributes(
         ? `${attr}=${value}`
         : `${out[path]},${attr}=${value}`;
   }
+  // Applied after the stream, so no later record for the same path can
+  // append onto it.
+  for (const path of undecodableDriver) out[path] = UNHASHABLE;
   // `diff=<driver>` names a driver whose behaviour lives in git CONFIG, not
   // in any attributes file — and `diff.<driver>.binary` flips a section
   // between readable hunks and "Binary files … differ" with the attribute
@@ -325,9 +371,6 @@ export function renderingAttributes(
   }
   return out;
 }
-
-/** `check-attr` answers for a set attribute, not a driver name. */
-const ATTR_STATES = new Set(['unspecified', 'set', 'unset']);
 
 /** One id for the whole state: order-independent, HEAD included. */
 export function stateIdOf(
@@ -361,6 +404,7 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     v?: unknown;
     target?: unknown;
     source?: unknown;
+    untracked?: unknown;
     headSha?: unknown;
     files?: unknown;
     stateId?: unknown;
@@ -406,6 +450,7 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     // cache from before the field reads as a mismatch against a file review,
     // which costs one full round.
     ...(typeof c.source === 'string' ? { source: c.source } : {}),
+    ...(typeof c.untracked === 'boolean' ? { untracked: c.untracked } : {}),
   };
 }
 

@@ -124,10 +124,12 @@ describe('tryGenerateSessionTitle', () => {
   });
 
   it('returns {ok:true, title, modelUsed} on success', async () => {
+    // Not one of the TITLE_SYSTEM_PROMPT "Good examples" — those are
+    // rejected as prompt echoes (see the #9706 tests below).
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',
       history: DIALOG_HISTORY,
-      generateJsonResult: { title: 'Fix login button on mobile' },
+      generateJsonResult: { title: 'Debug mobile login breakage' },
     });
     const outcome = await tryGenerateSessionTitle(
       config,
@@ -135,7 +137,7 @@ describe('tryGenerateSessionTitle', () => {
     );
     expect(outcome).toEqual({
       ok: true,
-      title: 'Fix login button on mobile',
+      title: 'Debug mobile login breakage',
       modelUsed: 'qwen-turbo',
     });
     // Schema call must use the fast model (not the main model) and the
@@ -155,6 +157,124 @@ describe('tryGenerateSessionTitle', () => {
     expect(callOpts.schema.required).toEqual(['title']);
     expect(callOpts.schema.properties.title.type).toBe('string');
     expect(callOpts.maxAttempts).toBe(1);
+  });
+
+  // #9706: when the recent conversation carries little topical signal
+  // (boilerplate-heavy channel sessions), the title model takes the cheapest
+  // schema-valid answer and parrots a TITLE_SYSTEM_PROMPT "Good example"
+  // back verbatim. Such canned titles say nothing about the session, so
+  // they must be treated like an empty result and let the caller fall back.
+  it('rejects a verbatim echo of a TITLE_SYSTEM_PROMPT example (#9706)', async () => {
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: 'Fix login button on mobile' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'empty_result' });
+  });
+
+  it('rejects case/punctuation variants of every prompt example (#9706)', async () => {
+    const echoes = [
+      // Case variants (incl. the prompt's own "Bad (wrong case)" example).
+      'Fix Login Button On Mobile',
+      'fix LOGIN button on mobile',
+      // Whitespace / residual punctuation that sanitizeTitle strips down to
+      // the bare example.
+      '  Add OAuth authentication flow  ',
+      'Debug failing CI pipeline tests.',
+      // The CJK example.
+      '重构用户鉴权中间件',
+    ];
+    for (const title of echoes) {
+      const { config } = makeConfig({
+        fastModel: 'qwen-turbo',
+        history: DIALOG_HISTORY,
+        generateJsonResult: { title },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(outcome, `echo not rejected: ${JSON.stringify(title)}`).toEqual({
+        ok: false,
+        reason: 'empty_result',
+      });
+    }
+  });
+
+  it('rejects bracket-wrapped echoes of prompt examples (#9706)', async () => {
+    // sanitizeTitle keeps ASCII/full-width brackets (legitimate in titles
+    // like "(WIP) Fix build"), so the guard itself must see through a
+    // bracket wrapper around a canned example.
+    const wrapped = [
+      '(Fix login button on mobile)',
+      '[Add OAuth authentication flow]',
+      '{Debug failing CI pipeline tests}',
+      '（重构用户鉴权中间件）',
+      // Wrappers that survive sanitizeTitle with inner punctuation intact —
+      // the guard must not depend on an enumerated bracket family.
+      '["Fix login button on mobile"]',
+      '<Add OAuth authentication flow>',
+      '«Debug failing CI pipeline tests»',
+    ];
+    for (const title of wrapped) {
+      const { config } = makeConfig({
+        fastModel: 'qwen-turbo',
+        history: DIALOG_HISTORY,
+        generateJsonResult: { title },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(
+        outcome,
+        `wrapped echo not rejected: ${JSON.stringify(title)}`,
+      ).toEqual({ ok: false, reason: 'empty_result' });
+    }
+  });
+
+  it('still accepts a genuine title wrapped in brackets (#9706)', async () => {
+    // The wrapper strip is comparison-only: a real title that happens to
+    // carry brackets must pass through unchanged, not be corrupted or
+    // rejected.
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: '(WIP) Fix build' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({
+      ok: true,
+      title: '(WIP) Fix build',
+      modelUsed: 'qwen-turbo',
+    });
+  });
+
+  it('still accepts a topical title that merely resembles an example (#9706)', async () => {
+    // The guard must be an exact (normalized) match, not fuzzy: a session
+    // genuinely about a login button still gets a real, non-canned title.
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: 'Fix login button styling' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({
+      ok: true,
+      title: 'Fix login button styling',
+      modelUsed: 'qwen-turbo',
+    });
   });
 
   it('uses the user-facing projection instead of hidden prompt context', async () => {

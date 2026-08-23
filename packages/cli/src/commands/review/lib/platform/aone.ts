@@ -19,6 +19,7 @@ import {
   a1JsonOnce,
   a1Once,
   ensureAoneAuthenticated,
+  execErrorCause,
 } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -28,6 +29,9 @@ import type {
   LinkedIssue,
   PrMeta,
   RepoIdentity,
+  ReviewContext,
+  ReviewContextComment,
+  ReviewContextVerdict,
   ReviewPlatformReader,
 } from './types.js';
 
@@ -57,6 +61,44 @@ interface AoneWorkitemRef {
   id: number;
   subject?: string;
   link?: string;
+}
+
+/**
+ * Shape of one `a1 repo mr comment list` entry (the fields we read).
+ * `path` present marks an inline (diff-anchored) comment; its absence marks
+ * a thread-level comment on the MR itself — the channel the posted review
+ * summaries ride on, and therefore where this pipeline's ledger markers
+ * live.
+ */
+interface AoneComment {
+  id: number;
+  note?: string;
+  body?: string;
+  author?: unknown;
+  createdAt?: string;
+  created_at?: string;
+  path?: string;
+  line?: number;
+  parentNoteId?: number | null;
+  /** Draft comments are unposted — neither discussion nor a prior round. */
+  isDraft?: boolean;
+}
+
+/** The author field tolerates the shapes a1 has shipped: a bare string or
+ *  an object carrying the account under one of several keys. The first
+ *  present non-empty one wins; `account` leads because that is the spelling
+ *  `a1 auth whoami` answers in — the identity the own/foreign split
+ *  compares against. */
+function aoneCommentAuthor(author: unknown): string {
+  if (typeof author === 'string') return author;
+  if (author !== null && typeof author === 'object') {
+    const o = author as Record<string, unknown>;
+    for (const key of ['account', 'username', 'login', 'name']) {
+      const v = o[key];
+      if (typeof v === 'string' && v !== '') return v;
+    }
+  }
+  return '';
 }
 
 /** Shape of `a1 project workitem get <id>` (best-effort fields). */
@@ -221,6 +263,44 @@ function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
 }
 
+/** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
+ *  Stated ONCE for the provider — every read site (presubmit facts,
+ *  getPrMeta, getFetchMeta, getReviewContext, submit's pre-write drift
+ *  gate, the head-moved-during-post re-read) routes through here.
+ *  Hand-derived copies had already diverged on normalization (two of the
+ *  five read untrimmed), and a padded server value then drifted against
+ *  the trimmed reads — a phantom "PR head advanced during review" for an
+ *  MR that never moved (#9629 review). */
+function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
+  return (view.sourceBranch ?? '').trim();
+}
+
+/**
+ * The two MR facts presubmit's gate compares, from ONE `mr view` fetch:
+ * the author's account name (self-PR detection — compared against the
+ * gate's whoami account) and the live head SHA (the drift
+ * check — under AGit-Flow `sourceBranch` IS the head). A missing author
+ * (deleted account) reports '', which fails the comparison soft, like the
+ * GitHub path's `author: null`. `username` is server-controlled, so it is
+ * type-guarded to a string and trimmed exactly like the gate's whoami
+ * account — a non-string reaching `.toLowerCase()` would crash the command
+ * outside presubmit's fetch try/catch instead of failing soft.
+ */
+export function mrPresubmitFacts(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author:
+      typeof view.author?.username === 'string'
+        ? view.author.username.trim()
+        : '',
+    headSha: aoneHeadSha(view),
+  };
+}
+
 /**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
@@ -268,6 +348,73 @@ function mrRepoPath(detailUrl: string | undefined): string | undefined {
   return m?.[1]?.toLowerCase();
 }
 
+/**
+ * ONE `a1 repo mr comment list` query, shape-checked. a1 can answer this
+ * exact command with a well-formed `a1.error/v1` error OBJECT at exit 0 (a
+ * backend auth failure or a client timeout — measured by cleanup's
+ * a1CommentList, same payload, same guard). `?? []` does not coalesce an
+ * object, and `.filter`/`.find` on it would throw an UNTAGGED TypeError,
+ * losing the envelope's actionable message — the difference between
+ * "re-authenticate" and "schema drift" — at exactly the moment the read
+ * fails for a recoverable reason. Surface the cause tagged instead.
+ */
+function aoneCommentListing(
+  prNumber: number,
+  ownerRepo: string,
+  ...extra: string[]
+): AoneComment[] {
+  const out = a1Json<unknown>(
+    'repo',
+    'mr',
+    'comment',
+    'list',
+    '--mr',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+    '--sort',
+    'asc',
+    ...extra,
+  );
+  if (!Array.isArray(out)) {
+    const cause = (out as { message?: unknown } | null)?.message;
+    throw new Error(
+      'a1 mr comment list returned an unexpected shape' +
+        (typeof cause === 'string' && cause.trim() !== ''
+          ? `: ${cause.trim()}`
+          : ''),
+    );
+  }
+  return out as AoneComment[];
+}
+
+/**
+ * The MR's FULL comment surface: the default listing UNIONED with the
+ * `--resolved` listing, deduped by id. The default listing EXCLUDES
+ * resolved comments (measured by cleanup's auditAoneMrWrites: the MR's
+ * `comments` minus `closedComments` is exactly what it returns), while
+ * GitHub's REST fetches INCLUDE resolved-thread comments — so any consumer
+ * that must see the same surface GitHub sees (the context bundle AND the
+ * comment-body refetch a truncation note names) reads through this union.
+ * A refetch that queried only the default list would throw "not found" for
+ * a resolved id the context file had just rendered.
+ *
+ * DISCLOSED RESIDUAL: resolved REPLIES stay invisible — the `--resolved`
+ * listing returns resolved ROOT inline comments only, and a1 exposes no
+ * listing that includes their replies (same residual cleanup's audit
+ * discloses, design doc #9617).
+ */
+function aoneAllComments(prNumber: number, ownerRepo: string): AoneComment[] {
+  const byId = new Map<number, AoneComment>();
+  for (const c of [
+    ...aoneCommentListing(prNumber, ownerRepo),
+    ...aoneCommentListing(prNumber, ownerRepo, '--resolved'),
+  ]) {
+    if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
+  }
+  return [...byId.values()];
+}
+
 export const aoneReader: ReviewPlatformReader = {
   kind: 'aone',
 
@@ -281,16 +428,7 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
-      // execFileSync failure messages BEGIN with the fixed preamble
-      // "Command failed: git remote get-url origin"; git's actual error is
-      // the first NON-empty line after it (same pitfall aone-client
-      // documents). `.split('\n')[0]` would render only the preamble.
-      const cause =
-        (err as Error).message
-          .split('\n')
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? '';
+      const cause = execErrorCause(err);
       throw new Error(
         `cannot resolve the repository: no \`origin\` remote` +
           (cause ? ` (${cause})` : ''),
@@ -326,7 +464,7 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     return {
       number: prNumber,
-      headSha: view.sourceBranch ?? '',
+      headSha: aoneHeadSha(view),
       webUrl: view.detailUrl ?? '',
     };
   },
@@ -557,19 +695,13 @@ export const aoneReader: ReviewPlatformReader = {
       );
     }
     // Aone has one flat comment collection per MR; the text is in `note`.
-    const comments = a1Json<
-      Array<{ id: number; note?: string; body?: string }>
-    >(
-      'repo',
-      'mr',
-      'comment',
-      'list',
-      '--mr',
-      String(prNumber),
-      '--repo',
-      ownerRepo,
-    );
-    const found = (comments ?? []).find((c) => c.id === id);
+    // Serve the SAME surface getReviewContext renders — the full union that
+    // INCLUDES resolved comments — because the refetch note that lands here
+    // is emitted for a comment the context file carried, which may be a
+    // resolved one; a default-only query would throw "not found" for it.
+    // The union helper also shape-checks the a1.error/v1 envelope.
+    const comments = aoneAllComments(prNumber, ownerRepo);
+    const found = comments.find((c) => c.id === id);
     // Throw on a miss — returning '' would be indistinguishable from a
     // genuinely-empty body, and the orchestrator would proceed on corrupted
     // evidence (the GitHub provider 404s on a bad id; keep the seam aligned).
@@ -589,13 +721,116 @@ export const aoneReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
     return {
-      headRefOid: view.sourceBranch ?? '',
+      headRefOid: aoneHeadSha(view),
       baseRefName: view.targetBranch ?? 'master',
       // The reviewer clones the repo the CR lives in — never cross-repo.
       isCrossRepository: false,
       body: view.description,
       // Aone does not report diff stats; fetch-pr computes them locally.
     };
+  },
+
+  getReviewContext(prNumber: number, ownerRepo: string): ReviewContext {
+    checkOwnerRepo(ownerRepo);
+    const view = mrView(prNumber, ownerRepo);
+    // One flat collection serves the three GitHub channels; `--sort asc`
+    // gives chronological order (the GitHub endpoints' natural order).
+    // The full resolved-INCLUSIVE surface (default + `--resolved`, deduped
+    // by id, envelope-guarded) comes from the shared helper — the SAME one
+    // getCommentBody reads, so a refetch note emitted for any rendered
+    // comment (resolved included) always finds its body.
+    const allComments = aoneAllComments(prNumber, ownerRepo);
+    // DISCLOSED RESIDUAL: resolved REPLIES stay invisible — the `--resolved`
+    // listing returns resolved ROOT inline comments only, and a1 exposes no
+    // listing that includes their replies (same residual cleanup's audit
+    // discloses, design doc #9617). A resolved thread therefore renders its
+    // root without its reply chain; the re-check walk is unaffected (a
+    // reply alone never retires a blocker — the code decides).
+    const comments: ReviewContextComment[] = allComments
+      .filter((c) => !c.isDraft)
+      .map((c) => ({
+        id: c.id,
+        author: aoneCommentAuthor(c.author),
+        body: c.note ?? c.body ?? '',
+        createdAt: c.createdAt ?? c.created_at ?? '',
+        ...(c.path !== undefined ? { path: c.path } : {}),
+        ...(c.line !== undefined ? { line: c.line } : {}),
+        ...(c.parentNoteId !== undefined && c.parentNoteId !== null
+          ? { parentId: c.parentNoteId }
+          : {}),
+      }));
+    // Aone has no review object: no verdicts. The ledger markers ride the
+    // posted summaries, which are thread-level (path-less) comments — those
+    // are the carriers, shaped as verdicts for the shared recovery walk.
+    const carriers: ReviewContextVerdict[] = comments
+      .filter((c) => c.path === undefined)
+      .map((c) => ({
+        id: c.id,
+        author: c.author,
+        body: c.body,
+        state: 'COMMENTED',
+        submittedAt: c.createdAt,
+      }));
+    return {
+      title: view.title ?? '',
+      body: view.description ?? '',
+      authorLogin: view.author?.username ?? '',
+      state: view.state ?? '',
+      baseRefName: view.targetBranch ?? 'master',
+      // Under AGit-Flow the head is a bare SHA and sourceBranch carries it;
+      // rendering `target ← <sha>` is truthful and informative. A
+      // non-AGit-Flow MR's real branch name renders the same way. Both
+      // fields route through the provider's ONE head normalization — a
+      // padded server value must not diverge from the trimmed reads every
+      // other subcommand reports (aoneHeadSha's docstring names the read
+      // sites; this one joins them).
+      headRefName: aoneHeadSha(view),
+      headRefOid: aoneHeadSha(view),
+      // Aone reports no diff stats; the context header degrades.
+      comments,
+      verdicts: [],
+      ledgerCarriers: carriers,
+    };
+  },
+
+  getCurrentUser(): string {
+    // The seam contract: '' on the empty-output shapes, never an untagged
+    // throw or a non-string leak. A literal `null` payload PARSES (the
+    // cleanup audit's aoneWhoamiAccount guards the same shape); an exit-0
+    // empty stdout throws inside a1Json before any guard runs, so the call
+    // is wrapped; a non-string account reaching recoverLedger's
+    // `.toLowerCase()` would throw into the conservative recovery strip
+    // and silently lose the ledger anchor.
+    try {
+      const who = a1Json<{ account?: unknown } | null>('auth', 'whoami');
+      return typeof who?.account === 'string' ? who.account : '';
+    } catch {
+      return '';
+    }
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Reader-backed by construction: an Aone MR link can NEVER be assembled
+    // from owner/repo — the collapse to the last two segments names a
+    // different (possibly nonexistent) repo for a nested-group project —
+    // so the only source is the platform's own detailUrl. A fetch failure
+    // degrades to '' — a missing link must not fail a consumer that owns
+    // the post's fate — but NOT silently: every other fail-open in this
+    // provider discloses on stderr, and a failing re-query (auth expiry,
+    // a network blip past the retry budget) must stay distinguishable
+    // from the designed coordinates-relay case.
+    try {
+      return mrView(prNumber, ownerRepo).detailUrl ?? '';
+    } catch (err) {
+      const cause = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the Aone MR-link lookup failed` +
+          (cause ? ` (${JSON.stringify(cause.slice(0, 80))})` : '') +
+          `; the Posted line degrades to the target's coordinates.\n`,
+      );
+      return '';
+    }
   },
 };
 
@@ -614,7 +849,17 @@ export const aoneReader: ReviewPlatformReader = {
 /** One inline finding as it lands on the MR. */
 export interface AoneInlineComment {
   path: string;
-  /** The new-side line — a multi-line range posts on its END line. */
+  /**
+   * The new-side line — a multi-line range posts on its END line. The
+   * old side CANNOT be anchored (a1 expresses `--line` as a new-side
+   * position only — probed 2026-08-21, see
+   * docs/design/2026-08-21-review-aone-removed-line-anchoring.md), and
+   * the platform validates NOTHING (any integer posts; a wrong number
+   * lands on the same-numbered new-side line silently). submit therefore
+   * validates every anchor against the captured diff and relocates the
+   * unanchorable BEFORE this batch is built — nothing reaching here is
+   * unvouched.
+   */
   line: number;
   body: string;
 }
@@ -660,6 +905,13 @@ export interface AoneSubmitResult {
  * and a retry posts it twice. So an ambiguous failure is counted as
  * LANDED for the do-not-re-run advisory — overcounting by one is a
  * cosmetic lie; undercounting is a duplicate post.
+ *
+ * `headMovedDuringPost` carries the mid-batch drift disclosure the
+ * success path re-reads for: a batch runs minutes of sequential execs,
+ * and an AGit-Flow amend pushed mid-batch orphans the landed pins at
+ * code the author already replaced. Undefined when the re-read itself
+ * failed — "could not verify" is not "verified stable", but it also
+ * must not mask the post failure.
  */
 export class AonePartialPostError extends Error {
   constructor(
@@ -668,6 +920,7 @@ export class AonePartialPostError extends Error {
     readonly inlineCommentIds: number[],
     readonly summaryPosted: boolean,
     readonly ambiguous: boolean = false,
+    readonly headMovedDuringPost?: boolean,
   ) {
     super(message);
     this.name = 'AonePartialPostError';
@@ -761,6 +1014,27 @@ function a1Cause(err: unknown): string {
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
+/** The post-batch head re-read, stated ONCE for both disclosure paths:
+ *  did the MR head move away from the composed `commitId`? Undefined when
+ *  the re-read itself failed OR came back without a head to compare —
+ *  "could not verify" is not "verified stable", and either shape
+ *  degrades to unknown; it never masks the outcome it reports on (the
+ *  post failure on the partial path, the post itself on the success
+ *  path). */
+function headMovedSinceCompose(
+  prNumber: number,
+  ownerRepo: string,
+  commitId: string,
+): boolean | undefined {
+  try {
+    const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
+    if (afterHead === '') return undefined;
+    return afterHead !== commitId;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Post a composed review to an Aone MR. The verdict mapping is the
  * design's D6: APPROVE runs the native `mr approve` AFTER the summary
@@ -787,7 +1061,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
   // review composed against the orphaned head would pin every inline
   // comment at code the author already replaced. An empty sourceBranch
   // cannot gate — nothing to compare against — and posts unanchored.
-  const liveHead = (view.sourceBranch ?? '').trim();
+  const liveHead = aoneHeadSha(view);
   if (liveHead !== '' && liveHead !== req.commitId) {
     throw new Error(
       `refusing to post: the MR head moved — the review was composed ` +
@@ -876,6 +1150,9 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       !summaryPosted && postedIds.length === req.comments.length
         ? `; the summary did NOT land`
         : '';
+    // The same mid-batch drift disclosure the success path carries: an
+    // amend pushed during the batch orphans the landed pins, and a write
+    // failure must not silently drop the warning.
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
@@ -886,6 +1163,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       ids,
       summaryPosted,
       true,
+      headMovedSinceCompose(req.prNumber, req.ownerRepo, req.commitId),
     );
   }
 
@@ -921,18 +1199,13 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     approveError,
     // The drift gate above is check-then-post; the batch is N+1 sequential
     // execs (minutes for a long review), so a head that moves DURING it
-    // slips the gate. Re-read once and disclose — the success report must
-    // not claim the pins held. A read failure after a successful post must
-    // not fail the post.
-    headMovedDuringPost: (() => {
-      try {
-        const after = mrView(req.prNumber, req.ownerRepo);
-        const afterHead = (after.sourceBranch ?? '').trim();
-        return afterHead !== '' && afterHead !== req.commitId;
-      } catch {
-        return false;
-      }
-    })(),
+    // slips the gate — re-read once and disclose; the success report must
+    // not claim the pins held, and a read failure must not fail the post.
+    headMovedDuringPost: headMovedSinceCompose(
+      req.prNumber,
+      req.ownerRepo,
+      req.commitId,
+    ),
     webUrl: view.detailUrl ?? '',
   };
 }

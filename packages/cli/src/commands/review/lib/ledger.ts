@@ -166,16 +166,40 @@ export interface Ledger {
    * Rides and sheds with `posted`, which it qualifies.
    */
   fresh?: number;
+  /**
+   * How many rounds — this one included — have been counted against the
+   * churn bar since the last round measured converging; a round that could
+   * not measure carries the count without adding to it. This is the ONE
+   * field here that is neither telemetry nor a gate on scope: it is the
+   * review's own standing claim about the pull request, carried exactly the
+   * way a finding id is, and `compose-review` reads it back to decide
+   * whether to file the non-convergence finding.
+   *
+   * So it does NOT ride in the volume tier that sheds first. It is a single
+   * small integer, and the pull request most likely to be churning is also
+   * the one whose marker is closest to its byte cap — shedding it there
+   * would disarm the mechanism on exactly the pull requests it exists for.
+   *
+   * It cannot decide alone, and that is deliberate: the body it rides on is
+   * another account's writable surface, so `compose-review` files nothing on
+   * a recovered streak unless THIS round's own census is also above the bar.
+   * Recovery hands this account only its OWN streak besides — a foreign
+   * winner's is stripped at the seam (`pr-context`) — so a forged marker
+   * plants neither the streak nor the finding.
+   */
+  churnRounds?: number;
 }
 
 /**
  * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
  * emits. The parser drops a field that fails this rather than the ledger —
  * the findings are still a work list even when the anchor is garbage — and
- * `fetch-pr --since` additionally verifies the anchor is an ancestor of the
- * fetched head before scoping to it (in the CLI; the orchestrator never runs
- * git against an anchor), so a tampered sha costs a full-range review, never
- * a mis-scoped one.
+ * `fetch-pr --since` additionally validates the anchor against the fetched
+ * history — existence always; ancestry except on Aone, where AGit-Flow
+ * amends orphan the cached head (design D7) — before scoping to it (in the
+ * CLI; the orchestrator never runs git against an anchor). The published
+ * scope is joined against the CR's own diff either way, so a tampered sha
+ * costs a full-range review, never a mis-scoped one.
  *
  * Exported because `fetch-pr --since` gates on the SAME shape: an anchor the
  * marker will not carry must not be one the fetch accepts, or a
@@ -323,6 +347,21 @@ export function volumeOf(n: unknown): number | undefined {
 }
 
 /**
+ * The ONE reading of the churn streak: a non-negative whole number of rounds,
+ * clamped to the round cap it shares a domain with — or `undefined`.
+ *
+ * Separate from `volumeOf` because the ceilings mean different things: a
+ * volume is a comment count and caps where a review surface stops being one;
+ * a streak counts ROUNDS, and past `LEDGER_MAX_ROUND` the same float64
+ * argument that bounds `round` applies to it unchanged.
+ */
+export function streakOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_ROUND)
+    : undefined;
+}
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -413,6 +452,12 @@ export function serializeLedger(ledger: Ledger): string {
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
       }
     }
+    // The streak rides ABOVE the shed cascade — see the field's own note. It
+    // is bounded like the round it counts (same domain, same arithmetic
+    // hazard past the cap) and omitted at zero, so a converging pull request
+    // spends no bytes on it at all.
+    const streak = streakOf(ledger.churnRounds);
+    if (streak !== undefined && streak > 0) payload.churnRounds = streak;
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -651,6 +696,19 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
+    // The streak survives a truncated work list for the same reason the
+    // volumes do — it qualifies no range — and it is the field the
+    // non-convergence rule reads. Clamped on read as on write; a shape
+    // the serializer would not have written does not survive. Clamped to
+    // the marker's own ROUND too:
+    // the streak counts rounds INSIDE the round it rides, and the pipeline's
+    // own writes advance it at most once per round, so a legitimate marker
+    // can never carry more counted rounds than rounds it claims. The marker
+    // body is any GitHub user's writable surface, and an unclamped streak
+    // inflates the posted ordinal ("the 10000th round…") past everything the
+    // pull request ever ran. Same invariant the finding-id filter enforces
+    // above: a claim about rounds that did not exist is not read.
+    const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
     // The floor qualifies `posted`, so it survives only beside it: a floor
     // alone would let a later round compare postures across rounds whose
     // volumes it does not have, which is not a comparison anyone can act on.
@@ -675,6 +733,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(model ? { model } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
+      ...(churnRounds === 0 ? {} : { churnRounds }),
       ...(floor === undefined ? {} : { floor }),
       ...(fresh === undefined ? {} : { fresh }),
     };

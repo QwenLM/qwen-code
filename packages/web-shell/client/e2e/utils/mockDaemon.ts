@@ -509,6 +509,20 @@ export function assistantTextEvent(
   );
 }
 
+export function thoughtTextEvent(
+  text: string,
+  options: { id?: number; sessionId?: string } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text },
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    },
+    options.id,
+  );
+}
+
 export function turnCompleteEvent(
   promptId: string,
   options: { id?: number; sessionId?: string } = {},

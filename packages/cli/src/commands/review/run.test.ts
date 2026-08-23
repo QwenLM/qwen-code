@@ -297,10 +297,18 @@ describe('target-pinned artifact patterns', () => {
     expect(local.test('review.md')).toBe(true);
     expect(local.test('2026-08-13-1622-pr-9045.md')).toBe(false);
 
-    // File reports carry the filename in the report stem's trailing slot.
+    // File reports carry the target token in the report stem's trailing
+    // slot — Step 8 names them from the capture's `target` field now, the
+    // same derivation this pattern builds from.
     const file = reportPatternFor({ kind: 'file', base: 'foo.ts' });
     expect(file.test('2026-08-13-101010-foo.ts.md')).toBe(true);
     expect(file.test('2026-08-13-101010-bar.ts.md')).toBe(false);
+    // A subdirectory target: the pin and the instructed name must agree PAST
+    // the repo root — exactly where the pre-PR basename convention lost the
+    // Report: line for every file review of a nested path.
+    const nested = reportPatternFor({ kind: 'file', base: 'src_foo.ts' });
+    expect(nested.test('2026-08-22-120000-src_foo.ts.md')).toBe(true);
+    expect(nested.test('2026-08-22-120000-foo.ts.md')).toBe(false);
     // A file literally named `pr-1234.md` claims its OWN report — the shape
     // the local branch's PR exclusion would self-reject (`.md` not doubled).
     const prNamed = reportPatternFor({ kind: 'file', base: 'pr-1234.md' });

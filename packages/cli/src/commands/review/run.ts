@@ -264,7 +264,7 @@ export function composedPatternFor(cls: RunTargetClass): RegExp {
 /**
  * The saved report under `.qwen/reviews/`, pinned as far as its naming
  * allows. PR reports reliably end `-pr-<n>.md`, and file reports carry the
- * filename in the same slot (`<date>-<time>-<filename>.md`, the `.md` not
+ * target token in the same slot (`<date>-<time>-<target>.md`, the `.md` not
  * doubled) — so a file target named `pr-1234.md` claims its OWN report
  * instead of tripping the local branch's PR exclusion. Local report stems
  * are model-chosen (three date formats observed in one day), so a bare run
