@@ -866,13 +866,25 @@ function isLoopDetectedTurnError(error: unknown): boolean {
  * for a frozen daemon poller, and the latched peak would halt a productive
  * turn just past the soft cap. Keys polled in every batch appear in the set
  * and keep their streaks, so a continuously frozen board still arms the cap.
+ * Keys requested in the CURRENT batch (`requestedKeys`) are skipped too —
+ * the mirror of core's skip for keys requested since the last Finished
+ * boundary (loopDetectionService.decayAbandonedStatefulStreaks): a poll
+ * batch's own results are recorded after this boundary runs, and any gap
+ * batch (other tools between polls) consumes the previous result's mark at
+ * its own boundary, so decaying a key that is still being polled would
+ * wipe its streak at the next poll's boundary and disarm the stuck signal
+ * for an every-other-batch frozen poller (issue #9450 requirement #6).
  */
-function decayAbandonedDaemonStreaks(loopState: DaemonToolLoopState): void {
+function decayAbandonedDaemonStreaks(
+  loopState: DaemonToolLoopState,
+  requestedKeys?: ReadonlySet<string>,
+): void {
   const sinceLastBatch = (loopState.statefulResultKeysSinceLastBatch ??=
     new Set<string>());
   let decayed = false;
   for (const [key, state] of loopState.statefulResultStreaks) {
     if (sinceLastBatch.has(key)) continue;
+    if (requestedKeys?.has(key)) continue;
     if (state.consecutiveIdenticalResults > 0) {
       state.consecutiveIdenticalResults = 0;
       decayed = true;
@@ -914,11 +926,22 @@ function recordDaemonToolCalls(
   // and skipping the decay can only keep the repeat peak higher, which a
   // prior non-halting check at the same total already tolerated.
   if (calls.length === 0) return false;
+  // Stateful keys requested in THIS batch: the boundary decay must skip
+  // them (see decayAbandonedDaemonStreaks) — their results have not landed
+  // yet, exactly as core's Finished-boundary decay skips keys requested
+  // since the last boundary.
+  const requestedStatefulKeys = new Set<string>();
+  for (const call of calls) {
+    const name = call.name ?? '';
+    if (isStatefulReadTool(name)) {
+      requestedStatefulKeys.add(getToolCallRepeatKey(name, call.args ?? {}));
+    }
+  }
   // Batch boundary: the previous batch's results have all been recorded by
   // now (results are recorded during execution, before the next batch is
   // streamed), so this is the safe point to decay stateful keys absent from
   // them — the daemon twin of core's Finished-boundary decay (issue #9450).
-  decayAbandonedDaemonStreaks(loopState);
+  decayAbandonedDaemonStreaks(loopState, requestedStatefulKeys);
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
     // Stateful read tools are counted post-execution in

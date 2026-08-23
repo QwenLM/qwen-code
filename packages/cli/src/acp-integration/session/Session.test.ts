@@ -11066,6 +11066,68 @@ describe('Session', () => {
           expect(loopState.totalToolCalls).toBe(21);
           expect(execute).toHaveBeenCalledTimes(20);
         });
+
+        it('still halts a frozen daemon poller interleaved every other batch with other work (issue #9450)', async () => {
+          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
+          // cap's stateful stuck signal is the ONLY live halt path. A
+          // frozen board polled every OTHER batch between varied work:
+          // pre-fix the poll batch's boundary found the key absent from
+          // the result set (the gap batch recorded no task_list result and
+          // consumed the previous mark at its own boundary), decayed the
+          // streak back to zero, and the stuck signal never armed — the
+          // turn ran to the hard backstop. The re-requested skip (mirror
+          // of core's requested-keys skip in
+          // decayAbandonedStatefulStreaks) keeps the streak alive across
+          // gap batches; the runtimes must not drift (requirement #6).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          const loopState = freshLoopState();
+
+          const runDiverseBatch = (round: number) =>
+            (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-diverse-${round}`,
+              [
+                {
+                  id: `diverse_${round}`,
+                  name: 'generic_tool',
+                  args: { step: round },
+                },
+              ],
+              loopState,
+            );
+
+          let fired = false;
+          for (let round = 0; round < 40 && !fired; round++) {
+            const poll = await runTaskListPoll(loopState, round);
+            fired = poll.loopDetected ?? false;
+            if (fired) break;
+            const gap = await runDiverseBatch(round);
+            fired = gap.loopDetected ?? false;
+          }
+          // The streak survives the gap batches and arms the stuck signal:
+          // the halt lands just past the soft cap (20), far below the hard
+          // backstop (200).
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBeLessThanOrEqual(24);
+        });
       });
     });
 
