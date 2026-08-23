@@ -84,11 +84,15 @@ import {
   SessionService,
   Storage,
   TrustGateError,
+  readSessionPrs,
+  upsertSessionPr,
   type Extension,
   type CommittedExtensionMutation,
   type PrepareExtensionInstallOptions,
   type PreparedExtensionMutation,
   type SessionListItem,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -797,6 +801,7 @@ interface FakeBridgeOpts {
     message: string,
     context?: BridgeClientRequestContext,
     messageId?: string,
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4],
   ) => { accepted: boolean; messageId?: string };
   removeMidTurnImpl?: (
     sessionId: string,
@@ -931,6 +936,12 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  controlSessionGoalImpl?: (
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ snapshot: GoalSnapshotV2 }>;
+  getSessionGoalImpl?: AcpSessionBridge['getSessionGoal'];
   continueSessionImpl?: (sessionId: string) => Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
@@ -1132,6 +1143,7 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
     messageId?: string;
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4];
   }>;
   removeMidTurnCalls: Array<{
     sessionId: string;
@@ -1232,6 +1244,11 @@ interface FakeBridge extends AcpSessionBridge {
     context?: BridgeClientRequestContext;
   }>;
   clearSessionGoalCalls: string[];
+  controlSessionGoalCalls: Array<{
+    sessionId: string;
+    request: GoalControlRequest;
+    context?: BridgeClientRequestContext;
+  }>;
   continueSessionCalls: string[];
   continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
@@ -1319,6 +1336,10 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     metadata: SessionMetadataUpdate;
     context?: BridgeClientRequestContext;
+  }>;
+  seedSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
   }>;
   heartbeatCalls: Array<{
     sessionId: string;
@@ -1415,6 +1436,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
     [];
   const clearSessionGoalCalls: string[] = [];
+  const controlSessionGoalCalls: FakeBridge['controlSessionGoalCalls'] = [];
   const continueSessionCalls: string[] = [];
   const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
     [];
@@ -1428,6 +1450,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceMemoryDreamCalls = 0;
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
+  const seedSessionPrsCalls: FakeBridge['seedSessionPrsCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
@@ -1759,6 +1782,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     (async () => ({ changed: true, status: 'pausing' }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const controlSessionGoalImpl =
+    opts.controlSessionGoalImpl ??
+    (async (_sessionId, request) => ({
+      snapshot: {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal:
+          request.action === 'create'
+            ? null
+            : {
+                goalId: request.expectedGoalId,
+                revision: request.expectedRevision,
+                objective: 'ship it',
+                status: 'active' as const,
+                evidenceCursor: { recordId: null },
+                turnCount: 0,
+                activeTimeMs: 0,
+                createdAt: 1,
+                updatedAt: 1,
+              },
+      },
+    }));
+  const getSessionGoalImpl =
+    opts.getSessionGoalImpl ??
+    (async () => ({
+      snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
+      active: null,
+    }));
   const continueSessionImpl =
     opts.continueSessionImpl ??
     (async () => ({ accepted: false, interruption: 'none' as const }));
@@ -1901,6 +1952,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.updateMetadataImpl ??
     ((_sid: string, m: SessionMetadataUpdate) => ({
       displayName: m.displayName,
+      ...(m.pr ? { prs: [m.pr] } : {}),
     }));
   const heartbeatImpl =
     opts.heartbeatImpl ??
@@ -2002,6 +2054,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
     clearSessionGoalCalls,
+    controlSessionGoalCalls,
     continueSessionCalls,
     continueSessionContexts,
     sessionHooksCalls,
@@ -2023,6 +2076,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     removeRuntimeMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
+    seedSessionPrsCalls,
     heartbeatCalls,
     heartbeatStateCalls,
     get shutdownCalls() {
@@ -2309,6 +2363,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
     },
+    async controlSessionGoal(sessionId, request, context) {
+      controlSessionGoalCalls.push({
+        sessionId,
+        request,
+        ...(context ? { context } : {}),
+      });
+      return controlSessionGoalImpl(sessionId, request, context);
+    },
+    async getSessionGoal(sessionId) {
+      return getSessionGoalImpl(sessionId);
+    },
     async continueSession(sessionId, context) {
       continueSessionCalls.push(sessionId);
       continueSessionContexts.push(context);
@@ -2428,7 +2493,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(messageId ? { messageId } : {}),
         ...(options ? { options } : {}),
       });
-      return enqueueMidTurnImpl(sessionId, message, context, messageId);
+      return enqueueMidTurnImpl(
+        sessionId,
+        message,
+        context,
+        messageId,
+        options,
+      );
     },
     removeMidTurnMessage(sessionId, messageId, context) {
       removeMidTurnCalls.push({
@@ -2526,6 +2597,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return updateMetadataImpl(sessionId, metadata, context);
+    },
+    seedSessionPrs(sessionId, prs) {
+      seedSessionPrsCalls.push({ sessionId, prs });
     },
     recordHeartbeat(sessionId, context) {
       heartbeatCalls.push({
@@ -9600,6 +9674,86 @@ describe('createServeApp', () => {
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
     });
 
+    it('reads and controls the canonical session Goal', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'ship it',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 1,
+          activeTimeMs: 1000,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const bridge = fakeBridge({
+        getSessionGoalImpl: async () => ({ snapshot, active: null }),
+        controlSessionGoalImpl: async () => ({ snapshot }),
+        knownClientIds: ['client-1'],
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const read = await request(app)
+        .get('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      const controlled = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 3,
+        });
+
+      expect(read.status).toBe(200);
+      expect(read.body).toEqual({ snapshot });
+      expect(controlled.status).toBe(200);
+      expect(controlled.body).toEqual({ snapshot });
+      expect(bridge.controlSessionGoalCalls).toEqual([
+        {
+          sessionId: 's-1',
+          request: {
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 3,
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('rejects an invalid Goal control before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'pause', expectedGoalId: 'goal-1' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_goal_control_request');
+      expect(bridge.controlSessionGoalCalls).toEqual([]);
+    });
+
     it('maps goal clear bridge errors', async () => {
       const bridge = fakeBridge({
         clearSessionGoalImpl: async (sessionId) => {
@@ -9786,10 +9940,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'notes 你好.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', encodeURIComponent('notes 你好.txt'))
         .send(Buffer.from('hello'));
 
       expect(uploaded.status).toBe(201);
@@ -9809,10 +9963,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'empty.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'empty.txt')
         .set('Content-Length', '0')
         .send(Buffer.alloc(0));
 
@@ -9833,10 +9987,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'empty.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'empty.png')
         .set('Content-Length', '0')
         .send(Buffer.alloc(0));
 
@@ -9854,10 +10008,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/SESSION/s-1/ATTACHMENTS')
+        .query({ name: 'notes.txt' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'notes.txt')
         .send(Buffer.from('hello'));
 
       expect(uploaded.status).toBe(201);
@@ -9875,10 +10029,10 @@ describe('createServeApp', () => {
       );
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'data.json' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'application/json')
-        .set('X-Qwen-Attachment-Name', 'data.json')
         .send('{"enabled":true}');
 
       expect(uploaded.status).toBe(201);
@@ -9899,10 +10053,10 @@ describe('createServeApp', () => {
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
 
       expect(uploaded.status).toBe(201);
@@ -9952,7 +10106,7 @@ describe('createServeApp', () => {
       expect(response.status).toBe(400);
     });
 
-    it('rejects malformed encoded attachment names', async () => {
+    it('rejects repeated attachment name query parameters', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
@@ -9960,14 +10114,17 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: ['one.txt', 'two.txt'] })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', '%E0%A4%A')
         .send('hello');
 
       expect(response.status).toBe(400);
-      expect(response.body).toEqual({ error: 'attachment name is invalid' });
+      expect(response.body).toEqual({
+        error:
+          'request body, Content-Type, and name query parameter are required',
+      });
     });
 
     it('maps attachment name and Content-Type mismatches to 400', async () => {
@@ -9982,10 +10139,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'screenshot.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'text/plain')
-        .set('X-Qwen-Attachment-Name', 'screenshot.png')
         .send('hello');
 
       expect(response.status).toBe(400);
@@ -10002,10 +10159,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.svg' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/svg+xml')
-        .set('X-Qwen-Attachment-Name', 'image.svg')
         .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
 
       expect(response.status).toBe(201);
@@ -10028,10 +10185,10 @@ describe('createServeApp', () => {
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(bytes);
       expect(uploaded.status).toBe(201);
 
@@ -10053,10 +10210,10 @@ describe('createServeApp', () => {
       );
       const response = await request(app)
         .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
-        .set('X-Qwen-Attachment-Name', 'image.png')
         .send(Buffer.alloc(8 * 1024 * 1024 + 1));
 
       expect(response.status).toBe(413);
@@ -10108,6 +10265,7 @@ describe('createServeApp', () => {
           message: 'hello',
           context: { clientId: 'client-9' },
           messageId: 'client-mid-1',
+          options: { rejectIfIdle: true },
         },
       ]);
     });
@@ -10124,8 +10282,36 @@ describe('createServeApp', () => {
       );
       expect(res.status).toBe(200);
       expect(bridge.enqueueMidTurnCalls).toEqual([
-        { sessionId: 's-1', message: 'hi', context: { clientId: 'client-9' } },
+        {
+          sessionId: 's-1',
+          message: 'hi',
+          context: { clientId: 'client-9' },
+          options: { rejectIfIdle: true },
+        },
       ]);
+    });
+
+    it('rejects an in-flight enqueue that reaches an idle session', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (
+          _sessionId,
+          _message,
+          _context,
+          _messageId,
+          options,
+        ) => (options?.rejectIfIdle ? { accepted: false } : { accepted: true }),
+      });
+
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'late steering',
+        messageId: 'late-steering-1',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false });
+      expect(bridge.enqueueMidTurnCalls[0]?.options).toEqual({
+        rejectIfIdle: true,
+      });
     });
 
     it.each([[''], [123], ['x'.repeat(129)]])(
@@ -10180,6 +10366,7 @@ describe('createServeApp', () => {
           sessionId: 's-1',
           message: 'see this',
           options: {
+            rejectIfIdle: true,
             content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
           },
         },
@@ -10206,7 +10393,7 @@ describe('createServeApp', () => {
         {
           sessionId: 's-1',
           message: 'read this',
-          options: { content: [resource] },
+          options: { rejectIfIdle: true, content: [resource] },
         },
       ]);
     });
@@ -10308,6 +10495,7 @@ describe('createServeApp', () => {
           sessionId: 's-1',
           message: 'see this',
           options: {
+            rejectIfIdle: true,
             content: [
               {
                 type: 'image',
@@ -13086,6 +13274,7 @@ describe('createServeApp', () => {
             [sessionId],
             expect.any(Function),
           );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
         } finally {
           runSharedMany.mockRestore();
           findSessionId.mockRestore();
@@ -13095,15 +13284,11 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'converts a pre-guard both-states %s conflict to actionable session conflict',
+      'keeps a differently spelled both-states %s conflict strict',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440147';
         const storageSessionId = sessionId.toUpperCase();
         const bridge = fakeBridge();
-        // Same spelling persisted in both active and archived states: the
-        // resolver carries the candidate spelling, so the conversion must
-        // re-check THAT spelling — the request-case id finds nothing on a
-        // case-sensitive filesystem and would skip SessionConflictError.
         const conflict = new SessionIdCaseConflictError(
           sessionId,
           storageSessionId,
@@ -13113,62 +13298,8 @@ describe('createServeApp', () => {
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
-          );
-        const runSharedMany = vi.spyOn(
-          SessionArchiveCoordinator.prototype,
-          'runSharedMany',
-        );
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { bridge },
-        );
-
-        try {
-          const res = await request(app)
-            .post(`/session/${sessionId}/${action}`)
-            .set('Host', `127.0.0.1:${baseOpts.port}`)
-            .send({});
-
-          expect(res.status).toBe(409);
-          expect(res.body.code).toBe('session_conflict');
-          expect(res.body.error).toContain(
-            'Delete the session with POST /sessions/delete',
-          );
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // The pre-guard conversion must fire before the guard is entered,
-          // so the shared guard never runs.
-          expect(runSharedMany).not.toHaveBeenCalled();
-          expect(bridge.loadCalls).toEqual([]);
-          expect(bridge.resumeCalls).toEqual([]);
-        } finally {
-          runSharedMany.mockRestore();
-          getSessionLocation.mockRestore();
-          findSessionId.mockRestore();
-        }
-      },
-    );
-
-    it.each(['load', 'resume'] as const)(
-      'converts an in-guard both-states %s conflict to actionable session conflict',
-      async (action) => {
-        const sessionId = '550e8400-e29b-41d4-a716-446655440148';
-        const storageSessionId = sessionId.toUpperCase();
-        const bridge = fakeBridge();
-        const conflict = new SessionIdCaseConflictError(
-          sessionId,
-          storageSessionId,
-        );
-        const findSessionId = vi
-          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
-          .mockRejectedValue(conflict);
-        const getSessionLocation = vi
-          .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
           );
         const app = createServeApp(
           { ...baseOpts, workspace: WS_BOUND },
@@ -13184,15 +13315,7 @@ describe('createServeApp', () => {
 
           expect(res.status).toBe(409);
           expect(res.body.code).toBe('session_conflict');
-          expect(res.body.error).toContain(
-            'Delete the session with POST /sessions/delete',
-          );
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // Without the call-count assertion below, replacing the in-guard
-          // re-resolve with the pre-guard result still yields the same 409
-          // via assertSessionLoadable's mocked 'conflict' location — the
-          // count is what pins the second resolution.
-          expect(findSessionId).toHaveBeenCalledTimes(2);
+          expect(getSessionLocation).not.toHaveBeenCalled();
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {
@@ -15487,6 +15610,175 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
       expect(res.body.sessions[0].sessionId).toBe(id);
+    });
+
+    it('merges sidecar pr history with the live entry bindings on list', async () => {
+      // The live entry only knows bindings from this daemon lifetime; the
+      // sidecar holds the full history. Binding A pre-restart, restarting
+      // (live entry resets), then binding B must still list [A, B] — the
+      // stacked-PR-across-restart case.
+      const id = '550e8400-e29b-41d4-a716-446655440003';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
+    it('dedupes by number on merge, preferring the live url', async () => {
+      // Overlap is the common production case (a route binding is persisted
+      // AND enters the live entry). Without the number-keyed filter the
+      // merged list duplicates the number and the badge renders `#9517 +1`
+      // for a one-PR session.
+      const id = '550e8400-e29b-41d4-a716-446655440004';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+      ]);
+    });
+
+    it('survives PR sidecars on the organized listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { view: 'organized', group: 'all' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
+    it('survives PR sidecars on the archived listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        state: 'archived',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        id,
+        'archived',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { archiveState: 'archived' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
+    it('survives PR sidecars on the metadata-filtered listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { sourceType: 'scheduled_task', sourceId: 'task-1' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
     });
 
     it('passes fractional cursor values to SessionService without truncating', async () => {
@@ -23811,6 +24103,36 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('reads and exports the active copy of an exact persisted conflict', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(sid, 'archived');
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exported = await request(app)
+        .get(`/session/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain(sid);
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+    });
+
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       const bridge = fakeBridge({
@@ -25388,27 +25710,27 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
-    it('rejects load for active/archive conflicts with session_conflict', async () => {
-      const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
-      await writeSession(sid);
-      await writeSession(sid, 'archived');
-      const bridge = fakeBridge();
-      const app = createArchiveApp(bridge);
+    it.each(['load', 'resume'] as const)(
+      '%s restores active/archive conflicted sessions from the active copy',
+      async (action) => {
+        const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
+        await writeSession(sid);
+        await writeSession(sid, 'archived');
+        const bridge = fakeBridge();
+        const app = createArchiveApp(bridge);
 
-      const loadRes = await request(app)
-        .post(`/session/${sid}/load`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: wsDir });
-      expect(loadRes.status).toBe(409);
-      expect(loadRes.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: sid,
-      });
-      expect(loadRes.body.error).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(bridge.loadCalls).toHaveLength(0);
-    });
+        const response = await request(app)
+          .post(`/session/${sid}/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: wsDir });
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable.
+        expect(response.status).toBe(200);
+        expect(
+          action === 'load' ? bridge.loadCalls : bridge.resumeCalls,
+        ).toHaveLength(1);
+      },
+    );
 
     it('returns session_archiving for prompt while archive is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -25770,15 +26092,19 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'My Session' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        sessionId: 'session-A',
+        sessionId: '550e8400-e29b-41d4-a716-446655440321',
         displayName: 'My Session',
       });
       expect(bridge.updateMetadataCalls).toHaveLength(1);
-      expect(bridge.updateMetadataCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.updateMetadataCalls[0]?.sessionId).toBe(
+        '550e8400-e29b-41d4-a716-446655440321',
+      );
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
       });
@@ -25789,7 +26115,7 @@ describe('createServeApp', () => {
       const noTokenApp = createServeApp(baseOpts, undefined, { bridge });
 
       const noToken = await request(noTokenApp)
-        .patch('/session/session-A/metadata')
+        .patch('/session/550e8400-e29b-41d4-a716-446655440321/metadata')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ displayName: 'blocked' });
       expect(noToken.status).toBe(401);
@@ -25798,7 +26124,9 @@ describe('createServeApp', () => {
 
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const authed = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'allowed' });
       expect(authed.status).toBe(200);
       expect(bridge.updateMetadataCalls).toHaveLength(1);
@@ -25810,7 +26138,11 @@ describe('createServeApp', () => {
     it('passes client identity context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
-      const res = await auth(request(app).patch('/session/session-A/metadata'))
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      )
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ displayName: 'test' });
       expect(res.status).toBe(200);
@@ -25823,11 +26155,483 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 123 });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
       expect(res.body.field).toBe('displayName');
+    });
+
+    it('200 on pr-only update and echoes the pr binding', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440321');
+      expect(res.body.prs).toEqual([pr]);
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: undefined,
+        pr,
+      });
+      // The echoed list reflects the sidecar actually written to disk.
+      expect(
+        (await readSessionPrs(sidecarPath))?.map(({ number, url }) => ({
+          number,
+          url,
+        })),
+      ).toEqual([pr]);
+      await fsp.rm(sidecarPath, { force: true });
+    });
+
+    it('echoes the sidecar list, not the bridge echo, when they disagree on the primary route', async () => {
+      // Without the persisted-readback overwrite the primary route would
+      // echo the bridge's live list; without the sidecar hydration before
+      // the bridge call the published event would drop persisted history.
+      const bridge = fakeBridge({
+        updateMetadataImpl: (_sid, m) => ({
+          displayName: m.displayName,
+          ...(m.pr
+            ? {
+                prs: [
+                  {
+                    number: 9001,
+                    url: 'https://github.com/o/r/pull/9001',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9000,
+        url: 'https://github.com/o/r/pull/9000',
+      });
+      try {
+        const res = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number: 9002, url: 'https://github.com/o/r/pull/9002' },
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.prs.map((p: { number: number }) => p.number)).toEqual([
+          9000, 9002,
+        ]);
+        expect(
+          bridge.seedSessionPrsCalls.map((call) =>
+            call.prs.map((p) => p.number),
+          ),
+        ).toEqual([[9000]]);
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
+    it('400 invalid_metadata for a malformed pr', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 'x', url: 'https://github.com/o/r/pull/1' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      const nonHttp = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 1, url: 'javascript:alert(1)' } });
+      expect(nonHttp.status).toBe(400);
+      expect(nonHttp.body.code).toBe('invalid_metadata');
+      expect(nonHttp.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_metadata when the pr url exceeds the length cap', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 9517,
+          url: `https://github.com/o/r/pull/${'a'.repeat(2048)}`,
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('does not persist the pr sidecar when the bridge rejects a combined request', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        displayName: 'bad\u0001name',
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      // A rejected request must not leave a durable binding behind.
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('does not persist the pr sidecar for a session the bridge does not know', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440999',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440999/metadata',
+        ),
+      ).send({ pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' } });
+      expect(res.status).toBe(404);
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('400 invalid_session_id and no escaped write for a traversal session id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const escapedPath = service.getPrSessionPathForArchiveState(
+        '../../pwn',
+        'active',
+      );
+      await fsp.rm(escapedPath, { force: true });
+      const res = await auth(
+        request(app).patch('/session/..%2F..%2Fpwn/metadata'),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+      await expect(fsp.access(escapedPath)).rejects.toThrow();
+    });
+
+    it('400 invalid_session_id for a traversal id on a multi-workspace registry', async () => {
+      // The gate sits before runtime resolution, so the answer is 400 even
+      // when the registry has two entries (runtime resolution would
+      // otherwise 404 the unknown id first, making the error contract
+      // configuration-dependent).
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch('/session/..%2F..%2Fpwn/metadata'),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+        {
+          force: true,
+        },
+      );
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.prs).toEqual([pr]);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
+          metadata: { displayName: undefined, pr },
+          context: undefined,
+        },
+      ]);
+      const sidecar = await readSessionPrs(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+      );
+      expect(sidecar?.map((p) => p.number)).toEqual([9517]);
+    });
+
+    it('accumulates multiple pr bindings on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+        {
+          force: true,
+        },
+      );
+      for (const number of [9600, 9601]) {
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number, url: `https://github.com/o/r/pull/${number}` },
+        });
+        expect(res.status).toBe(200);
+      }
+      const last = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 9602, url: 'https://github.com/o/r/pull/9602' } });
+      // The sidecar persists the full history, so the response echoes every
+      // binding in binding order.
+      expect(last.body.prs.map((p: { number: number }) => p.number)).toEqual([
+        9600, 9601, 9602,
+      ]);
+    });
+
+    it('echoes the sidecar list, not the bridge echo, when they disagree', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sid, m) => ({
+          displayName: m.displayName,
+          ...(m.pr
+            ? {
+                prs: [
+                  {
+                    number: 9001,
+                    url: 'https://github.com/o/r/pull/9001',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9000,
+        url: 'https://github.com/o/r/pull/9000',
+      });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 9002, url: 'https://github.com/o/r/pull/9002' } });
+      expect(res.status).toBe(200);
+      // The bridge (this-daemon memory) only knows 9001; the sidecar is the
+      // complete history and wins the echo.
+      expect(res.body.prs.map((p: { number: number }) => p.number)).toEqual([
+        9000, 9002,
+      ]);
+      // The route re-hydrates the bridge entry from the sidecar BEFORE the
+      // mutation, so the session_metadata_updated event the bridge publishes
+      // carries the full history too, not just this daemon lifetime's share.
+      expect(
+        secondaryBridge.seedSessionPrsCalls.map((call) =>
+          call.prs.map((p) => p.number),
+        ),
+      ).toEqual([[9000]]);
+    });
+
+    it('binds an archived session at the archived sidecar without orphaning an active one', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const activeSidecar = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      const archivedSidecar = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'archived',
+      );
+      await fsp.rm(activeSidecar, { force: true });
+      await fsp.rm(archivedSidecar, { force: true });
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('archived');
+      try {
+        const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr });
+        expect(res.status).toBe(200);
+        expect(res.body.prs).toEqual([pr]);
+        // The binding lands at the located (archived) state only — no
+        // orphan in the active chats dir that an unarchive would later
+        // conflict with.
+        const archived = await readSessionPrs(archivedSidecar);
+        expect(archived?.map((p) => p.number)).toEqual([9517]);
+        expect(await readSessionPrs(activeSidecar)).toBeNull();
+      } finally {
+        locationSpy.mockRestore();
+        await fsp.rm(archivedSidecar, { force: true });
+      }
+    });
+
+    it('400 invalid_session_id and no escaped write for a traversal id on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const escapedPath = service.getPrSessionPathForArchiveState(
+        '../../pwn',
+        'active',
+      );
+      await fsp.rm(escapedPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/..%2F..%2Fpwn/metadata',
+        ),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+      await expect(fsp.access(escapedPath)).rejects.toThrow();
+    });
+
+    it('400 when neither displayName nor pr is provided on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update for a persisted (non-live) session', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      try {
+        const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const service = new SessionService(WS_DIFFERENT);
+        await fsp.rm(
+          service.getPrSessionPathForArchiveState(
+            '550e8400-e29b-41d4-a716-446655440321',
+            'active',
+          ),
+          { force: true },
+        );
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr });
+        expect(res.status).toBe(200);
+        expect(res.body.prs).toEqual([pr]);
+        const sidecar = await readSessionPrs(
+          service.getPrSessionPathForArchiveState(
+            '550e8400-e29b-41d4-a716-446655440321',
+            'active',
+          ),
+        );
+        expect(sidecar?.map((p) => p.number)).toEqual([9517]);
+      } finally {
+        locationSpy.mockRestore();
+      }
     });
 
     it('404 on unknown session', async () => {
@@ -25838,10 +26642,12 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/missing/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440999/metadata',
+        ),
       ).send({ displayName: 'test' });
       expect(res.status).toBe(404);
-      expect(res.body.sessionId).toBe('missing');
+      expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440999');
     });
 
     it('400 invalid_metadata when displayName exceeds max length', async () => {
@@ -25855,7 +26661,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'x'.repeat(300) });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
@@ -25867,7 +26675,7 @@ describe('createServeApp', () => {
         createWorkspaceMetadataApp(secondaryBridge);
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       )
         .set('X-Qwen-Client-Id', 'client-1')
@@ -25876,7 +26684,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
-          sessionId: 'session-A',
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
           metadata: { displayName: 'Secondary session' },
           context: { clientId: 'client-1' },
         },
@@ -25893,7 +26701,7 @@ describe('createServeApp', () => {
 
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -25916,7 +26724,7 @@ describe('createServeApp', () => {
 
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -25937,7 +26745,7 @@ describe('createServeApp', () => {
         const { app } = createWorkspaceMetadataApp(secondaryBridge);
         const res = await auth(
           request(app).patch(
-            '/workspaces/ws-secondary/session/session-A/metadata',
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
           ),
         ).send(body);
 
@@ -25952,18 +26760,18 @@ describe('createServeApp', () => {
       const { app } = createWorkspaceMetadataApp(secondaryBridge);
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'x'.repeat(300) });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        sessionId: 'session-A',
+        sessionId: '550e8400-e29b-41d4-a716-446655440321',
         displayName: 'x'.repeat(256),
       });
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
-          sessionId: 'session-A',
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
           metadata: { displayName: 'x'.repeat(256) },
         },
       ]);
@@ -25976,7 +26784,7 @@ describe('createServeApp', () => {
       });
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -26047,6 +26855,99 @@ describe('createServeApp', () => {
         }
       },
     );
+
+    it('applies no durable rename when the pr sidecar write fails in the non-live fallback', async () => {
+      // A combined displayName+pr PATCH on a non-live session persists two
+      // writes sequentially and advances the catalog revision only after
+      // BOTH succeed. The sidecar write must run first: when it fails, the
+      // client receives a total-failure response, and nothing durable may
+      // be left behind unannounced.
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-prfail-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440035';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+      const service = new SessionService(WS_DIFFERENT, {
+        runtimeBaseDir,
+      });
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      // Force the sidecar write to fail: a directory squatting the file
+      // path makes both the read and the write fail with EISDIR.
+      await fsp.mkdir(sidecarPath, { recursive: true });
+
+      try {
+        const versionBefore = secondaryBridge.getSessionCatalogVersion();
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({
+          displayName: 'Doomed rename',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+        expect(res.status).toBe(500);
+        // The failed sidecar write must not strand a durable rename that
+        // the 500 response never announces.
+        expect(await fsp.readFile(filePath, 'utf8')).not.toContain(
+          'Doomed rename',
+        );
+        expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(
+          versionBefore.revision,
+        );
+
+        // CONTROL: once the sidecar path is writable, the same combined
+        // request applies both mutations and advances the catalog revision.
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+        const retry = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({
+          displayName: 'Doomed rename',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+        expect(retry.status).toBe(200);
+        expect(retry.body.displayName).toBe('Doomed rename');
+        expect(retry.body.prs).toEqual([
+          { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        ]);
+        expect(await fsp.readFile(filePath, 'utf8')).toContain('Doomed rename');
+        expect(
+          secondaryBridge.getSessionCatalogVersion().revision,
+        ).toBeGreaterThan(versionBefore.revision);
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
 
     it('returns 404 for a missing persisted session and 409 for a store conflict', async () => {
       const runtimeBaseDir = await fsp.mkdtemp(

@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
   type ModelGenerationConfig,
@@ -90,6 +91,7 @@ export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/session-recovery.js';
+export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
@@ -210,11 +212,24 @@ export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
+export {
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
+  MAX_DIRECTORY_ARTIFACT_FILES,
+  OFFICE_DOCUMENT_EXTENSIONS,
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
+  pathHasSkippedDirectoryComponent,
+  shouldSkipDirectoryArtifactName,
+  stripWorktreeArtifactPrefix,
+} from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export { RecordArtifactTool } from './tools/record-artifact.js';
+export {
+  RecordArtifactTool,
+  isRecordableDerivedChild,
+} from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
@@ -362,6 +377,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/session-pr-service.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,

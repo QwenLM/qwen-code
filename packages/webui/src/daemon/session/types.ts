@@ -36,12 +36,16 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -92,6 +96,8 @@ export interface DaemonConnectionState {
   displayName?: string;
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
+  /** Authoritative Goal v2 state for the current session. */
+  goalState?: GoalSnapshotV2;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -141,6 +147,14 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /**
+   * Maximum estimated bytes of transcript blocks retained in memory.
+   * Trimming evicts oldest blocks until the estimate is back under this
+   * budget; a block-count window alone is not a memory ceiling because
+   * blocks can carry large raw tool payloads. Defaults to the transcript
+   * store's built-in budget.
+   */
+  maxRetainedBytes?: number;
   /** Latest persisted records requested during an existing-session load. */
   historyPageSize?: number;
   /** Keep the full subagent transcript, or retain only bounded root summaries. */
@@ -217,6 +231,8 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'control_workflow'
   | 'run_saved_workflow'
+  | 'load_goal'
+  | 'control_goal'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -455,8 +471,8 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
   uploadAttachment(
-    image: DaemonPromptImage,
-    opts?: { signal?: AbortSignal },
+    attachment: DaemonPromptImage | DaemonPromptFile,
+    opts?: { signal?: AbortSignal; sessionId?: string },
   ): Promise<DaemonSessionAttachmentReference>;
   readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
   removeAttachment(
@@ -523,6 +539,15 @@ export interface DaemonSessionActions {
     status?: DaemonSessionWorkflowTaskStatus['status'];
     taskId?: string;
   }>;
+  getGoal(): Promise<GoalStateResponse>;
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
+  /**
+   * Install a Goal snapshot obtained outside the session action layer — a
+   * workspace-scoped control against the session this connection is attached
+   * to — reconciled like any other snapshot. A no-op once the connection has
+   * moved to another session.
+   */
+  applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2): void;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
@@ -549,6 +574,9 @@ export interface DaemonWorkspaceEventSignals {
   agentsVersion: number;
   toolsVersion: number;
   settingsVersion: number;
+  skillsVersion: number;
+  lastSkillMutation?: DaemonSkillToggleMutation;
+  skillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;

@@ -640,6 +640,45 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('extracts file attachments from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'explain this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['explain this'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 5,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'explain this',
+        source: 'mid_turn_message_injected',
+        files: [
+          {
+            name: 'notes.txt',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      }),
+    ]);
+  });
+
   it('shows the degraded-media notice when the echo text is empty', () => {
     // When the stored media is gone at drain, the daemon echoes an empty
     // messages array whose items carry only the placeholder text block; the

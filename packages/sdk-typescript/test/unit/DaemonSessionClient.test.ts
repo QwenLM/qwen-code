@@ -13,6 +13,10 @@ import {
   DaemonSessionClient,
   type DaemonSessionSubscribeOptions,
 } from '../../src/daemon/DaemonSessionClient.js';
+import type {
+  GoalControlRequest,
+  GoalSnapshotV2,
+} from '../../src/daemon/types.js';
 import { AutoReconnectTransport } from '../../src/daemon/AutoReconnectTransport.js';
 import {
   DaemonTransportClosedError,
@@ -20,6 +24,22 @@ import {
   type DaemonTransportSubscribeOptions,
   type DaemonTransportType,
 } from '../../src/daemon/DaemonTransport.js';
+
+const GOAL_SNAPSHOT: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'idle',
+  goal: {
+    goalId: 'goal-1',
+    revision: 4,
+    objective: 'ship it',
+    status: 'paused',
+    evidenceCursor: { recordId: null },
+    turnCount: 1,
+    activeTimeMs: 2000,
+    createdAt: 1000,
+    updatedAt: 3000,
+  },
+};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -139,6 +159,42 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds Goal reads and controls to the session and client identity', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { snapshot: GOAL_SNAPSHOT }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const request: GoalControlRequest = {
+      action: 'resume',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    };
+
+    await expect(session.goal()).resolves.toEqual({ snapshot: GOAL_SNAPSHOT });
+    await expect(session.controlGoal(request)).resolves.toEqual({
+      snapshot: GOAL_SNAPSHOT,
+    });
+
+    expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
+      { url: 'http://daemon/session/s-1/goal', method: 'GET' },
+      { url: 'http://daemon/session/s-1/goal', method: 'POST' },
+    ]);
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+    ]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual(request);
+  });
+
   it('creates or attaches a daemon session and exposes session metadata', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {
@@ -332,6 +388,37 @@ describe('DaemonSessionClient', () => {
       /* empty */
     }
     expect(calls[1]?.headers['last-event-id']).toBe('42');
+  });
+
+  it('releases the replay snapshot once consumed', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          lastEventId: 7,
+          compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+          liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(1);
+
+    const consumed = session.consumeReplaySnapshot();
+    expect(consumed.compactedReplay).toHaveLength(1);
+    expect(consumed.liveJournal).toHaveLength(1);
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(0);
+    // Idempotent: a second consume returns the empty snapshot.
+    expect(session.consumeReplaySnapshot().compactedReplay).toHaveLength(0);
   });
 
   it('hydrates replay images but leaves file attachments lazy', async () => {
@@ -737,7 +824,7 @@ describe('DaemonSessionClient', () => {
     await expect(
       session.uploadAttachment(
         new Blob([Uint8Array.of(1, 2, 3)]),
-        'image.png',
+        'image 你好.png',
         'image/png',
       ),
     ).resolves.toEqual(reference);
@@ -748,7 +835,10 @@ describe('DaemonSessionClient', () => {
         'x-qwen-client-id': 'client-1',
       }),
     });
-    expect(calls[0]?.url).toContain('/session/s-1/attachments');
+    expect(calls[0]?.headers).not.toHaveProperty('x-qwen-attachment-name');
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/s-1/attachments?name=image%20%E4%BD%A0%E5%A5%BD.png',
+    );
   });
 
   it('removes session attachment through the authenticated session route', async () => {

@@ -67,6 +67,8 @@ import {
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
+  isDownloadOnlyWorkspaceArtifact,
+  normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -2427,6 +2429,14 @@ function ArtifactDetail({
   }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
+    if (isDownloadOnlyWorkspaceArtifact(artifact)) {
+      return (
+        <DownloadableWorkspaceArtifact
+          artifact={artifact}
+          workspaceActions={workspaceActions}
+        />
+      );
+    }
     return (
       <WorkspaceFilePreview
         workspacePath={artifact.workspacePath}
@@ -2454,7 +2464,10 @@ function ArtifactDetail({
           {isAutomationSnapshot ? 'Automation Snapshot' : 'Artifact'}
         </div>
         <div className={styles.fieldGrid}>
-          <Field label="Type" value={artifactKindLabel(artifact.kind)} />
+          <Field
+            label="Type"
+            value={artifactKindLabel(artifact.kind, artifact.workspacePath)}
+          />
           <Field label="Storage" value={artifact.storage} />
           <Field label="Status" value={artifact.status} />
           <Field label="Source" value={artifact.source} />
@@ -2544,7 +2557,7 @@ function CodeReviewWorkspaceRequired() {
 
 function isHtmlArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     path.endsWith('.html') ||
@@ -2555,10 +2568,88 @@ function isHtmlArtifact(artifact: DaemonSessionArtifact) {
 
 function isMarkdownArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     path.endsWith('.md') ||
     path.endsWith('.markdown') ||
-    artifact.mimeType?.toLowerCase() === 'text/markdown'
+    mimeType === 'text/markdown'
+  );
+}
+
+function DownloadableWorkspaceArtifact({
+  artifact,
+  workspaceActions,
+}: {
+  artifact: DaemonSessionArtifact;
+  workspaceActions: ArtifactWorkspaceActions;
+}) {
+  const { t } = useI18n();
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
+  const location = getArtifactLocation(artifact);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const download = async () => {
+    if (!artifact.workspacePath) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      await downloadWorkspaceFile(
+        workspaceActions,
+        artifact.workspacePath,
+        artifact.mimeType,
+        () => !mountedRef.current,
+      );
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (mountedRef.current) {
+        setDownloading(false);
+      }
+    }
+  };
+
+  return (
+    <div className={styles.detail}>
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>{t('common.download')}</div>
+        <div className={styles.fieldGrid}>
+          <Field
+            label="Type"
+            value={artifactKindLabel(artifact.kind, artifact.workspacePath)}
+          />
+          <Field label="Size" value={formatArtifactSize(artifact.sizeBytes)} />
+          {location ? <Field label="Location" value={location} /> : null}
+          {artifact.status !== 'available' && artifact.status !== 'changed' ? (
+            <Field label="Status" value={artifact.status ?? 'missing'} />
+          ) : null}
+        </div>
+        <div className={styles.downloadRow}>
+          <button
+            type="button"
+            className={styles.downloadButton}
+            onClick={() => {
+              void download();
+            }}
+            disabled={
+              downloading ||
+              (artifact.status !== 'available' && artifact.status !== 'changed')
+            }
+          >
+            {downloading ? t('common.downloading') : t('common.download')}
+          </button>
+        </div>
+        {error && <div className={styles.previewError}>{error}</div>}
+      </div>
+    </div>
   );
 }
 
@@ -2878,9 +2969,16 @@ function useWorkspaceFileContent({
     setError(null);
     if (previewOnly) return undefined;
     workspaceActions
-      .readWorkspaceFile(workspacePath)
-      .then((file) => {
+      .stat(workspacePath)
+      .then((stat) => {
         if (cancelled) return;
+        if (stat.type === 'directory') {
+          throw new Error('Directories cannot be opened as artifacts.');
+        }
+        return workspaceActions.readWorkspaceFile(workspacePath);
+      })
+      .then((file) => {
+        if (cancelled || !file) return;
         setContent(file.content);
         if (file.truncated) setError(truncatedMessage);
       })
