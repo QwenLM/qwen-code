@@ -859,6 +859,17 @@ describe('bundled review skill', () => {
     expect(body).not.toContain(
       '`pr-context` and `comment-status` have no Aone backing',
     );
+    // The last three skip residues this change removes — the setup-batch
+    // parenthetical, the comment-status guard clause, and the Step 6
+    // no-report clause. The positive assertions above stay green if a
+    // merge resolution or partial revert re-adds any of them, while Aone
+    // runs skip comment-status again; the replacement contract is the
+    // a1-backed report's existence in Step 6's re-check.
+    expect(body).not.toContain('drops out of the batch');
+    expect(body).not.toContain('leaving a two-call batch');
+    expect(body).not.toContain('the command has no backing');
+    expect(body).not.toContain('skips the command with the Step 1 batch');
+    expect(body).toContain('on an Aone target it runs a1-backed');
   });
 
   it('keeps the corrected Aone --comment contract, not merge residue', () => {
@@ -988,6 +999,17 @@ describe('bundled review skill', () => {
     expect(core).toContain('`references/posting.md` — Step 7');
     expect(core).toContain('`references/persistence.md` — Step 8');
     expect(core).toContain('`references/aone.md` — the Aone paths');
+    // The enumeration prefixes alone do not pin WHEN a file loads:
+    // rewriting a load-condition clause with its prefix intact ships
+    // green. Pin the clauses themselves — the gating is the mechanism
+    // this split introduces.
+    expect(core).toContain('Load it when, and only when, posting is live');
+    expect(core).toContain(
+      'Load it before Step 8 on every run except cross-repo lightweight mode',
+    );
+    expect(core).toContain(
+      'Load it before `match-remote` when the target is Aone',
+    );
   });
 
   it('keeps the write prohibition and the posting gates in the core body', () => {
@@ -1012,7 +1034,19 @@ describe('bundled review skill', () => {
 
   it('moved the sections whole — no step body duplicated across files', () => {
     const core = coreBody();
-    // Distinctive openings of the moved sections: present in exactly one file.
+    const corpus = skillBody();
+    // Distinctive openings of the moved sections: present in exactly one
+    // file of the corpus, and absent from the core. The corpus-wide count
+    // alone would pass a revert that keeps a section in the core, and the
+    // absence-from-core alone passes a copy duplicated BETWEEN the
+    // reference files — an Aone --comment run loads both posting.md and
+    // aone.md, so one run would then obey two potentially divergent
+    // copies of the same step.
+    expect(corpus.match(/\*\*Use the "Create Review" API/g)).toHaveLength(1);
+    expect(corpus.match(/### Report persistence/g)).toHaveLength(1);
+    expect(
+      corpus.match(/run `\/review` \*\*from inside a clone of that repo\*\*/g),
+    ).toHaveLength(1);
     expect(core).not.toContain(
       '**Use the "Create Review" API to submit verdict + inline comments',
     );
@@ -1022,8 +1056,25 @@ describe('bundled review skill', () => {
     );
     // The compose-state field list relocated from Step 7 to Step 6's Verdict
     // section: one copy in the corpus, in the core.
-    const corpus = skillBody();
     expect(corpus.match(/- `modelId` — for the footer\./g)).toHaveLength(1);
     expect(core).toContain('- `modelId` — for the footer.');
+  });
+
+  it('keeps template tokens out of the raw-loaded reference files', () => {
+    // BundledSkillLoader interpolates only the core body it injects; the
+    // reference files are read raw via read_file, so a token there reaches
+    // the run unreplaced: a literal `(v{{cliVersion}})` draft footer is
+    // one stripReviewFooter cannot match (the version span excludes
+    // braces), so every posted comment carries the broken token above the
+    // canonical footer, and a `{{model}}` copied into the cache JSON
+    // fails the next round's same-model anchor gate.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name)).not.toMatch(/\{\{[^}]+\}\}/);
+    }
+    // The reference files' footer templates name YOUR_MODEL_ID, whose
+    // value the loader prepends to the injected core body — but only when
+    // the core body carries a model token; without one the declaration
+    // vanishes and the templates dangle.
+    expect(/{{model}}|YOUR_MODEL_ID/.test(coreBody())).toBe(true);
   });
 });

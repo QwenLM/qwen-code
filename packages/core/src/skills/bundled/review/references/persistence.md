@@ -82,7 +82,7 @@ If reviewing a PR **at high effort**, update the review cache for incremental re
    ```json
    {
      "lastCommitSha": "<HEAD SHA captured in Step 1>",
-     "lastModelId": "{{model}}",
+     "lastModelId": "<your model id — the YOUR_MODEL_ID value declared at the top of the skill prompt>",
      "lastReviewDate": "<ISO timestamp>",
      "round": <N — 1 on a first review, previous round + 1 after>,
      "findingsCount": <number>,
