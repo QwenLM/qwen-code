@@ -437,6 +437,7 @@ describe('Session', () => {
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
     flush: ReturnType<typeof vi.fn>;
+    recordSessionModel: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -719,6 +720,7 @@ describe('Session', () => {
       }),
       recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
       flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionModel: vi.fn().mockResolvedValue(true),
     };
     mockGoalRuntime = {
       getSnapshot: vi.fn().mockReturnValue({
@@ -3810,6 +3812,24 @@ describe('Session', () => {
         'security.auth.selectedType',
         AuthType.USE_OPENAI,
       );
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3-coder-plus',
+        authType: AuthType.USE_OPENAI,
+      });
+    });
+
+    it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
+      const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${snapshotId}(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: snapshotId,
+        authType: AuthType.USE_OPENAI,
+        isRuntime: true,
+      });
     });
 
     it('emits a current_model_update extNotification after switching (A1)', async () => {
@@ -3899,6 +3919,11 @@ describe('Session', () => {
             baseUrl: 'https://two.example/v1',
           },
         },
+      });
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'shared-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://two.example/v1',
       });
     });
 
@@ -4007,6 +4032,10 @@ describe('Session', () => {
         undefined,
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3-coder-flash',
+        authType: AuthType.USE_OPENAI,
+      });
     });
 
     it('propagates errors from config.switchModel', async () => {
@@ -17551,6 +17580,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -17593,6 +17623,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -17656,6 +17687,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -17763,6 +17795,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -17969,6 +18002,7 @@ describe('Session', () => {
           evidenceCursor: { recordId: 'cursor-1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1234,
           updatedAt: 1234,
         };
@@ -18054,6 +18088,7 @@ describe('Session', () => {
           evidenceCursor: { recordId: 'cursor-1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1234,
           updatedAt: 1234,
         };
@@ -18088,6 +18123,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18214,6 +18250,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18270,6 +18307,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18401,6 +18439,7 @@ describe('Session', () => {
               evidenceCursor: { recordId: 'cursor-1' },
               turnCount: 0,
               activeTimeMs: 0,
+              tokensUsed: 0,
               createdAt: 1234,
               updatedAt: 1234,
             },
@@ -18475,6 +18514,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18534,6 +18574,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18575,6 +18616,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18636,6 +18678,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18683,6 +18726,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18730,6 +18774,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18801,6 +18846,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18871,6 +18917,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -18928,6 +18975,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -19043,6 +19091,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -19153,6 +19202,7 @@ describe('Session', () => {
           evidenceCursor: { recordId: 'cursor-1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1234,
           updatedAt: 1234,
         };
@@ -19279,6 +19329,7 @@ describe('Session', () => {
             evidenceCursor: { recordId: 'cursor-1' },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1234,
             updatedAt: 1234,
           },
@@ -22743,6 +22794,7 @@ describe('Session', () => {
               evidenceCursor: { recordId: 'cursor-1' },
               turnCount: 0,
               activeTimeMs: 0,
+              tokensUsed: 0,
               createdAt: 1234,
               updatedAt: 1234,
             },
@@ -29525,6 +29577,7 @@ describe('Session', () => {
           evidenceCursor: { recordId: 'cursor-1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1234,
           updatedAt: 1234,
         },

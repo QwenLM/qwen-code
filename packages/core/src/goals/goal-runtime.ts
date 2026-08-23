@@ -69,6 +69,19 @@ export interface CreateGoalRuntimeOptions {
   evidenceSource?: GoalEvidenceSource;
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
+  tokenLedger?: GoalTurnTokenLedger;
+}
+
+/**
+ * The tokens a finished Goal turn billed.
+ *
+ * Scoped to the turn rather than to the session: the ledger is fed by the
+ * records the turn itself produced, so an interleaved user turn or a resumed
+ * session's replayed history is never attributed to a Goal.
+ */
+export interface GoalTurnTokenLedger {
+  /** Tokens billed to `turnId`, consumed so a turn is counted once. */
+  takeGoalTurnTokens(turnId: string): number;
 }
 
 export interface GoalEvidenceSource {
@@ -254,6 +267,22 @@ export function createGoalRuntime(
           controller: new AbortController(),
         }
       : undefined;
+
+  /**
+   * The finishing turn's spend, or zero when nothing can answer.
+   *
+   * Goal accounting is bookkeeping: a ledger that is absent or that throws
+   * costs the Goal its spend figure for this turn, never the turn itself.
+   */
+  const takeTurnTokens = (turnId: string): number => {
+    if (!options.tokenLedger) return 0;
+    try {
+      const tokens = options.tokenLedger.takeGoalTurnTokens(turnId);
+      return Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
+    } catch {
+      return 0;
+    }
+  };
 
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
@@ -1208,6 +1237,7 @@ export function createGoalRuntime(
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
+            tokensUsed: takeTurnTokens(permit.turnId),
           });
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,

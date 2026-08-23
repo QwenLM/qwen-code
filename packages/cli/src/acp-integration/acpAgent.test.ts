@@ -210,6 +210,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isTurnResultRecordPayload: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isTurnResultRecordPayload,
+  RUNTIME_SNAPSHOT_PREFIX: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).stripRuntimeSnapshotPrefix,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -1028,6 +1034,7 @@ function goalSnapshot(
       evidenceCursor: { recordId: 'cursor-1' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 123,
       updatedAt: 123,
       ...overrides,
@@ -3520,6 +3527,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not record a session model on an empty new daemon session', async () => {
+    const innerConfig = makeInnerConfig();
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+
+    expect(
+      innerConfig.getChatRecordingService().recordSessionModel,
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
     await setupSessionMocks('meta-session');
     const { agent, agentPromise } = await bootAcpAgent();
@@ -3894,6 +3942,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        recordSessionModel: vi.fn().mockResolvedValue(true),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn(),
         close: vi.fn().mockResolvedValue(undefined),
@@ -16489,6 +16538,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       finalize: vi.fn(),
       close: vi.fn().mockResolvedValue(undefined),
       hasWriteOwnership: vi.fn().mockReturnValue(false),
+      recordSessionModel: vi.fn().mockResolvedValue(true),
       runWithWriteBarrier: vi.fn(
         async <T>(operation: () => Promise<T>): Promise<T> => operation(),
       ),
@@ -16505,6 +16555,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      switchModel: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
@@ -16665,6 +16716,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const messages = data.conversation.messages as Array<
           Record<string, unknown>
         >;
+        const lastSessionModel = [...messages]
+          .reverse()
+          .find((message) => message['subtype'] === 'session_model');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -16677,6 +16731,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               lastCompletedUuid:
                 (messages.at(-1)?.['uuid'] as string | undefined) ?? '',
               turnParentUuids: [],
+              ...(lastSessionModel?.['systemPayload']
+                ? { sessionModel: lastSessionModel['systemPayload'] }
+                : {}),
             },
             artifactSnapshot: data.artifactSnapshot,
             goalRecords: messages,
@@ -16952,6 +17009,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         'settings_load',
         'existence_check',
         'config_setup',
+        'restore_session_model',
         'auth',
         'file_system_setup',
         'session_register',
@@ -16984,6 +17042,92 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       await agentPromise;
     },
   );
+
+  it.each(['load', 'resume'] as const)(
+    'cold %s restores the recorded session model before auth',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              type: 'system',
+              subtype: 'session_model',
+              systemPayload: {
+                modelId: 'qwen3-coder-plus',
+                authType: 'openai',
+              },
+            },
+            { role: 'user', parts: [{ text: 'hello' }] },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(request);
+      } else {
+        await agent.unstable_resumeSession(request);
+      }
+
+      expect(innerConfig.switchModel).toHaveBeenCalledWith(
+        'openai',
+        'qwen3-coder-plus',
+        undefined,
+      );
+      expect(innerConfig.switchModel.mock.invocationCallOrder[0]).toBeLessThan(
+        innerConfig.refreshAuth.mock.invocationCallOrder[0],
+      );
+      expect(
+        innerConfig.getChatRecordingService().recordSessionModel,
+      ).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('cold resume still succeeds when restoring the session model fails', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          {
+            uuid: 'model-1',
+            type: 'system',
+            subtype: 'session_model',
+            systemPayload: {
+              modelId: 'missing-model',
+              authType: 'openai',
+            },
+          },
+        ],
+      },
+    });
+    innerConfig.switchModel.mockRejectedValue(new Error('unknown model'));
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.unstable_resumeSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        models: expect.any(Object),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it.each(['load', 'resume'] as const)(
     'profiles the live %s restore path without an existence check',
@@ -17038,6 +17182,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).toEqual(expect.any(Number));
         expect(
           attributes['qwen-code.daemon.session_restore.existence_check_ms'],
+        ).toBeUndefined();
+        expect(
+          attributes[
+            'qwen-code.daemon.session_restore.restore_session_model_ms'
+          ],
         ).toBeUndefined();
       } finally {
         mockConnectionState.resolve();
@@ -17838,6 +17987,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 0,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 1,
       },

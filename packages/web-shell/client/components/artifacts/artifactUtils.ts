@@ -84,20 +84,38 @@ export function isOfficeDocumentPath(workspacePath?: string): boolean {
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
   kind?: string;
   workspacePath?: string;
+  mimeType?: string;
 }): boolean {
-  if (artifact.kind === 'image') {
-    return false;
-  }
+  const extension = pathExtension(artifact.workspacePath);
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   if (
-    artifact.kind === 'document' ||
-    artifact.kind === 'pdf' ||
-    artifact.kind === 'video' ||
-    artifact.kind === 'audio' ||
-    isOfficeDocumentPath(artifact.workspacePath)
+    extension === '.svg' ||
+    mimeType === 'image/svg+xml' ||
+    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
   ) {
     return true;
   }
-  return DOWNLOAD_ONLY_EXTENSIONS.has(pathExtension(artifact.workspacePath));
+  if (
+    getArtifactImageMimeType(artifact) ||
+    extension === '.md' ||
+    extension === '.markdown' ||
+    extension === '.html' ||
+    extension === '.htm' ||
+    mimeType === 'text/markdown' ||
+    mimeType === 'text/html'
+  ) {
+    return false;
+  }
+  if (
+    artifact.kind === 'image' ||
+    artifact.kind === 'document' ||
+    artifact.kind === 'pdf' ||
+    artifact.kind === 'video' ||
+    artifact.kind === 'audio'
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function pathExtension(workspacePath?: string): string {
@@ -134,11 +152,15 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
 const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
 const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 100 * 1024;
 
+export function normalizeArtifactMimeType(mimeType?: string): string {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+}
+
 export function getArtifactImageMimeType(
-  artifact: DaemonSessionArtifact,
+  artifact: Pick<DaemonSessionArtifact, 'mimeType' | 'workspacePath'>,
 ): string | undefined {
-  const mimeType = artifact.mimeType?.split(';', 1)[0]?.trim().toLowerCase();
-  if (mimeType?.startsWith('image/')) {
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  if (mimeType.startsWith('image/')) {
     if (mimeType === 'image/jpg') return 'image/jpeg';
     return Object.values(IMAGE_MIME_TYPES).includes(mimeType)
       ? mimeType

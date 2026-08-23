@@ -247,6 +247,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -539,6 +540,7 @@ type AcpSessionProfileStage =
   | 'live_restore'
   | 'existence_check'
   | 'config_setup'
+  | 'restore_session_model'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
@@ -5537,7 +5539,11 @@ class QwenAgent implements Agent {
             : {}),
         })) as LoadSessionResponse;
       try {
-        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        await profiler.time('restore_session_model', () =>
+          restoreSessionModelThenAuthenticate(config, projection, () =>
+            profiler.time('auth', () => this.ensureAuthenticated(config)),
+          ),
+        );
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );
@@ -5850,7 +5856,11 @@ class QwenAgent implements Agent {
       const projection = config.consumeSessionRestoreProjection?.();
       let response: ResumeSessionResponse | undefined;
       try {
-        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        await profiler.time('restore_session_model', () =>
+          restoreSessionModelThenAuthenticate(config, projection, () =>
+            profiler.time('auth', () => this.ensureAuthenticated(config)),
+          ),
+        );
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );

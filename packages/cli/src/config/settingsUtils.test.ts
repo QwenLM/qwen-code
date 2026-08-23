@@ -14,6 +14,7 @@ import {
   getEffectiveValue,
   getAllSettingKeys,
   getDialogSettingKeys,
+  WORKSPACE_RESTRICTED_SETTING_KEYS,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -366,6 +367,68 @@ describe('SettingsUtils', () => {
     });
 
     describe('getDialogSettingKeys', () => {
+      // R4-2: Workspace scope strips these before the merge, so listing them
+      // there lets a user toggle a setting that silently never takes effect
+      // and writes a dead entry into the repo's .qwen/settings.json.
+      describe('workspace-restricted filtering', () => {
+        const restrictedKey = WORKSPACE_RESTRICTED_SETTING_KEYS[0]!;
+        const [section, leaf] = restrictedKey.split('.') as [string, string];
+
+        beforeEach(() => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            [section]: {
+              type: 'object',
+              label: section,
+              category: 'General',
+              requiresRestart: false,
+              default: {},
+              description: 'section',
+              showInDialog: false,
+              properties: {
+                [leaf]: {
+                  type: 'boolean',
+                  label: leaf,
+                  category: 'General',
+                  requiresRestart: true,
+                  default: false,
+                  description: 'restricted',
+                  showInDialog: true,
+                },
+                unrestricted: {
+                  type: 'boolean',
+                  label: 'Unrestricted',
+                  category: 'General',
+                  requiresRestart: false,
+                  default: false,
+                  description: 'plain',
+                  showInDialog: true,
+                },
+              },
+            },
+          } as unknown as ReturnType<typeof getSettingsSchema>);
+        });
+
+        it('drops the restricted key when asked to, and nothing else', () => {
+          // Guard against a vacuous pass: it must be dialog-visible first.
+          expect(getDialogSettingKeys()).toContain(restrictedKey);
+
+          const workspaceKeys = getDialogSettingKeys({
+            excludeWorkspaceRestricted: true,
+          });
+          expect(workspaceKeys).not.toContain(restrictedKey);
+          expect(workspaceKeys).toContain(`${section}.unrestricted`);
+        });
+
+        it('keeps it when the option is absent or false', () => {
+          const allKeys = getDialogSettingKeys();
+          expect(getDialogSettingKeys({})).toEqual(allKeys);
+          expect(
+            getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+          ).toEqual(allKeys);
+          expect(allKeys).toContain(restrictedKey);
+        });
+      });
+
       it('should return only settings marked for dialog display', () => {
         const dialogKeys = getDialogSettingKeys();
 

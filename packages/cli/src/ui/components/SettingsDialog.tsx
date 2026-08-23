@@ -217,7 +217,15 @@ export function SettingsDialog({
   }, [selectedScope, settings, globalPendingChanges]);
 
   const generateSettingsItems = () => {
-    const settingKeys = getDialogSettingKeys();
+    // Workspace-restricted settings are stripped before the merge, so offering
+    // them under Workspace scope is a trap: the dialog renders from the raw
+    // scope file, so a toggle here would keep displaying the value it wrote
+    // while the feature stayed at its merged value, leaving a dead entry in
+    // the repo's .qwen/settings.json. They stay listed under the scopes that
+    // do honor them.
+    const settingKeys = getDialogSettingKeys({
+      excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
+    });
 
     return settingKeys.map((key: string) => {
       const definition = getSettingDefinition(key);
