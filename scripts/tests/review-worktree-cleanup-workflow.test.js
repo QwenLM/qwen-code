@@ -5,7 +5,18 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
@@ -129,6 +140,34 @@ function expectHardenedGit(run) {
 }
 
 const awkAvailable = spawnSync('awk', ['BEGIN { exit 0 }']).status === 0;
+
+// Substring/order pins cannot see parse or runtime behavior: a dropped
+// closing quote fails `bash -n` on the whole `if: always()` step, and a
+// dropped `]` in the existence check turns the ladder into a silent no-op —
+// both mutants survive every pin above (mutation-probed). Execute the
+// extracted function against fixture workspaces to catch that class.
+const removeTreeFnStart = reviewCleanStep.indexOf('remove_review_tree() {');
+const removeReviewTreeFn = reviewCleanStep.slice(
+  removeTreeFnStart,
+  reviewCleanStep.indexOf('\n}\n', removeTreeFnStart) + 2,
+);
+const bashAvailable = spawnSync('bash', ['-c', 'exit 0']).status === 0;
+// The fixtures defeat rm with a chmod-555 parent, which needs POSIX
+// permission semantics: Git Bash on Windows resolves `bash` but not chmod,
+// and root ignores the bits entirely.
+const permissionFixturesAvailable =
+  bashAvailable && process.platform !== 'win32' && process.geteuid?.() !== 0;
+const runRemoveReviewTree = (workspace, ...args) =>
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -uo pipefail\n${removeReviewTreeFn}\nremove_review_tree "$@"`,
+      'remove_review_tree',
+      ...args,
+    ],
+    { env: { ...process.env, GITHUB_WORKSPACE: workspace }, encoding: 'utf8' },
+  );
 
 describe('review worktree cleanup steps', () => {
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
@@ -257,14 +296,17 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanCode).toMatch(
       /could not remove review worktree[^\n]*\n\s*return 0/,
     );
-    // The probe must keep "sudo missing" from "sudo password-gated" apart:
-    // the incident this ladder exists for was a runner WITH sudo and no
-    // NOPASSWD entry, and "absent" sends the on-call to install a package
-    // instead of writing a sudoers rule.
+    // The probe must keep all three sudo states apart: the incident this
+    // ladder exists for was a runner WITH sudo and no NOPASSWD entry, and
+    // "absent" sends the on-call to install a package instead of writing a
+    // sudoers rule. The 'ok' assignment is pinned for the mirror case:
+    // without it a working passwordless sudo reports as password-gated and
+    // sends the on-call to add a sudoers rule that already exists.
     expect(reviewCleanCode).toContain("local sudo_probe='password-gated'");
     expect(reviewCleanCode).toContain(
       "command -v sudo >/dev/null 2>&1 || sudo_probe='absent'",
     );
+    expect(reviewCleanCode).toContain("sudo_probe='ok'");
   });
 
   it('keeps the pre-checkout agent-state sweep pinned to paths.ts', () => {
@@ -298,6 +340,86 @@ describe('review worktree cleanup steps', () => {
       });
       expect(out.status).toBe(0);
       expect(out.stdout.trim()).toBe(review);
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree actually removes a plain leftover',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const leftover = join(fixture, '.qwen/tmp/review-pr-101');
+        mkdirSync(leftover, { recursive: true });
+        writeFileSync(join(leftover, 'leftover.txt'), 'x');
+        // Relative input: the leftover loop's glob entries are relative.
+        const out = runRemoveReviewTree(fixture, '.qwen/tmp/review-pr-101');
+        expect(out.status).toBe(0);
+        expect(out.stdout).toBe('');
+        expect(existsSync(leftover)).toBe(false);
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree refuses a symlinked leftover without touching its target',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const target = join(fixture, 'target');
+        mkdirSync(target);
+        writeFileSync(join(target, 'keep.txt'), 'x');
+        const leftoverDir = join(fixture, '.qwen/tmp');
+        mkdirSync(leftoverDir, { recursive: true });
+        const link = join(leftoverDir, 'review-pr-102');
+        symlinkSync(target, link);
+        // Make rm fail so the ladder reaches the refusal branch: with a
+        // writable parent the first rung unlinks the link itself, which is
+        // correct but never exercises the guard.
+        chmodSync(leftoverDir, 0o555);
+        const out = runRemoveReviewTree(fixture, link);
+        expect(out.status).toBe(0);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(
+          'refusing to repair review worktree path (path is a symlink)',
+        );
+        expect(readFileSync(join(target, 'keep.txt'), 'utf8')).toBe('x');
+      } finally {
+        chmodSync(join(fixture, '.qwen/tmp'), 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree keeps a newline-bearing leftover name on one warning line',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const leftoverDir = join(fixture, '.qwen/tmp');
+        mkdirSync(leftoverDir, { recursive: true });
+        const hostile = join(leftoverDir, 'review-pr-\n::error::injected');
+        mkdirSync(hostile);
+        chmodSync(leftoverDir, 0o555);
+        const out = runRemoveReviewTree(fixture, hostile);
+        expect(out.status).toBe(0);
+        expect(existsSync(hostile)).toBe(true);
+        // The runner parses every stdout line as a possible workflow
+        // command: the stripped name must stay inside the single warning
+        // line, never surface `::error::` on its own line.
+        const lines = out.stdout.split(/\r?\n/).filter((line) => line);
+        expect(lines).toHaveLength(1);
+        expect(
+          lines[0].startsWith('::warning::could not remove review worktree'),
+        ).toBe(true);
+      } finally {
+        chmodSync(join(fixture, '.qwen/tmp'), 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
     },
   );
 });
