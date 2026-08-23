@@ -358,12 +358,7 @@ export class Storage {
     // The landing exists to keep artifacts OUT of version control, so refuse
     // before creating anything when QWEN_HOME resolves inside the audited
     // repository.
-    if (Storage.isPathWithinDirectory(dir, resolved)) {
-      throw new Error(
-        `audit: the fallback landing ${dir} resolves inside the audited ` +
-          `project root — point QWEN_HOME outside the repository and re-run.`,
-      );
-    }
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
     // Everything below validates a landing this process may have ADOPTED
     // rather than created. The path is fully predictable — the project hash
     // is a pure function of the root — and 0700 does not exclude the user's
@@ -386,12 +381,26 @@ export class Storage {
     // recursively when missing — matching every other writer under it — and
     // only `audits` and the project leaf below are validated components.
     fs.mkdirSync(baseDir, { recursive: true });
-    Storage.adoptDirectory(
+    // Re-check now that the base exists: the check above resolves through
+    // the deepest EXISTING ancestor, so a not-yet-existing QWEN_HOME passed
+    // it, and a same-UID process can plant that tail as a symlink into the
+    // audited repository between the check and this mkdir — which
+    // mkdirSync(recursive) then follows.
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
+    const auditsDir = Storage.adoptDirectory(
       path.join(baseDir, 'audits'),
       'the audit artifact directory',
     );
     Storage.adoptDirectory(dir, 'the fallback landing');
     Storage.assertAuditLandingIsClean(dir);
+    // Every check above ran BEFORE the component it guards existed, so a
+    // same-UID swap landing in a window between checks passes the check that
+    // already ran. Re-validate with everything in place: re-adoption
+    // lstat-refuses a swapped `audits` or leaf, and the containment re-check
+    // catches a swapped ancestor the lstats cannot see.
+    Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
+    Storage.adoptDirectory(dir, 'the fallback landing');
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
     return dir;
   }
 
@@ -414,7 +423,7 @@ export class Storage {
     }
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory()) {
-      throw new Error(
+      throw new FatalConfigError(
         `audit: ${what} ${dir} is not a directory (it may be a symlink ` +
           `planted ahead of the run) — remove it and re-run.`,
       );
@@ -458,7 +467,7 @@ export class Storage {
       // Fail closed: an unlistable landing cannot be validated, and
       // unreadable does NOT imply unwritable — listing needs r while
       // creating entries needs only w+x.
-      throw new Error(
+      throw new FatalConfigError(
         `audit: the fallback landing ${dir} could not be listed for ` +
           `validation (${(err as Error).message}) — remove it and re-run.`,
       );
@@ -478,7 +487,7 @@ export class Storage {
         }
       }
       if (entry.isSymbolicLink() || stat?.isSymbolicLink()) {
-        throw new Error(
+        throw new FatalConfigError(
           `audit: the fallback landing ${dir} contains a symlink ` +
             `(${entry.name}) — artifacts written under it would land outside ` +
             `the landing. Remove it and re-run.`,
@@ -494,12 +503,37 @@ export class Storage {
         continue; // vanished between readdir and lstat
       }
       if (links > 1) {
-        throw new Error(
+        throw new FatalConfigError(
           `audit: the fallback landing ${dir} contains a hardlinked file ` +
             `(${entry.name}) — a write to it would also write through its ` +
             `twin. Remove it and re-run.`,
         );
       }
+    }
+  }
+
+  /**
+   * Refuse a fallback landing that resolves inside the audited repository.
+   * A resolution failure (a non-directory component, a symlink loop, an
+   * unreadable ancestor) falls through instead of escaping as a raw errno:
+   * such a path cannot resolve to a usable landing, and the adoption checks
+   * own that state with the actionable message.
+   */
+  private static assertAuditLandingIsOutsideRepo(
+    dir: string,
+    resolvedProjectRoot: string,
+  ): void {
+    let contained = false;
+    try {
+      contained = Storage.isPathWithinDirectory(dir, resolvedProjectRoot);
+    } catch {
+      // Unresolvable: the adoption checks own this state (see above).
+    }
+    if (contained) {
+      throw new FatalConfigError(
+        `audit: the fallback landing ${dir} resolves inside the audited ` +
+          `project root — point QWEN_HOME outside the repository and re-run.`,
+      );
     }
   }
 
