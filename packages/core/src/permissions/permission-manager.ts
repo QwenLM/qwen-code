@@ -26,6 +26,7 @@ import {
   findDangerousAllowRules,
   isDangerousAllowRule,
 } from './dangerousRules.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -88,6 +89,19 @@ export interface PermissionManagerConfig {
    *             (e.g. `"Bash"` to block all shell commands) instead.
    */
   getCoreTools?(): string[] | undefined;
+
+  /**
+   * Returns the allow rules sourced from `settings.permissions.allow` only
+   * (NOT `--allowed-tools`, the SDK `allowedTools` param, or the legacy
+   * `tools.allowed` key — those stay pure auto-approval grants).
+   *
+   * When this list contains at least one valid rule, the registry-level
+   * allowlist activates: built-in tools not covered by ANY in-force allow
+   * rule are excluded from registration, matching the documented migration
+   * semantic of the legacy `tools.core` whitelist ("unlisted tools are
+   * disabled at registry level", #9827).
+   */
+  getRegistryAllowList?(): string[] | undefined;
 }
 
 /**
@@ -141,6 +155,26 @@ export class PermissionManager {
    */
   private coreToolsAllowList: Set<string> | null = null;
 
+  /**
+   * Whether the `permissions.allow` registry allowlist is active.
+   *
+   * Snapshotted once in `initialize()`: the allowlist activates only when
+   * `settings.permissions.allow` (exposed via `getRegistryAllowList()`)
+   * contains at least one VALID rule. Pure auto-approval sources —
+   * `--allowed-tools`, the SDK `allowedTools` param, the legacy
+   * `tools.allowed` key — deliberately do NOT activate it; they keep their
+   * documented "bypass the confirmation dialog" semantics (#9827).
+   *
+   * Activation is not re-evaluated later: rules granted mid-session
+   * ("Always allow", skill `allowedTools`, `/permissions` writes) extend
+   * allowlist MEMBERSHIP but must never activate the allowlist under a
+   * running session, or approving one tool would suddenly
+   * permission-error every tool not on the list. Registry composition is
+   * a startup decision, consistent with the "Requires restart" semantics
+   * of the other tool-availability settings.
+   */
+  private permissionsAllowListActive = false;
+
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
@@ -176,6 +210,14 @@ export class PermissionManager {
     if (this.config.getApprovalMode?.() === 'auto') {
       this.stripDangerousRulesForAutoMode();
     }
+
+    // Snapshot the `permissions.allow` registry allowlist activation.
+    // Only `settings.permissions.allow` rules activate it (see the
+    // `permissionsAllowListActive` field). Requiring at least one VALID
+    // rule keeps a malformed entry from gating the entire toolset.
+    this.permissionsAllowListActive = parseRules(
+      this.config.getRegistryAllowList?.() ?? [],
+    ).some((rule) => !rule.invalid);
   }
 
   // ---------------------------------------------------------------------------
@@ -600,17 +642,47 @@ export class PermissionManager {
   /**
    * Determine whether a tool should be present in the tool registry.
    *
-   * A tool is disabled (returns false) when a `deny` rule without a specifier
-   * (i.e. a whole-tool deny) matches.  Specifier-based deny rules such as
-   * `"Bash(rm -rf *)"` do NOT remove the tool from the registry – they only
-   * deny specific invocations at runtime.
+   * A tool is disabled (returns false) when:
+   * - the `permissions.allow` registry allowlist is active and the tool is
+   *   not covered by any allow rule (see `isPermissionsAllowListActive`), or
+   * - a `deny` rule without a specifier (i.e. a whole-tool deny) matches.
+   *
+   * Specifier-based deny rules such as `"Bash(rm -rf *)"` do NOT remove the
+   * tool from the registry – they only deny specific invocations at runtime.
+   * Likewise, specifier-based allow rules such as `"Bash(npm test)"` DO keep
+   * the tool in the registry — the allowlist is tool-level, not
+   * invocation-level.
    *
    * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
    * check because they are dynamically discovered or essential for system
-   * operation.
+   * operation, but they ARE subject to the `permissions.allow` registry
+   * allowlist (except MCP tools and `structured_output`, see below) — that
+   * is the documented migration semantic of the legacy `tools.core`
+   * whitelist ("unlisted tools are disabled at registry level") and the
+   * only way to keep e.g. `send_message` / `update_goal` schemas out of
+   * the model request (#9827).
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
     const canonicalName = resolveToolName(toolName);
+
+    // `permissions.allow` registry allowlist: when the session starts with
+    // at least one allow rule, any built-in tool not covered by an allow
+    // rule is never registered, so its schema is not sent to the model.
+    // Exempt:
+    // - MCP tools (`mcp__*`): dynamically discovered and filtered via the
+    //   per-server `includeTools` / `excludeTools` and `tools.disabled`
+    //   knobs instead — same bypass the legacy coreTools allowlist had.
+    // - `structured_output`: the synthetic terminal contract for
+    //   `--json-schema` runs; removing it leaves such runs with no way to
+    //   finish (deny rules still apply to it).
+    if (
+      this.permissionsAllowListActive &&
+      canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
+      !canonicalName.startsWith('mcp__') &&
+      !this.isCoveredByAllowRule(canonicalName)
+    ) {
+      return false;
+    }
 
     // Non-core tools bypass coreTools allowlist check
     if (!this.isCoreTool(canonicalName)) {
@@ -631,6 +703,48 @@ export class PermissionManager {
     // no specifier, which is the correct registry-level check.
     const decision = await this.evaluate({ toolName: canonicalName });
     return decision !== 'deny';
+  }
+
+  /**
+   * Whether the `permissions.allow` registry allowlist is active for this
+   * session. See the `permissionsAllowListActive` field for the activation
+   * contract (snapshot at `initialize()`, restart-scoped).
+   */
+  isPermissionsAllowListActive(): boolean {
+    return this.permissionsAllowListActive;
+  }
+
+  /**
+   * All allow rules currently in force: persistent + session + any rules
+   * the AUTO-mode strip moved to the stash (they are configured rules,
+   * merely suspended for runtime auto-approval purposes).
+   */
+  private getEffectiveAllowRules(): PermissionRule[] {
+    return [
+      ...this.sessionRules.allow,
+      ...this.persistentRules.allow,
+      ...(this.strippedAllowRules?.session ?? []),
+      ...(this.strippedAllowRules?.persistent ?? []),
+    ];
+  }
+
+  /**
+   * Registry-membership check for the `permissions.allow` allowlist: true
+   * when any in-force allow rule mentions the tool. Tool-name matching is
+   * specifier-agnostic (`Bash(npm test)` keeps `run_shell_command`
+   * registered) and honours meta-categories (`Read` covers grep/glob/...,
+   * `Bash` covers monitor) via `toolMatchesRuleToolName`.
+   *
+   * Session-granted rules count toward membership even though they cannot
+   * ACTIVATE the allowlist — so skill `allowedTools` grants and mid-session
+   * "Always allow" choices keep their tools available under an active
+   * allowlist.
+   */
+  private isCoveredByAllowRule(canonicalName: string): boolean {
+    return this.getEffectiveAllowRules().some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName),
+    );
   }
 
   /**

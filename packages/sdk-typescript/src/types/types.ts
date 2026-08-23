@@ -401,9 +401,11 @@ export interface QueryOptions {
 
   /**
    * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
-   * If specified, only matching core tools are registered for the session.
-   * This is separate from `permissions.allow`, which auto-approves matching
-   * tool calls but does not restrict tool registration.
+   * If specified, only matching core tools are registered for the session
+   * (non-core built-ins such as `send_message` are unaffected).
+   * `allowedTools` / `permissions.allow` also restricts tool registration:
+   * when at least one allow rule is configured, built-in tools not covered
+   * by any allow rule are not registered either (#9827).
    * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
    * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
@@ -440,6 +442,10 @@ export interface QueryOptions {
    * - Checked after `excludeTools` but before `canUseTool` callback
    * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
+   * - Registry allowlist: when at least one entry is configured, built-in
+   *   tools not covered by any entry are not registered for the session,
+   *   so their schemas are never sent to the model (MCP tools and the
+   *   `structuredOutput` contract are exempt) (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

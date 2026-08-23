@@ -1051,6 +1051,15 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
+    /**
+     * The subset of `allow` that comes from `settings.permissions.allow`
+     * (never `--allowed-tools`, the SDK `allowedTools` param, or the
+     * legacy `tools.allowed` key). When it contains at least one valid
+     * rule, the registry-level allowlist activates: built-in tools not
+     * covered by any allow rule are excluded from registration, so their
+     * schemas are never sent to the model (#9827).
+     */
+    registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
@@ -1899,6 +1908,7 @@ export class Config {
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
+  private readonly permissionsRegistryAllowList: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
@@ -2242,6 +2252,8 @@ export class Config {
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
+    this.permissionsRegistryAllowList =
+      params.permissions?.registryAllowList || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
@@ -5547,6 +5559,17 @@ export class Config {
 
   getPermissionsAsk(): string[] {
     return this.permissionsAsk;
+  }
+
+  /**
+   * Returns the allow rules that come from `settings.permissions.allow`
+   * only — never `--allowed-tools` / the SDK `allowedTools` param (merged
+   * into `getPermissionsAllow()` above) nor the legacy `tools.allowed`
+   * key. Consumed by `PermissionManager` to decide whether the
+   * registry-level allowlist is active (#9827).
+   */
+  getRegistryAllowList(): string[] {
+    return this.permissionsRegistryAllowList;
   }
 
   /**

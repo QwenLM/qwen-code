@@ -8251,6 +8251,122 @@ describe('Server Config (config.ts)', () => {
       expect(wasGrepToolRegistered).toBe(false);
     });
 
+    // ── #9827: permissions.allow must shrink the tool schemas sent to the model ──
+    it('registers only allowlisted tools when permissions.allow is set (#9827)', async () => {
+      const settingsAllow = [
+        'ReadFile',
+        'WriteFile',
+        'Edit',
+        'Grep',
+        'Glob',
+        'ListFiles',
+        'Shell',
+        'WebFetch',
+      ];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        // Mirrors the CLI wiring: merged allow list + the settings-sourced
+        // subset that activates the registry allowlist.
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      // Allowlisted tools are registered
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.WRITE_FILE);
+      expect(registered).toContain(ToolNames.EDIT);
+      expect(registered).toContain(ToolNames.GREP);
+      expect(registered).toContain(ToolNames.GLOB);
+      expect(registered).toContain(ToolNames.SHELL);
+      expect(registered).toContain(ToolNames.WEB_FETCH);
+
+      // Unlisted built-ins are NOT registered, so their schemas are never
+      // sent to the model. The reporter's grammar-breaking tools must all
+      // be absent; non-core built-ins are gated too.
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).not.toContain(ToolNames.GET_GOAL);
+      expect(registered).not.toContain(ToolNames.LOOP_WAKEUP);
+      expect(registered).not.toContain(ToolNames.READ_MCP_RESOURCE);
+      expect(registered).not.toContain(ToolNames.AGENT);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
+      expect(registered).not.toContain(ToolNames.SKILL);
+      // monitor stays registered: the "Shell" allow rule covers it so the
+      // shell tool cannot be bypassed by switching to monitor.
+      expect(registered).toContain(ToolNames.MONITOR);
+    });
+
+    it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      // Without an allowlist nothing is gated at registry level
+      expect(registered).toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).toContain(ToolNames.AGENT);
+      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).toContain(ToolNames.READ_FILE);
+    });
+
+    it('permissions.allow keeps the --exclude-tools (deny) path working (#9827)', async () => {
+      const settingsAllow = ['ReadFile', 'Shell'];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          deny: ['Shell'],
+        },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      expect(registered).toContain(ToolNames.READ_FILE);
+      // deny wins over allowlist membership
+      expect(registered).not.toContain(ToolNames.SHELL);
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+    });
+
     describe('with minified tool class names', () => {
       beforeEach(() => {
         Object.defineProperty(
