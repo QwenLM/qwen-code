@@ -633,6 +633,21 @@ export class WorkflowTool extends BaseDeclarativeTool<
     );
   }
 
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
+    const validationError = this.validateToolParams(params);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+    if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+      throw new Error(
+        'WorkflowTool: session-owned background runs require an active workflow completion channel.',
+      );
+    }
+    return this.createInvocation({ ...params, run_in_background: true });
+  }
+
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
