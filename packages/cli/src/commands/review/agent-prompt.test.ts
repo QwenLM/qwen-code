@@ -3383,6 +3383,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     const p0 = buildRoleBrief(PR_PLAN, '0');
     expect(p0).toContain('If the PR context file cannot be read');
     expect(p0).toContain('naming the PR context as unread');
+    // The branch's mandated diff read, not just its prose frame: the
+    // coverage gate certifies a diff-pointed agent by that read, so an
+    // Agent 0 that returned without opening the diff would wedge Step 3D
+    // (exit 3) instead of reaching the capped COMMENT terminus.
+    expect(p0).toContain('still open the diff ranges your launch names');
     // The issue-evidence half stays performable — the branch is a scope
     // determination, not a failure return.
     expect(p0).toContain('perform the half that does not need it');
