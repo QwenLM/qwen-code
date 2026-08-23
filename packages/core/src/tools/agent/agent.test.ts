@@ -3124,6 +3124,61 @@ describe('AgentTool', () => {
       expect(display.status).toBe('failed');
     });
 
+    it('includes preserved worktree details in execution errors', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-error-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        vi.mocked(mockAgent.execute).mockImplementation(async () => {
+          const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0];
+          const agentConfig = createCall[1] as Config;
+          fs.writeFileSync(
+            path.join(agentConfig.getProjectRoot(), 'dirty.txt'),
+            'dirty\n',
+          );
+          throw new Error('subagent boom');
+        });
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+          isolation: 'worktree',
+        });
+        const result = await invocation.execute();
+
+        const llmText = partToString(result.llmContent);
+        expect(llmText).toContain('Failed to run subagent: subagent boom');
+        expect(llmText).toContain('[worktree preserved:');
+        expect(result.error?.message).toContain('[worktree preserved:');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
     it('should execute subagent without live output callback', async () => {
       const params: AgentParams = {
         description: 'Search files',
