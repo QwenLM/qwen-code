@@ -764,6 +764,25 @@ describe('bundled review skill', () => {
     expect(body).toContain('Count the second in `fresh` but not `induced`');
   });
 
+  it('pins the fix-induced comment marking and why it is not decoration', () => {
+    // Issue #9674. The marking is what parts a fix-induced re-report from a
+    // still-stands re-post for the volume trend's first-time count; without
+    // the instruction the module's reader finds nothing to read and the
+    // trend silently understates new work on churning pull requests again.
+    // Both halves pinned: the FORMAT (what to write) and the RESTRICTION
+    // (never on a still-stands, where the claim really is the old one).
+    const body = skillBody();
+    expect(body).toContain(
+      "mark it `(fix-induced)` right after the id's colon",
+    );
+    expect(body).toContain(
+      '**[Critical]** R1-2: (fix-induced) <the new claim>',
+    );
+    expect(body).toContain(
+      'Write the marking only on a re-report that IS fix-induced — never on a `still stands`',
+    );
+  });
+
   it('pins the census contract and the module-owns-the-verdict split', () => {
     // The census is the numerator/denominator the non-convergence finding is
     // computed from, and three clauses have to survive together: what to
@@ -806,18 +825,26 @@ describe('bundled review skill', () => {
     );
   });
 
-  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
-    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
-    // the skill carried the "self-PR detection has no Aone backing" caveat —
-    // a review of the user's own MR silently got no downgrade. The command
-    // is now backed for self-PR detection and head drift; restoring either
-    // the skip or the caveat must fail here, not slip through.
+  it('runs comment-status and presubmit on Aone targets — backed, not skipped', () => {
+    // Revert guard (#9616, #9627): comment-status and presubmit used to sit
+    // on the Aone skip list and the skill carried the "no dedup backing" /
+    // "self-PR detection has no Aone backing" caveats — repeat rounds
+    // re-posted every finding and a review of the user's own MR got no
+    // downgrade. Both subcommands are now a1-backed with the full semantics;
+    // restoring either the skip or a caveat must fail here, not slip
+    // through.
     const body = skillBody();
-    expect(body).toContain('`presubmit` **runs on Aone targets too**');
-    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
-    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).toContain('`comment-status`, `presubmit`) work unchanged');
+    expect(body).toContain('(`comment-status` and `presubmit` ARE a1-backed');
+    expect(body).toContain('the MR author is matched against `a1 auth whoami`');
     expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('no dedup backing yet');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+    expect(body).not.toContain('come back neutral');
+    expect(body).not.toContain('`--new-findings` is unused');
+    expect(body).not.toContain(
+      '`pr-context` and `comment-status` have no Aone backing',
+    );
   });
 
   it('keeps the corrected Aone --comment contract, not merge residue', () => {
@@ -834,12 +861,18 @@ describe('bundled review skill', () => {
     // list parses as a setext-heading underline and `>>>>>>>` renders as a
     // blockquote, silently restructuring the instructions a review runs on.
     expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
-    // The cap keeps an Approve at Comment; a Request-changes verdict still
-    // posts its blocking summary — not the stale bullet's blanket cap.
+    // The forced cap is GONE now that pr-context is backed: approve fires
+    // exactly when the run read the MR's context (the same gate as
+    // GitHub), and only a context-unavailable run stays capped at COMMENT
+    // — neither the stale bullet's blanket cap nor a forced one.
     expect(body).toContain(
-      'the context-unavailable cap keeps an **Approve** verdict at Comment (a Request-changes verdict still posts its blocking summary)',
+      'fires for an APPROVE verdict exactly when the run read the MR',
     );
+    expect(body).toContain('a context-unavailable run stays capped at COMMENT');
     expect(body).not.toContain('which caps the verdict at');
+    expect(body).not.toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment',
+    );
     // The drift re-review is bounded by the once-per-review restart bound;
     // the stale variant ordered it unconditionally.
     expect(body).toContain(

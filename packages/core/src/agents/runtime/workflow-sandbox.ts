@@ -352,7 +352,7 @@ export interface WorkflowAgentOpts {
   /**
    * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
    * is aborted + retried (up to 3 attempts) after this many ms of no
-   * subagent progress (with no tool in flight). Defaults to 60_000 (env
+   * subagent progress (with no tool in flight). Defaults to 180_000 (env
    * override `QWEN_CODE_WORKFLOW_STALL_SECONDS`). `0` disables the watchdog
    * for this call.
    */

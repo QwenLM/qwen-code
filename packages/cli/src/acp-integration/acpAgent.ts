@@ -5510,6 +5510,9 @@ class QwenAgent implements Agent {
           restoreOptions,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
@@ -5853,6 +5856,9 @@ class QwenAgent implements Agent {
           RESUME_RESTORE_OPTIONS,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       let response: ResumeSessionResponse | undefined;
       try {
@@ -11908,6 +11914,9 @@ class QwenAgent implements Agent {
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
           logger: debugLogger,
+          // Read-only history dump never re-hangs the question. Skip
+          // finalize only on load/resume that will actually restore.
+          suppressRestoreAskUserQuestion: true,
         });
 
         return {
