@@ -75,7 +75,11 @@ emit_body() {
 }
 
 run_loop() {
-  require HB_REPO HB_COMMENT_ID HB_WORKDIR
+  # Validate EVERYTHING a tick needs, not just the loop's own three: a
+  # launch missing a body var would otherwise produce an immortal loop
+  # that never pulses — the exact "healthy round looks dead" failure this
+  # feature eliminates. Fail fast instead.
+  require HB_REPO HB_COMMENT_ID HB_WORKDIR HB_ROUND HB_CAP HB_URL HB_START_EPOCH
   # Self-detach from the launching step: log to WORKDIR and never hold the
   # step's pipes, or the step would never report completion.
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null
@@ -86,7 +90,7 @@ run_loop() {
   # defaults, never into a sleep-less busy loop hammering the API.
   [[ "${interval}" =~ ^[1-9][0-9]*$ ]] || interval=600
   [[ "${max_age}" =~ ^[1-9][0-9]*$ ]] || max_age=43200
-  local start="${HB_START_EPOCH:-$(date +%s)}"
+  local start="${HB_START_EPOCH}"
   echo "$(date -u +%FT%TZ) heartbeat started: comment ${HB_COMMENT_ID} interval ${interval}s max_age ${max_age}s"
   while :; do
     sleep "${interval}"
@@ -97,8 +101,15 @@ run_loop() {
       echo "$(date -u +%FT%TZ) self-exit: age ${age}s exceeds ${max_age}s"
       exit 0
     fi
-    if [[ ! -f "${HB_WORKDIR}/heartbeat.pid" ]]; then
-      echo "$(date -u +%FT%TZ) self-exit: pid file removed"
+    # IDENTITY, not existence: WORKDIR is PR-scoped (/tmp/autofix-review-<pr>),
+    # so after a crashed round's reset the NEXT round recreates heartbeat.pid
+    # at the same path. An existence check would let the orphaned old loop
+    # pass and keep PATCHing with its stale launch env, alternating with the
+    # new round's body on the same comment. The file must still hold THIS
+    # loop's own pid — removed OR replaced (by a newer round) ends the loop.
+    # This reads the file to self-identify only; it never kills anything.
+    if [[ "$(cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)" != "$$" ]]; then
+      echo "$(date -u +%FT%TZ) self-exit: pid file removed or replaced"
       exit 0
     fi
     if [[ -f "${HB_WORKDIR}/heartbeat-stop" ]]; then

@@ -88,13 +88,19 @@ orphan loops unacceptable):
 4. `Clean up autofix workdir` (`always()`) kills again as belt-and-braces.
 5. `Reset autofix workspace` does NOT kill: a cross-run pid would have to
    come from the untrusted file class. Wiping `WORKDIR` removes the pid
-   file, and the loop self-exits at its next self-check; a crash-leftover
-   orphan therefore dies within one interval (worst case: one stale
-   "working" tick on the comment, re-PATCHed by the new round).
-6. Self-exit bounds inside the loop: stop if the pid file disappears, if
-   `heartbeat-stop` exists, or at a hard age cap (12h, far beyond the
-   330-minute job timeout); each tick's `gh` call is wrapped in `timeout
-60` so a black-holed connection cannot stall the loop past the cap.
+   file, and the loop self-exits at its next identity self-check; a
+   crash-leftover orphan therefore dies within one interval (worst case:
+   one stale "working" tick already past its identity check, re-PATCHed
+   by the new round).
+6. Self-exit bounds inside the loop: stop if the pid file no longer holds
+   the loop's OWN pid — an identity check, not an existence check,
+   because `WORKDIR` is PR-scoped and the next round recreates
+   `heartbeat.pid` at the same path, which an existence check would let
+   the orphan pass (reading the file here is safe: the loop only
+   self-identifies, it never kills anything); stop if `heartbeat-stop`
+   exists, or at a hard age cap (12h, far beyond the 330-minute job
+   timeout); each tick's `gh` call is wrapped in `timeout 60` so a
+   black-holed connection cannot stall the loop past the cap.
 
 The kill logic is inline in the yml (4-6 lines each), **not** a script
 call: the killers run in PAT-bearing or post-agent steps, and executing a
@@ -201,11 +207,12 @@ comment is never worse than today.
 
 ## Residual risks (accepted)
 
-- **Liveness-signal integrity.** The sandbox can delete `heartbeat.pid`
-  (ending the pulse early), touch `heartbeat-stop`, or bump `agent.log`'s
-  mtime to forge "agent active 0 min ago". The attacker can only mislabel
-  their own round's progress — no token, no execution, no kill reach — so
-  this is accepted rather than engineered around.
+- **Liveness-signal integrity.** The sandbox can delete or overwrite
+  `heartbeat.pid` (ending the pulse early via the identity self-check),
+  touch `heartbeat-stop`, or bump `agent.log`'s mtime to forge "agent
+  active 0 min ago". The attacker can only mislabel or silence their own
+  round's progress — no token, no execution, no kill reach — so this is
+  accepted rather than engineered around.
 - **Post-gate silence.** After the gate kills the loop, the comment holds
   its last tick until finalize. A round deep in gate/repair looks quieter
   than it is; the run link stays live, which is the recourse.

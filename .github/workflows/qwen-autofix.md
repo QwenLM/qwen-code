@@ -3788,18 +3788,24 @@ comment id, run identity and liveness remotely: too slow
 and too much machinery for a pulse.
 
 ORPHAN DISCIPLINE on the persistent pool: the loop
-self-exits on a missing pid file (a crashed prior round's
-orphan ends at its next self-check once this round's reset
-wipes the dir — no cross-run kill, which would need a file
-pid and re-open the untrusted-target hole), a heartbeat-stop
-marker, or a 12h age cap far past the 330-minute job
-timeout; each tick's gh call is additionally wrapped in a
-60s timeout so a black-holed connection cannot stall the
-loop past the cap. Killers that run in-round touch the stop
-marker BEFORE killing so a missed kill still ends the loop
-at its next self-check — a tick landing after the terminal
-text would overwrite it with a live-looking "working" line
-— and finalize additionally sleeps past one PATCH
+self-exits when the pid file no longer holds ITS OWN pid.
+This is an identity check, not an existence check — WORKDIR
+is PR-scoped, so after a crashed round's reset the next
+round recreates heartbeat.pid at the SAME path; existence
+alone would let the orphaned old loop pass and keep PATCHing
+its stale body onto the comment. Reading the file to
+self-identify is safe (the loop never kills anything); the
+killers never read it, which is what keeps the
+untrusted-target hole closed — no cross-run kill. The other
+bounds: a heartbeat-stop marker, or a 12h age cap far past
+the 330-minute job timeout; each tick's gh call is
+additionally wrapped in a 60s timeout so a black-holed
+connection cannot stall the loop past the cap. Killers that
+run in-round touch the stop marker BEFORE killing so a
+missed kill still ends the loop at its next self-check — a
+tick landing after the terminal text would overwrite it
+with a live-looking "working" line — and finalize
+additionally sleeps past one PATCH
 round-trip so an already-dispatched tick cannot land after
 the terminal text server-side.
 ```

@@ -66,6 +66,31 @@ function readCalls(records) {
     );
 }
 
+// A fake `timeout` that records its argv and immediately execs its tail.
+// Placed FIRST on PATH, it shadows coreutils `timeout` on Linux and
+// supplies it on hosts without one (macOS dev), so the loop's black-hole
+// guard is exercised deterministically on every host: the assertion is
+// that `gh` runs UNDER `timeout <bound>`, which the shim proves by
+// recording the duration and then running gh itself.
+function fakeTimeoutBin(binDir, dir) {
+  const records = join(dir, 'timeout-calls');
+  mkdirSync(records, { recursive: true });
+  const timeout = join(binDir, 'timeout');
+  writeFileSync(
+    timeout,
+    [
+      '#!/usr/bin/env bash',
+      'set -u',
+      'n=$(( $(ls -1 "${TIMEOUT_RECORD_DIR}" | wc -l) + 1 ))',
+      'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${TIMEOUT_RECORD_DIR}/call-${n}"',
+      'shift',
+      'exec "$@"',
+    ].join('\n'),
+  );
+  chmodSync(timeout, 0o755);
+  return records;
+}
+
 function bodyEnv(overrides = {}) {
   const workdir = overrides.HB_WORKDIR ?? freshTmp();
   return {
@@ -298,6 +323,31 @@ describe('autofix-status-heartbeat loop', () => {
     }
   });
 
+  it('self-exits when the pid file is REPLACED by a newer round', async () => {
+    // The orphan scenario: WORKDIR is PR-scoped, so the next round of the
+    // same PR recreates heartbeat.pid at the same path. The old loop must
+    // recognize the foreign pid and exit, not keep pulsing with its stale
+    // launch env (alternating stale bodies onto the same comment).
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    const child = startLoop(env);
+    try {
+      const started = await waitFor(
+        () => existsSync(join(workdir, 'heartbeat.pid')),
+        8000,
+      );
+      assert.ok(started, 'the loop must register its pid first');
+      writeFileSync(join(workdir, 'heartbeat.pid'), '999999\n');
+      const code = await awaitExit(child, 8000);
+      assert.equal(code, 0, 'a replaced pid file must end the loop cleanly');
+      const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
+      assert.match(logText, /self-exit: pid file removed or replaced/);
+    } finally {
+      killGroup(child);
+    }
+  });
+
   it('degrades malformed interval and age-cap overrides to defaults', async () => {
     const dir = freshTmp();
     const gh = fakeGhBin(dir);
@@ -319,27 +369,26 @@ describe('autofix-status-heartbeat loop', () => {
     }
   });
 
-  it('skips a tick whose body composition fails and keeps looping', async () => {
+  it('runs each PATCH under timeout so a black-holed request cannot outlive the age cap', async () => {
+    // The age cap only runs BETWEEN ticks; a hung `gh api` inside a tick
+    // would stall the loop there forever, holding the PAT past the cap.
+    // The `timeout 60` wrapper is the guard — pin that gh actually runs
+    // under it (the shim records the bound, then execs gh).
     const dir = freshTmp();
     const gh = fakeGhBin(dir);
-    const { env, workdir } = loopEnv(dir, gh, { HB_URL: '' });
+    const timeoutRecords = fakeTimeoutBin(gh.bin, dir);
+    const { env } = loopEnv(dir, gh, { TIMEOUT_RECORD_DIR: timeoutRecords });
     const child = startLoop(env);
     try {
-      const ok = await waitFor(
-        () =>
-          existsSync(join(workdir, 'heartbeat.log')) &&
-          /body composition failed/.test(
-            readFileSync(join(workdir, 'heartbeat.log'), 'utf8'),
-          ),
-        8000,
+      const ok = await waitFor(() => readCalls(gh.records).length >= 1, 8000);
+      assert.ok(ok, 'the shim must exec gh through to its record');
+      const timeoutCalls = readCalls(timeoutRecords);
+      assert.ok(
+        timeoutCalls.length >= 1,
+        'gh must run UNDER timeout, not bare',
       );
-      assert.ok(ok, 'a failed compose must be logged, not fatal');
-      assert.equal(
-        readCalls(gh.records).length,
-        0,
-        'no PATCH may go out with a body that failed to compose',
-      );
-      assert.ok(child.exitCode === null, 'the loop must keep running');
+      assert.equal(timeoutCalls[0][0], '60', 'the bound must be 60s');
+      assert.equal(timeoutCalls[0][1], 'gh');
     } finally {
       killGroup(child);
     }
@@ -362,6 +411,32 @@ describe('autofix-status-heartbeat loop', () => {
     const code = await awaitExit(child, 8000);
     assert.equal(code, 2);
     assert.match(stderr, /HB_COMMENT_ID is required/);
+  });
+
+  it('refuses to loop when a BODY var is missing — no immortal unpulsing loop', async () => {
+    // A launch missing a body var (HB_ROUND here) must fail fast, not
+    // produce a loop that lives to the age cap logging "body composition
+    // failed" every tick while the status comment freezes — the exact
+    // "healthy round looks dead" failure this feature eliminates.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    delete env.HB_ROUND;
+    const child = spawn('bash', [script, 'loop'], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    const code = await awaitExit(child, 8000);
+    assert.equal(code, 2);
+    assert.match(stderr, /HB_ROUND is required/);
+    // Fail fast BEFORE registering anything: no pid file, no log.
+    assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
+    assert.ok(!existsSync(join(workdir, 'heartbeat.log')));
   });
 
   it('self-exits at the age cap', async () => {

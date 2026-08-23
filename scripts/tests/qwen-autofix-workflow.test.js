@@ -15791,6 +15791,44 @@ exit 1
     );
     expect(postStatusCommentStep).toContain('if [[ "${JOB_ID}" =~ ^[0-9]+$ ]]');
     expect(postStatusCommentStep).toContain("JOB_ID=''");
+    // Behavioral oracle for the filter itself (substring pins cannot catch
+    // last→first or a collapsed slurp): extract it verbatim and run it
+    // through real jq against paginate-shaped fixtures, the same pattern
+    // the LAST_ENGAGE_ACK_TS test uses.
+    const jobIdProgram = postStatusCommentStep.match(
+      /jq -rs --arg pr "\$\{PR\}" \\\n\s*'([\s\S]*?)'\)" \|/,
+    )?.[1];
+    expect(jobIdProgram).toBeTruthy();
+    const runJobIdFilter = (pr, input) =>
+      execFileSync('jq', ['-rs', '--arg', 'pr', pr, jobIdProgram], {
+        encoding: 'utf8',
+        input,
+      }).trim();
+    // One matching job across two concatenated page documents, plus the
+    // comma guard: PR 12's prefix must NOT match PR 123's job name.
+    const twoPages =
+      JSON.stringify({
+        total_count: 2,
+        jobs: [{ name: 'route', id: 1 }],
+      }) +
+      JSON.stringify({
+        total_count: 2,
+        jobs: [{ name: 'review-address (123, feat/x, 123, 1, x)', id: 3 }],
+      });
+    expect(runJobIdFilter('123', twoPages)).toBe('3');
+    expect(runJobIdFilter('12', twoPages)).toBe('');
+    // Two matches pin the DELIBERATE `last` choice (a last→first mutation
+    // would deep-link the wrong leg through the numeric guard).
+    const twoMatches =
+      JSON.stringify({
+        jobs: [{ name: 'review-address (123, a, 1)', id: 10 }],
+      }) +
+      JSON.stringify({
+        jobs: [{ name: 'review-address (123, b, 1)', id: 20 }],
+      });
+    expect(runJobIdFilter('123', twoMatches)).toBe('20');
+    // Empty input yields empty output — the run-URL fallback gate.
+    expect(runJobIdFilter('123', '')).toBe('');
 
     // Launch: detached (setsid + self-redirected output), gated on a
     // comment that actually exists (the gate wraps the launch itself, not
