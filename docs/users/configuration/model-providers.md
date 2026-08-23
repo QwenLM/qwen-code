@@ -317,6 +317,7 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
         "baseUrl": "http://localhost:11434/v1",
         "generationConfig": {
           "timeout": 300000,
+          "streamIdleTimeoutMs": 600000,
           "maxRetries": 1,
           "contextWindowSize": 32768,
           "samplingParams": {
@@ -357,6 +358,13 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
   }
 }
 ```
+
+For queued or slow local OpenAI-compatible servers, `streamIdleTimeoutMs`
+controls how long this model may stay silent between streamed chunks. It
+overrides the global `QWEN_STREAM_IDLE_TIMEOUT_MS` value for the selected
+provider entry; set it to `0` to disable the idle guard. The separate 15-minute
+stream lifetime cap still applies unless `QWEN_STREAM_MAX_LIFETIME_MS` is raised
+or disabled.
 
 For local servers that don't require authentication, you can use any placeholder value for the API key:
 
