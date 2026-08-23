@@ -293,6 +293,12 @@ describe('WorkflowExecutionView', () => {
       architecture.focus();
     });
     expect(architecture.getAttribute('data-path-emphasis')).toBe('active');
+    expect(
+      container.querySelector('[data-selected-dispatch="dispatch-3"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-workflow-prompt]')?.textContent).toBe(
+      'Review ownership boundaries',
+    );
     expect(correctnessEdge.getAttribute('data-path-emphasis')).toBe('dimmed');
     expect(architectureEdge.getAttribute('data-path-emphasis')).toBe('related');
 
@@ -494,14 +500,35 @@ describe('WorkflowExecutionView', () => {
       status: 'failed',
       startTime: 1_000,
       endTime: 1_500,
+      label: 'sensitive workflow label',
+      description: 'sensitive workflow description',
+      recentLogs: ['sensitive workflow log'],
+      error: 'sensitive workflow error',
+      pendingApprovalCount: 1,
+      pendingApprovals: [
+        {
+          approvalId: 'wfap-sensitive',
+          subagentId: 'sensitive-subagent',
+          name: 'sensitive approval name',
+          description: 'sensitive approval description',
+          at: 1_400,
+        },
+      ],
       events: [
         {
           id: 'event-1',
-          type: 'workflow-failed',
-          at: 1_500,
-          error: 'Verification failed',
+          type: 'log',
+          at: 1_400,
+          message: 'sensitive event log',
         },
       ],
+      dispatches: workflowTask().dispatches.map((dispatch) => ({
+        ...dispatch,
+        label: 'sensitive dispatch label',
+        prompt: 'sensitive dispatch prompt',
+        subagentId: 'sensitive-subagent',
+        error: 'sensitive dispatch error',
+      })),
     });
     const createObjectURL = vi.fn(() => 'blob:workflow-history');
     vi.stubGlobal('URL', {
@@ -560,14 +587,21 @@ describe('WorkflowExecutionView', () => {
     const exported = JSON.parse(text) as {
       runs: Array<{
         id: string;
-        events?: unknown[];
         dispatches: Array<Record<string, unknown>>;
       }>;
     };
     expect(exported.runs.map((run) => run.id)).toEqual(['wf-failed']);
-    expect(exported.runs[0]?.events).toEqual(failed.events);
-    expect(exported.runs[0]?.dispatches).not.toContainEqual(
-      expect.objectContaining({ prompt: expect.anything() }),
+    expect(exported.runs[0]?.dispatches[0]).toEqual({
+      id: 'dispatch-1',
+      phaseVisitId: 'phase-1',
+      status: 'completed',
+      dependsOn: [],
+      queuedAt: 1_010,
+      startedAt: 1_020,
+      endedAt: 1_100,
+    });
+    expect(text).not.toMatch(
+      /sensitive workflow|sensitive dispatch|sensitive approval|sensitive-subagent|sensitive event/,
     );
 
     act(() => {

@@ -195,30 +195,47 @@ function downloadWorkflowHistory(
   const content = JSON.stringify(
     {
       schemaVersion: 1,
-      workflow: task.label,
+      contextRunId: task.id,
       exportedAt: new Date().toISOString(),
       runs: runs.map((run) => ({
         id: run.id,
         sourceRunId: run.sourceRunId,
         startMode: run.startMode,
-        label: run.label,
-        description: run.description,
         status: run.status,
         startTime: run.startTime,
         endTime: run.endTime,
         runtimeMs: run.runtimeMs,
-        currentPhase: run.currentPhase,
-        phaseVisits: run.phaseVisits,
+        phaseVisits: run.phaseVisits.map(
+          ({ id, index, startedAt, endedAt }) => ({
+            id,
+            index,
+            startedAt,
+            endedAt,
+          }),
+        ),
         dispatches: run.dispatches.map(
-          ({ prompt: _prompt, ...dispatch }) => dispatch,
+          ({
+            id,
+            phaseVisitId,
+            status,
+            dependsOn,
+            queuedAt,
+            startedAt,
+            endedAt,
+          }) => ({
+            id,
+            phaseVisitId,
+            status,
+            dependsOn,
+            queuedAt,
+            startedAt,
+            endedAt,
+          }),
         ),
         agentsDispatched: run.agentsDispatched,
         agentsCompleted: run.agentsCompleted,
         tokensSpent: run.tokensSpent,
         tokenBudgetTotal: run.tokenBudgetTotal,
-        recentLogs: run.recentLogs,
-        events: run.events,
-        error: run.error,
       })),
     },
     null,
@@ -777,7 +794,10 @@ export function WorkflowExecutionView({
                   onClick={() => setSelectedId(dispatch.id)}
                   onMouseEnter={() => setHoveredDispatchId(dispatch.id)}
                   onMouseLeave={() => setHoveredDispatchId('')}
-                  onFocus={() => setFocusedDispatchId(dispatch.id)}
+                  onFocus={() => {
+                    setFocusedDispatchId(dispatch.id);
+                    setSelectedId(dispatch.id);
+                  }}
                   onBlur={() => setFocusedDispatchId('')}
                   style={
                     {
