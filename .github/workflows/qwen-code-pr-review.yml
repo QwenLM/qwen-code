@@ -1837,6 +1837,31 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body "$body"
 
+      # Preserve the review's machine record for later consumers — an agent
+      # collecting deferred Suggestions, a maintainer auditing the run. Two
+      # shapes: a finished run's durable `.qwen/reviews/` report + saved
+      # findings artifact, and a killed run's raw `.qwen/tmp` side files
+      # (the body's "…and N more (see the run report)" overflow pointer is a
+      # dead end once the runner wipes them — this upload is what it
+      # resolves to in CI). Runs BEFORE 'Clean review worktrees', which
+      # deletes those side files; never fails the job: a run that wrote
+      # nothing uploads nothing, and an upload error must not flip an
+      # already-posted review red.
+      - name: 'Upload review artifacts'
+        if: 'always()'
+        continue-on-error: true
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-review-pr-${{ steps.context.outputs.pr_number }}'
+          # .qwen/ is a dotfile tree — excluded from artifacts by default.
+          include-hidden-files: true
+          if-no-files-found: 'ignore'
+          path: |
+            .qwen/reviews/*-pr-${{ steps.context.outputs.pr_number }}.*
+            .qwen/reviews/*-pr-${{ steps.context.outputs.pr_number }}-cost-ledger.json
+            .qwen/tmp/qwen-review-pr-${{ steps.context.outputs.pr_number }}-*
+            .qwen/tmp/review-pr-${{ steps.context.outputs.pr_number }}/.qwen/tmp/qwen-review-*
+
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so
       # the next job on this reused runner can delete qwen-review/* branches.

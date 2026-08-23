@@ -6911,6 +6911,24 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('convergence posture (round 3, not a blocker)');
   });
+
+  it('the deferral list opens with a locatable marker — exactly once, and never without the list', () => {
+    // Later tooling (an agent collecting deferred Suggestions across
+    // rounds) greps the marker, not the prose heading a rewording could
+    // move. It rides the list's own fragment, so a budget trim drops the
+    // pointer with the list (the trim suite pins that), and a listless
+    // round carries no marker at all.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: [nit()] }),
+    );
+    expect(r.body.split(MARKER).length - 1).toBe(1);
+    expect(r.body).toContain(
+      `${MARKER}\n\nDeferred under the convergence posture`,
+    );
+    const listless = composeReview(base({ severityFloor: 'critical' }));
+    expect(listless.body).not.toContain(MARKER);
+  });
 });
 
 describe("composeReview — the composed body fits GitHub's limit", () => {
@@ -6972,6 +6990,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // The blocker survives whole; the deferral display is gone, counted.
     expect(r.body).toContain(blocker);
     expect(r.body).not.toContain('Deferred under the convergence posture');
+    // The locator marker rides the trimmed fragment — a pointer never
+    // outlives the list it points at.
+    expect(r.body).not.toContain('<!-- qwen-review-deferred -->');
     expect(r.body).toContain('(1 section(s))');
     expect(r.body).toContain('the deferred-findings list did not fit');
     // The operator gets the same fact on stderr, not only the PR page.

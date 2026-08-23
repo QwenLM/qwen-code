@@ -508,7 +508,14 @@ describe('bundled review skill', () => {
     // The tails carry the load: without them the paragraph reads as a
     // durability promise again, which is the drift this pin exists for.
     expect(body).toContain('so an overflowing body can carry none of it');
-    expect(body).toContain('has no cross-round record on the PR at all');
+    // The recoverable record lives OFF the PR page — the marker makes the
+    // block locatable across rounds, the CI upload keeps the full entries.
+    // Pin both halves of that qualification, or the paragraph drifts back
+    // to a page-side promise.
+    expect(body).toContain('<!-- qwen-review-deferred -->');
+    expect(body).toContain(
+      'keeps a recoverable record even though the PR page never shows it',
+    );
     expect(body).toContain(
       "when the budget trims it, the terminal summary is where the author's copy comes from",
     );
