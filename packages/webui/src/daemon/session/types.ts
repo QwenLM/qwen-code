@@ -283,6 +283,7 @@ export interface DaemonModelInfo {
   baseUrl?: string;
   envKey?: string;
   isRuntime?: boolean;
+  reasoningPreview?: DaemonReasoningControls;
 }
 
 export interface DaemonCommandInfo {

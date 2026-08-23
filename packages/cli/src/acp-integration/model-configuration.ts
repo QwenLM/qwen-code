@@ -9,10 +9,23 @@ import {
   resolveModelReasoningConfiguration,
   type AuthType,
   type ModelReasoningConfiguration,
+  type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
+import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 
 export { normalizeModelReasoningEffort };
 export type { ModelReasoningConfiguration };
+
+export const REASONING_EFFORT_DEFAULT = 'default';
+export const REASONING_EFFORT_NONE = 'none';
+
+export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
 
 export function getModelConfiguration(
   modelId: string | undefined,
@@ -28,4 +41,72 @@ export function getModelConfiguration(
     baseUrl: route?.baseUrl,
   });
   return reasoning ? { reasoning } : undefined;
+}
+
+export function buildModelReasoningConfigOption(
+  modelId: string | undefined,
+  state: { enabled?: boolean; effort?: ReasoningEffort } = {},
+  route?: { readonly authType?: AuthType; readonly baseUrl?: string },
+): SessionConfigOption | undefined {
+  const reasoning = getModelConfiguration(modelId, route)?.reasoning;
+  if (!reasoning?.thinking) return undefined;
+  const canDisable = reasoning.toggleOnly || reasoning.canDisable !== false;
+
+  const currentValue =
+    state.enabled === false && canDisable
+      ? REASONING_EFFORT_NONE
+      : reasoning.toggleOnly
+        ? REASONING_EFFORT_DEFAULT
+        : (normalizeModelReasoningEffort(reasoning, state.effort) ??
+          reasoning.defaultEffort);
+
+  return {
+    id: 'reasoning_effort',
+    name: 'Reasoning effort',
+    description: `Thinking and reasoning effort for ${modelId}`,
+    category: 'thought_level',
+    type: 'select',
+    currentValue,
+    options: [
+      ...(canDisable
+        ? [
+            {
+              value: REASONING_EFFORT_NONE,
+              name: 'Thinking off',
+              description: 'Disable thinking for this session',
+            },
+          ]
+        : []),
+      ...(reasoning.toggleOnly
+        ? [
+            {
+              value: REASONING_EFFORT_DEFAULT,
+              name: 'Thinking on',
+              description: 'Use the model or provider thinking default',
+            },
+          ]
+        : reasoning.efforts.map((effort) => ({
+            value: effort,
+            name: REASONING_EFFORT_NAMES[effort],
+            description: 'Apply this effort to the next request',
+          }))),
+    ],
+    _meta: {
+      'qwenCode/reasoning': {
+        ...(reasoning.toggleOnly
+          ? { toggleOnly: true }
+          : { defaultEffort: reasoning.defaultEffort }),
+        ...(!canDisable ? { canDisable: false } : {}),
+      },
+    },
+  };
+}
+
+export function buildModelReasoningConfigPreview(
+  modelId: string | undefined,
+): SessionConfigOption[] | undefined {
+  const reasoning = getModelConfiguration(modelId)?.reasoning;
+  if (!reasoning?.thinking || reasoning.toggleOnly) return undefined;
+  const option = buildModelReasoningConfigOption(modelId);
+  return option ? [option] : undefined;
 }
