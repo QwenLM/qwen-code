@@ -29,6 +29,7 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
+  transcriptUpdateCallbackRef,
   toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
@@ -103,6 +104,11 @@ const {
   },
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
+  },
+  transcriptUpdateCallbackRef: {
+    current: undefined as
+      | ((notification: Record<string, unknown>) => void)
+      | undefined,
   },
   toolCallCallbackRef: {
     current: undefined as
@@ -252,7 +258,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         askUserQuestionCallbackRef.current = callback;
       },
     );
-    onTranscriptUpdate = vi.fn();
+    onTranscriptUpdate = vi.fn(
+      (callback: (notification: Record<string, unknown>) => void) => {
+        transcriptUpdateCallbackRef.current = callback;
+      },
+    );
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
@@ -462,6 +472,7 @@ beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
+  transcriptUpdateCallbackRef.current = undefined;
   toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
@@ -1118,6 +1129,39 @@ describe('WebViewProvider.attachToView', () => {
     expect(postMessage).toHaveBeenCalledWith({
       type: 'availableCommands',
       data: { commands },
+    });
+  });
+});
+
+describe('WebViewProvider transcript forwarding', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+  });
+
+  it('forwards agent transcriptUpdate notifications to the webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    // The subscription is registered in the provider constructor; without it
+    // the webview never receives timeline frames and renders an empty
+    // transcript while every other message flow keeps working.
+    expect(transcriptUpdateCallbackRef.current).toBeDefined();
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      },
+    };
+
+    transcriptUpdateCallbackRef.current?.(notification);
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: notification,
     });
   });
 });
