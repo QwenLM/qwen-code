@@ -36,7 +36,7 @@ import type {
   PermissionSuggestion,
 } from '../../types.js';
 import { BaseController } from './baseController.js';
-import { buildPermissionSuggestions } from '../../../utils/permission-suggestions.js';
+import { buildPermissionSuggestions } from '../../permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
 

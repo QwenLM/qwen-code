@@ -8,6 +8,7 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  McpAppResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -474,6 +475,33 @@ function isTaskListResultDisplay(
   );
 }
 
+function isMcpAppResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is McpAppResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'mcp_app'
+  );
+}
+
+function compactMcpAppResultDisplay(
+  display: McpAppResultDisplay,
+  purpose: CompactionPurpose,
+): McpAppResultDisplay {
+  return {
+    ...display,
+    html: '',
+    toolResult: {},
+    fallbackText: compactString(
+      display.fallbackText,
+      purpose,
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    ),
+  };
+}
+
 function compactTaskListResultDisplay(
   display: TaskListResultDisplay,
   purpose: CompactionPurpose,
@@ -540,6 +568,10 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
 
   if (isTaskListResultDisplay(resultDisplay)) {
     return compactTaskListResultDisplay(resultDisplay, purpose) as T;
+  }
+
+  if (isMcpAppResultDisplay(resultDisplay)) {
+    return compactMcpAppResultDisplay(resultDisplay, purpose) as T;
   }
 
   return resultDisplay;
