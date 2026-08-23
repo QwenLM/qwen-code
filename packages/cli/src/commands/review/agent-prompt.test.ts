@@ -2617,6 +2617,31 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('welds the fix-witness format into the launched finder briefs', () => {
+    // The fix-witness mandate is pinned in SKILL.md by SKILL.test.ts, but
+    // this half is the one that actually reaches the agents: the
+    // FINDING_FORMAT embedded in every finder brief. Deleting the Fix
+    // witness line — or the exemption clause below it — shipped green once,
+    // because no test read a BUILT brief; launched finders would stop being
+    // asked for the criterion and Step 7's posting rule would go inert on
+    // every agent-built round. Pin both halves through the brief.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix witness:** <the test that must go RED if that fix is removed',
+    );
+    expect(brief).toContain('**This field never gates reporting**');
+    // The exemption TAIL, pinned beside the prefix. The prefix assertion
+    // above stops before it, so deleting or rewording `or "N/A" ...` shipped
+    // green — and the two copies of the finding format (SKILL.md, pinned by
+    // SKILL.test.ts, and this embedded one) could drift on exactly that
+    // clause. Finders would then read a brief that mandates Fix witness with
+    // no way out, and rounds would start demanding tests for fixes that add
+    // no guard at all — a rename, a comment, a docs line.
+    expect(brief).toContain(
+      'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
+    );
+  });
+
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,
@@ -3302,6 +3327,55 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
+  it('pins the goal-mechanism lenses — the incident replay in Agent 0, the TIME axis in 1c', () => {
+    // Lens prose lives only in agent-briefs.ts: a deletion ships green unless
+    // the load-bearing clauses are pinned literally (the enumeration-trap
+    // precedent above; this file's own comments record deletions that shipped
+    // green). Both lenses exist because of a replay nobody ran (#9655) — a
+    // silently deleted lens is the same failure one level up.
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p0 = buildRoleBrief(PR_PLAN, '0', { planPath });
+    // The duty and its subject: the incident is replayed against the
+    // post-change workflow, not re-narrated.
+    expect(p0).toContain('replay it against the post-change workflow');
+    // The severity contract: an unchanged outcome is a Critical, witnessed
+    // by the replay itself — soften it to a Suggestion and the finding
+    // arrives at Step 7 non-blocking.
+    expect(p0).toContain('a **Critical** with the replay as its witness');
+    // The un-gating: closing-keyword formality does not void the duty.
+    expect(p0).toContain('does not empty the replay duty');
+    // The return routing: the no-step-changed outcome is a FINDING, never an
+    // empty-scope evidence item — a receipt contributes nothing to the
+    // verdict, so a Critical routed there dissolves (R2-1). The receipt
+    // carries only the benign outcomes, and a skipped replay must stay
+    // distinguishable from a performed one.
+    expect(p0).toContain('the Critical the replay bullet above mandates');
+    expect(p0).toContain('the step the replay saw change');
+    expect(p0).toContain(
+      'a skipped replay must never read identically to a performed one',
+    );
+    const p1c = buildRoleBrief(PR_PLAN, '1c');
+    expect(p1c).toContain('Reachability has a TIME axis too');
+    // The finding format is the whole trace; drop it and the lens degrades to
+    // a vibe about ordering.
+    expect(p1c).toContain('produced at X, needed at Y, Y precedes X');
+    // The severity condition — guidance treating the record as a mechanism is
+    // what lifts the finding to Critical; soften it and the lens files nits.
+    expect(p1c).toContain('treat the record as though it had steered the run');
+    // The definition clause and the two-moments method: without them the
+    // severity rule names a record/mechanism split nothing defines, and the
+    // agent is never told to establish the timeline the trace format states.
+    expect(p1c).toContain('a record, not a mechanism');
+    expect(p1c).toContain('name two moments');
+    // The verifier side of the same weld: a replay finding must not be
+    // downgraded for lacking issue evidence — without this clause the lens's
+    // product is terminal-only in the exact case it was written for. Both
+    // halves pinned: the exception's subject and its operative no-downgrade.
+    const pv = buildRoleBrief(PR_PLAN, 'verify');
+    expect(pv).toContain("replay finding grounds in the PR's own narrative");
+    expect(pv).toContain('do not downgrade it for lacking issue evidence');
+  });
+
   it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {
     const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
     const p = buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com' }, '0', {
@@ -3823,6 +3897,43 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     // could silently drop.
     expect(p).toContain('falsify, not to fail-to-verify');
     expect(p).toContain('go read the claimed source first');
+  });
+
+  it('the verify brief carries the #9789 do-not-refute list and the constructible rejection bar', () => {
+    // The recall leak the finder-side RECALL rule closes has a verifier half:
+    // "silence is better than noise" read as a confidence bar lets Step 4 drop
+    // real-but-uncertain findings instead of downgrading them. The counterweight
+    // is the PLAUSIBLE-by-default list — a finding whose failure scenario names
+    // a state the code does not exclude may not be refuted as
+    // "too speculative" — and the bar that constrains rejection to what is
+    // constructible from the code. Pin each shape and each ground: a paraphrase
+    // that dropped any of them would reopen the leak silently.
+    const p = buildRoleBrief(PLAN, 'verify');
+    // The do-not-refute shapes.
+    expect(p).toContain('PLAUSIBLE by default');
+    expect(p).toContain('concurrency race');
+    expect(p).toContain('rare-but-reachable path');
+    expect(p).toContain('falsy zero');
+    expect(p).toContain('off-by-one');
+    expect(p).toContain('retry storm');
+    expect(p).toContain('lost an anchor');
+    // The four constructible rejection grounds.
+    expect(p).toContain('factually wrong');
+    expect(p).toContain('provably impossible');
+    expect(p).toContain('already handled in this diff');
+    expect(p).toContain('pure style with no observable effect');
+    // A rejection constructing none of them downgrades, never drops. Pin the
+    // consequence clause, not just its subject: a mutation flipping "is not a
+    // verdict this pipeline keeps: it downgrades…" into "is a verdict…: reject"
+    // survives the subject assertion alone (verified by mutation probe), which
+    // is exactly the drop-instead-of-downgrade leak this test exists to close.
+    expect(p).toContain('A rejection that constructs none of these');
+    expect(p).toContain('is not a verdict this pipeline keeps');
+    expect(p).toContain(
+      'downgrades to `confirmed (low confidence)` and goes to a human',
+    );
+    // Verifier-side recall must not bleed into a finder dimension.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('PLAUSIBLE by default');
   });
 
   it('the verify brief carries the #9341 live-verification run disciplines', () => {

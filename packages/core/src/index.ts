@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
   type ModelGenerationConfig,
@@ -46,6 +47,7 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  VERTEX_ADC_HINT,
 } from './models/index.js';
 
 // Output formatting
@@ -90,6 +92,7 @@ export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/session-recovery.js';
+export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';

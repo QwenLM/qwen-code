@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { getModelConfiguration } from './model-configuration.js';
+import {
+  buildModelReasoningConfigOption,
+  buildModelReasoningConfigPreview,
+  getModelConfiguration,
+} from './model-configuration.js';
 
 describe('model configuration manifest', () => {
   it('registers the exact stable qwen3.8-max reasoning controls', () => {
@@ -16,6 +20,40 @@ describe('model configuration manifest', () => {
         defaultEffort: 'xhigh',
       },
     });
+  });
+
+  it('builds the stable qwen3.8-max default reasoning option', () => {
+    expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'xhigh',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+      },
+    });
+  });
+
+  it.each([
+    undefined,
+    'qwen3.7-plus',
+    'qwen3.8-max-preview',
+    'qwen3.8-max-latest',
+    'qwen3.8-max-2026-08-12',
+    'qwen-route:v1:stable',
+    '$runtime|qwen-oauth|qwen3.8-max',
+  ])('does not project a tiered welcome preview for %s', (modelId) => {
+    expect(buildModelReasoningConfigPreview(modelId)).toBeUndefined();
+  });
+
+  it('wraps the stable default option for workspace preview', () => {
+    expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
+      buildModelReasoningConfigOption('qwen3.8-max'),
+    ]);
   });
 
   it.each([
