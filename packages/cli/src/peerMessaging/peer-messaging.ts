@@ -30,7 +30,6 @@ import {
   type PeerFrame,
   type PeerInbox,
   type PeerUserFrame,
-  patchSessionRecord,
   sendDeliveryStatus,
   startPeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -57,12 +56,16 @@ export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
+  updateSessionRegistryIpcPath: (ipcPath: string | undefined) => Promise<void>;
   socketPath?: string;
 }
 
 export class PeerMessaging {
   private inbox: PeerInbox | null = null;
   private gate: InboundGate | null = null;
+  private updateSessionRegistryIpcPath: (
+    ipcPath: string | undefined,
+  ) => Promise<void> = async () => {};
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: PeerUserFrame[] = [];
   private readonly heldListeners = new Set<
@@ -110,11 +113,13 @@ export class PeerMessaging {
 
     messaging.inbox = inbox;
     messaging.gate = gate;
+    messaging.updateSessionRegistryIpcPath =
+      options.updateSessionRegistryIpcPath;
 
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses
     // connections, which reads to them as "the session just exited".
-    await patchSessionRecord({ ipcPath: inbox.socketPath });
+    await messaging.updateSessionRegistryIpcPath(inbox.socketPath);
 
     return messaging;
   }
@@ -179,7 +184,7 @@ export class PeerMessaging {
     // receipts have to travel over it.
     this.gate?.shutdown();
     await this.inbox?.close();
-    await patchSessionRecord({ ipcPath: undefined });
+    await this.updateSessionRegistryIpcPath(undefined);
   }
 
   private onFrame(frame: PeerFrame): void {

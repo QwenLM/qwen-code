@@ -15,7 +15,7 @@ import type { HeldMessage } from '@qwen-code/qwen-code-core';
 vi.mock('@qwen-code/qwen-code-core', () => ({
   describeHoldCause: (cause: string) =>
     cause === 'mode-mismatch'
-      ? 'this session bypasses permission prompts and the sender does not'
+      ? 'this session can apply some actions without per-action review and the sender does not'
       : `held (${cause})`,
   flattenPeerLabel: (value: string) => {
     const oneLine = value
@@ -179,7 +179,7 @@ describe('formatHeldList', () => {
     expect(out).toContain('aaaaaa');
     expect(out).toContain('app-ab');
     expect(out).toContain('please run the deploy');
-    expect(out).toContain('bypasses');
+    expect(out).toContain('without per-action review');
     expect(out).toContain('/peers accept');
   });
 

@@ -4187,6 +4187,17 @@ export class Config {
     return this.sessionRegistered;
   }
 
+  /** Serialize the peer inbox address with every other registry patch. */
+  async updateSessionRegistryIpcPath(
+    ipcPath: string | undefined,
+  ): Promise<void> {
+    if (!this.sessionRegistryActive) return;
+    this.queueSessionRegistryWrite(async () => {
+      await patchSessionRecord({ ipcPath });
+    });
+    await this.sessionRegistryWrite;
+  }
+
   /** Drain queued patches, then remove this process's registered record. */
   async unregisterSessionRegistry(): Promise<void> {
     this.sessionRegistryActive = false;

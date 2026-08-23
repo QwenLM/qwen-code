@@ -144,7 +144,7 @@ describe('mode parity (no explicit setting)', () => {
   });
 });
 
-describe('receiver modes that review nothing', () => {
+describe('receiver modes that do not review every action', () => {
   it('holds a prompting sender when the receiver auto-approves edits', () => {
     // AUTO_EDIT applies every edit-shaped tool call with no prompt and no
     // classifier, so an accepted message can rewrite files unseen.
@@ -159,9 +159,16 @@ describe('receiver modes that review nothing', () => {
     expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
   });
 
-  it('accepts in AUTO, where the classifier sees the message', () => {
+  it('holds in AUTO because workspace edits bypass the classifier', () => {
     const h = harness({ mode: ApprovalMode.AUTO });
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('accept');
+    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(frame())).toBe('held');
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it('still accepts a bypassing sender in AUTO', () => {
+    const h = harness({ mode: ApprovalMode.AUTO });
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
   });
 
   it('fails closed on a mode value this build does not know', () => {
@@ -569,7 +576,7 @@ describe('describeHoldCause', () => {
     expect(describeHoldCause('explicit-setting')).toContain(
       'crossSessionInbound',
     );
-    expect(describeHoldCause('mode-mismatch')).toContain('bypasses');
+    expect(describeHoldCause('mode-mismatch')).toContain('without per-action');
     expect(describeHoldCause('no-mode-asserted')).toContain('did not say');
     expect(describeHoldCause('mode-unknown')).toContain('could not be');
     expect(describeHoldCause('policy-unreadable')).toContain(

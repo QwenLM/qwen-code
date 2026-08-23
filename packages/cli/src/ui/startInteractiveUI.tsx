@@ -423,7 +423,6 @@ export async function startInteractiveUI(
       qwenVersion: version,
     }),
   );
-  registerCleanup(() => config.unregisterSessionRegistry());
 
   // Bind the peer-messaging inbox, strictly after the registration above was
   // queued: the inbox advertises its address by patching this session's
@@ -433,41 +432,53 @@ export async function startInteractiveUI(
   if (settings.merged.agents?.crossSessionMessaging !== true) {
     publishPeerMessaging(null);
   } else {
-    let peerMessaging: PeerMessaging | null = null;
+    let exiting = false;
+    const peerMessagingStart = (async (): Promise<PeerMessaging | null> => {
+      try {
+        const registered = await config.whenSessionRegistered();
+        if (!registered || exiting) return null;
+        const peerMessaging = await PeerMessaging.start({
+          getApprovalMode: () => {
+            try {
+              return config.getApprovalMode();
+            } catch {
+              // An unreadable mode must read as unknown, which the gate
+              // treats as "hold", not as "accept".
+              return null;
+            }
+          },
+          getPolicySetting: () =>
+            settings.merged.agents?.crossSessionInbound as
+              | InboundPolicy
+              | undefined,
+          updateSessionRegistryIpcPath: (ipcPath) =>
+            config.updateSessionRegistryIpcPath(ipcPath),
+        });
+        if (exiting) {
+          await peerMessaging?.close();
+          return null;
+        }
+        return peerMessaging;
+      } catch (error) {
+        debugLogger.error('Failed to start cross-session messaging:', error);
+        return null;
+      }
+    })();
     registerCleanup(async () => {
+      exiting = true;
       // Awaited, unlike a fire-and-forget close on unmount: the socket file
       // and the record's ipcPath have to be gone before the process exits.
       // runExitCleanup caps every entry, so a stuck close cannot hang exit.
-      await peerMessaging?.close();
+      await (await peerMessagingStart)?.close();
     });
     void (async () => {
-      try {
-        // An unregistered session is unreachable by name, so an inbox nobody
-        // can find is pure cost.
-        peerMessaging = (await config.whenSessionRegistered())
-          ? await PeerMessaging.start({
-              getApprovalMode: () => {
-                try {
-                  return config.getApprovalMode();
-                } catch {
-                  // An unreadable mode must read as unknown, which the gate
-                  // treats as "hold", not as "accept".
-                  return null;
-                }
-              },
-              getPolicySetting: () =>
-                settings.merged.agents?.crossSessionInbound as
-                  | InboundPolicy
-                  | undefined,
-            })
-          : null;
-      } catch (error) {
-        debugLogger.error('Failed to start cross-session messaging:', error);
-      } finally {
-        publishPeerMessaging(peerMessaging);
-      }
+      publishPeerMessaging(await peerMessagingStart);
     })();
   }
+  // The peer cleanup is registered first so its final ipcPath clear stays
+  // inside Config's serial registry queue before unregister removes the
+  // record. With messaging disabled this remains the next cleanup entry.
+  registerCleanup(() => config.unregisterSessionRegistry());
 }
 
 function setWindowTitle(settings: LoadedSettings, folderName?: string) {

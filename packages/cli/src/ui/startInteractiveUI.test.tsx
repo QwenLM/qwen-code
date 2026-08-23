@@ -62,6 +62,7 @@ type TestConfig = Config & {
   trackSessionRegistration: ReturnType<typeof vi.fn>;
   unregisterSessionRegistry: ReturnType<typeof vi.fn>;
   whenSessionRegistered: ReturnType<typeof vi.fn>;
+  updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
 };
 
 function makeConfig(): TestConfig {
@@ -77,6 +78,7 @@ function makeConfig(): TestConfig {
     getApprovalMode: () => 'default',
     trackSessionRegistration,
     whenSessionRegistered: vi.fn().mockResolvedValue(true),
+    updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
     unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
   } as unknown as TestConfig;
 }
@@ -227,8 +229,32 @@ describe('startInteractiveUI cross-session messaging', () => {
 
     expect(registerCleanup).toHaveBeenCalledTimes(3);
     const closeInbox = registerCleanup.mock
-      .calls[2]?.[0] as () => Promise<void> | void;
+      .calls[1]?.[0] as () => Promise<void> | void;
     await closeInbox();
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start an inbox after exit cleanup begins', async () => {
+    let finishRegistration!: (registered: boolean) => void;
+    const config = makeConfig();
+    config.whenSessionRegistered.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishRegistration = resolve;
+        }),
+    );
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() =>
+      expect(config.whenSessionRegistered).toHaveBeenCalled(),
+    );
+
+    const closeInbox = registerCleanup.mock
+      .calls[1]?.[0] as () => Promise<void> | void;
+    const cleanup = Promise.resolve(closeInbox());
+    finishRegistration(true);
+    await cleanup;
+
+    expect(peerMessagingStart).not.toHaveBeenCalled();
   });
 });

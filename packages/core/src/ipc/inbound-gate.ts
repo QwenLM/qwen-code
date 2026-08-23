@@ -16,21 +16,21 @@
  * encodes one idea: a message may auto-deliver only when acting on it
  * cannot do more than the sender could already have done itself.
  *
- *   receiver unreviewed + sender bypass     → accept
- *   receiver unreviewed + sender prompting  → hold
- *   receiver unreviewed + sender unasserted → hold
- *   receiver reviewed   + anything          → accept
+ *   receiver not fully reviewed + sender bypass     → accept
+ *   receiver not fully reviewed + sender prompting  → hold
+ *   receiver not fully reviewed + sender unasserted → hold
+ *   receiver fully reviewed     + anything          → accept
  *   receiver mode unknown/unrecognized      → hold  (fail closed)
  *   policy setting unreadable               → hold  (fail closed)
  *
- * A reviewed receiver can accept freely because every consequential
+ * A fully reviewed receiver can accept freely because every consequential
  * action still faces its own gate; the message is a suggestion, not an
- * execution. An unreviewed receiver has no such backstop, so anything it
- * is told to do simply happens — which is why an unverified sender has
- * to be reviewed first. "Unreviewed" means YOLO *and* AUTO_EDIT:
- * auto-edit approves every edit-shaped tool call outright
- * (`permissionFlow.isAutoEditApproved`), with no prompt and no
- * classifier, so a peer asking for a file change gets it unseen.
+ * execution. A receiver that can apply any action without review lacks that
+ * universal backstop, which is why an unverified sender has to be reviewed
+ * first. These modes are YOLO, AUTO_EDIT, and AUTO:
+ * auto-edit approves every edit-shaped tool call outright, while AUTO's
+ * in-workspace edit fast path runs before its classifier. In either mode,
+ * a peer can ask for a file change that no human or classifier sees.
  *
  * The sender's half of the parity is self-asserted and unverifiable —
  * nothing authenticates `fromMode`, and any process running as this user
@@ -71,17 +71,20 @@ export type HoldCause =
 export const MAX_HELD_MESSAGES = 50;
 
 /**
- * True when something — a human prompt or the AUTO classifier — still
- * inspects each action this session takes.
+ * True when a human prompt still inspects each action this session takes.
  *
- * YOLO reviews nothing. AUTO_EDIT reviews nothing about an edit: the
- * scheduler approves every edit-shaped confirmation outright, so a peer
- * message asking for a file change is carried out with no prompt, no
- * classifier and no user in the loop — the one thing auto-delivery is
- * supposed to rule out.
+ * YOLO reviews nothing. AUTO_EDIT approves edit-shaped confirmations
+ * outright. AUTO's accept-edits fast path also applies in-workspace edits
+ * before the classifier runs. A peer asking either mode for a file change
+ * can therefore have it applied with no prompt, classifier, or user in the
+ * loop — the one thing auto-delivery is supposed to rule out.
  */
 export function receiverReviewsActions(mode: ApprovalMode): boolean {
-  return mode !== ApprovalMode.YOLO && mode !== ApprovalMode.AUTO_EDIT;
+  return (
+    mode !== ApprovalMode.YOLO &&
+    mode !== ApprovalMode.AUTO_EDIT &&
+    mode !== ApprovalMode.AUTO
+  );
 }
 
 /** Narrow an untyped setting value; anything else is unreadable. */
@@ -197,7 +200,7 @@ export class InboundGate {
       return { policy: 'accept' };
     }
 
-    // Nothing reviews what this session does from here down.
+    // Not every action this session takes is reviewed from here down.
     const sender = frame?.fromMode;
     if (sender === undefined) {
       return { policy: 'hold', cause: 'no-mode-asserted' };
@@ -443,9 +446,9 @@ export function describeHoldCause(cause: HoldCause): string {
     case 'explicit-setting':
       return 'your crossSessionInbound setting is "hold"';
     case 'mode-mismatch':
-      return 'this session bypasses permission prompts and the sender does not';
+      return 'this session can apply some actions without per-action review and the sender does not';
     case 'no-mode-asserted':
-      return 'this session bypasses permission prompts and the sender did not say whether it does';
+      return 'this session can apply some actions without per-action review and the sender did not say whether it does';
     case 'mode-unknown':
       return "this session's approval mode could not be determined";
     case 'policy-unreadable':

@@ -69,6 +69,7 @@ async function start(
     socketPath: path.join(tmpDir, 'socks', 'self.sock'),
     getApprovalMode: () => mode,
     getPolicySetting: () => undefined,
+    updateSessionRegistryIpcPath: async () => {},
   });
   if (!started) throw new Error('peer messaging failed to start');
   messaging = started;
@@ -133,6 +134,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -238,6 +240,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -283,6 +286,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -323,6 +327,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
