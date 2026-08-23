@@ -764,6 +764,25 @@ describe('bundled review skill', () => {
     expect(body).toContain('Count the second in `fresh` but not `induced`');
   });
 
+  it('pins the fix-induced comment marking and why it is not decoration', () => {
+    // Issue #9674. The marking is what parts a fix-induced re-report from a
+    // still-stands re-post for the volume trend's first-time count; without
+    // the instruction the module's reader finds nothing to read and the
+    // trend silently understates new work on churning pull requests again.
+    // Both halves pinned: the FORMAT (what to write) and the RESTRICTION
+    // (never on a still-stands, where the claim really is the old one).
+    const body = skillBody();
+    expect(body).toContain(
+      "mark it `(fix-induced)` right after the id's colon",
+    );
+    expect(body).toContain(
+      '**[Critical]** R1-2: (fix-induced) <the new claim>',
+    );
+    expect(body).toContain(
+      'Write the marking only on a re-report that IS fix-induced — never on a `still stands`',
+    );
+  });
+
   it('pins the census contract and the module-owns-the-verdict split', () => {
     // The census is the numerator/denominator the non-convergence finding is
     // computed from, and three clauses have to survive together: what to
