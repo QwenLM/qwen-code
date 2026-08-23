@@ -35,7 +35,7 @@ Provenance remains authoritative for loading and listing, but it does not preven
 
 ## Conflict repair
 
-Archive and unarchive keep the non-mutating default behavior: an active/archive conflict is returned as a per-session error and neither transcript is changed. The batch lifecycle routes, including workspace-qualified routes, return that outcome in a `200` response instead of the earlier workspace-qualified `409 session_conflict` envelope.
+Archive and unarchive keep the non-destructive default behavior: an active/archive conflict is returned as a per-session error and neither persisted copy is moved, removed, or overwritten. Archive still strictly closes a live session before classifying the conflict, so queued records may be flushed to the active transcript. The batch lifecycle routes, including workspace-qualified routes, return that outcome in a `200` response instead of the earlier workspace-qualified `409 session_conflict` envelope.
 
 Callers may send `resolveConflicts: true`:
 

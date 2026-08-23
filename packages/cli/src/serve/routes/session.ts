@@ -2272,11 +2272,12 @@ export function registerSessionRoutes(
   ): Array<{ sessionId: string; error: string }> =>
     errors.map((e) => ({
       sessionId: e.sessionId,
-      error: redactDetails
-        ? 'Session operation failed.'
-        : e.error instanceof Error
-          ? e.error.message
-          : String(e.error),
+      error:
+        redactDetails && !(e.error instanceof SessionConflictError)
+          ? 'Session operation failed.'
+          : e.error instanceof Error
+            ? e.error.message
+            : String(e.error),
     }));
 
   const runResolvedSessionBatch = async <T>(params: {

@@ -252,7 +252,10 @@ active/archive conflict, until an operator resolves the sealed lock and changed
 bytes. When `session_storage_conflict_repair` is advertised, archive and
 unarchive accept `resolveConflicts: true`: archive keeps the archived copy,
 while unarchive keeps the active copy. Without that option, active/archive
-conflicts remain non-mutating and are returned in the batch `errors` array.
+conflicts do not move, remove, or overwrite either persisted copy and are
+returned in the batch `errors` array. Archive still strictly closes a live
+session before classifying the conflict, which may flush queued records to the
+active transcript.
 Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
 instead of their earlier HTTP `409 session_conflict` response.
 

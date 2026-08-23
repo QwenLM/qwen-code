@@ -21,6 +21,7 @@ import {
 import {
   InvalidRewindTargetError,
   SessionBusyError,
+  SessionConflictError,
   SessionNotFoundError,
   type AcpSessionBridge,
   type BridgeClientRequestContext,
@@ -2142,7 +2143,7 @@ describe('multi-workspace session dispatch', () => {
         errors: [
           {
             sessionId,
-            error: 'Session operation failed.',
+            error: new SessionConflictError(sessionId).message,
           },
         ],
       });

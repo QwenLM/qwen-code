@@ -47,7 +47,7 @@ export interface DaemonUnarchiveSessionsResult {
 export interface DaemonDeleteSessionsResult {
   removed: string[];
   notFound: string[];
-  errors: Array<{ sessionId: string; error: unknown }>;
+  errors: Array<{ sessionId: string; error: string }>;
 }
 
 export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
@@ -312,8 +312,8 @@ async function classifySessionLocation(
   return service.getMaintainableSessionLocation(sessionId);
 }
 
-function sessionLocationError(sessionId: string): Error {
-  return new Error(`Session archive conflict: ${sessionId}`);
+function sessionLocationError(sessionId: string): SessionConflictError {
+  return new SessionConflictError(sessionId);
 }
 
 function updateScheduledTaskForMaintenance(
@@ -529,7 +529,7 @@ export async function deleteDaemonSessions(params: {
 
   const removed: string[] = [];
   const notFound: string[] = [];
-  const errors: Array<{ sessionId: string; error: unknown }> = [];
+  const errors: Array<{ sessionId: string; error: string }> = [];
   for (let i = 0; i < results.length; i++) {
     const sessionId = uniqueSessionIds[i]!;
     const result = results[i]!;
@@ -541,7 +541,10 @@ export async function deleteDaemonSessions(params: {
       errors.push({ sessionId, error: errorMessage(result.error) });
     }
     if (result.maintenanceError !== undefined) {
-      errors.push({ sessionId, error: result.maintenanceError });
+      errors.push({
+        sessionId,
+        error: 'Scheduled task lifecycle update failed.',
+      });
     }
   }
 

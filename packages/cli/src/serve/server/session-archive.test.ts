@@ -1396,7 +1396,12 @@ describe('deleteDaemonSessions', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(result.errors).toEqual([{ sessionId, error: expect.any(Error) }]);
+    expect(result.errors).toEqual([
+      {
+        sessionId,
+        error: 'Scheduled task lifecycle update failed.',
+      },
+    ]);
     expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
   });
 
