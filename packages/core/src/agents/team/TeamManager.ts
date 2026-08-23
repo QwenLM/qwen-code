@@ -726,6 +726,11 @@ export class TeamManager {
           reservations: 0,
           consumed: false,
         });
+        debug.debug(
+          `shutdown[${member.name}]: minted delivered token ` +
+            `(tokens=${ledger.outstandingTokens.length}, ` +
+            `inFlightWrites=${ledger.inFlightWrites})`,
+        );
       }
     } finally {
       if (this.shutdownLedgers.get(member.name) === ledger) {
@@ -1419,6 +1424,11 @@ export class TeamManager {
     if (consumed) {
       reservation.token.consumed = true;
     }
+    debug.debug(
+      `shutdown[${name}]: settled response (succeeded=${succeeded}, ` +
+        `consumedToken=${consumed}, ` +
+        `responsesInFlight=${reservation.ledger.responsesInFlight})`,
+    );
     this.cleanupShutdownLedger(name, reservation.ledger);
     return consumed;
   }
@@ -1434,6 +1444,7 @@ export class TeamManager {
       ledger.responsesInFlight === 0
     ) {
       this.shutdownLedgers.delete(name);
+      debug.debug(`shutdown[${name}]: ledger drained and removed`);
     }
   }
 
