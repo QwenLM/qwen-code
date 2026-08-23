@@ -898,6 +898,50 @@ describe('Session', () => {
     vi.clearAllTimers();
   });
 
+  it('captures the Session Workflow gate from settings at construction instead of tracking the live view', () => {
+    const setSessionWorkflowEnabledProvider = vi.fn();
+    const merged: Record<string, unknown> = {
+      experimental: { sessionWorkflow: true },
+    };
+    const gateSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+      reloadScopeFromDisk: vi.fn(() => {
+        merged['experimental'] = { sessionWorkflow: false };
+      }),
+    } as unknown as LoadedSettings;
+    const gateConfig = {
+      ...mockConfig,
+      setSessionWorkflowEnabledProvider,
+    } as unknown as Config;
+
+    const gateSession = new Session(
+      'gate-session-id',
+      gateConfig,
+      mockClient,
+      gateSettings,
+    );
+
+    const provider = setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0];
+    expect(provider).toBeDefined();
+    expect(provider?.()).toBe(true);
+
+    // reloadSkillSettings (the reload a workspaceSkillsRefresh performs on
+    // every live session) swaps the session's own workspace view; the gate
+    // must not silently flip with no change event and no plan-revision
+    // cleanup — gate changes flow through the daemon's explicit writers.
+    gateSession.reloadSkillSettings();
+    expect(
+      (merged['experimental'] as Record<string, unknown>)['sessionWorkflow'],
+    ).toBe(false);
+    expect(provider?.()).toBe(true);
+  });
+
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
     const source = `head-${'x'.repeat(499_999)}-tail`;
     await session.sendUpdate({

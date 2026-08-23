@@ -1929,8 +1929,19 @@ export class Session implements SessionContext {
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    // Capture the settings-derived gate value ONCE instead of tracking the
+    // live settings view: this session's LoadedSettings is reloaded from
+    // disk behind the session's back (e.g. `reloadSkillSettings` during a
+    // workspaceSkillsRefresh), and such a reload must not silently flip the
+    // Session Workflow gate with no change event and no plan-revision
+    // cleanup. Gate changes flow only through the daemon's explicit writers
+    // (the workspaceSessionWorkflow UI write and the workspaceReload
+    // re-derivation, both via applySessionWorkflowOverrideToLiveSessions),
+    // which re-pin the provider and run the per-session side effects.
+    const sessionWorkflowEnabledFromSettings =
+      this.settings.merged.experimental?.sessionWorkflow === true;
     this.config.setSessionWorkflowEnabledProvider?.(
-      () => this.settings.merged.experimental?.sessionWorkflow === true,
+      () => sessionWorkflowEnabledFromSettings,
     );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
