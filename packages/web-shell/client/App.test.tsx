@@ -12279,9 +12279,18 @@ describe('App session callbacks', () => {
   });
 
   it('classifies the retry payload from the prepared prompt, not the raw text', async () => {
+    const preparedAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'prepared',
+        reference: { id: 'prepared', kind: 'file' },
+      },
+    ];
     const prepareSubmit = vi.fn().mockResolvedValue({
       prompt: 'fix the CI pipeline',
-      inputAnnotations: [],
+      inputAnnotations: preparedAnnotations,
     });
     const { container, rerender } = renderApp({ prepareSubmit });
     await flush();
@@ -12321,13 +12330,57 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
+    expect(prepareSubmit).toHaveBeenCalledOnce();
     expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
       'fix the CI pipeline',
       expect.objectContaining({
         optimisticUserMessage: false,
         retry: true,
+        inputAnnotations: preparedAnnotations,
       }),
     );
+  });
+
+  it('disarms retry state when preparation turns the submit into a slash command', async () => {
+    const prepareSubmit = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        prompt: '/compact foo',
+        inputAnnotations: [],
+      });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    testState.prompt = 'world';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      '/compact foo',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-slash-prepared',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
   });
 
   it('does not attribute prompt admission when the active owner is unknown', async () => {
@@ -15299,6 +15352,11 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'queued',
+      inputAnnotations: [],
+    });
     expect(rawEnqueuePrompt).toHaveBeenCalledWith(
       'queued target',
       undefined,
@@ -15451,12 +15509,16 @@ describe('App session callbacks', () => {
           finishPrepare = resolve;
         }),
     );
-    const { container, rerender } = renderApp({ prepareSubmit });
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+    });
     await flush();
 
     act(() => {
       testState.streamingState = 'responding';
-      rerender({ prepareSubmit });
+      rerender({ prepareSubmit, onSubmitBefore });
     });
     testState.prompt = 'queued';
     await clickSubmit(container);
@@ -15466,19 +15528,20 @@ describe('App session callbacks', () => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.ownerVersion += 1;
-      rerender({ prepareSubmit });
+      rerender({ prepareSubmit, onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-1';
       mockConnection.workspaceCwd = '/tmp/project';
       testState.ownerVersion += 1;
-      rerender({ prepareSubmit });
+      rerender({ prepareSubmit, onSubmitBefore });
     });
     await act(async () => {
       finishPrepare?.();
       await Promise.resolve();
     });
 
+    expect(onSubmitBefore).not.toHaveBeenCalled();
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();

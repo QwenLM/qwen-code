@@ -6098,10 +6098,11 @@ export function App({
           ? allocatedOwner.workspaceCwd
           : undefined
         : existingSessionWorkspaceCwd;
+      const isSlashPreparedSubmit = preparedPrompt.trimStart().startsWith('/');
       if (
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
-        !preparedPrompt.trimStart().startsWith('/')
+        !isSlashPreparedSubmit
       ) {
         lastSubmittedPromptRef.current = preparedPrompt;
         lastSubmittedImagesRef.current = images;
@@ -6126,6 +6127,22 @@ export function App({
           sourceVersion: composerSourceVersionRef.current,
           snapshot: sessionOwnerGuard.capture(),
         };
+      } else if (
+        !opts?.retry &&
+        opts?.optimisticUserMessage !== false &&
+        isSlashPreparedSubmit
+      ) {
+        // A slash submit is never retried; disarm the previous submit's
+        // recorded retry state so a turn error on the slash turn cannot
+        // resend the already-succeeded earlier prompt.
+        lastSubmittedPromptRef.current = '';
+        lastSubmittedImagesRef.current = undefined;
+        lastSubmittedFilesRef.current = undefined;
+        lastSubmittedInputAnnotationsRef.current = undefined;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        failedTurnErrorRetryRef.current = null;
       }
       setShowRetryHint(false);
       finishPreparing();
