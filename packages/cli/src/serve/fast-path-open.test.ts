@@ -16,6 +16,7 @@ const originalSystemDefaultsPath =
   process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
 const originalTrustedFoldersPath =
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
 
 describe('serve fast path --open import boundary', () => {
   let tempQwenHome: string | undefined;
@@ -43,6 +44,7 @@ describe('serve fast path --open import boundary', () => {
     vi.restoreAllMocks();
     vi.doUnmock('./run-qwen-serve.js');
     vi.doUnmock('../commands/serve.js');
+    vi.doUnmock('./open-ephemeral-auth.js');
     vi.resetModules();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -67,6 +69,11 @@ describe('serve fast path --open import boundary', () => {
       process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
         originalTrustedFoldersPath;
     }
+    if (originalServerToken === undefined) {
+      delete process.env['QWEN_SERVER_TOKEN'];
+    } else {
+      process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
     if (tempQwenHome) {
       fs.rmSync(tempQwenHome, { recursive: true, force: true });
       tempQwenHome = undefined;
@@ -80,7 +87,7 @@ describe('serve fast path --open import boundary', () => {
     const runtimeReady = new Promise<void>((resolve) => {
       resolveRuntime = resolve;
     });
-    const runQwenServe = vi.fn(async () => ({
+    const runQwenServe = vi.fn(async (_options: unknown, _deps?: unknown) => ({
       runtimeReady,
       close: vi.fn().mockResolvedValue(undefined),
     }));
@@ -114,6 +121,88 @@ describe('serve fast path --open import boundary', () => {
     resolveRuntime?.();
     await vi.waitFor(() => expect(openBrowser).toHaveBeenCalledTimes(1));
     expect(serveCommandImported).toBe(true);
+  });
+
+  it('does not import the ephemeral-auth helper for bare --open', async () => {
+    useTempQwenHome();
+
+    const runtimeReady = new Promise<void>(() => undefined);
+    const runQwenServe = vi.fn(
+      async (_options: { token?: string }, _deps?: unknown) => ({
+        runtimeReady,
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    );
+    let ephemeralAuthImported = false;
+    vi.doMock('./run-qwen-serve.js', () => ({ runQwenServe }));
+    vi.doMock('./open-ephemeral-auth.js', () => {
+      ephemeralAuthImported = true;
+      return { applyOpenEphemeralAuth: vi.fn() };
+    });
+
+    const { tryRunServeFastPath } = await import('./fast-path.js');
+    void tryRunServeFastPath(['serve', '--open', '--no-web']);
+
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    expect(ephemeralAuthImported).toBe(false);
+  });
+
+  it('applies ephemeral auth before starting the daemon', async () => {
+    useTempQwenHome();
+
+    const runtimeReady = new Promise<void>(() => undefined);
+    const runQwenServe = vi.fn(
+      async (_options: { token?: string }, _deps?: unknown) => ({
+        runtimeReady,
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    );
+    const applyOpenEphemeralAuth = vi.fn((options: { token?: string }) => {
+      options.token = 'generated-token';
+    });
+    vi.doMock('./run-qwen-serve.js', () => ({ runQwenServe }));
+    vi.doMock('./open-ephemeral-auth.js', () => ({
+      applyOpenEphemeralAuth,
+    }));
+
+    const { tryRunServeFastPath } = await import('./fast-path.js');
+    void tryRunServeFastPath(['serve', '--open', '--ephemeral-auth']);
+
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    expect(applyOpenEphemeralAuth).toHaveBeenCalledOnce();
+    expect(runQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      token: 'generated-token',
+    });
+  });
+
+  it('loads settings environment before applying ephemeral auth', async () => {
+    useTempQwenHome();
+    fs.writeFileSync(
+      path.join(tempQwenHome!, 'settings.json'),
+      JSON.stringify({ env: { QWEN_SERVER_TOKEN: 'from-settings' } }),
+    );
+    delete process.env['QWEN_SERVER_TOKEN'];
+
+    const runtimeReady = new Promise<void>(() => undefined);
+    const runQwenServe = vi.fn(
+      async (_options: { token?: string }, _deps?: unknown) => ({
+        runtimeReady,
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    );
+    const applyOpenEphemeralAuth = vi.fn(() => {
+      expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-settings');
+    });
+    vi.doMock('./run-qwen-serve.js', () => ({ runQwenServe }));
+    vi.doMock('./open-ephemeral-auth.js', () => ({
+      applyOpenEphemeralAuth,
+    }));
+
+    const { tryRunServeFastPath } = await import('./fast-path.js');
+    void tryRunServeFastPath(['serve', '--open', '--ephemeral-auth']);
+
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    expect(applyOpenEphemeralAuth).toHaveBeenCalledOnce();
   });
 
   it('skips importing the full serve command opener when runtime startup fails', async () => {

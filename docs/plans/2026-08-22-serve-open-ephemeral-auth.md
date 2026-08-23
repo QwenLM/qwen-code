@@ -1,8 +1,8 @@
 # `qwen serve --open` ephemeral authentication implementation plan
 
-- Status: Proposed
+- Status: Implemented in [#9738](https://github.com/QwenLM/qwen-code/pull/9738)
 - Baseline: `main` at `ea872a4621` (2026-08-22)
-- Revalidated: `main` at `7f2c4416b3` (2026-08-23)
+- Revalidated: `main` at `431a0bd9b0` (2026-08-23)
 - Design: [2026-08-22-serve-open-ephemeral-auth.md](../design/2026-08-22-serve-open-ephemeral-auth.md)
 - Related tracking issue:
   [#4514](https://github.com/QwenLM/qwen-code/issues/4514)
@@ -146,24 +146,24 @@ the pair-token and revocation work in #4514.
 Add collocated tests for the shared selector and helper, and extend the existing
 command and fast-path suites.
 
-| Scenario                                                                                         | Expected result                                                      |
-| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| Plain `qwen serve`                                                                               | No token is generated                                                |
-| Bare interactive loopback `--open`                                                               | No token is generated; existing behavior is unchanged                |
-| Eligible `--open --ephemeral-auth` with Web Shell assets                                         | 32 random bytes encoded as base64url are assigned to `options.token` |
-| `--ephemeral-auth` without `--open`                                                              | CLI validation error on yargs and fast paths                         |
-| Non-empty `--token` on an eligible opted-in launch                                               | Explicit token is retained; no token is generated                    |
-| Non-empty `QWEN_SERVER_TOKEN` with no CLI token on an eligible opted-in launch                   | Environment token remains authoritative                              |
-| Whitespace-only selected token on an eligible opted-in launch                                    | Treated as absent and replaced                                       |
-| `--open --ephemeral-auth --no-web`                                                               | CLI validation error before listen                                   |
-| Opted-in launch with missing Web Shell assets                                                    | CLI validation error before listen                                   |
+| Scenario                                                                                         | Expected result                                                         |
+| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| Plain `qwen serve`                                                                               | No token is generated                                                   |
+| Bare interactive loopback `--open`                                                               | No token is generated; existing behavior is unchanged                   |
+| Eligible `--open --ephemeral-auth` with Web Shell assets                                         | 32 random bytes encoded as base64url are assigned to `options.token`    |
+| `--ephemeral-auth` without `--open`                                                              | CLI validation error on yargs and fast paths                            |
+| Non-empty `--token` on an eligible opted-in launch                                               | Explicit token is retained; no token is generated                       |
+| Non-empty `QWEN_SERVER_TOKEN` with no CLI token on an eligible opted-in launch                   | Environment token remains authoritative                                 |
+| Whitespace-only selected token on an eligible opted-in launch                                    | Treated as absent and replaced                                          |
+| `--open --ephemeral-auth --no-web`                                                               | CLI validation error before listen                                      |
+| Opted-in launch with missing Web Shell assets                                                    | CLI validation error before listen                                      |
 | Opted-in launch in CI, headless Linux, or ineligible SSH                                         | Starts; the warning names the tripped signal; the manual URL is printed |
-| `localhost`, uppercase `LOCALHOST`, `127.0.0.1`, `127.0.0.2`, `::1`, and `[::1]` with both flags | Eligible forms accepted through `isLoopbackBind()`                   |
-| `0.0.0.0`, `[::]`, or a LAN address with both flags                                              | CLI validation error even when another token is configured           |
-| `--open --ephemeral-auth --require-auth` with no configured token                                | Generated token reaches `runQwenServe()`                             |
-| `--open --ephemeral-auth --enable-session-shell` with no configured token                        | Generated token activates the explicit shell opt-in                  |
-| `--open --ephemeral-auth --allow-origin '*'` with no configured token                            | Token is generated before the wildcard-origin boot guard runs        |
-| `--open --ephemeral-auth --local-control` with no configured token                               | Primary gets the runtime token; LAN retains only its pairing token   |
+| `localhost`, uppercase `LOCALHOST`, `127.0.0.1`, `127.0.0.2`, `::1`, and `[::1]` with both flags | Eligible forms accepted through `isLoopbackBind()`                      |
+| `0.0.0.0`, `[::]`, or a LAN address with both flags                                              | CLI validation error even when another token is configured              |
+| `--open --ephemeral-auth --require-auth` with no configured token                                | Generated token reaches `runQwenServe()`                                |
+| `--open --ephemeral-auth --enable-session-shell` with no configured token                        | Generated token activates the explicit shell opt-in                     |
+| `--open --ephemeral-auth --allow-origin '*'` with no configured token                            | Token is generated before the wildcard-origin boot guard runs           |
+| `--open --ephemeral-auth --local-control` with no configured token                               | Primary gets the runtime token; LAN retains only its pairing token      |
 
 Also verify:
 

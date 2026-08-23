@@ -81,6 +81,7 @@ import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { resolveServeToken } from './serve-token.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -2240,17 +2241,7 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
-  // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
-  // token.txt)` keeps the file's trailing `\n` in the env value, so the
-  // hashed-then-compared token never matches what well-behaved clients
-  // send. Every request returns the generic 401 with no breadcrumb
-  // pointing at the whitespace, and operators chase ghosts. Trim once
-  // at boot so the comparison is over what humans intended to set.
-  const rawToken = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
-  const token =
-    typeof rawToken === 'string' && rawToken.trim().length > 0
-      ? rawToken.trim()
-      : undefined;
+  const token = resolveServeToken(optsIn.token, process.env);
   const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
     workerEnv: daemonRuntimeBaseEnv,
     ...(token ? { daemonToken: token } : {}),

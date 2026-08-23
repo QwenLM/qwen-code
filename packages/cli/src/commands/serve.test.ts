@@ -14,7 +14,16 @@ import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
+const mockBrowserLaunchIneligibilityReasons = vi.hoisted(() =>
+  vi.fn(() => ['CI is set']),
+);
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockApplyOpenEphemeralAuth = vi.hoisted(() =>
+  vi.fn((options: { token?: string }) => {
+    options.token ??= 'generated-token';
+    return true;
+  }),
+);
 const mockQr = vi.hoisted(() => ({
   generate: vi.fn(
     (
@@ -30,6 +39,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
+    browserLaunchIneligibilityReasons: mockBrowserLaunchIneligibilityReasons,
     openBrowserSecurely: mockOpenBrowserSecurely,
     shouldLaunchBrowser: mockShouldLaunchBrowser,
   };
@@ -38,6 +48,9 @@ vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
+vi.mock('../serve/open-ephemeral-auth.js', () => ({
+  applyOpenEphemeralAuth: mockApplyOpenEphemeralAuth,
+}));
 
 function buildParser(): Argv {
   return (serveCommand.builder as (argv: Argv) => Argv)(
@@ -45,7 +58,30 @@ function buildParser(): Argv {
   );
 }
 
+function buildParserWithFailures(): Argv {
+  return (serveCommand.builder as (argv: Argv) => Argv)(
+    yargs([]).exitProcess(false).locale('en'),
+  );
+}
+
 describe('serve command args', () => {
+  it('defaults ephemeral auth to disabled', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['ephemeral-auth']).toBe(false);
+  });
+
+  it('parses --open --ephemeral-auth', () => {
+    const parsed = buildParser().parseSync('--open --ephemeral-auth');
+    expect(parsed['open']).toBe(true);
+    expect(parsed['ephemeral-auth']).toBe(true);
+  });
+
+  it('requires --open when ephemeral auth is enabled', () => {
+    expect(() =>
+      buildParserWithFailures().parseSync('--ephemeral-auth'),
+    ).toThrow('--ephemeral-auth requires --open.');
+  });
+
   it('parses --enable-session-shell', () => {
     const parsed = buildParser().parseSync('--enable-session-shell');
     expect(parsed['enable-session-shell']).toBe(true);
@@ -381,6 +417,26 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('applies ephemeral auth before the yargs path starts the daemon', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      resolvedToken: 'generated-token',
+    });
+
+    await startServeHandlerWithArgs('--open --ephemeral-auth');
+
+    expect(mockApplyOpenEphemeralAuth).toHaveBeenCalledWith(
+      expect.any(Object),
+      true,
+      true,
+    );
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'generated-token' }),
+    );
+  });
+
   it('omits the journal caps for an unpinned boot so adaptive growth stays enabled', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
@@ -493,6 +549,41 @@ describe('serve rate limit env parsing', () => {
       expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
         'https://127.0.0.1/',
       ),
+    );
+  });
+
+  it('keeps Local Control pairing separate from the ephemeral primary token', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing-token',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      resolvedToken: 'generated-token',
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs('--local-control --open --ephemeral-auth');
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'generated-token' }),
+    );
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'http://192.168.1.20:4170/#token=pairing-token',
+      { small: true },
+      expect.any(Function),
+    );
+    expect(mockQr.generate).not.toHaveBeenCalledWith(
+      expect.stringContaining('generated-token'),
+      expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -825,6 +916,34 @@ describe('maybeOpenWebShellBrowser', () => {
       true,
     );
     expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+  });
+
+  it('prints a fragment URL and eligibility reason for ephemeral auth in headless environments', async () => {
+    mockShouldLaunchBrowser.mockReturnValue(false);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+    expect(mockBrowserLaunchIneligibilityReasons).toHaveBeenCalledOnce();
+    expect(stderrWrites.join('')).toContain(
+      'browser auto-open unavailable (CI is set)',
+    );
+    expect(stderrWrites.join('')).toContain(
+      'http://127.0.0.1:4170/#token=temporary-secret',
+    );
   });
 
   it('rewrites a wildcard bind host to loopback', async () => {

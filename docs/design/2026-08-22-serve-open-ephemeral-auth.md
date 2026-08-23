@@ -1,8 +1,8 @@
 # Ephemeral authentication for `qwen serve --open`
 
-- Status: Proposed
+- Status: Implemented in [#9738](https://github.com/QwenLM/qwen-code/pull/9738)
 - Baseline: `main` at `ea872a4621` (2026-08-22)
-- Revalidated: `main` at `7f2c4416b3` (2026-08-23)
+- Revalidated: `main` at `431a0bd9b0` (2026-08-23)
 - Related tracking issue:
   [#4514](https://github.com/QwenLM/qwen-code/issues/4514)
 - Implementation plan: [2026-08-22-serve-open-ephemeral-auth.md](../plans/2026-08-22-serve-open-ephemeral-auth.md)
@@ -110,23 +110,23 @@ API default.
 
 ## Behavior matrix
 
-| Invocation or environment                                                                           | Automatic token                                            | Result                                                                             |
-| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `qwen serve` on loopback with no configured token                                                   | No                                                         | Existing token-less developer default                                              |
-| `qwen serve --open` on an interactive loopback host with no configured token                        | No                                                         | Existing browser launch and token-less loopback contract                           |
-| `qwen serve --open --ephemeral-auth` on an eligible loopback host                                   | Yes, if no configured token exists                         | Browser receives the token; API routes require it                                  |
-| `qwen serve --open --ephemeral-auth --require-auth`                                                 | Yes, if no configured token exists                         | Browser receives the token; `/health` also requires it                             |
-| `QWEN_SERVER_TOKEN=... qwen serve --open --ephemeral-auth`                                          | No                                                         | Existing configured token is reused                                                |
-| `qwen serve --token ... --open --ephemeral-auth`                                                    | No                                                         | Explicit CLI token is reused                                                       |
-| `qwen serve --ephemeral-auth` without `--open`                                                      | No                                                         | CLI validation error                                                               |
-| `qwen serve --open --ephemeral-auth --no-web`                                                       | No                                                         | CLI validation error before listen                                                 |
-| `qwen serve --open --ephemeral-auth` with missing Web Shell assets                                  | No                                                         | CLI validation error before listen                                                 |
-| `qwen serve --open --ephemeral-auth` in CI, headless SSH, or another ineligible browser environment | Yes, if no configured token exists                        | Warning naming the tripped signal; the daemon starts and the CLI prints the fragment-bearing manual URL |
-| `qwen serve --hostname 0.0.0.0 --open --ephemeral-auth`                                             | No                                                         | CLI validation error; automatic credentials remain loopback-only                   |
-| `qwen serve --open --ephemeral-auth --local-control`                                                | Yes for the primary listener if no configured token exists | Primary uses the selected runtime token; LAN keeps its separate pairing credential |
-| `qwen serve --open --ephemeral-auth --enable-session-shell`                                         | Yes, if no configured token exists                         | The explicit shell opt-in becomes active and remains bearer-gated                  |
-| `qwen serve --open --ephemeral-auth --allow-origin '*'`                                             | Yes, if no configured token exists                         | Selected bearer intentionally satisfies the existing wildcard-origin boot guard    |
-| `qwen serve --open --ephemeral-auth --allow-origin chrome-extension://<id>`                         | Yes, if no configured token exists                         | Opened tab works; the extension does not receive or discover the generated token   |
+| Invocation or environment                                                                           | Automatic token                                            | Result                                                                                                  |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `qwen serve` on loopback with no configured token                                                   | No                                                         | Existing token-less developer default                                                                   |
+| `qwen serve --open` on an interactive loopback host with no configured token                        | No                                                         | Existing browser launch and token-less loopback contract                                                |
+| `qwen serve --open --ephemeral-auth` on an eligible loopback host                                   | Yes, if no configured token exists                         | Browser receives the token; API routes require it                                                       |
+| `qwen serve --open --ephemeral-auth --require-auth`                                                 | Yes, if no configured token exists                         | Browser receives the token; `/health` also requires it                                                  |
+| `QWEN_SERVER_TOKEN=... qwen serve --open --ephemeral-auth`                                          | No                                                         | Existing configured token is reused                                                                     |
+| `qwen serve --token ... --open --ephemeral-auth`                                                    | No                                                         | Explicit CLI token is reused                                                                            |
+| `qwen serve --ephemeral-auth` without `--open`                                                      | No                                                         | CLI validation error                                                                                    |
+| `qwen serve --open --ephemeral-auth --no-web`                                                       | No                                                         | CLI validation error before listen                                                                      |
+| `qwen serve --open --ephemeral-auth` with missing Web Shell assets                                  | No                                                         | CLI validation error before listen                                                                      |
+| `qwen serve --open --ephemeral-auth` in CI, headless SSH, or another ineligible browser environment | Yes, if no configured token exists                         | Warning naming the tripped signal; the daemon starts and the CLI prints the fragment-bearing manual URL |
+| `qwen serve --hostname 0.0.0.0 --open --ephemeral-auth`                                             | No                                                         | CLI validation error; automatic credentials remain loopback-only                                        |
+| `qwen serve --open --ephemeral-auth --local-control`                                                | Yes for the primary listener if no configured token exists | Primary uses the selected runtime token; LAN keeps its separate pairing credential                      |
+| `qwen serve --open --ephemeral-auth --enable-session-shell`                                         | Yes, if no configured token exists                         | The explicit shell opt-in becomes active and remains bearer-gated                                       |
+| `qwen serve --open --ephemeral-auth --allow-origin '*'`                                             | Yes, if no configured token exists                         | Selected bearer intentionally satisfies the existing wildcard-origin boot guard                         |
+| `qwen serve --open --ephemeral-auth --allow-origin chrome-extension://<id>`                         | Yes, if no configured token exists                         | Opened tab works; the extension does not receive or discover the generated token                        |
 
 Static Web Shell assets remain mounted before bearer authentication because
 address-bar navigation and script loading cannot attach an Authorization
