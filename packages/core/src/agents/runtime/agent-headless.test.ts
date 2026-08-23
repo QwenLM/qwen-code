@@ -2555,6 +2555,252 @@ describe('subagent.ts', () => {
         expect(finishEvents[0].loopType).toBe('global_tool_call_duplicate');
       });
 
+      // Cross-round replays of an already-handled call id are suppressed and
+      // answered with a fabricated duplicate error that never executed. That
+      // synthetic response must not feed the result-aware guards: recording
+      // it pairs a "changed" result with the replayed request and resets the
+      // frozen-board streaks, disarming every result-aware halt (the daemon
+      // twin excludes the class via its providerDuplicate/not_started
+      // filter). These two tests interleave one replay into a frozen streak
+      // and assert the halt still fires (issue #9450).
+      const installFrozenTaskListTool = (taskListArgs: object) => {
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // No teammate activity: every poll returns the identical board.
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '#7 [in_progress] @peer-a — task',
+            returnDisplay: 'Listed tasks',
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: {
+            name: 'task_list',
+            description: 'Lists team tasks',
+            parameters: { type: Type.OBJECT, properties: {} },
+          },
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        return { taskListInvocation, taskListTool };
+      };
+
+      it('still halts a frozen task_list streak when one poll is a cross-round replay of a handled id (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        // Round 4 replays poll_1 (already handled in round 1): the provider
+        // re-emits a handled call id, exactly the misbehavior the
+        // suppression machinery exists for.
+        const [replayedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'poll_1',
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            },
+          ],
+          new Set(['poll_1']),
+          new Set<string>(),
+        );
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [{ id: 'poll_1', name: 'task_list', args: taskListArgs }],
+            [{ id: 'poll_2', name: 'task_list', args: taskListArgs }],
+            [{ id: 'poll_3', name: 'task_list', args: taskListArgs }],
+            [replayedPart!.functionCall!],
+            [{ id: 'poll_4', name: 'task_list', args: taskListArgs }],
+            [{ id: 'poll_5', name: 'task_list', args: taskListArgs }],
+            'stop',
+          ]),
+        );
+
+        const { taskListInvocation, taskListTool } =
+          installFrozenTaskListTool(taskListArgs);
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const finishEvents: Array<{ loopType?: string }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(event as { loopType?: string });
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 20 },
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        // The replay never executes; the halt lands on the fifth identical
+        // request (poll_4's stream), whose four preceding results are the
+        // three executed frozen boards (the synthetic replay response is
+        // excluded). Pre-fix the fabricated replay error counted as a
+        // changed result, the streak restarted, and the run sailed to GOAL.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(3);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(finishEvents).toHaveLength(1);
+        expect(finishEvents[0].loopType).toBe(
+          'consecutive_identical_tool_calls',
+        );
+      });
+
+      it('still halts interleaved frozen task_list polling when one poll is a cross-round replay (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const fillerToolDef: FunctionDeclaration = {
+          name: 'tool_b',
+          description: 'Distinct filler work',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef, fillerToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list', 'tool_b'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        // Interleaved shape of the result-time-guard test above, with one
+        // cross-round replay of poll_1 between poll_3 and poll_4.
+        const [replayedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'poll_1',
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            },
+          ],
+          new Set(['poll_1']),
+          new Set<string>(),
+        );
+        const turns: Array<FunctionCall[] | 'stop'> = [
+          [{ id: 'poll_1', name: 'task_list', args: taskListArgs }],
+          [{ id: 'fill_1', name: 'tool_b', args: { step: 1 } }],
+          [{ id: 'poll_2', name: 'task_list', args: taskListArgs }],
+          [{ id: 'fill_2', name: 'tool_b', args: { step: 2 } }],
+          [{ id: 'poll_3', name: 'task_list', args: taskListArgs }],
+          [replayedPart!.functionCall!],
+          [{ id: 'poll_4', name: 'task_list', args: taskListArgs }],
+          [{ id: 'fill_4', name: 'tool_b', args: { step: 4 } }],
+          [{ id: 'poll_5', name: 'task_list', args: taskListArgs }],
+          [{ id: 'fill_5', name: 'tool_b', args: { step: 5 } }],
+          [{ id: 'poll_6', name: 'task_list', args: taskListArgs }],
+          // Extra rounds the pre-fix run consumes after its streak reset.
+          [{ id: 'fill_6', name: 'tool_b', args: { step: 6 } }],
+          [{ id: 'poll_7', name: 'task_list', args: taskListArgs }],
+          [{ id: 'fill_7', name: 'tool_b', args: { step: 7 } }],
+          [{ id: 'poll_8', name: 'task_list', args: taskListArgs }],
+          'stop',
+        ];
+        mockSendMessageStream.mockImplementation(createMockStream(turns));
+
+        const { taskListInvocation, taskListTool } =
+          installFrozenTaskListTool(taskListArgs);
+        const fillerInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Filler'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'filler done',
+            returnDisplay: 'Filler done',
+          }),
+        };
+        const fillerTool = {
+          name: 'tool_b',
+          displayName: 'Tool B',
+          description: 'Distinct filler work',
+          kind: 'READ' as const,
+          schema: fillerToolDef,
+          build: vi.fn().mockImplementation(() => fillerInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list'
+            ? taskListTool
+            : name === 'tool_b'
+              ? fillerTool
+              : undefined,
+        );
+
+        const finishEvents: Array<{ loopType?: string }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(event as { loopType?: string });
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 20 },
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        // Six executed frozen polls: the replay round never executes and
+        // its synthetic response is excluded, so the result-time
+        // global-duplicate count runs through it and halts when the sixth
+        // identical (call, result) pair is recorded. Pre-fix the fabricated
+        // replay error reset the streak and the halt slipped past poll_6.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(6);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(11);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(finishEvents).toHaveLength(1);
+        expect(finishEvents[0].loopType).toBe('global_tool_call_duplicate');
+      });
+
       it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
         // A provider can stream the SAME call id twice in one response — the
         // exact pathology dedupeToolCallsById exists for. Execution collapses

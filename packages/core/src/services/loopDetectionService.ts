@@ -635,6 +635,41 @@ export class LoopDetectionService {
     );
   }
 
+  /**
+   * Notes that a call which streamed through the guards was suppressed
+   * WITHOUT executing (a cross-round replay of an already-handled provider
+   * call id, or an authorization rejection), so its synthetic response carries
+   * no result evidence and must not be recorded via recordToolResult /
+   * recordToolResultByCallId. The request-time reservations the guards made
+   * when the call streamed in must unwind: the callId pairing is dropped (no
+   * real result will land for it), the alternating-pattern carve-out's
+   * in-flight reservation is released (otherwise the carve-out over-subtracts
+   * in-flight counts and judges the window on too little evidence), and the
+   * key is marked as having produced activity since the last Finished
+   * boundary — the model DID re-issue the poll; suppression is the runtime's
+   * machinery, not abandonment, so the decay must not wipe a live
+   * frozen-board streak on the next boundary (the daemon twin skips decay
+   * for batches that execute nothing instead — recordDaemonToolCalls in the
+   * ACP Session). Without this, a replay-suppressed round is
+   * indistinguishable from abandonment and disarms the result-aware halts.
+   * Unknown callIds (never streamed through the guards) are ignored.
+   */
+  noteSuppressedToolCallByCallId(callId: string): void {
+    const request = this.requestByCallId.get(callId);
+    if (!request) return;
+    this.requestByCallId.delete(callId);
+    if (!this.isStatefulReadTool(request.name)) return;
+    const key = this.getToolCallKey(request);
+    // Floored at zero because the heuristic tier (the only writer besides
+    // this unwind) may be off under skipLoopDetection; a stale decrement is
+    // inert then — nothing reads the count until a Retry/reset clears it.
+    const inFlight = this.statefulInFlight.get(key) ?? 0;
+    if (inFlight > 0) {
+      this.statefulInFlight.set(key, inFlight - 1);
+    }
+    this.statefulResultKeysSinceLastFinished.add(key);
+  }
+
   private isStatefulReadTool(toolName: string): boolean {
     return isStatefulReadTool(toolName);
   }
