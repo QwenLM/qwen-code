@@ -11,6 +11,13 @@ export interface TextMessage {
   content: string;
   timestamp: number;
   turnIndex?: number;
+  /**
+   * True for messages generated inside the webview itself (connection /
+   * auth / generic errors, the local "Interrupted" cancel mark). The
+   * WebShell transcript renders ACP `transcriptUpdate` frames only, so the
+   * App renders these entries in a dedicated notice slot.
+   */
+  localOnly?: boolean;
   kind?: 'image';
   imagePath?: string;
   imageSrc?: string;
