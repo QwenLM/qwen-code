@@ -3228,6 +3228,46 @@ describe('Session', () => {
         todoIds: ['ship'],
       });
     });
+
+    it('clears the active Todo plan revision when leaving plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: bind the revision while the session is
+      // still in PLAN, then leave PLAN before any approval happens.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Leaving PLAN abandons the draft approval cycle: the bound revision
+      // must be dropped so a later exit_plan_mode approval cannot reuse it.
+      // getApprovalMode still reports PLAN here, so this exercises the
+      // PLAN → DEFAULT exit side of the transition (the entry side is
+      // covered by the 'when changing mode' case above).
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'default',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
   });
 
   describe('sendCurrentModeUpdateNotification', () => {
