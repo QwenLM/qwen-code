@@ -1542,6 +1542,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                   selectedApproval.approval.callId,
                   outcome,
                   payload,
+                  selectedApproval.approval.subagentId,
                 );
               return;
             }

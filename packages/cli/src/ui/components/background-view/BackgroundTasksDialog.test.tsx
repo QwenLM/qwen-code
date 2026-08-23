@@ -112,6 +112,7 @@ interface Harness {
   abandon: ReturnType<typeof vi.fn>;
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
+  backgroundResolvePendingApproval: ReturnType<typeof vi.fn>;
   workflowResolvePendingApproval: ReturnType<typeof vi.fn>;
   workflowPause: ReturnType<typeof vi.fn>;
   workflowResume: ReturnType<typeof vi.fn>;
@@ -143,6 +144,7 @@ function setup(
   const abandon = vi.fn();
   const monitorCancel = vi.fn();
   const dreamCancelTask = vi.fn();
+  const backgroundResolvePendingApproval = vi.fn();
   const workflowResolvePendingApproval = vi.fn();
   const workflowPause = vi.fn();
   const workflowResume = vi.fn();
@@ -154,7 +156,7 @@ function setup(
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
-      resolvePendingApproval: vi.fn(),
+      resolvePendingApproval: backgroundResolvePendingApproval,
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -240,6 +242,7 @@ function setup(
     abandon,
     monitorCancel,
     dreamCancelTask,
+    backgroundResolvePendingApproval,
     workflowResolvePendingApproval,
     workflowPause,
     workflowResume,
@@ -938,6 +941,51 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('detail');
     expect(h.lastFrame()).toContain('Background agent needs approval');
     expect(h.lastFrame()).not.toContain('from nested agent');
+  });
+
+  it('routes an agent approval response with the nested subagentId key part', () => {
+    // Parked-approval identity is (subagentId, callId): approvals bridged
+    // from nested runtimes can share a generated callId (`call_qwen_N`
+    // restarts per conversation), so the resolve must carry the nested
+    // runtime's id — otherwise one answer could resolve another runtime's
+    // parked prompt.
+    const bridgedApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'call_qwen_1',
+      name: 'Shell',
+      description: 'run call_qwen_1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo nested',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+      subagentId: 'search-agent-aaa111',
+    };
+    const bg = entry({
+      agentId: 'bg-route-nested',
+      pendingApprovals: [bridgedApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKeyBroadcast({ name: 'escape' });
+
+    expect(h.backgroundResolvePendingApproval).toHaveBeenCalledTimes(1);
+    expect(h.backgroundResolvePendingApproval).toHaveBeenCalledWith(
+      'bg-route-nested',
+      'call_qwen_1',
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+      'search-agent-aaa111',
+    );
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {

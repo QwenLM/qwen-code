@@ -24,7 +24,11 @@ import {
   runWithRuntimeContentGenerator,
 } from './runtime/agent-context.js';
 import * as transcript from './agent-transcript.js';
-import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+  type AgentApprovalRequestEvent,
+} from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
@@ -68,6 +72,26 @@ function makeRegistration(
     isBackgrounded: true,
     outputFile: `/tmp/${agentId}.jsonl`,
     ...overrides,
+  };
+}
+
+function makeWaitingEvent(
+  subagentId: string,
+  callId: string,
+  respond: BackgroundApproval['respond'] = vi.fn(async () => {}),
+): AgentApprovalRequestEvent {
+  return {
+    subagentId,
+    round: 1,
+    callId,
+    name: 'Shell',
+    description: `run ${callId}`,
+    args: {},
+    confirmationDetails: {
+      type: 'exec',
+    } as BackgroundApproval['confirmationDetails'],
+    respond,
+    timestamp: Date.now(),
   };
 }
 
@@ -2850,6 +2874,122 @@ describe('BackgroundTaskRegistry', () => {
         ToolConfirmationOutcome.ProceedOnce,
         undefined,
       );
+    });
+
+    it('parks own and nested approvals that share a generated callId as separate prompts', () => {
+      // Generated callIds are only unique per conversation
+      // (`nextGeneratedId` starts every fresh conversation at
+      // `call_qwen_1`), so the first id-less call of each nested runtime
+      // arrives on the shared ancestor entry under the SAME callId. Each
+      // runtime's prompt must park separately — dropping the second leaves
+      // nothing in the dialog to answer and its respond() never runs.
+      registry.register(makeRegistration('bg-collide'));
+      const ownEmitter = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide', ownEmitter);
+      const nestedA = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide', nestedA, {
+        nestedSource: true,
+      });
+      const nestedB = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide', nestedB, {
+        nestedSource: true,
+      });
+
+      // The entry's own bridge stamps no subagentId (undefined).
+      ownEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('bg-collide-runtime', 'call_qwen_1'),
+      );
+      nestedA.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1'),
+      );
+      nestedB.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-bbb222', 'call_qwen_1'),
+      );
+
+      const parked = registry.getPendingApprovals('bg-collide');
+      expect(parked).toHaveLength(3);
+      expect(parked.map((a) => a.subagentId)).toEqual([
+        undefined,
+        'search-agent-aaa111',
+        'search-agent-bbb222',
+      ]);
+    });
+
+    it('resolves only the matching runtime when parked callIds collide', async () => {
+      registry.register(makeRegistration('bg-collide-resolve'));
+      const nestedA = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-resolve', nestedA, {
+        nestedSource: true,
+      });
+      const nestedB = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-resolve', nestedB, {
+        nestedSource: true,
+      });
+      const respondA = vi.fn(async () => {});
+      const respondB = vi.fn(async () => {});
+      nestedA.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respondA),
+      );
+      nestedB.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-bbb222', 'call_qwen_1', respondB),
+      );
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-collide-resolve',
+        'call_qwen_1',
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+        'search-agent-aaa111',
+      );
+
+      expect(ok).toBe(true);
+      expect(respondA).toHaveBeenCalledTimes(1);
+      expect(respondB).not.toHaveBeenCalled();
+      const remaining = registry.getPendingApprovals('bg-collide-resolve');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.subagentId).toBe('search-agent-bbb222');
+    });
+
+    it('clears only its own runtime prompt when a TOOL_RESULT collides on callId', () => {
+      registry.register(makeRegistration('bg-collide-clear'));
+      const nestedA = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-clear', nestedA, {
+        nestedSource: true,
+      });
+      const nestedB = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-clear', nestedB, {
+        nestedSource: true,
+      });
+      const respondA = vi.fn(async () => {});
+      const respondB = vi.fn(async () => {});
+      nestedA.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respondA),
+      );
+      nestedB.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-bbb222', 'call_qwen_1', respondB),
+      );
+
+      // Runtime A's call settled elsewhere; B's same-callId prompt must
+      // stay parked.
+      nestedA.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'search-agent-aaa111',
+        round: 1,
+        callId: 'call_qwen_1',
+        success: true,
+      } as never);
+
+      const remaining = registry.getPendingApprovals('bg-collide-clear');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.subagentId).toBe('search-agent-bbb222');
+      expect(respondA).not.toHaveBeenCalled();
+      expect(respondB).not.toHaveBeenCalled();
     });
 
     it('auto-rejects a bridged approval that arrives after termination', () => {

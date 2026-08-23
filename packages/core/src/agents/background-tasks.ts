@@ -1069,7 +1069,18 @@ export class BackgroundTaskRegistry {
       return 'unavailable';
     }
     const prior = entry.pendingApprovals ?? [];
-    if (prior.some((a) => a.callId === approval.callId)) return 'duplicate';
+    // Identity is (subagentId, callId), mirroring the workflow registry's
+    // source key: generated callIds (`call_qwen_N`) are only unique per
+    // conversation, so multiple nested runtimes bridged onto one entry can
+    // share a callId. Own approvals stay unstamped (undefined), so a
+    // same-call re-emission from the entry's own runtime still dedupes.
+    if (
+      prior.some(
+        (a) =>
+          a.callId === approval.callId && a.subagentId === approval.subagentId,
+      )
+    )
+      return 'duplicate';
     entry.pendingApprovals = [...prior, approval];
     debugLogger.info(
       `Parked approval for background agent ${agentId} ` +
@@ -1090,15 +1101,18 @@ export class BackgroundTaskRegistry {
     callId: string,
     outcome: Parameters<BackgroundApproval['respond']>[0],
     payload?: Parameters<BackgroundApproval['respond']>[1],
+    subagentId?: string,
   ): Promise<boolean> {
     const entry = this.agents.get(agentId);
     if (!entry) return false;
-    const approval = entry.pendingApprovals?.find((a) => a.callId === callId);
+    const approval = entry.pendingApprovals?.find(
+      (a) => a.callId === callId && a.subagentId === subagentId,
+    );
     if (!approval) return false;
     // Remove before responding so a re-entrant read inside the respond
     // chain (or a racing TOOL_RESULT clear) sees the call already gone.
     entry.pendingApprovals = (entry.pendingApprovals ?? []).filter(
-      (a) => a.callId !== callId,
+      (a) => !(a.callId === callId && a.subagentId === subagentId),
     );
     this.emitApprovalChange(entry);
     try {
@@ -1129,10 +1143,16 @@ export class BackgroundTaskRegistry {
    * double-answering. Mirrors the foreground `pendingConfirmation` clear in
    * the Agent tool's TOOL_RESULT handler.
    */
-  clearPendingApproval(agentId: string, callId: string): void {
+  clearPendingApproval(
+    agentId: string,
+    callId: string,
+    subagentId?: string,
+  ): void {
     const entry = this.agents.get(agentId);
     if (!entry?.pendingApprovals?.length) return;
-    const next = entry.pendingApprovals.filter((a) => a.callId !== callId);
+    const next = entry.pendingApprovals.filter(
+      (a) => !(a.callId === callId && a.subagentId === subagentId),
+    );
     if (next.length === entry.pendingApprovals.length) return;
     entry.pendingApprovals = next;
     this.emitApprovalChange(entry);
@@ -1207,8 +1227,14 @@ export class BackgroundTaskRegistry {
     };
     const onResult = (event: AgentToolResultEvent) => {
       // A result for a parked call means it settled elsewhere — clear the
-      // stale prompt (without responding again).
-      this.clearPendingApproval(agentId, event.callId);
+      // stale prompt (without responding again). Stamp the nested runtime
+      // exactly as onWaiting does so one runtime's result cannot clear a
+      // colliding callId parked by another runtime.
+      this.clearPendingApproval(
+        agentId,
+        event.callId,
+        options?.nestedSource ? event.subagentId : undefined,
+      );
     };
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
     emitter.on(AgentEventType.TOOL_RESULT, onResult);
