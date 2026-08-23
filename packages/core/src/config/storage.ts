@@ -335,6 +335,107 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
   }
 
+  /**
+   * Outside-repo landing for /audit reports and sidecars when the audited
+   * repository's ignore state cannot keep them out of version control.
+   * Per-user and per-project, honoring the QWEN_HOME override; 0700 so the
+   * quoted (possibly exploitable) module content stays private to the user.
+   */
+  static getAuditFallbackDir(projectRoot: string): string {
+    // Resolve symlinks before hashing so the fallback root is stable across
+    // spellings of the same directory (macOS `/var` → `/private/var`):
+    // plan-files, guard-check, and the SKILL relocation must all agree on
+    // one root, or the relocation-containment check spuriously fails.
+    let resolved = projectRoot;
+    try {
+      resolved = fs.realpathSync(projectRoot);
+    } catch {
+      // Unresolvable (e.g. not yet created): hash the raw path.
+    }
+    const dir = path.join(
+      Storage.getGlobalQwenDir(),
+      'audits',
+      getProjectHash(resolved),
+    );
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Everything below validates a landing this process may have ADOPTED
+    // rather than created. The path is fully predictable — the project hash
+    // is a pure function of the root — and 0700 does not exclude the user's
+    // own other processes, so "it exists already" is not evidence that this
+    // tool made it. The landing is where relocation puts artifacts precisely
+    // BECAUSE they must stay private, so adoption is validated, not assumed.
+    //
+    // mkdirSync's mode applies only to directories it CREATES, so a
+    // pre-existing leaf keeps whatever mode it was given.
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `audit: the fallback landing ${dir} is not a directory (it may be a ` +
+          `symlink planted ahead of the run) — remove it and re-run.`,
+      );
+    }
+    // Windows reports a mode that does not carry POSIX group/other bits;
+    // chmod there is a no-op, and the check would fire on every run.
+    if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+      fs.chmodSync(dir, 0o700);
+    }
+    Storage.assertAuditLandingIsClean(dir);
+    return dir;
+  }
+
+  /**
+   * Refuse a fallback landing whose CONTENTS would redirect writes out of it.
+   *
+   * Validating the leaf alone is not enough: artifacts land at paths BELOW it
+   * (`audit-<ts>.sidecar/sidecar.json`, the dated report), and an
+   * O_NOFOLLOW open only ever guards the final component. A planted symlink
+   * child is therefore a complete escape — `mkdirSync` happily treats a
+   * symlink-to-directory as the directory, and every artifact written
+   * "inside" the landing lands wherever the link points, while the leaf
+   * itself stays a perfectly valid directory that re-validation passes.
+   * A hardlinked regular file is the same story for reads: an existing name
+   * reopened with O_TRUNC writes into the planter's inode.
+   *
+   * The landing is REUSED across runs (the report and its sidecar are the
+   * durable artifacts), so this cannot refuse a non-empty landing — only
+   * entries that are not what a previous run of this tool would have left.
+   */
+  private static assertAuditLandingIsClean(dir: string): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      // Unreadable right after a successful lstat: nothing can be validated,
+      // and nothing can be written either — let the write surface it.
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          `audit: the fallback landing ${dir} contains a symlink ` +
+            `(${entry.name}) — artifacts written under it would land outside ` +
+            `the landing. Remove it and re-run.`,
+        );
+      }
+      if (!entry.isFile()) continue;
+      // A hardlink twin proves another name for the same inode exists
+      // somewhere this check can never see.
+      let links: number;
+      try {
+        links = fs.lstatSync(path.join(dir, entry.name)).nlink;
+      } catch {
+        continue; // vanished between readdir and lstat
+      }
+      if (links > 1) {
+        throw new Error(
+          `audit: the fallback landing ${dir} contains a hardlinked file ` +
+            `(${entry.name}) — a write to it would also write through its ` +
+            `twin. Remove it and re-run.`,
+        );
+      }
+    }
+  }
+
   getQwenDir(): string {
     return path.join(this.targetDir, QWEN_DIR);
   }
