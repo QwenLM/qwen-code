@@ -97,8 +97,22 @@ function mergeApprovalRecords(
   existing: Record<string, McpApprovalRecord>,
   incoming: Record<string, McpApprovalRecord>,
 ): Record<string, McpApprovalRecord> {
-  const merged: Record<string, McpApprovalRecord> = { ...existing };
+  // Use a null-prototype target so a server literally named `__proto__`
+  // keeps its decision as an own property: on a normal object the assignment
+  // `merged['__proto__'] = record` goes through the Object.prototype setter,
+  // the record becomes the map's prototype and JSON.stringify omits it.
+  const merged: Record<string, McpApprovalRecord> = Object.assign(
+    Object.create(null),
+    existing,
+  );
   for (const [name, record] of Object.entries(incoming)) {
+    // A stored record value can be `null` (corrupted sync / hand edit /
+    // format drift). Reading `record.status` would throw and condemn the
+    // whole approvals file — every project degrades to pending and the next
+    // save rewrites from a near-empty config — so skip non-record values.
+    if (!isApprovalRecordMap(record)) {
+      continue;
+    }
     const current = merged[name];
     if (!current) {
       merged[name] = record;

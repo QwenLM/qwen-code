@@ -350,6 +350,100 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     );
 
     itOnWin32(
+      'keeps the rejection regardless of key order in the file',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        fs.writeFileSync(
+          path.join(dir, MCP_APPROVALS_FILENAME),
+          JSON.stringify({
+            [flipDriveCase(resolvedDir)]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+            [resolvedDir]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'rejected',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        // Mirror order of the previous merge case: the approval is written
+        // under one casing and the later rejection appended under the other.
+        // A keep-first merge would flip this to 'approved', auto-enabling a
+        // gated server the user rejected.
+        expect(loadMcpApprovals().getState(resolvedDir, 'slack', server)).toBe(
+          'rejected',
+        );
+      },
+    );
+
+    itOnWin32('folds legacy UNC keys at load time', async () => {
+      const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          '\\\\FS01\\Share\\proj': {
+            slack: {
+              hash: hashMcpServerConfig(server),
+              status: 'approved',
+            },
+          },
+        }),
+      );
+      resetMcpApprovalsForTesting();
+      // The load-time key fold covers UNC paths too (`\\server\share`), so a
+      // network-share project approved under one casing resolves under the
+      // other. Deleting the UNC branch leaves this invisible again.
+      expect(
+        loadMcpApprovals().getState('\\\\fs01\\share\\proj', 'slack', server),
+      ).toBe('approved');
+    });
+
+    itOnWin32(
+      'keeps a __proto__ server decision when merging duplicate-cased keys',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({
+            [resolvedDir]: {
+              alpha: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+            [flipDriveCase(resolvedDir)]: {
+              // Computed key (not the literal `__proto__:` form, which would
+              // set the prototype instead of an own property).
+              ['__proto__']: {
+                hash: hashMcpServerConfig(server),
+                status: 'rejected',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        const approvals = loadMcpApprovals();
+        // The __proto__ decision must survive the merge as an own property
+        // rather than being written onto the prototype and dropped by
+        // JSON.stringify on the next save.
+        expect(approvals.getState(resolvedDir, '__proto__', server)).toBe(
+          'rejected',
+        );
+        const projectRecord = approvals.file.config[resolvedDir.toLowerCase()];
+        expect(
+          Object.getOwnPropertyDescriptor(projectRecord, '__proto__'),
+        ).toBeDefined();
+        expect(Object.keys(projectRecord)).toContain('__proto__');
+      },
+    );
+
+    itOnWin32(
       'rewrites migrated keys in normalized form on the next save',
       async () => {
         const resolvedDir = path.resolve(dir);
