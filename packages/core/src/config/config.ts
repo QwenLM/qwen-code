@@ -2049,6 +2049,12 @@ export class Config {
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly restoreAskUserQuestion: boolean = false;
+  /**
+   * startChat orphan-repair preserve. Defaults to `restoreAskUserQuestion`.
+   * A load/resume that will not re-hang (no client, fork) turns this off so
+   * Gemini history is repaired in lockstep with replay finalization.
+   */
+  private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
@@ -2334,6 +2340,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.restoreAskUserQuestion = params.restoreAskUserQuestion === true;
+    this.preserveRestorableAskUserQuestion = this.restoreAskUserQuestion;
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
@@ -7254,6 +7261,15 @@ export class Config {
 
   getRestoreAskUserQuestion(): boolean {
     return this.restoreAskUserQuestion;
+  }
+
+  getPreserveRestorableAskUserQuestion(): boolean {
+    return this.preserveRestorableAskUserQuestion;
+  }
+
+  /** Load/resume declined the re-hang: repair Gemini history like flag-off. */
+  suppressRestorableAskUserQuestionPreservation(): void {
+    this.preserveRestorableAskUserQuestion = false;
   }
 
   isSessionWriterLeaseEnabled(): boolean {
