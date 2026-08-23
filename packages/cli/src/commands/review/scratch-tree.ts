@@ -56,6 +56,7 @@ import {
 } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
   redirectedAncestor,
@@ -119,6 +120,13 @@ export interface ScratchTreeReport {
 export interface ScratchTreeArgs {
   worktree: string;
   label: string;
+  /**
+   * The commit the worktree must hold — fetch-pr's record from the plan,
+   * welded into the verifier's command. The residue probe's identity anchor:
+   * with it a healthy shared tree measures clean; without it an empty
+   * measurement is refused rather than certified clean.
+   */
+  fetchedSha?: string;
   out?: string;
 }
 
@@ -470,12 +478,15 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   }
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
-  // call found it and can never be confused with anything this call did.
-  const residue = worktreeResidue(worktree);
+  // call found it and can never be confused with anything this call did. The
+  // fetched sha, when the caller brought it, is the probe's identity anchor:
+  // with it a healthy tree measures clean, and a forged pair is refused at
+  // the pin (see worktreeResidue).
+  const residue = worktreeResidue(worktree, RESIDUE_PATH_CAP, args.fetchedSha);
   const sharedTreeResidue = residue.paths;
   const residueNote = residue.unmeasured
-    ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
-      `failed: ${inertPath(residue.unmeasured)}). An unmeasured tree is not a clean one — if a later read ` +
+    ? ` NOTE: whether the shared review worktree is clean could not be measured ` +
+      `(reason: ${inertPath(residue.unmeasured)}). An unmeasured tree is not a clean one — if a later read ` +
       'of it surprises you, check the path against `git show HEAD:<path>` before believing it.'
     : sharedTreeResidue.length > 0
       ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue
@@ -667,6 +678,15 @@ export const scratchTreeCommand: CommandModule = {
           'What makes this tree yours: pass the record key from your launch ' +
           'block. Two agents sharing a label share a tree, which is the race ' +
           'this command exists to remove.',
+      })
+      .option('fetched-sha', {
+        type: 'string',
+        describe:
+          'The commit the worktree must hold, as fetch-pr recorded it in the ' +
+          'plan: the shared-tree residue check pins the tree to it, so a ' +
+          'healthy tree measures clean and a forged identity is refused. ' +
+          'Without it an empty measurement is reported as unmeasured, never ' +
+          'clean.',
       })
       .option('out', {
         type: 'string',

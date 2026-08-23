@@ -1555,9 +1555,19 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       const wrongSha = briefOf({ fetchedSha: `deadbeef${'0'.repeat(32)}` });
       expect(wrongSha).toContain('Whether it is clean could not be measured');
       expect(wrongSha).toContain('not the fetched PR head');
+      // The framing names a reason, not a failed `git status` — the status
+      // never ran for these refusals, and a triager sent to debug the git
+      // environment would find nothing to fix.
+      expect(wrongSha).toContain('(reason: ');
+      expect(wrongSha).not.toContain('(`git status` failed');
       const noSha = briefOf({});
       expect(noSha).toContain('Whether it is clean could not be measured');
       expect(noSha).toContain('no usable record of the fetched head sha');
+      // The stderr warning the handler prints for the same state carries the
+      // same neutral framing.
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('(reason: '),
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
       gitIsolation.dispose();
@@ -2864,6 +2874,22 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(
       buildRoleBrief(PR_PLAN, 'verify', { key: 'verify; rm -rf /' }),
     ).toContain('--label verify__rm_-rf__');
+    // The plan's fetched sha rides along when the plan carries a usable one:
+    // it is the shared-tree residue check's identity anchor, and without it
+    // the check would refuse every healthy run (#9742). Absent or malformed,
+    // nothing is welded — the record-less refusal is the fail-closed shape.
+    const sha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).toContain(`--fetched-sha ${sha}`);
+    expect(p).not.toContain('--fetched-sha');
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: 'not-a-sha' }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).not.toContain('--fetched-sha');
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');

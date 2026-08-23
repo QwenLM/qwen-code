@@ -780,6 +780,40 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('NOT clean');
     expect(r.sharedTreeUnmeasured).toContain('brought no record');
     expect(r.note).toContain('could not be measured');
+    // ...and the note does not blame `git status`: the refusal fired AFTER a
+    // clean status, so a triager sent to debug the git environment finds
+    // nothing. The framing names a reason, not a failed command.
+    expect(r.note).toContain('(reason: ');
+    expect(r.note).not.toContain('git status failed');
+  });
+
+  it('measures a CLEAN shared worktree when the caller brings the fetched sha', () => {
+    // The pipeline caller's shape: fetch-pr records the sha in the plan and
+    // agent-prompt welds it into this command, so a healthy run measures
+    // clean — an unmeasured note that fired on every run would be noise
+    // nobody reads, and the genuine refusals would drown in it (#9742).
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--pinned',
+      fetchedSha: headSha,
+    });
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toBeUndefined();
+    expect(r.note).not.toContain('could not be measured');
+  });
+
+  it('refuses a shared worktree whose HEAD is not the fetched sha it brought', () => {
+    // The pin-mismatch signal the anchor exists for: a forged pair that
+    // commits the contamination cannot also reproduce the fetched head sha.
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--wrong-sha',
+      fetchedSha: `deadbeef${'0'.repeat(32)}`,
+    });
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toContain('not the fetched PR head');
+    expect(r.note).toContain('could not be measured');
   });
 
   it('links the review worktree’s node_modules in, and says so', () => {

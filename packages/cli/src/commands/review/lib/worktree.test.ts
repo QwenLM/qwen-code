@@ -23,6 +23,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -408,6 +409,42 @@ describe('worktreeResidue', () => {
       // repository answers for a path it does not contain. The link is the
       // mechanism; the boundary mismatch is the proof.
       expect(got.unmeasured).toContain('does not contain it');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('says UNMEASURED when an INTERMEDIATE ancestor is a symlink the earlier gates cannot see', () => {
+    // The walk's own witness: both sibling shapes refuse at earlier gates —
+    // the boundary check and the leaf lstat — so deleting the walk alone
+    // shipped green (measured). This shape passes every gate above it: the
+    // leaf is a real directory, the self-equality holds because both sides
+    // resolve through the same link, and the moved tree's gitfile still names
+    // the REAL repo's admin entry, so the common dir is the repo and the
+    // tree's literal path runs under it. Only the walk can refuse it.
+    expect(worktreeResidue(tree, 12, git('rev-parse', 'HEAD'))).toEqual({
+      paths: [],
+      total: 0,
+    });
+
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-walk-')));
+    try {
+      // Move the worktree out and plant a link at its parent pointing after
+      // it. The moved tree keeps naming its original admin entry — spelled
+      // absolutely, because its old relative spelling no longer resolves from
+      // outside the repo.
+      renameSync(tree, join(outside, 'review-wt'));
+      writeFileSync(
+        join(outside, 'review-wt', '.git'),
+        `gitdir: ${join(repo, '.git', 'worktrees', 'review-wt')}\n`,
+      );
+      rmSync(dirname(tree), { recursive: true, force: true });
+      symlinkSync(outside, dirname(tree));
+
+      const got = worktreeResidue(tree);
+
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toContain('resolves through a symlink');
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
