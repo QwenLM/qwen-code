@@ -8,8 +8,10 @@ import {
   ChannelWorkerStartupError,
   cleanupMintedWorkerCaBundleDirs,
   createChannelWorkerSupervisor,
+  resolveWorkerCaCertPath,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
+import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import { isChannelWorkerPromptAuthorized } from './channel-worker-prompt-authorization.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
 import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
@@ -611,6 +613,54 @@ describe('createChannelWorkerSupervisor', () => {
 
     expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the daemon cert and re-warns when certificate inspection fails', async () => {
+    // R22-2: an oracle failure (spawn error, killed child, truncated answer)
+    // used to collapse into "the loader takes nothing", so the merge stripped
+    // the operator file while blaming its PEM format. The inspection failure
+    // now carries its own fallback family — a read error that already warned
+    // for the pair cannot silence it — and its warning blames no contents.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-inspect-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+    const inspection = vi
+      .spyOn(pemCertificateBlocks, 'extractCertificateBlocks')
+      .mockImplementation(() => {
+        throw new pemCertificateBlocks.ExtraCaInspectionError(
+          'Inspecting NODE_EXTRA_CA_CERTS failed before its contents could be judged.',
+        );
+      });
+    try {
+      // The pair warns under the read-error family before the file exists...
+      expect(resolveWorkerCaCertPath(daemonCa, operatorCa)).toBe(daemonCa);
+      fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+      // ...and a later inspection failure still emits its own warning.
+      expect(resolveWorkerCaCertPath(daemonCa, operatorCa)).toBe(daemonCa);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(
+        warnings.some(
+          (message) =>
+            message.includes(operatorCa) &&
+            message.includes('failed before its contents could be judged'),
+        ),
+      ).toBe(true);
+      expect(
+        warnings.some(
+          (message) =>
+            message.includes(operatorCa) &&
+            message.includes('no PEM certificate block Node can load'),
+        ),
+      ).toBe(false);
+    } finally {
+      inspection.mockRestore();
+      process.off('warning', onWarning);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('merges a CRLF-terminated operator CA file', async () => {

@@ -31,9 +31,25 @@ interface ScannedCertificateBlock {
   certificate: X509Certificate;
 }
 
-class LegacyExtraCaInspectionError extends Error {
+/**
+ * The inspection produced no verdict. Callers must treat this as "could not
+ * answer", never as "the loader takes nothing": collapsing an inspection that
+ * could not run into an empty verdict made consumers strip operator trust
+ * roots from worker bundles and blame file contents that were never judged.
+ */
+export class ExtraCaInspectionError extends Error {}
+
+class LegacyExtraCaInspectionError extends ExtraCaInspectionError {
   constructor() {
     super('Inspecting NODE_EXTRA_CA_CERTS requires Node.js 22.15.0 or newer.');
+  }
+}
+
+class FailedExtraCaInspectionError extends ExtraCaInspectionError {
+  constructor() {
+    super(
+      'Inspecting NODE_EXTRA_CA_CERTS failed before its contents could be judged.',
+    );
   }
 }
 
@@ -74,30 +90,40 @@ function scanCertificateBlocks(
         windowsHide: true,
       },
     );
-    if (result.error || result.status !== 0) return [];
+    if (result.error || result.status !== 0) {
+      throw new FailedExtraCaInspectionError();
+    }
     const parsed: unknown = JSON.parse(result.stdout);
-    if (typeof parsed !== 'object' || parsed === null) return [];
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new FailedExtraCaInspectionError();
+    }
     const certificates = Reflect.get(parsed, 'certificates');
     if (certificates !== undefined) {
       if (
         !Array.isArray(certificates) ||
         !certificates.every((item) => typeof item === 'string')
       ) {
-        return [];
+        throw new FailedExtraCaInspectionError();
       }
       return certificates.map((block) => ({
         block: block.trimEnd(),
         certificate: new X509Certificate(block),
       }));
     }
-    if (Reflect.get(parsed, 'legacy') !== true) return [];
+    if (Reflect.get(parsed, 'legacy') !== true) {
+      throw new FailedExtraCaInspectionError();
+    }
     // Older Node 22 releases expose no certificate list. Their byte-oriented
     // loader cannot be reproduced by a string parser without drifting, so do
     // not silently remove operator trust roots from worker bundles.
     throw new LegacyExtraCaInspectionError();
   } catch (error) {
-    if (error instanceof LegacyExtraCaInspectionError) throw error;
-    return [];
+    if (error instanceof ExtraCaInspectionError) throw error;
+    // A truncated stdout, an unmodellable answer, a failed temp write —
+    // anything short of a clean oracle verdict is "could not answer", never
+    // "the loader takes nothing". Returning [] here used to be
+    // indistinguishable from a genuinely unloadable file.
+    throw new FailedExtraCaInspectionError();
   } finally {
     if (dir) {
       try {
@@ -111,7 +137,8 @@ function scanCertificateBlocks(
 
 /**
  * The certificate blocks a worker's `NODE_EXTRA_CA_CERTS` loader takes from
- * `contents`, in file order, or `undefined` when it takes none.
+ * `contents`, in file order, or `undefined` when it takes none. Throws an
+ * `ExtraCaInspectionError` when the inspection itself cannot run.
  */
 export function extractCertificateBlocks(
   contents: string,
@@ -123,7 +150,8 @@ export function extractCertificateBlocks(
 
 /**
  * The certificates a worker's loader takes from `contents`, or `undefined`
- * when it takes none of them.
+ * when it takes none of them. Throws an `ExtraCaInspectionError` when the
+ * inspection itself cannot run.
  */
 export function loadableCertificates(
   contents: string,

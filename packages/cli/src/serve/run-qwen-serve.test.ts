@@ -53,6 +53,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
 import * as settingsRuntime from '../config/settings.js';
@@ -10885,6 +10886,76 @@ describe('runQwenServe channel worker supervisor', () => {
     });
 
     expect(failure?.code).toEqual(expect.any(String));
+  });
+
+  it('boots TLS channels and logs once when loader inspection cannot run', async () => {
+    // R22-1: on Node 22.0-22.14 (and on any oracle infrastructure failure)
+    // the loader inspection throws instead of answering. Before the guard the
+    // throw escaped ensureChannelWorkerManager and turned TLS + channels into
+    // a runtime-startup failure — the exact outage this PR exists to fix. The
+    // guard keeps the daemon booting: one log line, and the live probe and
+    // the workers still run.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-inspect-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue(undefined);
+    const inspection = vi
+      .spyOn(pemCertificateBlocks, 'loadableCertificates')
+      .mockImplementation(() => {
+        throw new pemCertificateBlocks.ExtraCaInspectionError(
+          'Inspecting NODE_EXTRA_CA_CERTS requires Node.js 22.15.0 or newer.',
+        );
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+        workerTlsTrustVerifier,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledTimes(1);
+    } finally {
+      inspection.mockRestore();
+      await handle.close();
+    }
+    // The daemon log flushes on close, so read it last, the way
+    // bootTlsDaemonForTrustGapLog does.
+    const log = fs.readFileSync(
+      path.join(logBaseDir, 'daemon', 'daemon.log'),
+      'utf8',
+    );
+    expect(log).toContain('trust-gap inspection could not run');
+    expect(log).toContain('Node.js 22.15.0 or newer');
+    // One inspection failure is one log line, not one per re-entry.
+    expect(log.split('trust-gap inspection could not run').length).toBe(2);
   });
 
   it('does not start channel workers after close begins during TLS verification', async () => {

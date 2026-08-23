@@ -5,7 +5,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { channelSelectionNames } from './channel-selection.js';
-import { extractCertificateBlocks } from './pem-certificate-blocks.js';
+import {
+  ExtraCaInspectionError,
+  extractCertificateBlocks,
+} from './pem-certificate-blocks.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
@@ -431,6 +434,7 @@ const warnedWorkerCaMergeFallbacks = new Set<string>();
  */
 const WORKER_CA_MERGE_FALLBACK_FAMILIES = [
   'read-error',
+  'inspection-failed',
   'no-operator-blocks',
   'no-daemon-blocks',
 ] as const;
@@ -624,7 +628,12 @@ export function resolveWorkerCaCertPath(
     warnWorkerCaMergeFallback(
       existing,
       daemonCertPath,
-      'read-error',
+      // An inspection that could not run blames nothing about the file's
+      // contents; sharing the read-error family would let a first ENOENT
+      // silence the later, now-accurate inspection-failure diagnosis.
+      err instanceof ExtraCaInspectionError
+        ? 'inspection-failed'
+        : 'read-error',
       err instanceof Error ? err.message : String(err),
     );
     return daemonCertPath;

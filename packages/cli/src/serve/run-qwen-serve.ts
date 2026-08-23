@@ -177,7 +177,10 @@ import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
-import { loadableCertificates } from './pem-certificate-blocks.js';
+import {
+  ExtraCaInspectionError,
+  loadableCertificates,
+} from './pem-certificate-blocks.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
@@ -8008,20 +8011,33 @@ async function runQwenServeImpl(
                   (error as NodeJS.ErrnoException)?.code ?? 'read failed';
               }
             }
-            const predictedGaps = describeWorkerTlsTrustGaps({
-              cert: tlsOptions.cert,
-              certPath: tlsCertPath,
-              certSourcePath: tlsCertPath,
-              daemonUrl: workerDaemonUrl,
-              ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
-              ...(operatorCaCert
-                ? {
-                    operatorCaCert,
-                    operatorCaCertSourcePath: operatorCaCertPath,
-                  }
-                : {}),
-              ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
-            });
+            let predictedGaps: string[] = [];
+            try {
+              predictedGaps = describeWorkerTlsTrustGaps({
+                cert: tlsOptions.cert,
+                certPath: tlsCertPath,
+                certSourcePath: tlsCertPath,
+                daemonUrl: workerDaemonUrl,
+                ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
+                ...(operatorCaCert
+                  ? {
+                      operatorCaCert,
+                      operatorCaCertSourcePath: operatorCaCertPath,
+                    }
+                  : {}),
+                ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
+              });
+            } catch (error) {
+              if (!(error instanceof ExtraCaInspectionError)) throw error;
+              // A verdict the inspection cannot reach must not become a boot
+              // failure: the live handshake probe below and the supervisor's
+              // warned fallback still run; only the static prediction is lost.
+              daemonLog.warn(
+                `Channel worker TLS trust-gap inspection could not run: ` +
+                  `${error.message} Continuing with the live handshake ` +
+                  `probe only.`,
+              );
+            }
             const workerCaCertPath = workerRuntime.resolveWorkerCaCertPath(
               tlsCertPath,
               operatorCaCertPath,
