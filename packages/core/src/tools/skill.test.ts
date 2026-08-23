@@ -1278,6 +1278,83 @@ describe('SkillTool', () => {
     });
   });
 
+  // Regression for issue #9821. In interactive mode the
+  // modelInvocableCommands provider is only registered once the CLI's
+  // CommandService finishes initialising — AFTER `Config.initialize()` →
+  // `toolRegistry.warmAll()` has already constructed SkillTool, whose
+  // constructor `refreshSkills()` therefore read a still-null provider and
+  // cached an empty command set. Nothing re-notifies SkillTool when the
+  // provider is attached, so validation kept rejecting every command until
+  // an unrelated SkillManager change event happened to re-run
+  // `refreshSkills()` — the source of the reported ~50% flakiness.
+  describe('late-attached modelInvocableCommands provider (issue #9821)', () => {
+    it('validates a command registered after construction with no SkillManager change event', () => {
+      // beforeEach already constructed skillTool with a null provider and
+      // drained the constructor's refreshSkills(). Register the provider
+      // late — deliberately WITHOUT firing a change listener — mirroring
+      // slashCommandProcessor's post-CommandService.create registration.
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [
+          { name: 'late-command', description: 'Registered after startup' },
+        ],
+      );
+
+      expect(
+        skillTool.validateToolParams({ skill: 'late-command' }),
+      ).toBeNull();
+    });
+
+    it('lists late-registered commands in the not-found error', () => {
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [
+          { name: 'late-command', description: 'Registered after startup' },
+        ],
+      );
+
+      const result = skillTool.validateToolParams({ skill: 'unknown' });
+      expect(result).toContain('"unknown" not found');
+      expect(result).toContain('late-command');
+    });
+
+    it('keeps path-gated skills gated when the provider is late-registered', async () => {
+      // The live read must apply the same file-based-skill name shadowing
+      // as collectAvailableSkillEntries, so a command named after a pending
+      // conditional skill cannot bypass the "gated by paths:" branch.
+      const conditionalSkill: SkillConfig = {
+        name: 'tsx-helper',
+        description: 'React TSX helper',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/tsx-helper/SKILL.md',
+        body: 'Body.',
+        paths: ['src/**/*.tsx'],
+      };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        conditionalSkill,
+      ]);
+      vi.mocked(mockSkillManager.isSkillActive).mockImplementation(
+        (s: SkillConfig) => !s.paths || s.paths.length === 0,
+      );
+      const gatedTool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // Late provider registration (SkillCommandLoader surfaces the skill).
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'tsx-helper', description: 'React TSX helper' }],
+      );
+
+      const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
+      expect(result).toMatch(/gated by path-based activation/);
+    });
+
+    it('still rejects unknown commands when no provider is ever registered', () => {
+      // SDK/headless mode without a provider: behavior must be unchanged.
+      const result = skillTool.validateToolParams({ skill: 'unknown' });
+      expect(result).toBe(
+        'Skill "unknown" not found. Available skills: code-review, testing',
+      );
+    });
+  });
+
   describe('commandExecutor fallback in execute()', () => {
     beforeEach(async () => {
       // Expose an MCP-only command that has no file-based skill

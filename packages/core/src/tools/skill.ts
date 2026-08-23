@@ -211,8 +211,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     );
     if (skillExists) return null;
 
-    // Check model-invocable commands (e.g. MCP prompts) listed in <available_skills>
-    const commandExists = this.modelInvocableCommands.some(
+    // Check model-invocable commands (e.g. MCP prompts) listed in
+    // <available_skills>. Consults the live provider — not just the cached
+    // snapshot — because in interactive mode the provider is only attached
+    // after CommandService initialisation resolves, which races SkillTool
+    // construction: the constructor's refreshSkills() then reads a still-null
+    // provider and caches an empty command set that is never refreshed unless
+    // an unrelated SkillManager change event happens to fire (issue #9821).
+    const commandExists = this.getModelInvocableCommands().some(
       (cmd) => cmd.name === params.skill,
     );
     if (commandExists) return null;
@@ -236,13 +242,55 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
 
     const availableNames = [
-      ...this.availableSkills.map((s) => s.name),
-      ...this.modelInvocableCommands.map((c) => c.name),
+      ...new Set([
+        ...this.availableSkills.map((s) => s.name),
+        ...this.getModelInvocableCommands().map((c) => c.name),
+      ]),
     ];
     if (availableNames.length === 0) {
       return `Skill "${params.skill}" not found. No skills are currently available.`;
     }
     return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
+  }
+
+  /**
+   * Returns the model-invocable commands to validate against, preferring a
+   * live read of the config provider over the cached snapshot from the last
+   * `refreshSkills()` (see `validateToolParams` for the late-attach race).
+   * Falls back to the cache when no provider is registered (e.g. SDK mode)
+   * or when the provider throws. The provider is synchronous, so the live
+   * read is cheap enough to run on every validation.
+   *
+   * Commands whose names collide with a file-based skill (active or pending
+   * path-activation) are dropped, mirroring the `fileBasedSkillNames` dedup
+   * in `collectAvailableSkillEntries` — without this, a command named after
+   * a path-gated skill would pass validation here and bypass the
+   * "gated by paths:" branch above.
+   */
+  private getModelInvocableCommands(): ReadonlyArray<{
+    name: string;
+    description: string;
+  }> {
+    let commands: ReadonlyArray<{ name: string; description: string }>;
+    const provider = this.config.getModelInvocableCommandsProvider();
+    if (provider) {
+      try {
+        commands = provider();
+      } catch (error) {
+        debugLogger.warn(
+          'Model-invocable commands provider threw; falling back to cached set:',
+          error,
+        );
+        commands = this.modelInvocableCommands;
+      }
+    } else {
+      commands = this.modelInvocableCommands;
+    }
+    const shadowedNames = new Set<string>([
+      ...this.availableSkills.map((skill) => skill.name),
+      ...this.pendingConditionalSkillNames,
+    ]);
+    return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
 
   protected createInvocation(params: SkillParams) {
