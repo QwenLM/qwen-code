@@ -21933,6 +21933,123 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('still applies an approval-mode flip after the daemon settings cache was swapped', async () => {
+    // `this.settings` is a replaceable "latest loaded" cache: handlers such
+    // as qwen/settings/getCore swap it for a fresh loadSettings instance.
+    // If the disk flips and THEN such a swap happens, the reload diff
+    // compares two fresh views of the same disk state (no diff) while the
+    // live session still runs the old mode — the approval-mode application
+    // must not depend on the diff.
+    const mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'default' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-approval-swapped-settings'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      // The reload re-derivation applies the Session Workflow gate to live
+      // sessions unconditionally; report the (unchanged) effective gate so
+      // the per-session no-op check skips this session and the clear counts
+      // below stay attributable to the approval-mode application.
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-approval-swapped-settings'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The disk flips to plan, and a handler then swaps the daemon's
+    // settings cache for a fresh load that already carries the new state.
+    const freshSettings = {
+      merged: { tools: { approvalMode: 'plan' } },
+      user: { settings: {}, path: '/home/u/.qwen/settings.json' },
+      workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
+      isTrusted: true,
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(freshSettings);
+    await agent.extMethod('qwen/settings/getCore', {});
+
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan');
+    try {
+      // oldMerged (cloned from the fresh cache) and newMerged both read
+      // plan, so a diff-based application would skip the live session
+      // entirely.
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+      expect(setApprovalMode).toHaveBeenCalledWith('plan');
+      expect(approvalMode).toBe('plan');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
+
+      // A follow-up no-edit reload must stay a per-session no-op.
+      setApprovalMode.mockClear();
+      clearActiveTodoPlanRevision.mockClear();
+      clearTodoStopGuardTrust.mockClear();
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},

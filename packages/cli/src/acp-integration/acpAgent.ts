@@ -12534,27 +12534,37 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+            }
 
-              const newMode = newMerged.tools?.approvalMode;
-              const previousMode = config.getApprovalMode();
-              if (
-                newMode &&
-                APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-                newMode !== previousMode
-              ) {
-                try {
-                  config.setApprovalMode(newMode as ApprovalMode);
-                  if (newMode === 'plan') {
-                    session.clearActiveTodoPlanRevision();
-                    session.clearTodoStopGuardTrust();
-                  } else if (previousMode === 'plan') {
-                    session.clearActiveTodoPlanRevision();
-                  }
-                } catch (err) {
-                  debugLogger.warn(
-                    `reload: setApprovalMode failed for session ${id}: ${err}`,
-                  );
+            // Apply the reloaded approval mode unconditionally (mirroring
+            // the Session Workflow gate re-derivation above): the
+            // merged↔merged diff against `oldMerged` is unreliable because
+            // `this.settings` is a replaceable "latest loaded" cache that
+            // other handlers can swap for a fresh loadSettings instance
+            // between a disk edit and this reload, after which `changed`
+            // reports no `tools` diff and a mode flip (e.g. into plan)
+            // would never reach live sessions. The no-op decision stays
+            // per-session on `newMode !== previousMode`, so re-applying on
+            // every reload is idempotent.
+            const newMode = newMerged.tools?.approvalMode;
+            const previousMode = config.getApprovalMode();
+            if (
+              newMode &&
+              APPROVAL_MODES.includes(newMode as ApprovalMode) &&
+              newMode !== previousMode
+            ) {
+              try {
+                config.setApprovalMode(newMode as ApprovalMode);
+                if (newMode === 'plan') {
+                  session.clearActiveTodoPlanRevision();
+                  session.clearTodoStopGuardTrust();
+                } else if (previousMode === 'plan') {
+                  session.clearActiveTodoPlanRevision();
                 }
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: setApprovalMode failed for session ${id}: ${err}`,
+                );
               }
             }
 
