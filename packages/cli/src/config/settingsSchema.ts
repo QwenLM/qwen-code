@@ -192,7 +192,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http'],
+            enum: ['command', 'http', 'prompt'],
             required: true,
           },
           command: {
@@ -204,6 +204,15 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The prompt to send to the model. Required for "prompt" type.',
+          },
+          model: {
+            type: 'string',
+            description: 'The optional model to use for a "prompt" hook.',
           },
           headers: {
             type: 'object',
