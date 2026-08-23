@@ -702,8 +702,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('approval-mode', {
           type: 'string',
           choices: APPROVAL_MODES,
-          description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
+          description: `Set the approval mode: ${APPROVAL_MODES.join(', ')}`,
         })
         .option('acp', {
           type: 'boolean',

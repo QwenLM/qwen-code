@@ -4479,7 +4479,7 @@ describe('loadCliConfig approval mode', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
-      tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
+      tools: { approvalMode: 'auto_edit' },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
