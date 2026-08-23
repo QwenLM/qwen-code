@@ -100,6 +100,7 @@ describe('moonshotProvider', () => {
         modalities: { image: true, video: true },
       },
     });
+    expect(models?.[1]?.generationConfig?.thinkingMandatory).toBeUndefined();
 
     expect(models?.[2]).toMatchObject({
       id: 'kimi-k2.7-code-highspeed',
@@ -110,17 +111,18 @@ describe('moonshotProvider', () => {
         modalities: { image: true, video: true },
       },
     });
+    expect(models?.[2]?.generationConfig?.thinkingMandatory).toBeUndefined();
 
-    // K2.6 is text-only, matching modalityDefaults for that ID.
     expect(models?.[3]).toMatchObject({
       id: 'kimi-k2.6',
       name: '[Kimi] kimi-k2.6',
       generationConfig: {
         contextWindowSize: 262144,
         extra_body: { enable_thinking: true },
+        modalities: { image: true, video: true },
       },
     });
-    expect(models?.[3]?.generationConfig?.modalities).toBeUndefined();
+    expect(models?.[3]?.generationConfig?.thinkingMandatory).toBeUndefined();
   });
 
   it('falls back gracefully for unknown model IDs', () => {
