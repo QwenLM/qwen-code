@@ -30,6 +30,7 @@ vi.mock('./lib/gh.js', () => ({
   ghApiAll: mocks.ghApiAll,
   ensureAuthenticated: mocks.ensureAuthenticated,
   setGhHost: mocks.setGhHost,
+  currentUser: vi.fn(() => 'octocat'),
 }));
 
 vi.mock('./lib/git.js', () => ({

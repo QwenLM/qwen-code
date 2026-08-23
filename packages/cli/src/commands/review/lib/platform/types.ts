@@ -64,6 +64,67 @@ export const COMMENT_KINDS = ['review', 'inline', 'issue'] as const;
 export type CommentKind = (typeof COMMENT_KINDS)[number];
 
 /**
+ * One comment on a review target, normalized across platforms. `path`
+ * present marks an inline (diff-anchored) comment; its absence marks a
+ * thread-level comment on the target itself (GitHub issue comment / Aone
+ * global note). `parentId` links replies into threads (GitHub
+ * `in_reply_to_id` / Aone `parentNoteId`).
+ */
+export interface ReviewContextComment {
+  id: number;
+  /** The author's login/account; '' when the platform gives none. */
+  author: string;
+  body: string;
+  /** ISO timestamp; '' when the platform gives none. */
+  createdAt: string;
+  path?: string;
+  line?: number;
+  parentId?: number;
+}
+
+/**
+ * One review-level verdict (GitHub's review object). Platforms without the
+ * concept (Aone) report none — approvals there surface only through the
+ * merge-status checks.
+ */
+export interface ReviewContextVerdict {
+  id: number;
+  author: string;
+  body: string;
+  /** APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING | … */
+  state: string;
+  submittedAt: string;
+  /** The head commit the verdict was submitted against, when the platform
+   *  records one (GitHub `commit_id`). */
+  commitId?: string;
+}
+
+/**
+ * Everything `pr-context` reads about a review target, normalized: metadata,
+ * the comment channels, the platform's verdicts, and the bodies that carry
+ * this pipeline's machine-ledger markers (GitHub: the verdict bodies; Aone:
+ * the thread-level comments, where the posted summaries land).
+ */
+export interface ReviewContext {
+  title: string;
+  body: string;
+  authorLogin: string;
+  state: string;
+  baseRefName: string;
+  /** Branch name on GitHub. Aone: `sourceBranch` — a bare SHA under
+   *  AGit-Flow, rendered as `base ← <sha>`. */
+  headRefName: string;
+  headRefOid: string;
+  /** Absent where the platform reports no diff stats (Aone). */
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  comments: ReviewContextComment[];
+  verdicts: ReviewContextVerdict[];
+  ledgerCarriers: ReviewContextVerdict[];
+}
+
+/**
  * The metadata fetch-pr records when it pulls a PR's head into the review
  * worktree. GitHub reports diff stats; Aone does not, so those are optional
  * and computed locally from the fetched diff when absent.
@@ -140,6 +201,20 @@ export interface ReviewPlatformReader {
 
   /** The metadata fetch-pr records when it pulls the PR head. */
   getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta;
+
+  /**
+   * The normalized context `pr-context` renders: metadata, comments,
+   * verdicts, and the ledger carriers. The identity fail-closed policy
+   * stays in pr-context; this is a pure read.
+   */
+  getReviewContext(prNumber: number, ownerRepo: string): ReviewContext;
+
+  /**
+   * The authenticated account ('' on the empty-output shape; throws on a
+   * lookup failure). pr-context calls it only when comments exist, and
+   * applies its own fail-closed semantics to the answer.
+   */
+  getCurrentUser(): string;
 
   /**
    * The canonical web URL of the PR/MR. GitHub COMPOSES it — the URL

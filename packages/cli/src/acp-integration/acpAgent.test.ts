@@ -35,7 +35,7 @@ const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
 }));
-vi.mock('../utils/housekeeping/scheduler.js', () => ({
+vi.mock('../services/housekeeping/scheduler.js', () => ({
   startNonInteractiveOpenAILogHousekeeping:
     mockStartNonInteractiveOpenAILogHousekeeping,
 }));
@@ -244,6 +244,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SessionIdCaseConflictError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionIdCaseConflictError,
+  // The real helpers: `history-replay-page` is not mocked and calls them to
+  // compute the restore skip set when a replay is not suppress-driven.
+  lastHistoryContentFromRecords: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).lastHistoryContentFromRecords,
+  restorableAskUserQuestionCallIds: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).restorableAskUserQuestionCallIds,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -878,7 +886,7 @@ vi.mock('./session/Session.js', () => {
     }),
   };
 });
-vi.mock('../utils/languageUtils.js', () => ({
+vi.mock('../i18n/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(
     (
@@ -968,7 +976,10 @@ import {
   GoalInvalidTransitionError,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
+import {
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  SESSION_SOURCE_META_KEY,
+} from '@qwen-code/acp-bridge';
 import type {
   Agent,
   LoadSessionResponse,
@@ -1000,7 +1011,7 @@ import {
   resolveOutputLanguageOrPreserveAuto,
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
-} from '../utils/languageUtils.js';
+} from '../i18n/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -1034,6 +1045,7 @@ function goalSnapshot(
       evidenceCursor: { recordId: 'cursor-1' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 123,
       updatedAt: 123,
       ...overrides,
@@ -11752,6 +11764,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/session/loadUpdates finalizes a dangling ask_user_question even with the restore flag on', async () => {
+    const settings = makeCoreSettings();
+    mockConfig = {
+      ...mockConfig,
+      getRestoreAskUserQuestion: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-auq',
+                    name: 'ask_user_question',
+                    args: {
+                      questions: [
+                        {
+                          question: 'Which approach?',
+                          header: 'Approach',
+                          options: [
+                            { label: 'Polling', description: 'Poll the API' },
+                            { label: 'Webhook', description: 'Use a webhook' },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+    });
+    mockHistoryReplay.mockReset();
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    // The read-only dump never re-hangs the question, so the replayer must
+    // receive no skipFinalizeCallIds even though the restore flag is on and
+    // the transcript tail is a restorable ask_user_question.
+    expect(mockHistoryReplay).toHaveBeenCalled();
+    const replayOptions = mockHistoryReplay.mock.calls[0]?.[3] as
+      | Record<string, unknown>
+      | undefined;
+    expect(replayOptions?.['skipFinalizeCallIds']).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/status/session/transcript returns id-less replay events from transcript reader pages', async () => {
     const settings = makeCoreSettings();
     mockRunExitCleanup.mockResolvedValue(undefined);
@@ -16590,6 +16663,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getSessionService: vi.fn(),
       consumeSessionRestoreProjection: vi.fn(),
+      suppressRestorableAskUserQuestionPreservation: vi.fn(),
       // load path reads back the persisted conversation here and feeds
       // it to `session.replayHistory`. resume path doesn't read this.
       getResumedSessionData: vi
@@ -16959,6 +17033,65 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).toBe(true);
       } finally {
         mockArgv.restoreAskUserQuestion = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s suppresses AUQ preservation when the daemon declines the re-hang',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+          },
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(
+          innerConfig.suppressRestorableAskUserQuestionPreservation,
+        ).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s keeps AUQ preservation without the suppress meta key',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(
+          innerConfig.suppressRestorableAskUserQuestionPreservation,
+        ).not.toHaveBeenCalled();
+      } finally {
         mockConnectionState.resolve();
         await agentPromise;
       }
@@ -17986,6 +18119,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 0,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 1,
       },
