@@ -81,6 +81,17 @@ export async function refreshWorkspaceSessionPrStates(
     for (const sessionId of sessionService.listSessionIdsWithPrSidecar(
       archiveState,
     )) {
+      // The sidecar enumeration (unlike listSessions) sees foreign sessions
+      // whose sanitized cwds collide onto this chats dir — never rewrite
+      // another project's bindings.
+      if (
+        !(await sessionService.sessionPrSidecarBelongsToCurrentProject(
+          sessionId,
+          archiveState,
+        ))
+      ) {
+        continue;
+      }
       const prPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
         archiveState,

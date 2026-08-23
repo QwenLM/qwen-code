@@ -237,6 +237,13 @@ describe('backfillWorkspaceSessionPrs', () => {
     const result = await backfillWorkspaceSessionPrs(runtime);
 
     expect(result).toMatchObject({ scanned: 1, bound: 1, unresolved: 0 });
+    // The fetch options are load-bearing: state 'all' makes merged heads
+    // bindable, and slim avoids the GraphQL timeouts on large queries.
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      undefined,
+      { state: 'all', limit: 500, slim: true },
+    );
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
@@ -469,6 +476,66 @@ describe('backfillWorkspaceSessionPrs', () => {
       overLimit: 2,
     });
     expect(await readSessionPrs(prPath)).toEqual(afterFirst);
+  });
+
+  it('binds the newest PR when several share one head branch', async () => {
+    await seedSession(SESSION_A, 'chore/deps');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      // gh pr list arrives newest-first; the newest PR owns the reused
+      // branch, so the stale merged PR must lose the mapping.
+      pullRequests: [pr(250, 'chore/deps'), pr(10, 'chore/deps')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.map((entry) => entry.number)).toEqual([250]);
+  });
+
+  it('keeps the convention number bound when candidates exceed the cap', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    for (let i = 2; i <= 12; i++) {
+      await fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    }
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(50, 'worktree-pr-50'),
+        ...Array.from({ length: 12 }, (_, i) => pr(i + 1, `b-${i + 1}`)),
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 10, overLimit: 3 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    // The pr-<N> slug names the session's own PR — the tail slice must not
+    // evict it in favor of branch-mapped numbers.
+    expect(prs?.map((entry) => entry.number)).toContain(50);
   });
 
   it('keeps backfilling other sessions when one sidecar write fails', async () => {

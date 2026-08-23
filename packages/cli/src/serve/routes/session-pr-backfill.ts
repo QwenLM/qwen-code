@@ -223,7 +223,13 @@ export async function backfillWorkspaceSessionPrs(
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-      if (pr.headRefName) branchToNumber.set(pr.headRefName, pr.number);
+      // First-write-wins: the list arrives newest-first (gh's order
+      // survives the slim fetch's no-op sort), so the newest PR owns a
+      // reused head branch — overwriting would map the branch to the
+      // oldest PR instead.
+      if (pr.headRefName && !branchToNumber.has(pr.headRefName)) {
+        branchToNumber.set(pr.headRefName, pr.number);
+      }
     }
   }
 
@@ -246,7 +252,16 @@ export async function backfillWorkspaceSessionPrs(
     // rotating the list forever instead of converging.
     if (numbers.length > SESSION_PR_LIST_LIMIT) {
       result.overLimit += numbers.length - SESSION_PR_LIST_LIMIT;
-      numbers = numbers.slice(-SESSION_PR_LIST_LIMIT);
+      if (candidate.conventionNumber !== undefined) {
+        // The pr-<N> slug names the session's own PR — keep it and evict
+        // the oldest branch-mapped numbers instead.
+        numbers = [
+          candidate.conventionNumber,
+          ...numbers.slice(1).slice(-(SESSION_PR_LIST_LIMIT - 1)),
+        ];
+      } else {
+        numbers = numbers.slice(-SESSION_PR_LIST_LIMIT);
+      }
     }
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,

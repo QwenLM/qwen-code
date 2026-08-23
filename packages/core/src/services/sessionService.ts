@@ -693,6 +693,38 @@ export class SessionService {
       .map((name) => name.slice(0, -'.pr.json'.length));
   }
 
+  /**
+   * Project-membership check for sidecar-driven callers (the PR refresh
+   * sweep) that enumerate chats-dir files directly. That enumeration —
+   * unlike {@link listSessions} — also sees sessions of other projects
+   * whose sanitized cwds collide onto the same chats dir, so the
+   * transcript head must pass the same rule listSessions applies when it
+   * exists. A missing transcript is inconclusive: the sidecar may predate
+   * the session's first flush, so the binding must stay refreshable.
+   */
+  async sessionPrSidecarBelongsToCurrentProject(
+    sessionId: string,
+    archiveState: SessionArchiveState,
+  ): Promise<boolean> {
+    let records: ChatRecord[];
+    try {
+      records = await jsonl.readLines<ChatRecord>(
+        this.getSessionFilePath(sessionId, archiveState),
+        1,
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.warn(
+          `sessionPrSidecarBelongsToCurrentProject: failed to read ${sessionId}: ${error}`,
+        );
+      }
+      return true;
+    }
+    const head = records[0];
+    if (!head) return true;
+    return this.sessionBelongsToCurrentProject(sessionId, head.cwd);
+  }
+
   private async readProjectSessionHead(
     sessionId: string,
     filePath: string,
