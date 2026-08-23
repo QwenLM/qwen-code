@@ -102,6 +102,7 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import {
+  resolveOnPath,
   DEFAULT_COLS,
   DEFAULT_ROWS,
   captureServerName,
@@ -113,7 +114,6 @@ import {
   isNothingToKill,
   isSocketDirNeverCreated,
   isSocketDirUnusable,
-  isSocketPathAbsent,
   verdictExaminedBase,
   validGeometry,
   type CaptureManifest,
@@ -235,40 +235,6 @@ export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
  * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
  * without this seam that path is untestable in the one environment where it
  * matters. Tests override a probe and restore it; production never does. */
-/** The first executable `bin` on an ABSOLUTE element of this process's PATH,
- * or undefined.
- *
- * In-process rather than a spawn, because the answer needed is the PATH
- * lookup itself — a path this file hands to `spawnSync` and embeds in the
- * holder script — not an exit code.
- *
- * Deliberately narrower than execvp, in one respect: a PATH element that is
- * not absolute is SKIPPED. POSIX reads an empty element as the current
- * directory and honours relative ones against it, and the capture's cwd is
- * the reviewed worktree — so either rule lets the PR under review supply the
- * binary. Two things follow from skipping them, and both are load-bearing:
- * the answer is absolute by CONSTRUCTION, which is what the holder script
- * needs (a relative path there is re-resolved against the PANE's `--cwd`,
- * putting the lookup back where this function exists to take it from), and
- * the reviewed tree cannot supply it. A host whose only `sleep` sits on a
- * relative element gets a refusal that names the cause, which is the right
- * end for an evidence tool.
- */
-function resolveOnPath(bin: string): string | undefined {
-  for (const dir of (process.env['PATH'] ?? '').split(':')) {
-    if (!isAbsolute(dir)) continue;
-    const candidate = join(dir, bin);
-    try {
-      accessSync(candidate, fsConstants.X_OK);
-      if (statSync(candidate).isFile()) return candidate;
-    } catch {
-      // Absent here, a directory, or not executable by this uid: keep going,
-      // exactly as execvp would.
-    }
-  }
-  return undefined;
-}
-
 export const probes = {
   // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.1, and a
   // host with an older tmux must be told so up front — the real cause named,
@@ -283,6 +249,30 @@ export const probes = {
   // how the degraded-PATH refusal below gets covered at all.
   sleepBin: (): string | undefined => resolveOnPath('sleep'),
 };
+
+/** The flags every artifact write opens with.
+ *
+ * Named and exported because the one that matters most cannot be reached by
+ * a behavioural test: `O_NONBLOCK` only changes the outcome when a FIFO
+ * lands in the microseconds between `changed()`'s lstat and this open. A
+ * FIFO present at any other moment is caught by `changed()` as the occupant
+ * it is, so a test can only win that race by spraying — and a race a test
+ * loses proves nothing. Without the flag, `open(O_WRONLY)` on a FIFO waits
+ * for a reader that never comes, on the MAIN THREAD, inside a synchronous
+ * syscall: the refusal contract breaks outright (no reason on stdout, no
+ * exit 3) and only an external SIGKILL ends it. The manifest READ open
+ * carries the same flag against the same class, and that side IS covered.
+ *
+ * `O_NOFOLLOW` so a symlink at the path is never written THROUGH; the
+ * atomic create-or-fail form, and the identity guarantees that go with it,
+ * are the hardening PR's business. A regular file is unaffected by either.
+ */
+export const ARTIFACT_OPEN_FLAGS =
+  fsConstants.O_WRONLY |
+  fsConstants.O_CREAT |
+  fsConstants.O_TRUNC |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0);
 
 /** A capture manifest is a few hundred bytes; anything past this is not
  * one, and reading it would cost more than refusing does. */
@@ -590,19 +580,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           `capture did not write — refusing to replace it`,
       );
     }
-    // O_NOFOLLOW so a symlink at the path is never written THROUGH; the
-    // atomic create-or-fail form, and the identity guarantees that go with
-    // it, are the hardening PR's business.
     let fd: number;
     try {
-      fd = openSync(
-        path,
-        fsConstants.O_WRONLY |
-          fsConstants.O_CREAT |
-          fsConstants.O_TRUNC |
-          (fsConstants.O_NOFOLLOW ?? 0),
-        0o666,
-      );
+      fd = openSync(path, ARTIFACT_OPEN_FLAGS, 0o666);
     } catch (e) {
       // EEXIST never fires without O_EXCL (the atomic create-or-fail form
       // is the hardening PR's business): the raced shape this guard was
@@ -613,7 +593,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // (probe-verified: same occupant, one microsecond apart, one outcome
       // deleted it). Both errnos are the collision.
       const code = (e as NodeJS.ErrnoException).code;
-      if (code === 'EEXIST' || code === 'ELOOP') {
+      // ENXIO joins them: a FIFO that failed the non-blocking open is a
+      // claimant this run did not write, which is exactly what the other
+      // two mean.
+      if (code === 'EEXIST' || code === 'ELOOP' || code === 'ENXIO') {
         throw new ArtifactCollision(
           `${path} was claimed during the capture window by something this ` +
             `capture did not write — refusing to replace it`,
@@ -1464,10 +1447,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         try {
           tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
           baseDead = true;
-          // Death established GLOBALLY: the server name is unique to this
-          // run, so a kill that succeeded reaped this server whichever
-          // base answered.
-          confirmedDead = true;
+          // Death established GLOBALLY only where this kill CAN have reached
+          // this run's server. The name is unique to this run, but uniqueness
+          // is not exclusivity under this file's threat model: the captured
+          // command reads the name from `$TMUX` and can bind a sacrificial
+          // server at that name under the OTHER candidate base, whose exit-0
+          // kill then vouched for a server it never touched and silenced the
+          // orphan WARNING for the real one. A present stamp PROVES the bind
+          // happened on the start base, so a success anywhere else cannot be
+          // ours; with no stamp the bind site is unknown and any base's
+          // success is the best evidence there is — which is the fallback
+          // shape this inference was written for.
+          if (resolve(base) === startBase || socketStampIno === undefined) {
+            confirmedDead = true;
+          }
         } catch (e) {
           // A spawn that never ran says nothing about the server: the
           // WARNING has to separate "tmux told us it failed" from "we could
@@ -1510,21 +1503,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // mid-window can answer about a socket this run never owned, and
           // the live server behind the destroyed one would read as dead.
           const onStartBase = resolve(base) === startBase;
+          // The ENOENT class is NOT credited, on any base, under any flag.
+          // It says the socket path was gone at look time and nothing more,
+          // and every proxy for "so the server never existed" has turned out
+          // to be a different question: an absent stamp is also absent when
+          // the stamp failed after a successful start, and `startThrew` is
+          // also set for a belt-cut start that threw with the server already
+          // forked and its socket bound (the shape this file documents at
+          // the start call). Both were tried here and both conflated. On a
+          // real tmux, `rm` of a live server's socket answers this exact
+          // wording while `kill -0` shows the server alive — and the
+          // captured command, untrusted same-uid code, is the thing that
+          // removes it. So the wording buys doubt, not death; the run says
+          // so out loud rather than exiting 0 over an orphan that neither
+          // `-L` nor the readdir sweep can reach any more.
           baseDead =
-            (isNothingToKill(stderrText) ||
-              // `startThrew`, not an absent stamp: the comment above says
-              // this class establishes death only where start never bound a
-              // socket, and an absent stamp cannot carry that — it is also
-              // absent when the stamp FAILED after a successful start (this
-              // file's own `startThrew` declaration says so). In that state
-              // the ENOENT wording was credited while the server stood, and
-              // both bases credited it, so the run exited 0 with no WARNING
-              // and orphaned server and holder for the holder's whole
-              // window. Nothing is lost where start bound under the other
-              // base: that base's own kill succeeds and its confirmed death
-              // is global, so the uncredited verdict here raises no warning
-              // of its own.
-              (isSocketPathAbsent(stderrText) && startThrew)) &&
+            isNothingToKill(stderrText) &&
             verdictExaminedBase(stderrText, base) &&
             !(
               isSocketDirNeverCreated(stderrText) &&

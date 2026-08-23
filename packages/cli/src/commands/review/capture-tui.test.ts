@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -24,6 +25,7 @@ import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import {
+  ARTIFACT_OPEN_FLAGS,
   captureTuiCommand,
   freezeRender,
   hostStateFor,
@@ -719,6 +721,177 @@ exit 0
         if (realPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = realPath;
         rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('opens artifact writes non-blocking — a FIFO must refuse, not wedge', () => {
+    // The one flag here that a behavioural test cannot reach: O_NONBLOCK
+    // only decides the outcome when a FIFO lands in the microseconds
+    // between changed()'s lstat and the open, and a FIFO at any other
+    // moment is caught by changed() as the occupant it is. Without it,
+    // open(O_WRONLY) on a FIFO waits for a reader forever — on the main
+    // thread, inside a synchronous syscall — so the machine-read refusal
+    // contract breaks entirely and only an external SIGKILL ends the run.
+    // Pinned at the flag set, which is the thing an edit would drop.
+    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_WRONLY).toBeTruthy();
+    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_CREAT).toBeTruthy();
+    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_TRUNC).toBeTruthy();
+    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_NOFOLLOW).toBeTruthy();
+    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_NONBLOCK).toBeTruthy();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a start that THREW still warns — the ENOENT wording buys doubt, not death',
+    async () => {
+      // The ENOENT class says the socket path was gone when the client
+      // looked, and nothing else. Two proxies for "so the server never
+      // existed" were tried here and both conflated: an absent stamp is
+      // also absent when the stamp failed AFTER a successful start, and
+      // `startThrew` is also set for a belt-cut start that threw with the
+      // server already forked and its socket bound — the shape this file
+      // documents at the start call. On a real tmux, `rm` of a live
+      // server's socket answers this exact wording while `kill -0` shows it
+      // alive, and the captured command is the thing that removes it. So
+      // the class credits nothing on any base: a refusal that cannot prove
+      // the server is gone says so, at the cost of a warning in the shape
+      // where it truly never came up.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-startthrew-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // start FAILS and binds nothing the stamp could see; every kill then
+      // answers the ENOENT class.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    echo "start refused" >&2
+    exit 1
+  fi
+  if [ "$a" = "kill-server" ]; then
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not let a kill on another base vouch for the start base',
+    async () => {
+      // A successful kill used to establish death GLOBALLY on the strength
+      // of the server name being unique to this run. Unique is not
+      // exclusive here: the captured command reads that name from `$TMUX`
+      // and can bind a sacrificial server under the OTHER candidate base,
+      // whose exit-0 kill then vouched for a server it never touched and
+      // silenced the orphan WARNING for the real one. A present stamp
+      // proves the bind happened on the start base, so a success anywhere
+      // else cannot be this run's.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-crossbase-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // Binds under the START base (so the stamp is taken there), then
+      // answers the start base's kill with the ENOENT class — the shape of
+      // a live server whose socket was removed — while the OTHER base's
+      // kill exits 0, as a sacrificial server's would.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+    : > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    if [ "$TMUX_TMPDIR" = "${envBase}" ]; then
+      echo "error connecting to $TMUX_TMPDIR/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        // The capture succeeds; what must not happen is the silence.
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
       }
     },
   );

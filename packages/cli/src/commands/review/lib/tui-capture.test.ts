@@ -11,7 +11,6 @@ import {
   isNothingToKill,
   isSocketDirNeverCreated,
   isSocketDirUnusable,
-  isSocketPathAbsent,
   verdictExaminedBase,
   tmuxPlan,
   tmuxSupportsCaptureN,
@@ -58,7 +57,6 @@ describe('kill-server stderr classification', () => {
   ];
   for (const line of pathAbsent) {
     it(`never establishes death on its own: ${line.slice(0, 40)}`, () => {
-      expect(isSocketPathAbsent(line)).toBe(true);
       expect(isNothingToKill(line)).toBe(false);
       expect(isSocketDirUnusable(line)).toBe(false);
     });

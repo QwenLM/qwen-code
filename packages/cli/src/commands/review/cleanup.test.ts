@@ -30,6 +30,14 @@ type SweepEntryStat = {
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
+  // The sweep resolves `tmux` on PATH before it will spawn it, and that walk
+  // reads node:fs — so it has to come through this file's mock like every
+  // other read, or the tests would depend on where the host installed tmux.
+  // The default refuses every candidate: a describe that needs a resolvable
+  // binary says so.
+  accessSync: vi.fn((_path: string): void => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   existsSync: vi.fn((_path: string): boolean => false),
   // The path is taken because several tests dispatch on it. The default
   // answer serves BOTH lstat consumers at once: the redirect guard reads
@@ -101,6 +109,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     default: {
       ...actual,
+      accessSync: mocks.accessSync,
       existsSync: mocks.existsSync,
       lstatSync: mocks.lstatSync,
       readdirSync: mocks.readdirSync,
@@ -108,6 +117,7 @@ vi.mock('node:fs', async (importOriginal) => {
       statSync: mocks.statSync,
       rmSync: mocks.rmSync,
     },
+    accessSync: mocks.accessSync,
     existsSync: mocks.existsSync,
     lstatSync: mocks.lstatSync,
     readdirSync: mocks.readdirSync,
@@ -200,6 +210,9 @@ describe('runCleanup', () => {
     // on the marker signal, and the mtime/plan-missing branches under
     // test never even evaluate.
     mocks.statSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.accessSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     mocks.readFileSync.mockImplementation(() => {
@@ -446,6 +459,13 @@ describe('runCleanup', () => {
       // name. The pid liveness probe and the tmux kill are the two halves.
       const uid = process.getuid?.();
       const dir = `/fake-tmp/tmux-${String(uid)}`;
+      // The sweep resolves `tmux` on PATH before it will spawn anything, and
+      // that walk goes through this file's own node:fs mock — so the walk is
+      // given a deterministic answer rather than the host's real tmux, which
+      // would make these assertions depend on where the machine installed it.
+      const SWEEP_PATH_DIR = '/fake-bin';
+      const SWEEP_TMUX = `${SWEEP_PATH_DIR}/tmux`;
+      let realPath: string | undefined;
       // A pid that WAS alive and is not: spawn a process and let it exit.
       const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
       const deadPid2 = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
@@ -463,6 +483,19 @@ describe('runCleanup', () => {
 
       beforeEach(() => {
         process.env['TMUX_TMPDIR'] = '/fake-tmp';
+        realPath = process.env['PATH'];
+        // One absolute element, holding one binary: the resolution the sweep
+        // performs is then a fact of the fixture rather than of the host.
+        process.env['PATH'] = SWEEP_PATH_DIR;
+        mocks.accessSync.mockImplementation((p: string) => {
+          if (p !== SWEEP_TMUX) {
+            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          }
+        });
+        mocks.statSync.mockImplementation((p: string) => {
+          if (p === SWEEP_TMUX) return { isFile: () => true } as never;
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
         mocks.existsSync.mockImplementation((p: string) => p === dir);
         mocks.readdirSync.mockImplementation((p: string) =>
           // The foreign socket comes FIRST: a continue→break mutant stops the
@@ -478,13 +511,15 @@ describe('runCleanup', () => {
 
       afterEach(() => {
         delete process.env['TMUX_TMPDIR'];
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
       });
 
       it('reaps sockets whose launcher pid is dead and leaves live ones alone', () => {
         runCleanup('local');
 
         expect(mocks.execFileSync).toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', orphan, 'kill-server'],
           expect.objectContaining({
             stdio: 'pipe',
@@ -496,7 +531,7 @@ describe('runCleanup', () => {
           }),
         );
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', live, 'kill-server'],
           expect.objectContaining({
             stdio: 'pipe',
@@ -529,7 +564,7 @@ describe('runCleanup', () => {
         // on non-match kill-server'd the user's default server in probe (the
         // blast radius private -L isolation exists to prevent).
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', 'some-other-socket', 'kill-server'],
           expect.anything(),
         );
@@ -582,7 +617,7 @@ describe('runCleanup', () => {
         // Throw for the FIRST orphan only (both retry attempts), so the sweep
         // must note it and CONTINUE to the second one.
         mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
-          if (bin === 'tmux' && argv?.[1] === orphan) {
+          if (bin === SWEEP_TMUX && argv?.[1] === orphan) {
             throw Object.assign(new Error('wedged'), {
               stderr: 'tmux: server is wedged',
             });
@@ -615,7 +650,7 @@ describe('runCleanup', () => {
         // The sweep REACHED the orphan listed after the wedged one — a
         // continue→break mutant left it alive for the holder's bounded window, unnoted.
         expect(mocks.execFileSync).toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', orphan2, 'kill-server'],
           expect.objectContaining({
             stdio: 'pipe',
@@ -670,7 +705,7 @@ describe('runCleanup', () => {
         // state, not a failure: the socket is litter and must still go. A
         // `serverDead = false` mutant ships this branch green otherwise.
         mocks.execFileSync.mockImplementation((bin: string) => {
-          if (bin === 'tmux') {
+          if (bin === SWEEP_TMUX) {
             throw Object.assign(new Error('exited 1'), {
               stderr: Buffer.from(`no server running on ${dir}/${orphan}`),
             });
@@ -689,6 +724,67 @@ describe('runCleanup', () => {
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
         );
+      });
+
+      it('never spawns a bare tmux name — the cwd is the reviewed tree', () => {
+        // execvp honours the empty-PATH-element → cwd rule, and `cleanup`
+        // runs with the reviewed worktree as its cwd: on a host whose PATH
+        // carries an empty element, a `tmux` committed to the PR under
+        // review is what the pinned kill-server executes, with the
+        // reviewer's environment. The sweep resolves on absolute elements
+        // only, so an unresolvable tmux is a disclosed skip rather than a
+        // spawn of whatever the tree supplied.
+        mocks.accessSync.mockImplementation(() => {
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('not reachable at any absolute PATH element'),
+        );
+        // A skip is a failure to reap, so it must not read as a clean run.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('ignores a capture-PREFIXED name that the producer cannot mint', () => {
+        // The matcher is anchored to the producer's whole shape, not its
+        // prefix. With an open suffix a same-uid planter chose the rest of
+        // the name — and the sweep put that name into a command built to be
+        // PASTED, plus its stdout and stderr lines, so `$(…)` in a socket
+        // name reached an operator's shell. Nothing here is escaped after
+        // the fact; the name simply never becomes this sweep's business.
+        const forged = `${captureServerName(Number(deadPid), 'aaaa')}$(touch pwned)`;
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [forged] : [],
+        );
+
+        runCleanup('local');
+
+        // Never inspected, never killed, never named on either stream.
+        expect(mocks.lstatSync).not.toHaveBeenCalledWith(`${dir}/${forged}`);
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', forged, 'kill-server'],
+          expect.anything(),
+        );
+        for (const spy of [mocks.writeStdoutLine, mocks.writeStderrLine]) {
+          for (const call of spy.mock.calls) {
+            expect(String(call[0])).not.toContain('touch pwned');
+          }
+        }
       });
 
       it('never follows a symlink planted under a capture-shaped name', () => {
@@ -716,7 +812,7 @@ describe('runCleanup', () => {
         runCleanup('local');
 
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', planted, 'kill-server'],
           expect.anything(),
         );
@@ -757,7 +853,7 @@ describe('runCleanup', () => {
         runCleanup('local');
 
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', planted, 'kill-server'],
           expect.anything(),
         );
@@ -777,7 +873,7 @@ describe('runCleanup', () => {
         // isSocket() completes the guard: a planted regular file or FIFO
         // is not a server, and a kill-server pointed at it probes at best
         // an error and at worst something unrelated.
-        const planted = captureServerName(Number(deadPid), 'gggg');
+        const planted = captureServerName(Number(deadPid), '0d0d');
         mocks.readdirSync.mockImplementation((p: string) =>
           p === dir ? [planted] : [],
         );
@@ -794,7 +890,7 @@ describe('runCleanup', () => {
         runCleanup('local');
 
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', planted, 'kill-server'],
           expect.anything(),
         );
@@ -814,7 +910,7 @@ describe('runCleanup', () => {
         // exists on the connect itself — but the success line must not
         // assert a certainty the sweep does not have, so the post-kill
         // identity re-check names the swap instead.
-        const planted = captureServerName(Number(deadPid), 'hhhh');
+        const planted = captureServerName(Number(deadPid), '1e1e');
         mocks.readdirSync.mockImplementation((p: string) =>
           p === dir ? [planted] : [],
         );
@@ -859,7 +955,7 @@ describe('runCleanup', () => {
         // running server and kill answers exactly this). Not death, not an
         // unlink, and loud like the other never-death wordings.
         mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
-          if (bin === 'tmux' && argv?.[1] === orphan) {
+          if (bin === SWEEP_TMUX && argv?.[1] === orphan) {
             throw Object.assign(new Error('exited 1'), {
               stderr: Buffer.from(
                 `error connecting to ${dir}/${orphan} ` +
@@ -1185,7 +1281,7 @@ describe('runCleanup', () => {
         // The mocked execFileSync cannot show that; the env it is called
         // with can.
         expect(mocks.execFileSync).toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', orphan, 'kill-server'],
           expect.objectContaining({
             env: expect.objectContaining({
@@ -1218,7 +1314,7 @@ describe('runCleanup', () => {
         // The kill carries the padded base too — trimming EITHER side
         // sends tmux to a directory it never used.
         expect(mocks.execFileSync).toHaveBeenCalledWith(
-          'tmux',
+          SWEEP_TMUX,
           ['-L', orphan, 'kill-server'],
           expect.objectContaining({
             env: expect.objectContaining({ TMUX_TMPDIR: '/fake-tmp ' }),
@@ -1263,7 +1359,7 @@ describe('runCleanup', () => {
       it('reaps on the SECOND kill attempt — the sweep retry is real', () => {
         let calls = 0;
         mocks.execFileSync.mockImplementation((bin: string) => {
-          if (bin === 'tmux') {
+          if (bin === SWEEP_TMUX) {
             calls++;
             if (calls === 1) {
               throw Object.assign(new Error('transient'), {
@@ -1286,7 +1382,7 @@ describe('runCleanup', () => {
         // each attempt pays the full 15s belt before the cleanup moves on.
         const killCalls = mocks.execFileSync.mock.calls.filter(
           (c: unknown[]) =>
-            c[0] === 'tmux' &&
+            c[0] === SWEEP_TMUX &&
             Array.isArray(c[1]) &&
             (c[1] as string[]).includes('kill-server') &&
             (c[1] as string[]).includes(orphan),
@@ -1301,7 +1397,7 @@ describe('runCleanup', () => {
         // the full 15s belt per attempt against a genuinely wedged server
         // while the cleanup waits.
         mocks.execFileSync.mockImplementation((bin: string) => {
-          if (bin === 'tmux') {
+          if (bin === SWEEP_TMUX) {
             throw Object.assign(new Error('wedged'), {
               stderr: 'tmux: server is wedged',
             });
@@ -1311,7 +1407,7 @@ describe('runCleanup', () => {
         runCleanup('local');
         const killCalls = mocks.execFileSync.mock.calls.filter(
           (c: unknown[]) =>
-            c[0] === 'tmux' &&
+            c[0] === SWEEP_TMUX &&
             Array.isArray(c[1]) &&
             (c[1] as string[]).includes('kill-server') &&
             (c[1] as string[]).includes(orphan),
@@ -1328,7 +1424,7 @@ describe('runCleanup', () => {
           p === dir ? [orphan] : [],
         );
         mocks.execFileSync.mockImplementation((bin: string) => {
-          if (bin === 'tmux') {
+          if (bin === SWEEP_TMUX) {
             throw Object.assign(new Error('wedged'), {
               stderr: 'tmux: server is wedged',
             });

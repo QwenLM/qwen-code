@@ -18,7 +18,12 @@
 // verdict-path canonicalization, which falls back to lexical resolution when
 // a path does not resolve. The command layer owns the processes.
 
-import { realpathSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { posix } from 'node:path';
 
 /** The one server-name prefix, shared by the producer (captureServerName)
@@ -33,8 +38,15 @@ export const CAPTURE_SERVER_PREFIX = 'qwen-review-capture-';
  * never be created (measured with a mode-0555 TMUX_TMPDIR) — `couldn't
  * create directory <dir> (Permission denied)`. Reading only the first
  * wording printed a false orphan WARNING naming a server that never
- * existed. The ENOENT-class wordings are deliberately NOT here — see
- * isSocketPathAbsent. */
+ * existed. The ENOENT-class wordings (`error connecting to <path> (No such
+ * file or directory)`, and the bare one) are deliberately NOT here and have
+ * no predicate of their own any more: they prove the socket PATH was gone
+ * when the client looked and nothing else — a live server behind a removed
+ * socket answers exactly them (probed live: rm the socket under a running
+ * server, kill-server exits 1 with the wording, kill -0 shows it alive) —
+ * and every attempt to name the sub-shape where absence WOULD mean death
+ * conflated it with something else, so no caller credits the class at all.
+ * The tests below pin them out of this predicate. */
 export function isNothingToKill(stderr: string): boolean {
   return (
     /no server running/i.test(stderr) ||
@@ -45,22 +57,6 @@ export function isNothingToKill(stderr: string): boolean {
     // TMUX_TMPDIR).
     /file name too long/i.test(stderr)
   );
-}
-
-/** Whether a failed `kill-server` says the socket PATH was absent when the
- * client looked — `error connecting to <path> (No such file or directory)`
- * and the bare `no such file or directory`. Deliberately NOT part of
- * isNothingToKill, though both wordings also appear when there was never a
- * server: they prove only that the path was gone at look time — a LIVE
- * server behind a removed socket file answers exactly these (probed live:
- * rm the socket file under a running server, kill-server exits 1 with the
- * wording, kill -0 shows it alive). Split out for the same folded-in
- * reason isSocketDirUnusable carries: crediting the class read a live
- * server as reaped in both consumers (the reap and the sweep). The caller
- * knows the one shape where absence IS the goal state — a start that never
- * bound a socket — and credits it there. */
-export function isSocketPathAbsent(stderr: string): boolean {
-  return /no such file or directory/i.test(stderr);
 }
 
 /** Whether a failed `kill-server` says the CLIENT could not reach the
@@ -167,6 +163,64 @@ export function isSocketDirNeverCreated(stderr: string): boolean {
  * "drives the user's own windows". A pid+nonce-scoped socket name means even
  * two concurrent reviews cannot collide.
  */
+/** The first executable `bin` on an ABSOLUTE element of this process's PATH,
+ * or undefined.
+ *
+ * In-process rather than a spawn, because the answer needed is the PATH
+ * lookup itself — a path that gets handed to `spawnSync` and embedded in the
+ * holder script — not an exit code.
+ *
+ * Deliberately narrower than execvp in one respect: a PATH element that is
+ * not absolute is SKIPPED. POSIX reads an empty element as the current
+ * directory and resolves relative ones against it, and both `capture-tui` and
+ * `cleanup` run with the REVIEWED WORKTREE as their cwd — so either rule lets
+ * the PR under review supply the binary they execute. Two things follow, and
+ * both are load-bearing: the answer is absolute by CONSTRUCTION, which is what
+ * the holder script needs (a relative path there is re-resolved against the
+ * PANE's own `--cwd`), and the reviewed tree cannot supply it. A host whose
+ * only copy of a binary sits on a relative element gets a refusal that names
+ * the cause, which is the right end for an evidence tool.
+ *
+ * POSIX-only, like everything else here: the separator is `:` and the
+ * elements are POSIX paths.
+ */
+export function resolveOnPath(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  for (const dir of (env['PATH'] ?? '').split(':')) {
+    if (!posix.isAbsolute(dir)) continue;
+    const candidate = posix.join(dir, bin);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Absent here, a directory, or not executable by this uid: keep going,
+      // exactly as execvp would.
+    }
+  }
+  return undefined;
+}
+
+/** The exact shape `captureServerName` mints, anchored end to end.
+ *
+ * The orphan sweep matches THIS rather than the bare prefix. An open suffix
+ * let a same-uid planter choose the rest of a name that the sweep then put
+ * into a command built to be PASTED, plus a stdout and a stderr line — so
+ * `qwen-review-capture-<dead pid>-x$(…)` reached an operator's shell.
+ * Anchoring the whole name closes every one of those interpolations at the
+ * source instead of one escape at a time, and narrows what the sweep is
+ * willing to kill to names this tool can have produced.
+ *
+ * The nonce is matched by its ALPHABET, not its current length: a hex run
+ * cannot carry a shell metacharacter, which is the whole property needed,
+ * while pinning the count would silently stop the sweep from reaping the
+ * day someone widens `randomBytes`. It lives here, beside the producer, so
+ * the two cannot drift — and the test mints a real name to prove it. */
+export const CAPTURE_SERVER_NAME_RE = new RegExp(
+  `^${CAPTURE_SERVER_PREFIX}(\\d+)-[0-9a-f]+$`,
+);
+
 export function captureServerName(pid: number, nonce: string): string {
   return `${CAPTURE_SERVER_PREFIX}${pid}-${nonce}`;
 }

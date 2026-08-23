@@ -27,9 +27,10 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
-  CAPTURE_SERVER_PREFIX,
+  CAPTURE_SERVER_NAME_RE,
   isNothingToKill,
   isSocketDirUnusable,
+  resolveOnPath,
 } from './lib/tui-capture.js';
 import {
   clearReviewWorktreeLease,
@@ -601,7 +602,10 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       );
     }
   }
-  const orphanRe = new RegExp(`^${CAPTURE_SERVER_PREFIX}(\\d+)-`);
+  // The producer's own anchored shape, not a prefix — see its declaration
+  // for why the whole name has to be matched and why the nonce is pinned by
+  // alphabet rather than length.
+  const orphanRe = CAPTURE_SERVER_NAME_RE;
   for (const { dir, name } of entries) {
     const m = orphanRe.exec(name);
     if (!m) continue;
@@ -661,11 +665,28 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     // after a long review's many spawns) is the named shape, and the
     // identical second attempt reaps what otherwise lives out the holder's
     // bounded three-hour window.
+    // Resolved, never bare — the half the comment below used to claim from
+    // capture-tui's control calls without carrying it. execvp honours the
+    // empty-PATH-element → cwd rule, and `cleanup` runs with the reviewed
+    // worktree as its cwd: on a host whose PATH has an empty element, a
+    // `tmux` committed to the PR under review is what this kill executes,
+    // with the reviewer's environment. Resolved HERE rather than at sweep
+    // start so a host with no tmux and no orphans stays silent.
+    const tmuxBin = resolveOnPath('tmux');
+    if (tmuxBin === undefined) {
+      failedAny = true;
+      writeStderrLine(
+        `note: could not reap orphaned capture server ${name}: tmux is not ` +
+          'reachable at any absolute PATH element, and this sweep will not ' +
+          'resolve it through the current directory',
+      );
+      continue;
+    }
     let serverDead = false;
     let dirUnusable = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
       try {
-        execFileSync('tmux', ['-L', name, 'kill-server'], {
+        execFileSync(tmuxBin, ['-L', name, 'kill-server'], {
           stdio: 'pipe',
           // The scan finds sockets under BOTH bases, but `-L` re-resolves
           // the socket directory from THIS process's environment — and tmux
@@ -717,7 +738,12 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
           // or a backtick expands at paste time and resolves the wrong
           // base — the same confusion this note exists to prevent.
           `(TMUX_TMPDIR='${dirname(dir).replaceAll("'", "'\\''")}' ` +
-          `tmux -L ${name} kill-server to reap it by hand)`,
+          // The name is quoted for the same reason the base above it is, and
+          // belt-and-braces on top of the anchored `orphanRe`: this line is
+          // built to be PASTED, so anything reaching it that a shell would
+          // read runs in the operator's cwd. The regex is the gate; this is
+          // the second wall behind it.
+          `tmux -L '${name.replaceAll("'", "'\\''")}' kill-server to reap it by hand)`,
       );
       continue;
     }
