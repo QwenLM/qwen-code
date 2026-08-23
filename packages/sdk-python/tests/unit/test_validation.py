@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
-
 from qwen_code_sdk.errors import ValidationError
 from qwen_code_sdk.types import PermissionMode, QueryOptions, TimeoutOptions
 from qwen_code_sdk.validation import validate_query_options
