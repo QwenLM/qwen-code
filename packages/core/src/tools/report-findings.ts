@@ -77,8 +77,16 @@ export function compressFindingSummary(
   if (flat.length <= max) return flat;
   // Cut on a word boundary when one is reasonably near the limit, so the label
   // reads as a clause rather than a severed word. `max - 1` leaves room for the
-  // ellipsis, which is one character (U+2026), not three dots.
-  const head = flat.slice(0, max - 1);
+  // ellipsis, which is one character (U+2026), not three dots. The hard cut
+  // backs off one unit when it would land inside a surrogate pair — an
+  // unpaired high surrogate is not a character, and the codebase's other
+  // truncation paths (terminal sanitizing, display compaction) all cut on
+  // code-point boundaries.
+  let head = flat.slice(0, max - 1);
+  const lastUnit = head.charCodeAt(head.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    head = head.slice(0, -1);
+  }
   const space = head.lastIndexOf(' ');
   const cut = space >= max * 0.6 ? head.slice(0, space) : head;
   return `${cut.trimEnd()}…`;
@@ -242,7 +250,14 @@ function normalizeFinding(raw: ReportFindingsFindingParams): ReportedFinding {
   };
 }
 
-/** Severity, then confidence, then location — the artifact's own order. */
+/**
+ * Severity, then confidence, then location — matching the artifact's own
+ * `sortFindings` (code-unit file/id comparison, a missing line ranked first),
+ * so the list a client renders and the artifact a reader opens agree about
+ * order. The one extension: the artifact requires `confidence`, this contract
+ * does not (an unverified low-effort pass omits it), and an absent confidence
+ * ranks between `high` and `low`.
+ */
 function sortReportedFindings(
   findings: readonly ReportedFinding[],
 ): ReportedFinding[] {
@@ -256,12 +271,12 @@ function sortReportedFindings(
     const confidence =
       confidenceRank(a.confidence) - confidenceRank(b.confidence);
     if (confidence !== 0) return confidence;
-    const file = a.file.localeCompare(b.file);
-    if (file !== 0) return file;
-    const line =
-      (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER);
+    if (a.file !== b.file) return a.file < b.file ? -1 : 1;
+    const line = (a.line ?? 0) - (b.line ?? 0);
     if (line !== 0) return line;
-    return (a.id ?? '').localeCompare(b.id ?? '');
+    const aId = a.id ?? '';
+    const bId = b.id ?? '';
+    return aId < bId ? -1 : aId > bId ? 1 : 0;
   });
 }
 

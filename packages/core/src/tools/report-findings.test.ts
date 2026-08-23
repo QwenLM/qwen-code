@@ -101,24 +101,70 @@ describe('ReportFindingsTool', () => {
     ]);
   });
 
-  it('derives shortSummary from summary and compresses long values to 60 chars', async () => {
+  it('breaks location ties the way the artifact does: missing line first, then id by code units', async () => {
+    // The two entries on z.ts:42 arrive with the LOWER-sorting id last, so a
+    // dropped id tiebreak (stable sort keeps input order) flips the expected
+    // order; the body finding has no line and must rank before every
+    // line-anchored one on the same file (`?? 0`, the artifact's rule).
+    const result = await run({
+      findings: [
+        finding({
+          id: 'R1-2',
+          file: 'z.ts',
+          line: 42,
+          summary: 'second by id',
+          failureScenario: 'tie',
+        }),
+        finding({
+          id: 'R1-10',
+          file: 'z.ts',
+          line: 42,
+          summary: 'first by id',
+          failureScenario: 'tie',
+        }),
+        finding({
+          id: 'R1-3',
+          file: 'z.ts',
+          line: undefined,
+          summary: 'body finding without a line',
+          failureScenario: 'unanchored',
+        }),
+      ],
+    });
+    expect(displayOf(result).findings.map((f) => f.summary)).toEqual([
+      'body finding without a line',
+      'first by id',
+      'second by id',
+    ]);
+  });
+
+  it('derives shortSummary from summary, prefers a supplied one, and compresses both', async () => {
+    // Pins both branches of the `raw.shortSummary?.trim() || raw.summary`
+    // derivation by exact value: the derived label must be the compressed
+    // SUMMARY (word-boundary cut), the supplied label must survive as itself.
     const longSummary =
       'the retry guard drops the final attempt when the backoff timer fires after the abort signal has already resolved';
     const result = await run({
       findings: [
         finding({ summary: longSummary }),
+        finding({ file: 'src/other.ts', shortSummary: 'supplied label' }),
         finding({
-          file: 'src/other.ts',
+          file: 'src/third.ts',
           shortSummary: `supplied ${'x'.repeat(100)}`,
         }),
       ],
     });
-    for (const f of displayOf(result).findings) {
-      expect(f.shortSummary.length).toBeLessThanOrEqual(60);
-    }
-    expect(
-      displayOf(result).findings.some((f) => f.shortSummary.endsWith('…')),
-    ).toBe(true);
+    const byFile = Object.fromEntries(
+      displayOf(result).findings.map((f) => [f.file, f]),
+    );
+    expect(byFile['src/foo.ts'].shortSummary).toBe(
+      'the retry guard drops the final attempt when the backoff…',
+    );
+    expect(byFile['src/other.ts'].shortSummary).toBe('supplied label');
+    const compressedSupplied = byFile['src/third.ts'].shortSummary;
+    expect(compressedSupplied.length).toBeLessThanOrEqual(60);
+    expect(compressedSupplied.startsWith('supplied x')).toBe(true);
+    expect(compressedSupplied.endsWith('…')).toBe(true);
   });
 
   it('accepts an empty findings list as a valid nothing-found report', async () => {
@@ -171,16 +217,25 @@ describe('ReportFindingsTool', () => {
     ).toThrow(/duplicate id "R1-1"/);
   });
 
-  it('refuses control characters in display fields', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [finding({ file: 'src/foo.ts\u0007' })],
-      }),
-    ).toThrow(/control characters/);
-  });
+  it.each([
+    ['file', { file: 'src/foo.ts\u0007' }],
+    ['id', { id: 'R1\u00071' }],
+    ['summary', { summary: 'beep\u0007boop' }],
+    ['shortSummary', { shortSummary: 'short\u0007' }],
+    ['failureScenario', { failureScenario: 'boom\u0007' }],
+    ['category', { category: 'corr\u0007' }],
+    ['outcomeNote', { outcome: 'skipped' as const, outcomeNote: 'no\u0007te' }],
+  ])(
+    'refuses control characters in %s',
+    (_field: string, overrides: Partial<ReportFindingsFindingParams>) => {
+      const tool = new ReportFindingsTool();
+      expect(() => tool.build({ findings: [finding(overrides)] })).toThrow(
+        /control characters/,
+      );
+    },
+  );
 
-  it('allows line whitespace in summary but not in file', () => {
+  it('allows line whitespace only in the prose fields', () => {
     const tool = new ReportFindingsTool();
     expect(() =>
       tool.build({
@@ -189,7 +244,24 @@ describe('ReportFindingsTool', () => {
     ).not.toThrow();
     expect(() =>
       tool.build({
+        findings: [finding({ failureScenario: 'step one\nstep two' })],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      tool.build({
+        findings: [
+          finding({ outcome: 'skipped', outcomeNote: 'reason one\ntwo' }),
+        ],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      tool.build({
         findings: [finding({ file: 'src/\nfoo.ts' })],
+      }),
+    ).toThrow(/control characters/);
+    expect(() =>
+      tool.build({
+        findings: [finding({ shortSummary: 'one\ntwo' })],
       }),
     ).toThrow(/control characters/);
   });
@@ -229,6 +301,9 @@ describe('ReportFindingsTool', () => {
       /"file" must not be empty/,
     );
     expect(() =>
+      tool.build({ findings: [finding({ summary: '  ' })] }),
+    ).toThrow(/"summary" must not be empty/);
+    expect(() =>
       tool.build({ findings: [finding({ failureScenario: ' ' })] }),
     ).toThrow(/"failureScenario" must not be empty/);
   });
@@ -250,6 +325,15 @@ describe('ReportFindingsTool', () => {
     expect(item.summary).toBe('padded summary');
     expect(item.category).toBeUndefined();
   });
+
+  it('passes id and line through to the display item', async () => {
+    const result = await run({
+      findings: [finding({ id: 'R2-7', line: 314 })],
+    });
+    const [item] = displayOf(result).findings;
+    expect(item.id).toBe('R2-7');
+    expect(item.line).toBe(314);
+  });
 });
 
 describe('compressFindingSummary', () => {
@@ -258,11 +342,21 @@ describe('compressFindingSummary', () => {
   });
 
   it('cuts on a word boundary with a single ellipsis character', () => {
-    const compressed = compressFindingSummary(
-      'the quick brown fox jumps over the lazy dog and keeps on running far beyond the fence',
-    );
-    expect(compressed.length).toBeLessThanOrEqual(60);
-    expect(compressed.endsWith('…')).toBe(true);
-    expect(compressed).not.toContain('...');
+    // Exact value on purpose: a hard cut at 59 units would yield
+    // '…keeps on ru…', which satisfies every length/ellipsis assertion —
+    // only the full string pins the word-boundary logic itself.
+    expect(
+      compressFindingSummary(
+        'the quick brown fox jumps over the lazy dog and keeps on running far beyond the fence',
+      ),
+    ).toBe('the quick brown fox jumps over the lazy dog and keeps on…');
+  });
+
+  it('keeps a hard cut off the middle of a surrogate pair', () => {
+    // 58 filler units put the astral character across units 58-59, exactly
+    // where the hard cut lands; spaceless input keeps the word-boundary
+    // rescue out of the way.
+    const short = compressFindingSummary(`${'a'.repeat(58)}𝕏 tail words`);
+    expect(short).toBe(`${'a'.repeat(58)}…`);
   });
 });

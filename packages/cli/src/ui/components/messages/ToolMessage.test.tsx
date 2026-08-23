@@ -212,15 +212,18 @@ describe('<ToolMessage />', () => {
               confidence: 'high',
               file: 'src/foo.ts',
               line: 42,
-              summary: 'wrong return value on cold cache',
-              shortSummary: 'wrong return value on cold cache',
+              // shortSummary differs from summary so this also pins that the
+              // routed renderer shows the compact label, not the summary.
+              summary:
+                'the provider returns the wrong value on every cold-cache lookup',
+              shortSummary: 'cold-cache wrong return',
               failureScenario: 'first call after start returns undefined',
             },
             {
               severity: 'Suggestion',
               confidence: 'low',
               file: 'src/bar.ts',
-              summary: 'duplicated helper',
+              summary: 'the helper is duplicated between bar.ts and baz.ts',
               shortSummary: 'duplicated helper',
               failureScenario: 'two copies drift',
             },
@@ -231,9 +234,12 @@ describe('<ToolMessage />', () => {
     );
     const output = lastFrame()!;
     expect(output).toContain('src/foo.ts:42');
-    expect(output).toContain('wrong return value on cold cache');
+    expect(output).toContain('cold-cache wrong return');
     expect(output).toContain('(low confidence)');
     expect(output).not.toContain('"findings"'); // not the JSON fallback
+    expect(output.replace(/\s+/g, ' ')).not.toContain(
+      'wrong value on every cold-cache lookup',
+    );
   });
 
   it('renders inline images returned by a tool', () => {
