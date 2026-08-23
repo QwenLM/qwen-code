@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
   type ModelGenerationConfig,

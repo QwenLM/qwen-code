@@ -3226,6 +3226,296 @@ describe('Session', () => {
       expect(session.pendingWorktreeNotice).toBe(notice);
       expect(finishedSpy).toHaveBeenCalledTimes(1);
     });
+
+    it('does not persist the decline when a restored question is session_closed', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          execute,
+          'ask_user_question',
+          vi.fn().mockResolvedValue(undefined),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+        _meta: { 'qwen.daemon.permissionCancelReason': 'session_closed' },
+      });
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(
+        mockChatRecordingService.recordToolResult,
+      ).not.toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'call-auq' }),
+          }),
+        ]),
+        expect.anything(),
+      );
+    });
+
+    it('does not persist skipped siblings when a restored batch times out', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'pick two' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq-a',
+                name: 'ask_user_question',
+                args: auqArgs,
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-auq-b',
+                name: 'ask_user_question',
+                args: auqArgs,
+              },
+            },
+          ],
+        },
+      ]);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn(),
+          'ask_user_question',
+          vi.fn().mockResolvedValue(undefined),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+        _meta: { 'qwen.daemon.permissionCancelReason': 'timeout' },
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockChatRecordingService.recordToolResult).not.toHaveBeenCalled();
+    });
+
+    it('does not persist the answered sibling when the rest of the restored batch times out', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'pick two' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq-a',
+                name: 'ask_user_question',
+                args: auqArgs,
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-auq-b',
+                name: 'ask_user_question',
+                args: auqArgs,
+              },
+            },
+          ],
+        },
+      ]);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn().mockResolvedValue({
+            llmContent: 'User answers:\nQuestion: Polling',
+            returnDisplay: 'answered',
+          }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission)
+        .mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Polling' },
+        })
+        .mockResolvedValueOnce({
+          outcome: { outcome: 'cancelled' },
+          _meta: { 'qwen.daemon.permissionCancelReason': 'timeout' },
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      // Persisting the answered sibling would leave a user turn after the
+      // dangling model turn, making the batch unrestorable on the next load.
+      expect(mockChatRecordingService.recordToolResult).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        label: 'resolves after the abort',
+        permissionResult: {
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Polling' },
+        } as const,
+        reject: false,
+      },
+      {
+        label: 'rejects after the abort',
+        permissionResult: new Error('permission transport closed'),
+        reject: true,
+      },
+    ])(
+      'does not persist a restored ask_user_question whose permission wait is aborted ($label)',
+      async ({ permissionResult, reject }) => {
+        mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool('ask_user_question', vi.fn()),
+        );
+        vi.mocked(mockClient.requestPermission).mockImplementation(async () => {
+          // The abort carries no permissionCancelReason meta, so only the
+          // wasAborted mark can keep the fabricated result off disk.
+          await session.cancelPendingPrompt();
+          if (reject) throw permissionResult;
+          return permissionResult;
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        } as unknown as Parameters<typeof session.prompt>[0]);
+
+        expect(
+          mockChatRecordingService.recordToolResult,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('carries a pending recovered-agents notice on the post-answer message', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn().mockResolvedValue({
+            llmContent: 'User answers:\nQuestion: Polling',
+            returnDisplay: 'answered',
+          }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'got it' }] } }],
+            },
+          },
+        ]),
+      );
+      const notice = 'Recovered background agents: researcher';
+      session.pendingRecoveredAgentsNotice = notice;
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      const sent = firstSentMessage();
+      expect(
+        sent.some(
+          (part) =>
+            typeof part.text === 'string' &&
+            part.text.includes('<system-reminder>') &&
+            part.text.includes(notice),
+        ),
+      ).toBe(true);
+      expect(session.pendingRecoveredAgentsNotice).toBeNull();
+    });
+
+    it('keeps the worktree notice when the post-answer send fails', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn().mockResolvedValue({
+            llmContent: 'User answers:\nQuestion: Polling',
+            returnDisplay: 'answered',
+          }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValue(new Error('compression failed'));
+      const notice = 'worktree restore notice';
+      session.pendingWorktreeNotice = notice;
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        } as unknown as Parameters<typeof session.prompt>[0]),
+      ).rejects.toThrow('compression failed');
+
+      expect(session.pendingWorktreeNotice).toBe(notice);
+    });
+
+    it('does not snapshot file history on a restore continuation', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          'ask_user_question',
+          vi.fn().mockResolvedValue({
+            llmContent: 'User answers:\nQuestion: Polling',
+            returnDisplay: 'answered',
+          }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'got it' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordFileHistorySnapshot,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   // Runs a full exit_plan_mode approval turn and returns the permission

@@ -18,7 +18,6 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   retryWithBackoff,
@@ -2615,15 +2614,6 @@ export class GeminiChat {
         }
       }
 
-      // Capture the trailing entry BEFORE the user push: when
-      // --restore-ask-user-question preserved a dangling ask_user_question
-      // at load, a send that beats the restore prompt must not close it
-      // with a synthetic failure — the restore hint is one-shot.
-      const preserveCallIds =
-        this.config.getRestoreAskUserQuestion?.() === true
-          ? restorableAskUserQuestionCallIds(this.history.at(-1))
-          : undefined;
-
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;
@@ -2634,14 +2624,13 @@ export class GeminiChat {
       // Per-send orphan repair (belt-and-suspenders alongside the
       // startChat load-time pass). Runs AFTER user content lands so a
       // user-supplied tool_result closes the pair before we synthesize
-      // anything. Logs are tagged so investigators can distinguish this
-      // pass from the session-load pass and from the React scheduler's
-      // dedup-drop. See the canonical note above
-      // `ORPHAN_TOOL_USE_REPAIR_REASON`.
+      // anything. An ordinary prompt that races a restore re-hang must
+      // still close the pair — `model[functionCall] → user[text]` is
+      // rejected by Anthropic-compatible providers. Restore itself sends
+      // the real functionResponse, so this pass is a no-op on that path.
       const inlineRepair = repairOrphanedToolUseTurns(
         this.history,
         ORPHAN_TOOL_USE_REPAIR_REASON,
-        preserveCallIds ? { preserveCallIds } : undefined,
       );
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
