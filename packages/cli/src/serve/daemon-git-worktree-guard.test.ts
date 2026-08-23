@@ -26,6 +26,7 @@ import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/brid
 import { SHELL_EXECUTING_TOOL_NAMES } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   containsCmdRewriteSyntax,
+  containsUnmodelledWindowsSyntax,
   createDaemonToolGuard,
   preserveWindowsPathSeparators,
 } from './daemon-git-worktree-guard.js';
@@ -705,67 +706,6 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  // cmd.exe strips carets and expands `%…%`/`!…!` before the child runs, so
-  // a relocation written in rewrite syntax is invisible to a static token
-  // scan yet live in the executed argv (`git ^-C <outside> reset --hard`).
-  // The guard denies the whole class instead of guessing.
-  describe.runIf(
-    process.platform === 'win32' && getShellConfiguration().shell === 'cmd',
-  )('cmd.exe rewrite-syntax shapes', () => {
-    it('denies a caret-escaped relocation flag as cmd rewrite syntax', async () => {
-      const guard = createDaemonToolGuard();
-      await expect(
-        guard(request(`git ^-C ${outsideRepo} reset --hard`)),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining('cmd.exe rewrite syntax'),
-      });
-    });
-
-    it('denies a caret-escaped quote as cmd rewrite syntax', async () => {
-      const guard = createDaemonToolGuard();
-      await expect(
-        guard(request(`git ^"-C ${outsideRepo}^" reset --hard`)),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining('cmd.exe rewrite syntax'),
-      });
-    });
-
-    it('denies an expansion-pair relocation as cmd rewrite syntax', async () => {
-      const guard = createDaemonToolGuard();
-      await expect(
-        guard(request('git -C %OUTSIDE_REPO% reset --hard')),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining('cmd.exe rewrite syntax'),
-      });
-    });
-
-    // The two markers pair only across the `&&`, so only the whole-text
-    // check before `splitCommands` sees them; moving the check into the
-    // per-segment loop would silently allow this shape.
-    it('denies a rewrite pair distributed across a command separator', async () => {
-      const guard = createDaemonToolGuard();
-      await expect(
-        guard(request('echo %A && git -C %B reset --hard')),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining('cmd.exe rewrite syntax'),
-      });
-    });
-
-    it('still denies the unescaped relocation on its own reason (control)', async () => {
-      const guard = createDaemonToolGuard();
-      await expect(
-        guard(request(`git -C ${outsideRepo} reset --hard`)),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining(outsideRepo),
-      });
-    });
-  });
-
   // The rewrite gate reads process.platform and getShellConfiguration() at
   // call time, so spoofing both pins the cmd-lane denial on every lane — the
   // merge_group Windows lane is otherwise the only lane that executes the
@@ -812,6 +752,22 @@ it -C ${outsideRepo} reset --hard`,
       });
     });
 
+    it('denies caret-escaped rewrite shapes on their own reason', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`git ^-C ${outsideRepo} reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
+      });
+      await expect(
+        guard(request(`git ^"-C ${outsideRepo}^" reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
+      });
+    });
+
     it('keeps the unparseable reason for genuinely unparseable commands', async () => {
       const guard = createDaemonToolGuard();
       await expect(
@@ -820,6 +776,129 @@ it -C ${outsideRepo} reset --hard`,
         allowed: false,
         reason: expect.stringContaining('could not be parsed'),
       });
+    });
+  });
+
+  // The win32 lanes execute cmd.exe or PowerShell, whose grammar diverges
+  // from the POSIX text model the analysis reads; the divergent-syntax gate
+  // and the lane-scoped shadow/pipe models close the class structurally.
+  // Spoofed so every lane pins it — the merge_group Windows lane is
+  // otherwise the only lane that executes these paths.
+  describe('Windows shell-surface denial (spoofed lanes)', () => {
+    const savedEnv: Record<string, string | undefined> = {};
+
+    const spoofLane = (lane: 'cmd' | 'powershell'): void => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        delete process.env[key];
+      }
+      if (lane === 'powershell') process.env['ComSpec'] = 'powershell.exe';
+    };
+
+    beforeEach(() => {
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        savedEnv[key] = process.env[key];
+      }
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    });
+
+    it.each([
+      // A separator glued to a path split stages before one normalization.
+      () => ['cmd', `cd ${outsideRepo}\\&& git reset --hard`],
+      // cmd.exe ordinary characters the POSIX model misreads.
+      () => [
+        'cmd',
+        `git -C ${insideNested}\\#x -C ${outsideRepo} reset --hard`,
+      ],
+      () => [
+        'cmd',
+        `git -C ${insideNested}\\;x -C ${outsideRepo} reset --hard`,
+      ],
+      () => ['cmd', `cd ${outsideRepo} & git reset --hard`],
+      () => ['cmd', `(cd ${outsideRepo}) && git reset --hard`],
+      () => ['cmd', `git -C ${outsideRepo} reset --hard'suffix`],
+      // bash shadow syntax defines nothing on the Windows lanes.
+      () => ['cmd', `alias git='echo hi'; git -C ${outsideRepo} reset --hard`],
+      () => ['cmd', `git() { :; }; git -C ${outsideRepo} reset --hard`],
+      // Heredoc bodies are live commands on these lanes.
+      () => ['cmd', `echo <<EOF\ncd ${outsideRepo}\nEOF\ngit reset --hard`],
+      // PowerShell stop-parsing, call operator, subexpression, pipe state.
+      () => ['powershell', 'git --% -C %TEMP% reset --hard'],
+      () => [
+        'powershell',
+        `alias git='echo hi'; git -C ${outsideRepo} reset --hard`,
+      ],
+      () => ['powershell', `cd ${outsideRepo}; & git reset --hard`],
+      () => ['powershell', `cd ${outsideRepo} | git reset --hard`],
+      () => ['powershell', `$(cd ${outsideRepo}); git reset --hard`],
+    ])('denies the divergent shape %#', async (build) => {
+      const [lane, command] = build() as ['cmd' | 'powershell', string];
+      spoofLane(lane);
+      const guard = createDaemonToolGuard();
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    });
+
+    it.each([
+      () => ['cmd', 'git add -A && git commit -m "x"'],
+      () => ['cmd', 'cd nested && git reset --hard'],
+      () => ['powershell', 'git status; git log -1'],
+      // A PowerShell pipeline does not scope the session's directory away.
+      () => ['powershell', 'cd nested | Out-Null; git reset --hard'],
+    ])('still allows the agreed shape %#', async (build) => {
+      const [lane, command] = build() as ['cmd' | 'powershell', string];
+      spoofLane(lane);
+      const guard = createDaemonToolGuard();
+      await expect(guard(request(command))).resolves.toEqual({
+        allowed: true,
+      });
+    });
+  });
+
+  describe('containsUnmodelledWindowsSyntax (pure predicate)', () => {
+    const detects = (segment: string, shell: 'cmd' | 'powershell' | 'bash') =>
+      containsUnmodelledWindowsSyntax(segment, 'win32', shell);
+
+    it('flags the divergent cmd.exe forms', () => {
+      expect(detects('git -C in#x -C out reset', 'cmd')).toBe(true);
+      expect(detects('alias git=x; git reset', 'cmd')).toBe(true);
+      expect(detects('cd out & git reset', 'cmd')).toBe(true);
+      expect(detects('(cd out) && git reset', 'cmd')).toBe(true);
+      expect(detects("git -C 'out' reset", 'cmd')).toBe(true);
+      expect(detects('"a" && "b"', 'cmd')).toBe(true);
+    });
+
+    it('flags the divergent PowerShell forms', () => {
+      expect(detects('git --% -C %TEMP% reset', 'powershell')).toBe(true);
+      expect(detects("git -C 'out''x' reset", 'powershell')).toBe(true);
+      expect(detects('cd out; & git reset', 'powershell')).toBe(true);
+      expect(detects('$(cd out); git reset', 'powershell')).toBe(true);
+    });
+
+    it('leaves agreed syntax alone', () => {
+      for (const shell of ['cmd', 'powershell'] as const) {
+        expect(detects('git add -A && git commit -m "x"', shell)).toBe(false);
+        expect(detects('git status | more', shell)).toBe(false);
+        expect(detects('a || b', shell)).toBe(false);
+      }
+      expect(detects("git -C 'out' reset", 'powershell')).toBe(false);
+      expect(detects('git -C in#x reset', 'powershell')).toBe(false);
+    });
+
+    it('stays off for bash sessions and other platforms', () => {
+      expect(detects('cd out & (git reset)', 'bash')).toBe(false);
+      expect(containsUnmodelledWindowsSyntax('(cd out)', 'linux', 'cmd')).toBe(
+        false,
+      );
     });
   });
 
@@ -2424,14 +2503,12 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  // `BASH_FUNC_git%%` spells a bash exported-function entry, but the two
-  // percent signs are also a cmd.exe expansion pair — cmd expands `%…%`
-  // through single quotes — so the rewrite-syntax gate denies these commands
-  // on the cmd lane before shadow modelling runs. That denial is right for
-  // cmd sessions; the bash-semantics pins below only mean what they say off
-  // that lane.
+  // Shadow modelling is bash semantics: on the win32 cmd/PowerShell lanes
+  // the same text defines nothing — the guard's divergent-syntax gate denies
+  // most of it outright and no shadow is recorded — so these pins only mean
+  // what they say on lanes that execute through bash.
   describe.runIf(
-    process.platform !== 'win32' || getShellConfiguration().shell !== 'cmd',
+    process.platform !== 'win32' || getShellConfiguration().shell === 'bash',
   )('bash exported-function shadow semantics', () => {
     it.each([
       // `env -u BASH_FUNC_git%%` (separated, attached, and `--unset=` forms)
