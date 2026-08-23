@@ -1520,6 +1520,9 @@ describe('AgentTool', () => {
       expect(result.llmContent).toBe(
         'Subagent "non-existent" not found. Available subagents: file-search, code-review',
       );
+      expect(result.error?.message).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
     });
 
     it('still reports not-found when listing available subagents fails', async () => {
@@ -1536,25 +1539,6 @@ describe('AgentTool', () => {
       const result = await invocation.execute(new AbortController().signal);
 
       expect(result.llmContent).toBe('Subagent "non-existent" not found');
-    });
-
-    it('marks the not-found result as a failed tool call (#9509)', async () => {
-      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
-
-      const invocation = agentTool.build({
-        description: 'Use missing agent',
-        prompt: 'Do work',
-        subagent_type: 'non-existent',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-
-      // The scheduler records a failure only when `error` is set. A launch
-      // that never ran must not count as a successful agent call, and the
-      // error message (not `llmContent`) is what the failure path forwards
-      // to the model — so it must carry the full guidance text (#9509).
-      expect(result.error?.message).toBe(
-        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
-      );
     });
   });
 
@@ -3132,6 +3116,9 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to run subagent: Creation failed');
+      expect(result.error?.message).toContain(
+        'Failed to run subagent: Creation failed',
+      );
       const display = result.returnDisplay as AgentResultDisplay;
 
       expect(display.status).toBe('failed');
@@ -6467,6 +6454,7 @@ describe('AgentTool', () => {
         const result = await invocation.execute();
 
         expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect(result.error?.message).toBe(errorMessage);
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
