@@ -5478,6 +5478,32 @@ describe('App session workflow', () => {
     ).not.toBeNull();
   });
 
+  it('evicts an established cockpit when revalidation resolves disabled', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // The retaining walk above keeps the last-known-good flag through a
+    // background reload; this is the reset walk: the reload RESOLVES with
+    // the gate disabled (file edit, dotfile sync) while the cockpit is
+    // open. The Chat/Workflow toggle hides when disabled, so nothing can
+    // lead back in — the eviction must be automatic: unmount the view,
+    // strip the deep link, and restore composer focus.
+    editorFocus.mockClear();
+    testState.settings = [];
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
   it('strips the cockpit deep link when a controlled host takes over the view', async () => {
     testState.settings = [sessionWorkflowSetting()];
     window.history.replaceState(null, '', '/?view=cockpit');
