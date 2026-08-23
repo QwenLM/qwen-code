@@ -11,13 +11,20 @@ const {
   mockProcessImageAttachments,
   mockShowErrorMessage,
   mockExportSessionToFile,
+  mockReadFile,
 } = vi.hoisted(() => ({
   mockProcessImageAttachments: vi.fn(),
   mockShowErrorMessage: vi.fn(),
   mockExportSessionToFile: vi.fn(),
+  mockReadFile: vi.fn(),
 }));
 const { mockExecuteCommand } = vi.hoisted(() => ({
   mockExecuteCommand: vi.fn(),
+}));
+
+vi.mock('fs/promises', () => ({
+  readFile: mockReadFile,
+  default: { readFile: mockReadFile },
 }));
 
 vi.mock('vscode', () => ({
@@ -281,6 +288,158 @@ describe('SessionMessageHandler', () => {
     expect(sendToWebView.mock.invocationCallOrder[echoCallIndex]).toBeLessThan(
       agentManager.sendMessage.mock.invocationCallOrder[0],
     );
+  });
+
+  it('echoes attached prompt images into the transcript as inline image chunks', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+      displayText: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+      savedImageCount: 1,
+      promptImages: [
+        {
+          path: '/tmp/clipboard/clipboard-1.png',
+          name: 'pasted_image.png',
+          mimeType: 'image/png',
+        },
+      ],
+    });
+    mockReadFile.mockResolvedValue(Buffer.from([1, 2, 3]));
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'look at this',
+        attachments: [
+          {
+            id: 'img-1',
+            name: 'pasted_image.png',
+            type: 'image/png',
+            size: 3,
+            data: 'data:image/png;base64,AQID',
+            timestamp: Date.now(),
+          },
+        ],
+      },
+    });
+
+    // The prompt itself still carries the image as a resource_link block,
+    // but the transcript echo must carry inline data the reducer can render.
+    expect(mockReadFile).toHaveBeenCalledWith('/tmp/clipboard/clipboard-1.png');
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: Buffer.from([1, 2, 3]).toString('base64'),
+            mimeType: 'image/png',
+          },
+        },
+      },
+    });
+    // Image echoes land before the prompt is dispatched, mirroring the text
+    // echo, so the user turn renders complete ahead of assistant frames.
+    const imageEchoCallIndex = sendToWebView.mock.calls.findIndex(
+      (call) =>
+        (
+          (call[0] as { type?: string; data?: unknown } | undefined)?.data as
+            | { update?: { content?: { type?: string } } }
+            | undefined
+        )?.update?.content?.type === 'image',
+    );
+    expect(imageEchoCallIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      sendToWebView.mock.invocationCallOrder[imageEchoCallIndex],
+    ).toBeLessThan(agentManager.sendMessage.mock.invocationCallOrder[0]);
+  });
+
+  it('keeps the send flowing when a prompt image cannot be read back for the echo', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+      displayText: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+      savedImageCount: 1,
+      promptImages: [
+        {
+          path: '/tmp/clipboard/clipboard-1.png',
+          name: 'pasted_image.png',
+          mimeType: 'image/png',
+        },
+      ],
+    });
+    mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), {}));
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'look at this' },
+    });
+
+    // The unreadable image is skipped (no image chunk) but the text echo and
+    // the prompt itself still go through.
+    const imageEchoCallIndex = sendToWebView.mock.calls.findIndex(
+      (call) =>
+        (
+          (call[0] as { type?: string; data?: unknown } | undefined)?.data as
+            | { update?: { content?: { type?: string } } }
+            | undefined
+        )?.update?.content?.type === 'image',
+    );
+    expect(imageEchoCallIndex).toBe(-1);
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+          },
+        },
+      },
+    });
+    expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('sends image file context as prompt image blocks', async () => {

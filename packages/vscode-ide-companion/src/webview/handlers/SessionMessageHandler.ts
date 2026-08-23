@@ -6,6 +6,7 @@
 
 import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
+import * as fsp from 'fs/promises';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import {
@@ -647,6 +648,33 @@ export class SessionMessageHandler extends BaseMessageHandler {
           },
         });
       }
+      // The prompt carries attached images as ACP `resource_link` blocks,
+      // which the transcript reducer cannot render (no inline data). Echo
+      // each saved image back as an inline `user_message_chunk` image part
+      // (the daemon-echo content shape) so pasted/attached pictures render
+      // in the WebShell transcript timeline alongside the prompt text.
+      if (transcriptEchoSessionId && promptImages.length > 0) {
+        for (const image of promptImages) {
+          const imageData = await this.readPromptImageAsBase64(image.path);
+          if (imageData === null) {
+            continue;
+          }
+          this.sendToWebView({
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: transcriptEchoSessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'image',
+                  data: imageData,
+                  mimeType: image.mimeType,
+                },
+              },
+            },
+          });
+        }
+      }
 
       await this.agentManager.sendMessage(
         buildPromptBlocks(promptText, promptImages),
@@ -769,6 +797,29 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.sendStreamEnd('error', myRequestId);
         }
       }
+    }
+  }
+
+  /**
+   * Read a saved prompt image back from disk as base64 so the transcript
+   * echo can carry it as inline data (the ACP `resource_link` form used in
+   * the prompt has no inline payload the transcript reducer can render).
+   * Returns `null` when the file is unreadable so the echo degrades to the
+   * text-only turn instead of failing the send.
+   */
+  private async readPromptImageAsBase64(
+    imagePath: string,
+  ): Promise<string | null> {
+    try {
+      const buffer = await fsp.readFile(imagePath);
+      return buffer.toString('base64');
+    } catch (error) {
+      logger.warn(
+        '[SessionMessageHandler] Failed to read image for transcript echo:',
+        imagePath,
+        error,
+      );
+      return null;
     }
   }
 
