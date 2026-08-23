@@ -262,6 +262,80 @@ describe('useAcpTranscript', () => {
     expect(captured.blocks[2]).toMatchObject({ streaming: false });
   });
 
+  it('renders live frames of the fresh session published by a load-failure fallback', () => {
+    // session/load failed for an archived session: the extension falls back
+    // to cached history plus a fresh ACP session and publishes the fresh id
+    // as liveSessionId alongside the archived sessionId.
+    act(() => {
+      postToWebview({
+        type: 'qwenSessionSwitched',
+        data: {
+          sessionId: 'archived-session',
+          liveSessionId: 'fresh-acp-session',
+          messages: [
+            { role: 'user', content: 'cached question', timestamp: 1 },
+            { role: 'assistant', content: 'cached answer', timestamp: 2 },
+          ],
+        },
+      });
+    });
+
+    expect(captured.blocks).toHaveLength(2);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'cached question',
+    });
+    expect(captured.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'cached answer',
+    });
+
+    // The extension posts sessionLoadComplete right after the boundary to
+    // finalize the cached history before the user interacts.
+    act(() => {
+      postToWebview({
+        type: 'sessionLoadComplete',
+        data: { sessionId: 'archived-session' },
+      });
+    });
+    expect(captured.blocks).toHaveLength(2);
+    expect(captured.blocks[1]).toMatchObject({ streaming: false });
+
+    // Live frames of the fresh session (user echo + assistant reply) must
+    // render even though the boundary's sessionId named the archived one.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('fresh-acp-session', 'follow-up'),
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('fresh-acp-session', 'live answer'),
+      });
+    });
+
+    expect(captured.blocks).toHaveLength(4);
+    expect(captured.blocks[2]).toMatchObject({
+      kind: 'user',
+      text: 'follow-up',
+    });
+    expect(captured.blocks[3]).toMatchObject({
+      kind: 'assistant',
+      text: 'live answer',
+    });
+
+    // Frames from unrelated sessions must still be dropped by the guard.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('unrelated-session', 'stray'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(4);
+  });
+
   it('finalizes the streaming assistant block when the turn ends', () => {
     act(() => {
       postToWebview({

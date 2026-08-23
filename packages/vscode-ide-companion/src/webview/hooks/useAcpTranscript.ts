@@ -35,6 +35,9 @@ function streamEndToDoneReason(reason: unknown): string {
  * startup/reconnect), so blocks from one session can never leak into another
  * session's replay. Frames arriving after a boundary are additionally
  * dropped when their `sessionId` no longer matches the active session.
+ * Boundaries that carry a `liveSessionId` (load-failure fallbacks that
+ * create a fresh ACP session) adopt that live id instead of the archived
+ * `sessionId`, so the fresh session's live frames pass the guard.
  */
 export function useAcpTranscript() {
   const stateRef = useRef<DaemonTranscriptState | null>(null);
@@ -76,10 +79,19 @@ export function useAcpTranscript() {
           const data = message.data as
             | {
                 sessionId?: unknown;
+                liveSessionId?: unknown;
                 messages?: Array<Record<string, unknown>>;
               }
             | undefined;
-          if (typeof data?.sessionId === 'string' && data.sessionId) {
+          // Load-failure fallbacks keep the archived conversation id for
+          // the session list while creating a fresh ACP session for live
+          // streaming; the boundary publishes that fresh id as
+          // `liveSessionId`. Adopt it (instead of the archived id) so the
+          // live frames carrying it are not dropped by the session guard
+          // below; cached history is seeded under the same adopted id.
+          if (typeof data?.liveSessionId === 'string' && data.liveSessionId) {
+            activeSessionIdRef.current = data.liveSessionId;
+          } else if (typeof data?.sessionId === 'string' && data.sessionId) {
             activeSessionIdRef.current = data.sessionId;
           }
           // Offline restores and load-failure fallbacks deliver cached
