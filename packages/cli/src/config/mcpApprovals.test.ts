@@ -196,6 +196,22 @@ describe('mcpApprovals (hash-bound approval store)', () => {
         : p.charAt(0).toUpperCase() + p.slice(1);
     }
 
+    /** Flip the case of the first alphabetic char after the drive prefix. */
+    function flipFirstNonDriveChar(p: string): string {
+      let i = /^[A-Za-z]:[\\/]/.test(p) ? 3 : 0;
+      for (; i < p.length; i++) {
+        const ch = p[i];
+        if (/[A-Za-z]/.test(ch)) {
+          return (
+            p.slice(0, i) +
+            (ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase()) +
+            p.slice(i + 1)
+          );
+        }
+      }
+      return p;
+    }
+
     itOnWin32('matches an approval across drive-letter casing', async () => {
       const approvals = loadMcpApprovals();
       await approvals.setState(dir, 'slack', server, 'approved');
@@ -203,6 +219,75 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       expect(fs.existsSync(variant)).toBe(true);
       expect(approvals.getState(variant, 'slack', server)).toBe('approved');
     });
+
+    itOnWin32(
+      'matches an approval across non-drive directory-name casing',
+      async () => {
+        const approvals = loadMcpApprovals();
+        await approvals.setState(dir, 'slack', server, 'approved');
+        // Flip a component beyond the drive letter (e.g. Users <-> users). A
+        // drive-letter-only fold would orphan this lookup and re-create the
+        // invisible-approval bug class this PR fixes, so the fold must cover
+        // the whole path.
+        const resolvedDir = path.resolve(dir);
+        const variant = flipFirstNonDriveChar(resolvedDir);
+        expect(variant).not.toBe(resolvedDir);
+        expect(fs.existsSync(variant)).toBe(true);
+        expect(approvals.getState(variant, 'slack', server)).toBe('approved');
+      },
+    );
+
+    itOnWin32('leaves foreign POSIX keys untouched at load time', async () => {
+      const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          '/home/u/Projects/Foo': {
+            slack: {
+              hash: hashMcpServerConfig(server),
+              status: 'approved',
+            },
+          },
+        }),
+      );
+      resetMcpApprovalsForTesting();
+      // A synced `~/.qwen` can carry Linux decisions; their case is
+      // significant there, so they must round-trip verbatim.
+      expect(Object.keys(loadMcpApprovals().file.config)).toEqual([
+        '/home/u/Projects/Foo',
+      ]);
+    });
+
+    itOnWin32(
+      'a later approval cannot override an earlier rejection on merged keys',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        fs.writeFileSync(
+          path.join(dir, MCP_APPROVALS_FILENAME),
+          JSON.stringify({
+            [resolvedDir]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'rejected',
+              },
+            },
+            [flipDriveCase(resolvedDir)]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        // Records carry no timestamps and file order does not track recency;
+        // the conservative merge keeps the rejection so a stale approval can
+        // never auto-enable a gated server the user rejected.
+        expect(loadMcpApprovals().getState(resolvedDir, 'slack', server)).toBe(
+          'rejected',
+        );
+      },
+    );
 
     itOnWin32(
       'matches decisions stored by older builds under legacy cased keys',
