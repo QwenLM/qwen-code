@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   diagnoseConvergence,
+  isFreshDraft,
   recommendationsFor,
   renderConvergenceDiagnosis,
   renderMechanismHealth,
@@ -1078,6 +1079,60 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('round 4 posted 3 inline comment(s)');
     expect(r.en).not.toContain('the previous round posted');
     expect(r.zh).not.toContain('上一轮发布了');
+  });
+});
+
+describe('isFreshDraft — a carried id no longer answers on its own', () => {
+  // Issue #9674. Two different things reach this function under a previous
+  // round's id: a claim re-asserted (`still stands`) and a NEW defect wearing
+  // the id of the entry whose fix produced it (`fix-induced`). Only the first
+  // is a re-post.
+  const carried = new Set(['R2-1']);
+
+  it('reads a plain carried id as a re-post, as it always did', () => {
+    expect(isFreshDraft({ file: 'a.ts', carriedId: 'R2-1' }, 4, carried)).toBe(
+      false,
+    );
+  });
+
+  it('reads a fix-induced carried id as first-time work', () => {
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: 'R2-1', fixInduced: true },
+        4,
+        carried,
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a finding with no id fresh either way', () => {
+    // The marking adds nothing where the id is absent — that comment is
+    // already first-time by the id alone — and must not subtract either.
+    expect(isFreshDraft({ file: 'a.ts' }, 4, carried)).toBe(true);
+    expect(isFreshDraft({ file: 'a.ts', fixInduced: true }, 4, carried)).toBe(
+      true,
+    );
+  });
+
+  it('holds at the round cap, where a plain re-post still reads carried', () => {
+    // The cap arm returns false for a carried id minted at or past the cap.
+    // The marking has to reach its answer BEFORE that arm, or the one place
+    // the counter stops advancing is the one place a fix-induced re-report
+    // silently stops counting.
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: `R${LEDGER_MAX_ROUND}-1` },
+        LEDGER_MAX_ROUND,
+        new Set([`R${LEDGER_MAX_ROUND}-1`]),
+      ),
+    ).toBe(false);
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: `R${LEDGER_MAX_ROUND}-1`, fixInduced: true },
+        LEDGER_MAX_ROUND,
+        new Set([`R${LEDGER_MAX_ROUND}-1`]),
+      ),
+    ).toBe(true);
   });
 });
 

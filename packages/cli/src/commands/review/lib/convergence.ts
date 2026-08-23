@@ -81,6 +81,19 @@ export interface DraftedFinding {
    * which has no id until this round's ledger is built.
    */
   carriedId?: string;
+  /**
+   * The carried id fronts a NEW defect — one the fix for that entry
+   * introduced — rather than a re-assertion of the entry's own claim.
+   *
+   * A carried id means two things since the fix-induced disposition shipped,
+   * and only one of them is a re-post. Without this the trend counted both,
+   * so a round that newly identified six defects, four of them re-reported
+   * under the ids whose fixes produced them, recorded a first-time count of
+   * two — the baseline falling on exactly the churning pull requests where
+   * new work was not falling at all. Read off the comment body beside the id,
+   * so a marking the reader cannot see is one the count does not get either.
+   */
+  fixInduced?: boolean;
 }
 
 /** What the previous round left behind, and how far it can be trusted. */
@@ -302,6 +315,24 @@ export function isFreshDraft(
 ): boolean {
   const minted = birthRound(d?.carriedId);
   if (minted === undefined) return true;
+  // A fix-induced re-report is first-time work wearing an earlier id. The id
+  // is bookkeeping — it keeps one churning site on one thread instead of
+  // opening a new one every round — and reading it as a re-post is what made
+  // this count understate new work precisely where the loop was creating the
+  // most of it. Placed before every arm below on purpose: the membership test
+  // exists to stop a STRAY id from hiding real work and this id is not stray,
+  // and the round-cap arm is the one place the counter stops advancing, which
+  // must not also be the place this stops counting.
+  //
+  // It is the one input here that can only come from the model asserting
+  // something, so weigh it the way the caller's own asymmetry note does. An
+  // OMITTED marking degrades to the reading every round had before it
+  // existed — a re-post, one round of silence. A marking wrongly added to a
+  // still-stands would narrate divergence at the steady state, which is the
+  // expensive error, and that is why the skill restricts the token to a
+  // re-report that genuinely is fix-induced rather than offering it as a way
+  // to flag any carried finding as interesting.
+  if (d?.fixInduced === true) return true;
   // The id must NAME an entry in the work list it claims to carry forward.
   // Step 6 teaches the model to lead a re-post with `R1-2: <the claim>`, and
   // models emit stray ids at the head of a claim line — so a genuinely new

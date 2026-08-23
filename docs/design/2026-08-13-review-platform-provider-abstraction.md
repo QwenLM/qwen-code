@@ -368,6 +368,19 @@ Enterprise paragraph.
     documented for the user. Still open: dedup/self-PR backing for Aone,
     `composeUrl`, AI-comment marking (Q4), the
     render-adjudication carve-out.
+  - **Anchored (2026-08-21, issue #9615):** Q2's controlled probe
+    (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved the
+    platform posts ANY `--line` unvalidated and cannot express the old
+    side — an old-side number silently becomes the same-numbered
+    new-side line. `submit`'s Aone branch now validates every inline
+    anchor against the review's captured diff BEFORE posting: an
+    unanchorable Critical is relocated into the summary body, an
+    unanchorable Suggestion discarded and counted (the GitHub
+    422-recovery dispose, performed in code), each disclosed in the
+    terminal; a missing captured diff refuses the whole post. Probe
+    evidence and pinned semantics:
+    `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`.
+
   - **Landed (2026-08-21, #9617):** the cleanup bypass audit — D8's
     "`comment list` filtered by author within the audit window". `cleanup`
     selects the audit backend from the fetch report's recorded host, with
@@ -479,6 +492,24 @@ Enterprise paragraph.
     version floor applies to the presubmit seam as well. Still open:
     dedup backing for Aone, cleanup audit, the ai_comment marking flag
     (a1-side), the render-adjudication carve-out.
+
+- **Phase 3b — Aone `pr-context` backing (this change).** The reader gains
+  `getReviewContext` + `getCurrentUser` (D1's `getContext` + `self`,
+  synchronous). `pr-context` routes through the platform reader; the
+  normalized bundle keeps ALL rendering and security logic platform-neutral.
+  GitHub's implementation EXTRACTS pr-context's existing gh calls
+  unchanged — the existing suite passing unmodified is the no-regression
+  evidence. On Aone: metadata from `mr view` (stats degrade), one flat
+  comment list split by `path`, no verdicts, ledger carriers = the
+  thread-level comments (the posted summaries); refetch commands bake
+  `--pr` (Aone addresses every comment body per-MR) and bake only an
+  explicit `--host` (never the ambient GH_HOST). The forced
+  context-unavailable cap leaves submit (the reads are backed now), so an
+  Aone run that read its context can APPROVE and the wired
+  `a1 repo mr approve` fires. Agent 0 becomes runnable on Aone (its gate
+  is pr-context success; its welded `issue-context` command is already
+  backed). Design: `2026-08-21-review-aone-pr-context.md`. Still open: the
+  Phase-3 open items above, unchanged.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
@@ -535,9 +566,16 @@ create --file/--line` and `-f json` stability? Provider version floor TBD.~~
    actionable upgrade message; an unparseable `--version` and a failed
    probe alike are disclosed on stderr and fail OPEN, never refusing an
    a1 the check merely cannot read.
-2. **Q2 — Inline anchor semantics.** Does `--line` accept only new-side lines?
-   How are removed-line (`side: left`) comments posted? Needs a controlled
-   experiment on a scratch CR.
+2. **Q2 — Inline anchor semantics. RESOLVED (2026-08-21).** The controlled
+   probe (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved: `--line`
+   is new-side only (no `--side` flag exists; an old-side number silently
+   becomes the same-numbered new-side line), the server performs ZERO anchor
+   validation (even beyond-EOF lines post), and `--file` without `--line`
+   drops the path entirely (file-level is MR-level in disguise). Semantics
+   pinned in `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`:
+   client-side hunk validation in submit's Aone branch, with the GitHub
+   422-recovery degrade (Critical → body, Suggestion → discarded) performed
+   in code and disclosed in the terminal.
 3. **Q3 — REQUEST_CHANGES.** ~~Confirm no native reject/unapprove API
    exists.~~ **Re-confirmed 2026-08-21 on a1 v0.1.90:** the `repo mr` surface
    (approve/close/comment/cr/create/diff/edit/list/merge/remind/reopen/

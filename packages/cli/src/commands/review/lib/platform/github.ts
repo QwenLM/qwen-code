@@ -10,10 +10,12 @@
 // prose never name an endpoint.
 
 import {
+  currentUser,
   ensureAuthenticated,
   getGhHost,
   gh,
   ghApi,
+  ghApiAll,
   ghRaw,
   isOwnerRepo,
   normalizeGhHostForUrl,
@@ -27,6 +29,9 @@ import type {
   LinkedIssue,
   PrMeta,
   RepoIdentity,
+  ReviewContext,
+  ReviewContextComment,
+  ReviewContextVerdict,
   ReviewPlatformReader,
 } from './types.js';
 
@@ -79,6 +84,28 @@ interface GhIssueView {
     body?: string;
     createdAt?: string;
   }>;
+}
+
+/** One entry of `pulls/<n>/comments` or `issues/<n>/comments` (REST). */
+interface GhComment {
+  id: number;
+  user?: { login?: string };
+  body?: string;
+  created_at?: string;
+  /** Inline-only fields (issue comments never carry them). */
+  path?: string;
+  line?: number;
+  in_reply_to_id?: number | null;
+}
+
+/** One entry of `pulls/<n>/reviews` (REST). */
+interface GhReview {
+  id: number;
+  user?: { login?: string };
+  body?: string;
+  state?: string;
+  submitted_at?: string;
+  commit_id?: string;
 }
 
 /**
@@ -270,6 +297,83 @@ export const githubReader: ReviewPlatformReader = {
       deletions: view.deletions,
       changedFiles: view.changedFiles,
     };
+  },
+
+  getReviewContext(prNumber: number, ownerRepo: string): ReviewContext {
+    checkOwnerRepo(ownerRepo);
+    const [owner, repo] = ownerRepo.split('/');
+    const view = ghJson<{
+      title: string;
+      body: string | null;
+      author: { login: string } | null;
+      baseRefName: string;
+      headRefName: string;
+      headRefOid: string;
+      additions: number;
+      deletions: number;
+      changedFiles: number;
+      state: string;
+    }>(
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+      '--json',
+      'title,body,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,state',
+    );
+    // Paginate — busy PRs routinely cross the default 30-per-page limit on
+    // each of these endpoints, and the latest entries (which carry the most
+    // recent reviewer summaries / replies) end up on later pages we'd
+    // otherwise miss.
+    const inline = ghApiAll(
+      `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+    ) as GhComment[];
+    const issue = ghApiAll(
+      `repos/${owner}/${repo}/issues/${prNumber}/comments`,
+    ) as GhComment[];
+    const reviews = ghApiAll(
+      `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+    ) as GhReview[];
+    const comments: ReviewContextComment[] = [...inline, ...issue].map((c) => ({
+      id: c.id,
+      author: c.user?.login ?? '',
+      body: c.body ?? '',
+      createdAt: c.created_at ?? '',
+      ...(c.path !== undefined ? { path: c.path } : {}),
+      ...(c.line !== undefined ? { line: c.line } : {}),
+      ...(c.in_reply_to_id !== undefined && c.in_reply_to_id !== null
+        ? { parentId: c.in_reply_to_id }
+        : {}),
+    }));
+    const verdicts: ReviewContextVerdict[] = reviews.map((r) => ({
+      id: r.id,
+      author: r.user?.login ?? '',
+      body: r.body ?? '',
+      state: r.state ?? '',
+      submittedAt: r.submitted_at ?? '',
+      ...(typeof r.commit_id === 'string' ? { commitId: r.commit_id } : {}),
+    }));
+    return {
+      title: view.title,
+      body: view.body ?? '',
+      authorLogin: view.author?.login ?? '',
+      state: view.state,
+      baseRefName: view.baseRefName,
+      headRefName: view.headRefName,
+      headRefOid: view.headRefOid,
+      additions: view.additions,
+      deletions: view.deletions,
+      changedFiles: view.changedFiles,
+      comments,
+      verdicts,
+      // GitHub's ledger markers ride in the review bodies.
+      ledgerCarriers: verdicts,
+    };
+  },
+
+  getCurrentUser(): string {
+    return currentUser();
   },
 
   composeUrl(prNumber: number, ownerRepo: string): string {
