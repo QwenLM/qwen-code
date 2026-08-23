@@ -11645,11 +11645,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   const VALID_SESSION_ID = '12345678-1234-1234-1234-1234567890ab';
 
-  function mockSessionServiceLoad(result: unknown) {
+  function mockSessionServiceLoad(result: unknown, onRead?: () => void) {
     vi.mocked(SessionService).mockImplementation(
       () =>
         ({
-          loadSession: vi.fn().mockResolvedValue(result),
+          loadSession: vi.fn().mockImplementation(async () => {
+            onRead?.();
+            return result;
+          }),
         }) as unknown as InstanceType<typeof SessionService>,
     );
   }
@@ -12171,19 +12174,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.getSessionRuntimeBaseDir = vi
       .fn()
       .mockReturnValue('/tmp/qwen-runtime-test');
-    mockSessionServiceLoad({
-      conversation: {
-        messages: [{ role: 'user' }],
-        startTime: 'start',
-        lastUpdated: 'end',
+    // Anchor the settle flip to the read boundary: the session is active
+    // before the read and the mocked sessionService.loadSession flips it to
+    // idle inside the read window (mirrors the sessionTranscript test that
+    // toggles state inside readPage.mockImplementationOnce). Keying the
+    // isTurnIdle mock by call order instead would let a mutation that moves
+    // the before-read sample across the read survive.
+    mockSessionServiceLoad(
+      {
+        conversation: {
+          messages: [{ role: 'user' }],
+          startTime: 'start',
+          lastUpdated: 'end',
+        },
       },
-    });
+      () => lastSessionMock!.isTurnIdle.mockReturnValue(true),
+    );
     mockHistoryReplay.mockResolvedValue(undefined);
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     // Active before the read, idle by replay time: the before-read sample
     // alone must keep the trailing call pending.
-    lastSessionMock!.isTurnIdle.mockReturnValueOnce(false);
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
 
     await agent.extMethod('qwen/session/loadUpdates', {
       sessionId: VALID_SESSION_ID,
@@ -12205,21 +12217,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.getSessionRuntimeBaseDir = vi
       .fn()
       .mockReturnValue('/tmp/qwen-runtime-test');
-    mockSessionServiceLoad({
-      conversation: {
-        messages: [{ role: 'user' }],
-        startTime: 'start',
-        lastUpdated: 'end',
+    // Anchor the start flip to the read boundary: the session is idle
+    // before the read and the mocked sessionService.loadSession flips it to
+    // active inside the read window. Keying the isTurnIdle mock by call
+    // order instead would let a mutation that moves the replay-time sample
+    // across the read survive.
+    mockSessionServiceLoad(
+      {
+        conversation: {
+          messages: [{ role: 'user' }],
+          startTime: 'start',
+          lastUpdated: 'end',
+        },
       },
-    });
+      () => lastSessionMock!.isTurnIdle.mockReturnValue(false),
+    );
     mockHistoryReplay.mockResolvedValue(undefined);
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     // Idle before the read, active by replay time: the replay-time sample
     // alone must keep the trailing call pending.
-    lastSessionMock!.isTurnIdle
-      .mockReturnValueOnce(true)
-      .mockReturnValue(false);
+    lastSessionMock!.isTurnIdle.mockReturnValue(true);
 
     await agent.extMethod('qwen/session/loadUpdates', {
       sessionId: VALID_SESSION_ID,
