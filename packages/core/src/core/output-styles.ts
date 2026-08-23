@@ -24,7 +24,7 @@ export interface OutputStyleDefinition {
    * either way; a style never switches those off.
    */
   keepCodingInstructions: boolean;
-  /** The style section itself, rendered under a `# <Name> Style Active` heading. */
+  /** The style section itself, rendered under the `# Output Style: <name>` heading. */
   prompt: string;
   /**
    * Overrides the generic wording of the per-turn reminder. Every active style
@@ -42,7 +42,7 @@ const CONCISE: OutputStyleDefinition = {
   name: 'Concise',
   source: 'built-in',
   description:
-    'Answers first, with no preamble, narration, or closing recap — the work stays as thorough',
+    'Answers first, with no preamble, narration, or closing recap — the work stays as thorough as ever',
   keepCodingInstructions: true,
   turnReminder:
     'Be concise: answer first, cut the narration, keep only what the user needs.',
