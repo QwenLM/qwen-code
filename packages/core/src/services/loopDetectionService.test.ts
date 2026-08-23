@@ -3052,6 +3052,182 @@ describe('LoopDetectionService', () => {
       expect(capService.getLastLoopType()).toBeNull();
     });
 
+    it('does not halt a changing-board poller when a suppressed replay lands mid-streak', () => {
+      // The provider re-emitted an already-handled call id mid-streak: the
+      // replay streamed through the guards (incrementing the request-side
+      // counts) and was suppressed without executing. Pre-fix the
+      // suppressed occurrence kept its increment, so at the 5th identical
+      // request expectedResults = 4 while resultsObserved = 3 forever —
+      // the exoneration branch unreachable, and the turn halted
+      // CONSECUTIVE_IDENTICAL_TOOL_CALLS despite every executed result
+      // having changed (the #9450 false positive re-entering via provider
+      // re-emission).
+      let fired = false;
+      for (let i = 0; i < 8 && !fired; i++) {
+        const callId = `call-${i}`;
+        fired = service.checkAlwaysOnSafeties(taskListEvent(callId));
+        if (fired) break;
+        if (i === 2) {
+          // Mid-streak replay of an already-handled call id: it streams in
+          // (the guards count it), then the runtime suppresses it — no
+          // result will ever land for it.
+          fired = service.checkAlwaysOnSafeties(taskListEvent('call-1'));
+          if (fired) break;
+          service.noteSuppressedToolCallByCallId('call-1');
+        }
+        fired = service.recordToolResultByCallId(
+          callId,
+          taskListResult(`board state v${i}`, callId),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt an ABAB poller when a suppressed replay pads the window', () => {
+      // A replay of the stateful participant mid-window pads the window to
+      // a clean ABABAB shape while producing no result. Pre-fix the
+      // carve-out saw 3 window occurrences against only 2 recorded
+      // results, skipped the exoneration, and halted on arguments alone.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('alternating-replay');
+
+      const toolB = () =>
+        createToolCallRequestEvent('tool_b', { step: 'work' });
+      const recordBoard = (callId: string, board: string) =>
+        heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(board, callId),
+        );
+
+      expect(heuristicService.addAndCheck(taskListEvent('a-0'))).toBe(false);
+      expect(recordBoard('a-0', 'board state v0')).toBe(false);
+      expect(heuristicService.addAndCheck(toolB())).toBe(false);
+      expect(heuristicService.addAndCheck(taskListEvent('a-1'))).toBe(false);
+      expect(recordBoard('a-1', 'board state v1')).toBe(false);
+      expect(heuristicService.addAndCheck(toolB())).toBe(false);
+      // The replay streams in and is suppressed without executing.
+      expect(heuristicService.addAndCheck(taskListEvent('a-0'))).toBe(false);
+      heuristicService.noteSuppressedToolCallByCallId('a-0');
+      // Pre-fix this 6th window entry halted
+      // ALTERNATING_TOOL_CALL_PATTERN on args alone.
+      expect(heuristicService.addAndCheck(toolB())).toBe(false);
+      expect(heuristicService.getLastLoopType()).toBeNull();
+    });
+
+    it('halts an interleaved frozen poller whose gap rounds previously decayed the streak', () => {
+      // Production ordering: requests → Finished → results. A frozen board
+      // polled every OTHER round between varied work: pre-fix the poll
+      // round's Finished boundary found the key absent from the result set
+      // (the gap round's boundary had consumed the previous result's mark),
+      // decayed the streak back to zero, and the cap's stuck signal never
+      // armed — the turn ran to the hard backstop instead of halting just
+      // past the soft cap. The requested-keys skip keeps the streak alive
+      // across gap rounds.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-interleaved-frozen');
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+
+      let fired = false;
+      let totalCalls = 0;
+      for (let round = 0; round < 40 && !fired; round++) {
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        totalCalls++;
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+        fired = capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+        if (fired) break;
+        // Gap round: other work, no task_list request or result.
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+      }
+      expect(fired).toBe(true);
+      expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // Halts just past the soft cap (20) once the stuck signal arms, far
+      // below the hard backstop (20 * 10).
+      expect(totalCalls).toBeLessThanOrEqual(24);
+    });
+
+    it('does not halt a changing-board poller when a gap round lands mid-streak', () => {
+      // A text-only gap round mid-streak: pre-fix the next poll round's
+      // Finished boundary decayed resultsObserved/unchangedStreak to zero
+      // while toolCallRepetitionCount stood, making the carve-out gate
+      // resultsObserved >= count - 1 permanently unsatisfiable — the 5th
+      // identical request halted on arguments alone despite every executed
+      // result having changed (fail-closed arm of the decay gap).
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-0'))).toBe(
+        false,
+      );
+      service.checkAlwaysOnSafeties(finishedEvent);
+      expect(
+        service.recordToolResultByCallId(
+          'call-0',
+          taskListResult('board v0', 'call-0'),
+        ),
+      ).toBe(false);
+
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-1'))).toBe(
+        false,
+      );
+      service.checkAlwaysOnSafeties(finishedEvent);
+      expect(
+        service.recordToolResultByCallId(
+          'call-1',
+          taskListResult('board v1', 'call-1'),
+        ),
+      ).toBe(false);
+
+      // Text-only gap round: no requests, no results.
+      service.checkAlwaysOnSafeties(finishedEvent);
+
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-2'))).toBe(
+        false,
+      );
+      // Pre-fix this boundary wiped resultsObserved/unchangedStreak.
+      service.checkAlwaysOnSafeties(finishedEvent);
+      expect(
+        service.recordToolResultByCallId(
+          'call-2',
+          taskListResult('board v2', 'call-2'),
+        ),
+      ).toBe(false);
+
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-3'))).toBe(
+        false,
+      );
+      service.checkAlwaysOnSafeties(finishedEvent);
+      expect(
+        service.recordToolResultByCallId(
+          'call-3',
+          taskListResult('board v3', 'call-3'),
+        ),
+      ).toBe(false);
+
+      // 5th identical request: all four prior results changed, so the
+      // exoneration branch must restart the streak instead of halting.
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-4'))).toBe(
+        false,
+      );
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
     it('does not collapse the fingerprint when board content merely quotes the digest label', () => {
       // task_list embeds peer-authored text verbatim, and agents quote stub
       // text (including the `Full output sha256: <hex>` line this PR adds to

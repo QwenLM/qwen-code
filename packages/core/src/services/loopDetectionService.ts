@@ -441,14 +441,30 @@ export class LoopDetectionService {
   >();
 
   // Stateful keys that recorded a result since the last Finished round-trip
-  // boundary. At each Finished, keys NOT in this set produced no result for
-  // a whole round-trip: the model moved on to other work, so their streak
-  // evidence is abandoned and must stop feeding the cap's stuck signal —
-  // otherwise a key abandoned after a frozen phase keeps its peak for the
-  // whole prompt and the adaptive cap halts a productive turn just past the
-  // soft cap (issue #9450). Keys that keep polling appear in every round's
-  // results and are never decayed.
+  // boundary. At each Finished, keys NOT in this set AND not in the
+  // requested set below produced no result AND no request for a whole
+  // round-trip: the model moved on to other work, so their streak evidence
+  // is abandoned and must stop feeding the cap's stuck signal — otherwise a
+  // key abandoned after a frozen phase keeps its peak for the whole prompt
+  // and the adaptive cap halts a productive turn just past the soft cap
+  // (issue #9450). Keys that keep polling appear in every round's results
+  // (or requests) and are never decayed.
   private statefulResultKeysSinceLastFinished = new Set<string>();
+
+  // Stateful keys that streamed a request since the last Finished boundary.
+  // Decay must skip these too: production records results AFTER the Finished
+  // of the stream that emitted their calls, so at the boundary of a poll
+  // round the poll's own result has not landed yet, and a gap round (a
+  // text-only turn, an interleaved other tool) consumes the previous
+  // result's mark at ITS boundary — keying decay on result marks alone
+  // wipes a still-polled key's streak at the next poll's boundary. That
+  // disarmed the cap's stuck signal for a frozen board polled every other
+  // round (fail open) and reset resultsObserved mid-streak while
+  // toolCallRepetitionCount stood, making the consecutive guard's
+  // exoneration gate permanently unsatisfiable (fail closed) (issue #9450).
+  // Maintained in the always-on path (checkAlwaysOnSafeties) so it works
+  // under skipLoopDetection too.
+  private statefulRequestedKeysSinceLastFinished = new Set<string>();
 
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
@@ -666,7 +682,17 @@ export class LoopDetectionService {
    * for batches that execute nothing instead — recordDaemonToolCalls in the
    * ACP Session). Without this, a replay-suppressed round is
    * indistinguishable from abandonment and disarms the result-aware halts.
-   * Unknown callIds (never streamed through the guards) are ignored.
+   * The request-side repetition evidence the guards accumulated when the
+   * call streamed in must unwind too: no result will ever land for a
+   * suppressed call, so keeping its increment would leave the result-aware
+   * carve-outs permanently one result short of the request count (the
+   * exoneration gate `resultsObserved >= count - 1` becomes unreachable)
+   * and halt a changing-board poller on arguments alone — the #9450 false
+   * positive re-entering via provider re-emission mid-streak. The daemon
+   * twin never counts suppressed calls (its batch recorder receives only
+   * executable calls), so this keeps the runtimes aligned (issue #9450
+   * requirement #6). Unknown callIds (never streamed through the guards)
+   * are ignored.
    */
   noteSuppressedToolCallByCallId(callId: string): void {
     const request = this.requestByCallId.get(callId);
@@ -680,6 +706,24 @@ export class LoopDetectionService {
     const inFlight = this.statefulInFlight.get(key) ?? 0;
     if (inFlight > 0) {
       this.statefulInFlight.set(key, inFlight - 1);
+    }
+    // Unwind the consecutive-identical increment, but only while the streak
+    // still belongs to the suppressed key: a later different call restarts
+    // the count for its own key, and decrementing then would corrupt an
+    // unrelated streak. Floored at zero (a Retry may have reset it since).
+    if (this.lastToolCallKey === key && this.toolCallRepetitionCount > 0) {
+      this.toolCallRepetitionCount--;
+    }
+    // Drop the window occurrence the alternating-pattern tier pushed when
+    // the call streamed in; it carries no result, and leaving it in would
+    // overstate the key's occurrences so the carve-out expects one more
+    // recorded result than can ever exist (judging the window on too
+    // little evidence). Remove the most recent occurrence: the suppressed
+    // call is the latest push of this key unless an identical call streamed
+    // after it, in which case removing either occurrence is equivalent.
+    const windowIndex = this.recentToolCallKeys.lastIndexOf(key);
+    if (windowIndex >= 0) {
+      this.recentToolCallKeys.splice(windowIndex, 1);
     }
     this.statefulResultKeysSinceLastFinished.add(key);
   }
@@ -837,6 +881,7 @@ export class LoopDetectionService {
         state.consecutiveIdenticalResults = 0;
       }
       this.statefulResultKeysSinceLastFinished.clear();
+      this.statefulRequestedKeysSinceLastFinished.clear();
       this.statefulAlternationHistory.clear();
       this.statefulRepeatKeys.clear();
       this.statefulInFlight.clear();
@@ -861,6 +906,10 @@ export class LoopDetectionService {
     const stateful = this.isStatefulReadTool(event.value.name);
     if (stateful) {
       this.statefulRepeatKeys.add(key);
+      // The Finished-boundary decay must not treat this key as abandoned
+      // at this stream's own boundary: its result is recorded AFTER the
+      // Finished event (see statefulRequestedKeysSinceLastFinished).
+      this.statefulRequestedKeysSinceLastFinished.add(key);
     }
 
     // Pair requests with their later results (recordToolResultByCallId).
@@ -1441,16 +1490,26 @@ export class LoopDetectionService {
    * stuck signal. Without this the key map is add-only and the peak latches
    * for the whole prompt — the adaptive cap would then halt a productive
    * turn just past the soft cap on the abandoned key's stale peak (issue
-   * #9450). Keys polled in every round-trip appear in the set and keep their
-   * streaks, so a continuously frozen board still arms the cap. lastFingerprint
-   * survives the decay: when polling resumes, the first fresh result is
-   * still judged against the last observed one (changed → productive,
-   * unchanged → the count re-accumulates toward the halt).
+   * #9450). Keys polled in every round-trip appear in the result set and
+   * keep their streaks, so a continuously frozen board still arms the cap.
+   * Keys that merely streamed a request since the last boundary are skipped
+   * too (statefulRequestedKeysSinceLastFinished): production records results
+   * AFTER the Finished of the stream that emitted their calls, and any gap
+   * round (a text-only turn, an interleaved other tool) consumes the
+   * previous result's mark at its own boundary — decaying a key that is
+   * still being polled would wipe its streak at the next poll's boundary,
+   * disarming the stuck signal for an every-other-round frozen poller and
+   * resetting resultsObserved mid-streak while toolCallRepetitionCount
+   * stands (issue #9450). lastFingerprint survives the decay: when polling
+   * resumes, the first fresh result is still judged against the last
+   * observed one (changed → productive, unchanged → the count
+   * re-accumulates toward the halt).
    */
   private decayAbandonedStatefulStreaks(): void {
     let decayed = false;
     for (const [key, state] of this.statefulRepeatState) {
       if (this.statefulResultKeysSinceLastFinished.has(key)) continue;
+      if (this.statefulRequestedKeysSinceLastFinished.has(key)) continue;
       if (
         state.consecutiveIdenticalResults > 0 ||
         state.resultsObserved > 0 ||
@@ -1463,6 +1522,7 @@ export class LoopDetectionService {
       }
     }
     this.statefulResultKeysSinceLastFinished.clear();
+    this.statefulRequestedKeysSinceLastFinished.clear();
     if (decayed) {
       this.recomputeStatefulCapPeak();
     }
@@ -1643,6 +1703,7 @@ export class LoopDetectionService {
     this.statefulCapKeyRepeat = 0;
     this.statefulRepeatState.clear();
     this.statefulResultKeysSinceLastFinished.clear();
+    this.statefulRequestedKeysSinceLastFinished.clear();
     this.statefulRepeatKeys.clear();
     this.statefulAlternationHistory.clear();
     this.statefulInFlight.clear();
