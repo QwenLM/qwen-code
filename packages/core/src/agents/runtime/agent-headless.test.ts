@@ -2665,13 +2665,18 @@ describe('subagent.ts', () => {
 
         await scope.execute(new ContextState());
 
-        // The replay never executes; the halt lands on the fifth identical
-        // request (poll_4's stream), whose four preceding results are the
-        // three executed frozen boards (the synthetic replay response is
-        // excluded). Pre-fix the fabricated replay error counted as a
-        // changed result, the streak restarted, and the run sailed to GOAL.
-        expect(taskListInvocation.execute).toHaveBeenCalledTimes(3);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        // The replay never executes, and the suppression unwinds its
+        // streamed-in request count (keeping the exoneration gate
+        // `resultsObserved >= count - 1` reachable for changing boards and
+        // matching the daemon twin, which never counts suppressed calls),
+        // so the consecutive streak counts the four executable requests:
+        // the halt lands on the fifth countable identical request
+        // (poll_5's stream) after poll_4 executes as the fourth frozen
+        // board, corroborated by the four unchanged results. Pre-fix the
+        // fabricated replay error counted as a changed result, the streak
+        // restarted, and the run sailed to GOAL.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(4);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(6);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
         expect(finishEvents).toHaveLength(1);
         expect(finishEvents[0].loopType).toBe(
