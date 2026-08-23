@@ -30,6 +30,7 @@
 // keeps rebase survival — the same graceful degradation the cache has always
 // had.
 
+import { renderingAttributes } from './local-anchor.js';
 import { gitRaw } from './git.js';
 import { LITERAL_PATHSPECS } from './diff-flags.js';
 
@@ -39,6 +40,17 @@ export const NO_BLOB = 'absent';
 export interface BlobPair {
   base: string;
   head: string;
+  /**
+   * The EFFECTIVE rendering attributes git reports for this path, when it has
+   * any.
+   *
+   * The two blobs answer "did the content move"; this answers "would git
+   * render it the same way", which the blobs cannot: an untracked
+   * `.gitattributes` in the reviewer's checkout governs `git diff` while
+   * recording `absent/absent` in both trees. Optional, so a record written
+   * before this field reads as changed once and is re-recorded.
+   */
+  attrs?: string;
 }
 
 export type FileVerdicts = Record<string, BlobPair>;
@@ -149,6 +161,29 @@ export function blobPairs(
   if (base === null || head === null) return null;
   const out = nullProtoMap<BlobPair>();
   for (const p of all) out[p] = { base: base[p], head: head[p] };
+  // …and the EFFECTIVE rendering, asked of git rather than inferred from the
+  // tree. The attribute-file blobs above see only what the two trees carry: a
+  // `.gitattributes` that is UNTRACKED in the reviewer's checkout records
+  // `absent/absent` on both sides and stays inert for ever, while `git diff`
+  // renders under it — so round 1 could read `Binary files … differ`, round 2
+  // (same trees, file since deleted) full hunks, with the pairs byte-identical
+  // and the clean verdict transferred over hunks no round ever read.
+  //
+  // `check-attr` is the authority: it answers under every source git honours,
+  // in git's own precedence, including the worktree copy this record cannot
+  // see, `.git/info/attributes`, and the config-side diff drivers. The answer
+  // is folded per path as a THIRD component, so a rendering change moves the
+  // record even when both blobs stand still. It is machine-local by nature,
+  // which is the safe direction: another checkout reads it as changed and
+  // re-reviews.
+  const attrs = renderingAttributes(
+    repoRoot,
+    paths.filter((p) => out[p] !== undefined),
+  );
+  for (const p of paths) {
+    const a = attrs[p];
+    if (a !== undefined && out[p] !== undefined) out[p].attrs = a;
+  }
   return out;
 }
 
@@ -270,6 +305,13 @@ export function changedPairs(
     const cur = Object.hasOwn(current, p) ? current[p] : undefined;
     if (!rec || !cur) return true;
     if (rec.base === NO_BLOB || cur.base === NO_BLOB) return true;
+    // The rendering is the third component, and comparing only the blobs
+    // would leave the field inert: an untracked `.gitattributes` moves
+    // `attrs` while both blobs stand still, which is the whole reason it is
+    // recorded. A record written before the field has none on the recorded
+    // side, so it reads as changed once and is re-recorded — the safe
+    // direction.
+    if (rec.attrs !== cur.attrs) return true;
     return rec.base !== cur.base || rec.head !== cur.head;
   });
 }

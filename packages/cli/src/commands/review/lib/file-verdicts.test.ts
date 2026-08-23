@@ -296,3 +296,30 @@ describe('changedPairs', () => {
     expect(changedPairs(rec, {}, ['__proto__'])).toEqual(['__proto__']);
   });
 });
+describe('blobPairs — the rendering the reviewer actually gets', () => {
+  it('moves when an UNTRACKED .gitattributes changes how git renders', () => {
+    // The two blobs answer "did the content move". They cannot answer "would
+    // git render it the same way": a `.gitattributes` that is untracked in
+    // the reviewer's checkout governs `git diff` while recording
+    // absent-on-both-sides in the trees, so round 1 could read
+    // "Binary files … differ", round 2 (same trees, file since removed) full
+    // hunks — pairs byte-identical, clean verdict transferred over hunks no
+    // round ever read.
+    write('x.txt', 'hello\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    // Untracked, so it is in NEITHER tree.
+    write('.gitattributes', 'x.txt binary\n');
+    const withAttr = blobPairs(repo, base, base, ['x.txt'])!;
+    rmSync(join(repo, '.gitattributes'));
+    const withoutAttr = blobPairs(repo, base, base, ['x.txt'])!;
+
+    // Same trees, same blobs — and git renders them differently, so the
+    // record has to differ.
+    expect(withAttr['x.txt'].base).toBe(withoutAttr['x.txt'].base);
+    expect(withAttr['x.txt'].head).toBe(withoutAttr['x.txt'].head);
+    expect(changedPairs(withAttr, withoutAttr, ['x.txt'])).toContain('x.txt');
+  });
+});
