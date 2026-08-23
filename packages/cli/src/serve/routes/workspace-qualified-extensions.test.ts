@@ -1798,7 +1798,6 @@ describe('extension management v2 REST', () => {
   });
 
   it('times out a legacy update check while its cache refresh stalls', async () => {
-    vi.useFakeTimers();
     const h = await makeHarness();
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -1807,6 +1806,10 @@ describe('extension management v2 REST', () => {
       .spyOn(ExtensionManager.prototype, 'refreshCache')
       .mockImplementationOnce(async () => await stalledRefresh)
       .mockResolvedValue(undefined);
+    // Install fake timers only after the harness is up: app setup performs
+    // real async work that must not run under a frozen clock (the deadline
+    // timer this test targets is created later, inside the route handler).
+    vi.useFakeTimers();
     try {
       const response = auth(
         request(h.app).post('/workspace/extensions/check-updates'),
@@ -1827,7 +1830,10 @@ describe('extension management v2 REST', () => {
       vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
-  });
+    // Generous budget: this test mixes fake timers with real socket/fs I/O,
+    // which the shared CI runners occasionally stretch past the 15s default
+    // (the assertion logic itself needs only the 2min fake-clock advance).
+  }, 30_000);
 
   it('reports legacy global mutations as applied after runtime reconciliation', async () => {
     const h = await makeHarness();
