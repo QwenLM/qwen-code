@@ -245,13 +245,16 @@ load/resume, and mutations racing an archive transition return
 `409 session_archiving`.
 
 Empty, damaged, and orphaned regular transcript files remain eligible for these
-lifecycle operations even when they cannot be loaded as conversations. When
-`session_storage_conflict_repair` is advertised, archive and unarchive accept
-`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
-the active copy. Without that option, active/archive conflicts remain
-non-mutating and are returned in the batch `errors` array. Workspace-qualified
-lifecycle routes now use that HTTP `200` batch envelope instead of their earlier
-HTTP `409 session_conflict` response.
+lifecycle operations even when they cannot be loaded as conversations, unless
+the file changed after a writer sealed its certified handoff proof. That case
+continues to fail closed with `SessionTranscriptChangedError`, distinct from an
+active/archive conflict, until an operator resolves the sealed lock and changed
+bytes. When `session_storage_conflict_repair` is advertised, archive and
+unarchive accept `resolveConflicts: true`: archive keeps the archived copy,
+while unarchive keeps the active copy. Without that option, active/archive
+conflicts remain non-mutating and are returned in the batch `errors` array.
+Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
+instead of their earlier HTTP `409 session_conflict` response.
 
 ### Context Usage (`session_context_usage` capability tag)
 
