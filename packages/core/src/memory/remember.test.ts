@@ -147,7 +147,6 @@ describe('remember memory helper', () => {
     expect(params.tools).toEqual([
       'read_file',
       'grep_search',
-      'list_directory',
       'write_file',
       'edit',
     ]);
