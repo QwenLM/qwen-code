@@ -81,6 +81,36 @@ describe('worktreeResidue', () => {
     gitIsolation.dispose();
   });
 
+  // A completely genuine forge territory — `git init` with the
+  // contamination committed, plus a linked worktree of it — built outside the
+  // repo. Both redirect tests stand one up before planting their divergent
+  // links; one builder means an isolation fix lands once, not once per test.
+  const forgeTerritory = (outside: string, wtName: string) => {
+    const forgeRepo = join(outside, 'forge');
+    mkdirSync(forgeRepo);
+    const fgit = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: forgeRepo, encoding: 'utf8' },
+      );
+    fgit('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(forgeRepo, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forgeRepo, '__probe__.test.ts'), 'probe');
+    fgit('add', '-A');
+    fgit('commit', '-qm', 'the mutant, committed', '--no-verify');
+    fgit('worktree', 'add', '--detach', '-q', join(outside, wtName), 'HEAD');
+    return join(outside, wtName);
+  };
+
   it('is empty for the tree a review actually reads', () => {
     const head = git('rev-parse', 'HEAD');
     expect(worktreeResidue(tree, 12, head)).toEqual({ paths: [], total: 0 });
@@ -368,35 +398,7 @@ describe('worktreeResidue', () => {
 
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-redirect-')));
     try {
-      const forgeRepo = join(outside, 'forge');
-      mkdirSync(forgeRepo);
-      const fgit = (...args: string[]) =>
-        execFileSync(
-          'git',
-          [
-            '-c',
-            'user.email=t@t.t',
-            '-c',
-            'user.name=t',
-            '-c',
-            'commit.gpgsign=false',
-            ...args,
-          ],
-          { cwd: forgeRepo, encoding: 'utf8' },
-        );
-      fgit('init', '-q', '-b', 'main', '--template=', '.');
-      writeFileSync(join(forgeRepo, 'a.ts'), 'export const x = 2; // MUTANT\n');
-      writeFileSync(join(forgeRepo, '__probe__.test.ts'), 'probe');
-      fgit('add', '-A');
-      fgit('commit', '-qm', 'the mutant, committed', '--no-verify');
-      fgit(
-        'worktree',
-        'add',
-        '--detach',
-        '-q',
-        join(outside, 'review-wt'),
-        'HEAD',
-      );
+      forgeTerritory(outside, 'review-wt');
 
       // The attack: the ancestor becomes a link into that territory.
       rmSync(dirname(tree), { recursive: true, force: true });
@@ -465,39 +467,11 @@ describe('worktreeResidue', () => {
 
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-redirect-')));
     try {
-      const forgeRepo = join(outside, 'forge');
-      mkdirSync(forgeRepo);
-      const fgit = (...args: string[]) =>
-        execFileSync(
-          'git',
-          [
-            '-c',
-            'user.email=t@t.t',
-            '-c',
-            'user.name=t',
-            '-c',
-            'commit.gpgsign=false',
-            ...args,
-          ],
-          { cwd: forgeRepo, encoding: 'utf8' },
-        );
-      fgit('init', '-q', '-b', 'main', '--template=', '.');
-      writeFileSync(join(forgeRepo, 'a.ts'), 'export const x = 2; // MUTANT\n');
-      writeFileSync(join(forgeRepo, '__probe__.test.ts'), 'probe');
-      fgit('add', '-A');
-      fgit('commit', '-qm', 'the mutant, committed', '--no-verify');
-      fgit(
-        'worktree',
-        'add',
-        '--detach',
-        '-q',
-        join(outside, 'leaf-wt'),
-        'HEAD',
-      );
+      const forgedTree = forgeTerritory(outside, 'leaf-wt');
 
       // The attack: the leaf becomes a link into that territory.
       rmSync(tree, { recursive: true, force: true });
-      symlinkSync(join(outside, 'leaf-wt'), tree);
+      symlinkSync(forgedTree, tree);
 
       const got = worktreeResidue(tree);
 
