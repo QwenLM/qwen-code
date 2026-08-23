@@ -30,6 +30,7 @@ import {
   vi,
 } from 'vitest';
 import { SessionService, SessionStorageEntryError } from './sessionService.js';
+import { SessionTranscriptIdentityUnavailableError } from './session-writer-lease.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 
@@ -824,6 +825,54 @@ describe('SessionService lifecycle maintenance', () => {
     });
     expect(fs.existsSync(paths.active)).toBe(false);
     expect(fs.readFileSync(paths.archived, 'utf8')).toBe(content);
+  });
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a just-over-limit readable transcript from another workspace',
+    async (action) => {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths } = createHarness('', state);
+      const sourcePath = paths[state];
+      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
+      const content = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd: foreignCwd,
+        filler: 'x'.repeat(1024 * 1024),
+      })}\n`;
+      expect(Buffer.byteLength(content)).toBeGreaterThan(1024 * 1024);
+      expect(Buffer.byteLength(content)).toBeLessThan(1024 * 1024 + 64 * 1024);
+      fs.writeFileSync(sourcePath, content);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).resolves.toBe(false);
+      } else {
+        await expect(
+          service[`${action}Sessions`]([sessionId]),
+        ).resolves.toMatchObject({ notFound: [sessionId], errors: [] });
+      }
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
+      expect(
+        fs.existsSync(action === 'unarchive' ? paths.active : paths.archived),
+      ).toBe(false);
+    },
+  );
+
+  it('fails closed on a readable transcript whose first record exceeds the bounded read window', async () => {
+    const { service, sessionId, paths } = createHarness('', 'active');
+    const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
+    const content = `${JSON.stringify({
+      ...recordFor('u1', 'user', null),
+      sessionId,
+      cwd: foreignCwd,
+      filler: 'x'.repeat(2 * 1024 * 1024),
+    })}\n`;
+    fs.writeFileSync(paths.active, content);
+
+    await expect(
+      service.getMaintainableSessionLocation(sessionId),
+    ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
   });
 
   it.each(['archive', 'unarchive'] as const)(

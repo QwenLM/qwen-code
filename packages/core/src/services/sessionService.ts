@@ -1028,7 +1028,14 @@ export class SessionService {
       });
       let newline = pending.indexOf('\n');
       const firstLineLength = newline >= 0 ? newline : pending.length;
-      if (firstLineLength > MAX_MAINTAINABLE_FIRST_RECORD_BYTES) {
+      if (
+        firstLineLength > MAX_MAINTAINABLE_FIRST_RECORD_BYTES &&
+        newline < 0
+      ) {
+        const prefix = pending.trimStart();
+        if (!prefix || prefix.startsWith('{')) {
+          throw new SessionTranscriptIdentityUnavailableError();
+        }
         return undefined;
       }
       while (newline >= 0) {
