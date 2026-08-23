@@ -762,6 +762,28 @@ describe('Storage – getAuditFallbackDir', () => {
     }
   });
 
+  it('refuses an audits PARENT planted as a symlink, which relocates the whole landing', () => {
+    // mkdirSync(recursive) follows symlinks in every component ABOVE the
+    // leaf, and lstat refuses to follow only the FINAL one — so a leaf-only
+    // check cannot see a redirected parent. Planting `audits` is one `ln -s`
+    // with no race: ~/.qwen exists long before `audits` does.
+    if (process.platform === 'win32') return;
+    const attacker = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'audit-attacker-'),
+    );
+    actualFs.symlinkSync(attacker, path.join(home, 'audits'));
+    try {
+      expect(() => Storage.getAuditFallbackDir('/any/project')).toThrow(
+        /audit artifact directory .* is not a directory/,
+      );
+      // Nothing was created inside the planter's directory.
+      expect(actualFs.readdirSync(attacker)).toEqual([]);
+    } finally {
+      actualFs.rmSync(path.join(home, 'audits'), { force: true });
+      actualFs.rmSync(attacker, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a landing holding a symlink child, which redirects writes out of it', () => {
     // Validating the leaf alone leaves the escape open: artifacts land BELOW
     // it, and mkdirSync treats a symlink-to-directory as the directory, so

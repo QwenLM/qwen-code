@@ -352,12 +352,6 @@ export class Storage {
     } catch {
       // Unresolvable (e.g. not yet created): hash the raw path.
     }
-    const dir = path.join(
-      Storage.getGlobalQwenDir(),
-      'audits',
-      getProjectHash(resolved),
-    );
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     // Everything below validates a landing this process may have ADOPTED
     // rather than created. The path is fully predictable — the project hash
     // is a pure function of the root — and 0700 does not exclude the user's
@@ -365,21 +359,60 @@ export class Storage {
     // tool made it. The landing is where relocation puts artifacts precisely
     // BECAUSE they must stay private, so adoption is validated, not assumed.
     //
-    // mkdirSync's mode applies only to directories it CREATES, so a
-    // pre-existing leaf keeps whatever mode it was given.
+    // Validation walks EVERY component this method creates, not just the
+    // leaf. `mkdirSync(…, { recursive: true })` follows symlinks in every
+    // component above the final one, and `lstat` refuses to follow only the
+    // final one — so a leaf-only check cannot see a redirected parent. With
+    // `audits` planted as a symlink (one `ln -s`, no race: `~/.qwen` exists
+    // long before `audits` does), the leaf is created inside the planter's
+    // directory, reports as a perfectly real directory, and every artifact
+    // written "into the landing" lands wherever the link points. Binding
+    // writes to "this root" later cannot help if the root itself moved.
+    //
+    // QWEN_HOME itself is deliberately NOT validated here: it is the user's
+    // own configured location, not a path this method invents.
+    const auditsDir = Storage.adoptDirectory(
+      path.join(Storage.getGlobalQwenDir(), 'audits'),
+      'the audit artifact directory',
+    );
+    const dir = Storage.adoptDirectory(
+      path.join(auditsDir, getProjectHash(resolved)),
+      'the fallback landing',
+    );
+    Storage.assertAuditLandingIsClean(dir);
+    return dir;
+  }
+
+  /**
+   * Create one path component and return it only if what is there now is a
+   * real directory owned by this user's private mode.
+   *
+   * Non-recursive on purpose: `recursive: true` would silently walk (and
+   * follow) anything already standing in the path. Creating exactly one
+   * component at a time is what makes each component checkable.
+   */
+  private static adoptDirectory(dir: string, what: string): string {
+    try {
+      fs.mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      // EEXIST is the adoption case the checks below exist for. Anything
+      // else (a missing parent, a permission error) surfaces as itself.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory()) {
       throw new Error(
-        `audit: the fallback landing ${dir} is not a directory (it may be a ` +
-          `symlink planted ahead of the run) — remove it and re-run.`,
+        `audit: ${what} ${dir} is not a directory (it may be a symlink ` +
+          `planted ahead of the run) — remove it and re-run.`,
       );
     }
-    // Windows reports a mode that does not carry POSIX group/other bits;
-    // chmod there is a no-op, and the check would fire on every run.
+    // mkdirSync's mode applies only to directories it CREATES, so a
+    // pre-existing component keeps whatever mode it was given. Windows
+    // reports a mode that does not carry POSIX group/other bits; chmod there
+    // is a no-op, and the check would fire on every run.
     if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
       fs.chmodSync(dir, 0o700);
     }
-    Storage.assertAuditLandingIsClean(dir);
     return dir;
   }
 
@@ -410,19 +443,32 @@ export class Storage {
       return;
     }
     for (const entry of entries) {
-      if (entry.isSymbolicLink()) {
+      // Some filesystems return an unknown dirent type, and then BOTH
+      // isSymbolicLink() and isFile() answer false — the entry would slip
+      // past every arm below. Ask the kernel directly for those.
+      const typed =
+        entry.isSymbolicLink() || entry.isFile() || entry.isDirectory();
+      let stat: fs.Stats | undefined;
+      if (!typed) {
+        try {
+          stat = fs.lstatSync(path.join(dir, entry.name));
+        } catch {
+          continue; // vanished between readdir and lstat
+        }
+      }
+      if (entry.isSymbolicLink() || stat?.isSymbolicLink()) {
         throw new Error(
           `audit: the fallback landing ${dir} contains a symlink ` +
             `(${entry.name}) — artifacts written under it would land outside ` +
             `the landing. Remove it and re-run.`,
         );
       }
-      if (!entry.isFile()) continue;
+      if (!(entry.isFile() || stat?.isFile())) continue;
       // A hardlink twin proves another name for the same inode exists
       // somewhere this check can never see.
       let links: number;
       try {
-        links = fs.lstatSync(path.join(dir, entry.name)).nlink;
+        links = (stat ?? fs.lstatSync(path.join(dir, entry.name))).nlink;
       } catch {
         continue; // vanished between readdir and lstat
       }
