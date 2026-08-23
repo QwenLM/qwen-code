@@ -62,23 +62,33 @@ loopback `/health` pre-authentication unless the operator passes
 
 ## Decision
 
-Add one default-off CLI flag, `--ephemeral-auth`. The mode is accepted only
-when these structural conditions hold:
+Add one default-off CLI flag, `--ephemeral-auth`. The mode requires these
+structural conditions, validated before the daemon listens:
 
 1. Both `--open` and `--ephemeral-auth` are enabled.
 2. `isLoopbackBind()` classifies the primary listener as loopback.
 3. Web Shell serving is enabled and built assets are available.
-4. The current environment is eligible for browser launch.
 
-After those checks, the CLI creates an ephemeral bearer only when the existing
-token resolution produces no non-empty token.
+These checks are deterministic, so a failure is a command error before the
+daemon listens, even when a token is already configured; the explicit request
+must not silently degrade or describe a browser-delivery mode that cannot
+run.
 
-`--ephemeral-auth` requires `--open`. An ineligible bind, API-only launch,
-missing Web Shell assets, or headless browser environment is a command error
-before the daemon listens, even when a token is already configured; the
-explicit request must not silently degrade or describe a browser-delivery mode
-that cannot run. A non-empty configured token remains authoritative and
-suppresses generation after these structural eligibility checks.
+Browser-launch eligibility is deliberately not one of these hard gates.
+`shouldLaunchBrowser()` is a heuristic with common false negatives — a truthy
+`CI`, `DEBIAN_FRONTEND=noninteractive`, a Linux session without
+`DISPLAY`/`WAYLAND_DISPLAY`/`MIR_SOCKET`, a blocklisted `BROWSER` command, or
+SSH on a non-Linux host — and several of those environments still let the
+operator open a printed URL manually, for example over SSH port forwarding.
+When the heuristic reports ineligible, the CLI therefore warns, names the
+specific signal that tripped, starts the daemon, and prints the
+fragment-bearing manual URL instead of auto-opening it. This matches the
+existing recovery for a browser launch that fails after eligibility passed,
+so "the browser did not open" has exactly one outcome.
+
+After the structural checks, the CLI creates an ephemeral bearer only when the
+existing token resolution produces no non-empty token. A non-empty configured
+token remains authoritative and suppresses generation.
 
 The token is 32 cryptographically random bytes encoded with base64url. The CLI
 places it in `ServeOptions.token` before calling `runQwenServe()`. From that
@@ -111,7 +121,7 @@ API default.
 | `qwen serve --ephemeral-auth` without `--open`                                                      | No                                                         | CLI validation error                                                               |
 | `qwen serve --open --ephemeral-auth --no-web`                                                       | No                                                         | CLI validation error before listen                                                 |
 | `qwen serve --open --ephemeral-auth` with missing Web Shell assets                                  | No                                                         | CLI validation error before listen                                                 |
-| `qwen serve --open --ephemeral-auth` in CI, headless SSH, or another ineligible browser environment | No                                                         | CLI validation error before listen                                                 |
+| `qwen serve --open --ephemeral-auth` in CI, headless SSH, or another ineligible browser environment | Yes, if no configured token exists                        | Warning naming the tripped signal; the daemon starts and the CLI prints the fragment-bearing manual URL |
 | `qwen serve --hostname 0.0.0.0 --open --ephemeral-auth`                                             | No                                                         | CLI validation error; automatic credentials remain loopback-only                   |
 | `qwen serve --open --ephemeral-auth --local-control`                                                | Yes for the primary listener if no configured token exists | Primary uses the selected runtime token; LAN keeps its separate pairing credential |
 | `qwen serve --open --ephemeral-auth --enable-session-shell`                                         | Yes, if no configured token exists                         | The explicit shell opt-in becomes active and remains bearer-gated                  |
@@ -158,8 +168,10 @@ Consequences of this intentionally short lifetime are:
   authentication-recovery screen; restart
   `qwen serve --open --ephemeral-auth`, or use an explicitly managed token for
   a workflow that must be reopened or shared.
-- A browser launcher failure follows the existing recovery path, which may
-  print the secret-bearing fragment URL for manual opening.
+- A browser launcher failure, or an environment the eligibility heuristic
+  reports as ineligible, follows the existing recovery path, which may print
+  the secret-bearing fragment URL for manual opening. The ineligibility
+  warning names the specific signal that tripped.
 - A long-running or multi-client workflow should configure
   `QWEN_SERVER_TOKEN` explicitly so the operator can give the same credential
   to each authorized client and reopen the Web Shell without restarting.
@@ -205,10 +217,13 @@ store work tracked by #4514.
 ## Failure behavior
 
 - Bare `--open` keeps its existing no-op and API-only degradation behavior.
-  With `--ephemeral-auth`, browser eligibility, loopback binding, Web Shell
-  enablement, and asset availability are validated before listen; an invalid
-  explicit request fails instead of leaving an inaccessible authenticated
-  daemon.
+  With `--ephemeral-auth`, loopback binding, Web Shell enablement, and asset
+  availability are validated before listen; an invalid explicit request fails
+  instead of leaving an inaccessible authenticated daemon.
+- Browser-launch eligibility is a heuristic and is not a hard gate. An
+  ineligible environment warns, names the specific signal that tripped, and
+  falls back to the printed manual URL — the same outcome as a launch failure
+  after eligibility passed.
 - Non-loopback binding is never made implicitly usable by token generation; it
   continues to demand explicit operator-supplied credentials and cannot use
   `--ephemeral-auth`.
@@ -216,8 +231,9 @@ store work tracked by #4514.
   eligible opted-in launch, the selected credential satisfies it and also moves
   loopback `/health` behind the bearer.
 - If browser launch fails after eligibility was established, the existing
-  browser launcher retains its manual-URL fallback. No persistent recovery
-  credential is added.
+  browser launcher retains its manual-URL fallback. The heuristic-ineligible
+  path prints the same form of manual URL. No persistent recovery credential
+  is added.
 - Runtime startup failure keeps the existing daemon shutdown/error behavior;
   the ephemeral token does not create a second lifecycle. The ordinary yargs
   path uses the default `runQwenServe()` contract, which does not return a
@@ -280,10 +296,11 @@ all daemon transports.
 - Plain `qwen serve`, bare `qwen serve --open`, direct `runQwenServe()` callers,
   headless `--open`, API-only mode, and non-loopback boot checks preserve their
   existing behavior.
-- `--ephemeral-auth` without `--open`, or with an ineligible bind, disabled or
-  missing Web Shell, or headless browser environment, fails before listen even
-  when another token is configured; remove the inapplicable flag to use the
-  existing mode.
+- `--ephemeral-auth` without `--open`, or with an ineligible bind or disabled
+  or missing Web Shell, fails before listen even when another token is
+  configured; remove the inapplicable flag to use the existing mode. A
+  headless or otherwise browser-ineligible environment starts the daemon,
+  warns with the tripped signal named, and prints the manual URL.
 - A non-empty token selected by the existing CLI-over-environment precedence is
   never replaced. An empty or whitespace-only selected value is treated as
   absent.

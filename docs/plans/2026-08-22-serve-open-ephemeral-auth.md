@@ -16,7 +16,8 @@ SDK discovery mechanism. The implementation must reuse the existing runtime
 bearer and Web Shell fragment flow end to end.
 
 The implementation PR starts from fresh `main`. It may touch the two CLI serve
-entry paths, one ephemeral-auth helper, one pure token-selection leaf, targeted
+entry paths, one ephemeral-auth helper, one pure token-selection leaf, one
+additive diagnostic export in `packages/core/src/utils/browser.ts`, targeted
 tests, and the existing user/developer documentation. It must not broaden into
 the pair-token and revocation work in #4514.
 
@@ -39,11 +40,23 @@ the pair-token and revocation work in #4514.
   because the fast path already materializes and normalizes that object before
   startup.
 - Return immediately when `--ephemeral-auth` is false. When it is true, require
-  `--open`; `isLoopbackBind(options.hostname)`; `serveWebShell !== false`;
-  resolvable Web Shell assets; and `shouldLaunchBrowser() === true`. Reuse the
-  existing predicates rather than copying their accepted values. Fail before
-  listen with an actionable error when any requirement is false, even if an
-  explicit token is configured, because the opt-in flag is inapplicable.
+  `--open`; `isLoopbackBind(options.hostname)`; `serveWebShell !== false`; and
+  resolvable Web Shell assets. Reuse the existing predicates rather than
+  copying their accepted values. Fail before listen with an actionable error
+  when any of these deterministic requirements is false, even if an explicit
+  token is configured, because the opt-in flag is inapplicable.
+- Treat browser-launch eligibility as advisory, not a hard gate. When
+  `shouldLaunchBrowser()` is false, do not fail: warn once, name the specific
+  signal that tripped, continue startup, and once the runtime is ready print
+  the fragment-bearing manual URL instead of auto-opening it. This matches the
+  launcher's existing manual-URL fallback, so an undelivered browser has one
+  outcome regardless of where the attempt stopped.
+- Add `browserLaunchIneligibilityReasons()` to
+  `packages/core/src/utils/browser.ts` as a pure additive export listing each
+  tripped signal (`CI`, `DEBIAN_FRONTEND`, missing display variables,
+  blocklisted `BROWSER`, non-Linux SSH). Reimplement
+  `shouldAttemptBrowserLaunch()` over it so the heuristic stays single-sourced
+  and its current behavior is unchanged.
 - Call the shared token selector and generate only when it returns `undefined`.
   Do not let a generated token replace a non-empty configured token.
 - Generate `randomBytes(32).toString('base64url')` and assign it only to
@@ -78,7 +91,10 @@ the pair-token and revocation work in #4514.
 - Leave `maybeOpenWebShellBrowser()` responsible for waiting for runtime
   readiness, rewriting wildcard browser targets, adding `resolvedToken` as a
   fragment, and invoking the secure browser launcher. Do not re-derive or pass
-  the generated token separately.
+  the generated token separately. When an opted-in launch skipped auto-open
+  because the environment was ineligible, print the same fragment-bearing
+  manual URL through the launcher's existing manual-URL wording once readiness
+  resolves.
 - Do not change `RunHandle`, `ServeOptions`, `CredentialStore`, bearer
   middleware, mutation gates, Local Control credentials, channel-worker token
   separation, WebSocket authentication, or the Web Shell token reader. A new
@@ -141,7 +157,7 @@ command and fast-path suites.
 | Whitespace-only selected token on an eligible opted-in launch                                    | Treated as absent and replaced                                       |
 | `--open --ephemeral-auth --no-web`                                                               | CLI validation error before listen                                   |
 | Opted-in launch with missing Web Shell assets                                                    | CLI validation error before listen                                   |
-| Opted-in launch in CI, headless Linux, or ineligible SSH                                         | CLI validation error before listen                                   |
+| Opted-in launch in CI, headless Linux, or ineligible SSH                                         | Starts; the warning names the tripped signal; the manual URL is printed |
 | `localhost`, uppercase `LOCALHOST`, `127.0.0.1`, `127.0.0.2`, `::1`, and `[::1]` with both flags | Eligible forms accepted through `isLoopbackBind()`                   |
 | `0.0.0.0`, `[::]`, or a LAN address with both flags                                              | CLI validation error even when another token is configured           |
 | `--open --ephemeral-auth --require-auth` with no configured token                                | Generated token reaches `runQwenServe()`                             |
@@ -151,6 +167,11 @@ command and fast-path suites.
 
 Also verify:
 
+- An eligible opted-in generation emits the shared non-secret breadcrumb, and
+  the emitted message does not contain the generated token value.
+- `browserLaunchIneligibilityReasons()` and `shouldAttemptBrowserLaunch()`
+  agree on every environment combination covered by the existing browser util
+  tests, so the refactor changes no launch decision.
 - The yargs and fast paths parse the new flag and invoke the same decision
   after their environment bootstrap.
 - `runQwenServe()` and the generation helper both import the shared selector;
@@ -223,16 +244,19 @@ application.
 6. Verify loopback `/health` remains unauthenticated for opted-in ephemeral
    mode, then repeat with `--require-auth` and verify an unauthenticated probe
    returns 401.
-7. Verify `--ephemeral-auth` without `--open`, opted-in `--no-web`, missing Web
-   Shell assets, and a headless opted-in launch fail before listen. Verify the
-   corresponding invocations without the new flag retain existing behavior.
+7. Verify `--ephemeral-auth` without `--open`, opted-in `--no-web`, and missing
+   Web Shell assets fail before listen. Verify a headless opted-in launch
+   starts, warns with the tripped signal named, and prints the manual URL.
+   Verify the corresponding invocations without the new flag retain existing
+   behavior.
 8. Verify a non-loopback opted-in launch fails before listen even when an
    explicit token is configured. Without the new flag, verify that the same
    explicit-token launch starts and a no-token non-loopback launch still
    refuses to start.
-9. Verify a successful launch does not print the generated value to normal
-   stdout or stderr. Record that the fragment remains visible to the browser
-   launcher process by design.
+9. Verify a successful launch prints the non-secret breadcrumb announcing
+   temporary authentication, and that neither it nor any other normal stdout
+   or stderr line contains the generated value. Record that the fragment
+   remains visible to the browser launcher process by design.
 10. Verify `--open --ephemeral-auth --allow-origin '*'` starts with the
     generated bearer, leaves loopback `/health` pre-authentication, and returns
     401 for an unauthenticated protected request. Verify
