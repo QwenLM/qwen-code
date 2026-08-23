@@ -364,6 +364,95 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     );
   });
 
+  it('reports stashRestoreConflict when the stash restore conflicts', async () => {
+    const dir = makeDirtyPullRepo();
+    // Also edit the same line the remote changed, so the stash pop
+    // conflicts after the pull succeeds.
+    const localContent = fs
+      .readFileSync(path.join(dir, 'a.txt'), 'utf8')
+      .replace('line 10', 'line 10 local');
+    fs.writeFileSync(path.join(dir, 'a.txt'), localContent);
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(response.body.stashRestoreConflict).toBe(true);
+  });
+
+  it('classifies a pull blocked by unmerged files as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+    );
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote edit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // Divergent local commit touching the same file, then a failed merge:
+    // the index now carries unmerged entries.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local change\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local edit');
+    git(dir, 'fetch', '-q', 'origin');
+    let mergeFailed = false;
+    try {
+      git(
+        dir,
+        'merge',
+        'origin/' + git(dir, 'symbolic-ref', '--short', 'HEAD').trim(),
+      );
+    } catch {
+      mergeFailed = true;
+    }
+    expect(mergeFailed).toBe(true);
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+  });
+
+  it('rejects force pull from a subdirectory workspace without discarding', async () => {
+    const dir = makeDirtyPullRepo();
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    const before = fs.readFileSync(path.join(dir, 'a.txt'), 'utf8');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error ?? response.body.message).toContain(
+      'subdirectory',
+    );
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    // Nothing was discarded.
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(before);
+  });
+
   it('does not misclassify a non-dirty error when the workspace path contains "dirty"', async () => {
     const parent = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-dirty-utils-')),

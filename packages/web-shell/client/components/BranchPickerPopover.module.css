@@ -226,6 +226,12 @@
   background: color-mix(in srgb, var(--destructive, #ef4444) 10%, transparent);
 }
 
+.statusBarWarning {
+  white-space: normal;
+  color: var(--warning, #d29922);
+  background: color-mix(in srgb, var(--warning, #d29922) 10%, transparent);
+}
+
 .statusBarSuccess {
   color: var(--success-color, #22c55e);
   background: color-mix(
@@ -297,8 +303,12 @@
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .empty {

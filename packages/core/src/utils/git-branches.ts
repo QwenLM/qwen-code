@@ -494,6 +494,12 @@ export async function gitPush(
 export interface GitPullResult {
   success: boolean;
   output: string;
+  /**
+   * The pull succeeded but restoring the auto-stashed changes conflicted.
+   * The working tree carries conflict markers and git keeps the stash
+   * entry, so the user must resolve the conflicts manually.
+   */
+  stashRestoreConflict?: boolean;
 }
 
 export interface GitPullOptions {
@@ -539,6 +545,39 @@ export async function gitPull(
     return { success: true, output: output.trim() };
   }
   if (opts?.force) {
+    // `reset --hard` resets the whole repository regardless of cwd, and so
+    // does the pull's merge, but `clean -fd` from a subdirectory only
+    // removes untracked files inside that subtree. Refuse instead of
+    // destroying tracked changes outside the workspace while still leaving
+    // the files that block the merge in place.
+    const prefix = (
+      await runGit(cwd, ['rev-parse', '--show-prefix'], env)
+    ).trim();
+    if (prefix) {
+      throw new Error(
+        'cannot discard changes: the workspace is a subdirectory of the git repository, and discarding is only supported at the repository root; use the stash option instead',
+      );
+    }
+    // Validate before destroying: a failing fetch or missing upstream must
+    // surface while the local changes are still intact, and a diverged
+    // branch is refused because the post-discard pull would have to merge
+    // the local commits and could wedge the repository mid-merge.
+    await runGit(cwd, ['fetch'], env);
+    const counts = (
+      await runGit(
+        cwd,
+        ['rev-list', '--left-right', '--count', 'HEAD...@{u}'],
+        env,
+      )
+    ).trim();
+    const [ahead, behind] = counts
+      .split(/\s+/)
+      .map((n) => parseInt(n, 10) || 0);
+    if ((ahead ?? 0) > 0 && (behind ?? 0) > 0) {
+      throw new Error(
+        'cannot discard changes and update: the branch has diverged from its upstream, so the update would still need to merge your local commits; merge or rebase them manually first',
+      );
+    }
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   }
@@ -562,26 +601,42 @@ export async function gitPull(
     stashed = after !== '' && after !== before;
   }
   const args = ['pull'];
-  if (opts?.rebase) args.push('--rebase');
+  if (opts?.rebase) {
+    args.push('--rebase');
+  } else {
+    // Pin the merge default explicitly: on git builds without pull.rebase /
+    // pull.ff configured a bare `git pull` on divergent branches fatals
+    // with "Need to specify how to reconcile divergent branches". --no-edit
+    // keeps the merge-commit message from waiting on an editor.
+    args.push('--no-rebase', '--no-edit');
+  }
   let output: string;
   try {
     output = await runGit(cwd, args, env);
   } catch (err) {
-    if (stashed) {
-      // Restore the pre-pull state: abort any partial merge/rebase, then
-      // bring the user's changes back. A failed restore leaves the stash
-      // entry in place, so nothing is lost either way.
+    if (stashed || opts?.force) {
+      // Never leave the repository wedged mid-merge: abort any partial
+      // merge/rebase (restoring the pre-pull HEAD), then bring the
+      // stashed changes back. A failed restore leaves the stash entry in
+      // place, so nothing is lost either way.
       await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
       await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
-      await runGit(cwd, ['stash', 'pop'], env).catch(() => {});
+      if (stashed) {
+        await runGit(cwd, ['stash', 'pop'], env).catch(() => {});
+      }
     }
     throw err;
   }
   if (stashed) {
+    let stashRestoreConflict = false;
     const popOutput = await runGit(cwd, ['stash', 'pop'], env).catch(
-      (popErr) => {
+      async (popErr) => {
         // Conflicting restore: git keeps the stash entry, so report the
         // details instead of failing an otherwise successful pull.
+        stashRestoreConflict =
+          (
+            await runGit(cwd, ['ls-files', '--unmerged'], env).catch(() => '')
+          ).trim().length > 0;
         const e = popErr as { stdout?: string; stderr?: string };
         return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
       },
@@ -589,6 +644,7 @@ export async function gitPull(
     return {
       success: true,
       output: `${output.trim()}\n${popOutput.trim()}`.trim(),
+      ...(stashRestoreConflict ? { stashRestoreConflict: true } : {}),
     };
   }
   return { success: true, output: output.trim() };

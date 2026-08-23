@@ -30,6 +30,11 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
 import styles from './BranchPickerPopover.module.css';
 
+// The daemon's stash/force pull flows chain several git commands, each with
+// its own 30s budget; size the client fetch timeout for that worst case so
+// the request is not aborted while the daemon keeps mutating the repository.
+const GIT_PULL_FETCH_TIMEOUT_MS = 300_000;
+
 function isDirtyWorkingTreeError(err: unknown): boolean {
   if (!(err instanceof DaemonHttpError) || err.status !== 409) return false;
   const body = err.body;
@@ -37,6 +42,21 @@ function isDirtyWorkingTreeError(err: unknown): boolean {
     typeof body === 'object' &&
     body !== null &&
     (body as Record<string, unknown>)['error'] === 'dirty_working_tree'
+  );
+}
+
+// A dirty-tree 409 whose message carries an unmerged/conflict state: stash
+// cannot recover it (git refuses to stash unmerged entries), only discard.
+function isUnmergedStateError(err: unknown): boolean {
+  if (!(err instanceof DaemonHttpError)) return false;
+  const body = err.body;
+  const message =
+    typeof body === 'object' && body !== null
+      ? (body as Record<string, unknown>)['message']
+      : undefined;
+  return (
+    typeof message === 'string' &&
+    /unmerged files|have not concluded your merge/i.test(message)
   );
 }
 
@@ -75,9 +95,9 @@ export function BranchPickerPopover({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [statusType, setStatusType] = useState<'info' | 'error' | 'success'>(
-    'info',
-  );
+  const [statusType, setStatusType] = useState<
+    'info' | 'error' | 'success' | 'warning'
+  >('info');
   const [search, setSearch] = useState('');
   const [newBranchMode, setNewBranchMode] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
@@ -86,6 +106,7 @@ export function BranchPickerPopover({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [pullBlockedUnmerged, setPullBlockedUnmerged] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     recent: false,
     local: false,
@@ -125,21 +146,29 @@ export function BranchPickerPopover({
       setStatusMsg(null);
       setPullBlocked(false);
       setConfirmDiscard(false);
+      setPullBlockedUnmerged(false);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open, fetchBranches]);
 
   const showStatus = useCallback(
-    (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
+    (msg: string, type: 'info' | 'error' | 'success' | 'warning' = 'info') => {
       setStatusMsg(msg);
       setStatusType(type);
     },
     [],
   );
 
+  const clearPullPanel = useCallback(() => {
+    setPullBlocked(false);
+    setConfirmDiscard(false);
+    setPullBlockedUnmerged(false);
+  }, []);
+
   const handleCheckout = useCallback(
     async (ref: string) => {
       if (busyAction) return;
+      clearPullPanel();
       setBusyAction('checkout');
       try {
         await ws.workspaceGitCheckout(ref, gitCwd);
@@ -152,11 +181,21 @@ export function BranchPickerPopover({
         setBusyAction(null);
       }
     },
-    [ws, busyAction, gitCwd, onBranchChanged, onOpenChange, showStatus, t],
+    [
+      ws,
+      busyAction,
+      gitCwd,
+      onBranchChanged,
+      onOpenChange,
+      showStatus,
+      clearPullPanel,
+      t,
+    ],
   );
 
   const handleNewBranch = useCallback(async () => {
     if (busyAction) return;
+    clearPullPanel();
     if (!validateBranchName(newBranchName)) {
       // An empty name just means "not typed yet"; only explain the rejection
       // once the user has actually entered something invalid.
@@ -187,6 +226,7 @@ export function BranchPickerPopover({
     onBranchChanged,
     onOpenChange,
     showStatus,
+    clearPullPanel,
     t,
   ]);
 
@@ -197,6 +237,7 @@ export function BranchPickerPopover({
 
   const handlePush = useCallback(async () => {
     if (busyAction) return;
+    clearPullPanel();
     setBusyAction('push');
     try {
       const result = await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
@@ -208,7 +249,16 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t]);
+  }, [
+    ws,
+    busyAction,
+    gitCwd,
+    fetchBranches,
+    onBranchChanged,
+    showStatus,
+    clearPullPanel,
+    t,
+  ]);
 
   const handlePull = useCallback(
     async (opts?: { stash?: boolean; force?: boolean }) => {
@@ -219,25 +269,47 @@ export function BranchPickerPopover({
           ? 'pullDiscard'
           : 'pull';
       setBusyAction(action);
-      setPullBlocked(false);
-      setConfirmDiscard(false);
+      setStatusMsg(null);
       try {
-        const result = await ws.workspaceGitPull(opts, gitCwd);
-        showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
+        const result = await ws.workspaceGitPull(
+          opts,
+          gitCwd,
+          GIT_PULL_FETCH_TIMEOUT_MS,
+        );
+        // Keep the resolution panel mounted (with its button spinner) while
+        // its own action is in flight; it only closes once the pull settles.
+        clearPullPanel();
+        if (result.stashRestoreConflict) {
+          showStatus(t('branchPicker.pullStashConflict'), 'warning');
+        } else {
+          showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
+        }
         await fetchBranches();
         onBranchChanged?.();
       } catch (err) {
         if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
+          setConfirmDiscard(false);
+          setPullBlockedUnmerged(isUnmergedStateError(err));
           showStatus(t('branchPicker.pullBlocked'), 'error');
         } else {
+          clearPullPanel();
           showStatus(err instanceof Error ? err.message : String(err), 'error');
         }
       } finally {
         setBusyAction(null);
       }
     },
-    [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t],
+    [
+      ws,
+      busyAction,
+      gitCwd,
+      fetchBranches,
+      onBranchChanged,
+      showStatus,
+      clearPullPanel,
+      t,
+    ],
   );
 
   const q = search.toLowerCase().trim();
@@ -599,7 +671,9 @@ export function BranchPickerPopover({
         {pullBlocked ? (
           <div className={styles.pullBlocked}>
             <div className={styles.pullBlockedMessage}>
-              {t('branchPicker.pullBlocked')}
+              {pullBlockedUnmerged
+                ? t('branchPicker.pullUnmerged')
+                : t('branchPicker.pullBlocked')}
             </div>
             {confirmDiscard ? (
               <>
@@ -629,40 +703,49 @@ export function BranchPickerPopover({
                 </div>
               </>
             ) : (
-              <div className={styles.pullBlockedActions}>
-                <button
-                  type="button"
-                  className={styles.pullBlockedButton}
-                  disabled={!!busyAction}
-                  onClick={() => void handlePull({ stash: true })}
-                >
-                  {busyAction === 'pullStash' ? (
-                    <Loader2Icon size={13} className={styles.spin} />
-                  ) : (
-                    <ArrowDownToLineIcon size={13} />
+              <>
+                {pullBlockedUnmerged && (
+                  <div className={styles.pullBlockedHint}>
+                    {t('branchPicker.pullUnmergedHint')}
+                  </div>
+                )}
+                <div className={styles.pullBlockedActions}>
+                  {!pullBlockedUnmerged && (
+                    <button
+                      type="button"
+                      className={styles.pullBlockedButton}
+                      disabled={!!busyAction}
+                      onClick={() => void handlePull({ stash: true })}
+                    >
+                      {busyAction === 'pullStash' ? (
+                        <Loader2Icon size={13} className={styles.spin} />
+                      ) : (
+                        <ArrowDownToLineIcon size={13} />
+                      )}
+                      {t('branchPicker.pullStash')}
+                    </button>
                   )}
-                  {t('branchPicker.pullStash')}
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
-                  disabled={!!busyAction}
-                  onClick={() => setConfirmDiscard(true)}
-                >
-                  {t('branchPicker.pullDiscard')}
-                </button>
-                <button
-                  type="button"
-                  className={styles.pullBlockedButton}
-                  disabled={!!busyAction}
-                  onClick={() => {
-                    setPullBlocked(false);
-                    setStatusMsg(null);
-                  }}
-                >
-                  {t('branchPicker.cancel')}
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
+                    disabled={!!busyAction}
+                    onClick={() => setConfirmDiscard(true)}
+                  >
+                    {t('branchPicker.pullDiscard')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.pullBlockedButton}
+                    disabled={!!busyAction}
+                    onClick={() => {
+                      clearPullPanel();
+                      setStatusMsg(null);
+                    }}
+                  >
+                    {t('branchPicker.cancel')}
+                  </button>
+                </div>
+              </>
             )}
           </div>
         ) : (
@@ -673,7 +756,9 @@ export function BranchPickerPopover({
                   ? styles.statusBarError
                   : statusType === 'success'
                     ? styles.statusBarSuccess
-                    : ''
+                    : statusType === 'warning'
+                      ? styles.statusBarWarning
+                      : ''
               }`}
             >
               {statusMsg}

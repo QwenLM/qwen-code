@@ -26,13 +26,24 @@ sending both is a 400):
   then `git stash pop`. If the pull fails, any partial merge/rebase is
   aborted and the stash is popped back, restoring the pre-pull state. If
   the restore conflicts after a successful pull, the response is still a
-  success and its `output` carries git's conflict notice; git keeps the
-  stash entry, so nothing is lost.
+  success with `stashRestoreConflict: true` and its `output` carries git's
+  conflict notice; git keeps the stash entry, so nothing is lost.
 - `force`: discard all local changes first (`git reset --hard` +
   `git clean -fd`; ignored files are kept), then pull. Destructive.
+  Both commands act on the whole repository, so `force` is refused when
+  the workspace cwd is below the repository root (it could destroy
+  tracked changes outside the workspace while leaving the files that
+  block the merge in place). The pull is validated before anything is
+  discarded: the fetch runs first and a diverged branch (local commits
+  on both sides) is refused, because the post-discard merge could wedge
+  the repository mid-merge; a failed post-discard pull still aborts any
+  partial merge/rebase.
 
 Stash detection compares `refs/stash` before/after the push instead of
-parsing git output, which varies by version and locale.
+parsing git output, which varies by version and locale. The pull itself
+passes `--no-rebase --no-edit` when rebase is not requested, so divergent
+branches merge instead of fataling on git builds without a `pull.rebase`
+/ `pull.ff` policy.
 
 ## UI
 
@@ -45,7 +56,12 @@ footer switches from the status line to a resolution panel offering:
   `force: true`.
 - **Cancel** — dismisses the panel.
 
-The panel state resets whenever the popover is reopened.
+The panel stays mounted (with a spinner on the clicked button) while its
+own stash/discard pull is in flight, and resets whenever the popover is
+reopened. When the blocking state is an unmerged working tree (conflicting
+restore or abandoned merge), the stash option is replaced by an
+explanation — `git stash push` refuses unmerged entries — leaving discard
+as the recovery path.
 
 ## Ownership
 

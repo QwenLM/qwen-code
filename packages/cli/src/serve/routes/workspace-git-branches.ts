@@ -82,7 +82,15 @@ function sendGitError(
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
+  // `unmerged files` / `have not concluded your merge` cover the states a
+  // conflicting stash restore or an abandoned merge leaves behind: pull and
+  // stash both refuse until the conflicts are resolved, so the resolution
+  // panel (whose discard path clears the state) must reappear for them.
+  if (
+    /dirty|uncommitted|would be overwritten|unmerged files|have not concluded your merge/i.test(
+      message,
+    )
+  ) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }

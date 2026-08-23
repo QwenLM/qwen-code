@@ -55,6 +55,11 @@ const EN: Messages = {
   'branchPicker.pushSuccess': 'Pushed successfully',
   'branchPicker.pullSuccess': 'Updated successfully',
   'branchPicker.pullBlocked': 'Update blocked by uncommitted changes',
+  'branchPicker.pullUnmerged': 'Update blocked by unresolved merge conflicts',
+  'branchPicker.pullUnmergedHint':
+    'Stashing is unavailable while conflicts are unresolved. Discard resets the workspace to its last commit.',
+  'branchPicker.pullStashConflict':
+    'Updated, but restoring your stashed changes conflicted. Resolve the conflict markers in your files; the stash entry is kept.',
   'branchPicker.pullStash': 'Stash Changes and Update',
   'branchPicker.pullDiscard': 'Discard Changes and Update…',
   'branchPicker.pullDiscardConfirm':
@@ -3080,6 +3085,11 @@ const ZH: Messages = {
   'branchPicker.pushSuccess': '推送成功',
   'branchPicker.pullSuccess': '更新成功',
   'branchPicker.pullBlocked': '存在未提交的修改，无法更新',
+  'branchPicker.pullUnmerged': '存在未解决的合并冲突，无法更新',
+  'branchPicker.pullUnmergedHint':
+    '冲突未解决时无法使用 Stash。放弃会将工作区重置为最近一次提交。',
+  'branchPicker.pullStashConflict':
+    '更新成功，但恢复 Stash 中的修改时发生冲突。请解决文件中的冲突标记；Stash 条目已保留。',
   'branchPicker.pullStash': 'Stash 修改并更新',
   'branchPicker.pullDiscard': '放弃修改并更新…',
   'branchPicker.pullDiscardConfirm':

@@ -473,12 +473,7 @@ describe('gitPull', () => {
     git(dir, 'push', '-q', 'origin', 'HEAD');
 
     // Create a divergent commit on the remote via a second clone.
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
+    const clone = makeClone(remote);
     fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', 'remote commit');
@@ -503,12 +498,7 @@ describe('gitPull', () => {
     git(dir, 'remote', 'add', 'origin', remote);
     git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
 
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
+    const clone = makeClone(remote);
     fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', 'remote commit');
@@ -529,12 +519,7 @@ describe('gitPull', () => {
     git(dir, 'remote', 'add', 'origin', remote);
     git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
 
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
+    const clone = makeClone(remote);
     fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', 'remote commit');
@@ -575,6 +560,7 @@ describe('gitPull', () => {
       'local edit\n',
     );
     expect(fs.existsSync(path.join(dir, 'scratch.txt'))).toBe(true);
+    expect(result.stashRestoreConflict).toBeUndefined();
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
@@ -615,6 +601,8 @@ describe('gitPull', () => {
 
     expect(result.success).toBe(true);
     expect(result.output).toContain('CONFLICT');
+    expect(result.stashRestoreConflict).toBe(true);
+    expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
     expect(
       git(dir, 'stash', 'list', '--oneline').trim().split('\n'),
     ).toHaveLength(1);
@@ -641,6 +629,9 @@ describe('gitPull', () => {
     const dir = makeRepo();
     const remote = makeBareRemote();
     git(dir, 'remote', 'add', 'origin', remote);
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'local.env\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore local.env');
     git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
 
     const clone = makeClone(remote);
@@ -651,6 +642,7 @@ describe('gitPull', () => {
 
     fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
     fs.writeFileSync(path.join(dir, 'scratch.txt'), 'untracked\n');
+    fs.writeFileSync(path.join(dir, 'local.env'), 'secret\n');
 
     const result = await gitPull(dir, { force: true });
 
@@ -658,6 +650,7 @@ describe('gitPull', () => {
     expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
     expect(fs.existsSync(path.join(dir, 'scratch.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'local.env'))).toBe(true);
   });
 
   it('rejects combining stash and force', async () => {
@@ -666,6 +659,199 @@ describe('gitPull', () => {
     await expect(gitPull(dir, { stash: true, force: true })).rejects.toThrow(
       /mutually exclusive/,
     );
+  });
+
+  it('merge pull reconciles divergent branches when no pull policy is configured', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // A divergent local commit; with pull.rebase/pull.ff unset a bare
+    // `git pull` here fatals with "Need to specify how to reconcile
+    // divergent branches" unless the merge default is pinned explicitly.
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+
+    const result = await gitPull(dir);
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+    expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+  });
+
+  it('stash pull merges divergent branches and restores the local changes', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('a conflicting stash pull aborts the partial merge and restores the dirty state', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // A divergent local commit touching the same file: the post-stash pull
+    // merge-conflicts and leaves MERGE_HEAD unless the recovery aborts it.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toThrow();
+
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+    expect(() =>
+      git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+    ).toThrow();
+  });
+
+  it('force pull refuses a diverged branch before discarding anything', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir, { force: true })).rejects.toThrow(/diverged/);
+
+    // Nothing was discarded and no merge was started.
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local version\n',
+    );
+    expect(headSha(dir)).toBe(headBefore);
+    expect(() =>
+      git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+    ).toThrow();
+  });
+
+  it('force pull refuses a missing upstream before discarding anything', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    // No -u: the branch has no upstream.
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir, { force: true })).rejects.toThrow(/no upstream/);
+
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+  });
+
+  it('force pull from a repository subdirectory refuses without discarding', async () => {
+    const dir = makeRepo();
+    fs.mkdirSync(path.join(dir, 'ws'));
+    fs.writeFileSync(path.join(dir, 'ws', 'w.txt'), 'ws v1\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'add ws');
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // Dirty tracked edits inside AND outside the workspace subdirectory.
+    fs.writeFileSync(path.join(dir, 'ws', 'w.txt'), 'ws local edit\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'root local edit\n');
+
+    await expect(
+      gitPull(path.join(dir, 'ws'), { force: true }),
+    ).rejects.toThrow(/subdirectory/);
+
+    expect(fs.readFileSync(path.join(dir, 'ws', 'w.txt'), 'utf8')).toBe(
+      'ws local edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'root local edit\n',
+    );
+  });
+
+  it('stash pull leaves an unrelated pre-existing stash entry untouched', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // A user stash created earlier; the tree is clean again.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'stashed work\n');
+    git(dir, 'stash', 'push', '-q', '-m', 'user stash');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    // Nothing was stashed, so nothing may be popped: the unrelated entry
+    // must stay in the list and out of the working tree.
+    const stashes = git(dir, 'stash', 'list', '--oneline').trim().split('\n');
+    expect(stashes).toHaveLength(1);
+    expect(stashes[0]).toContain('user stash');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
   });
 });
 

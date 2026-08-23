@@ -28,11 +28,15 @@ const {
   workspaceGitBranches,
   workspaceGitCreateBranch,
   workspaceGitPull,
+  workspaceGitPush,
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
   const workspaceGitCreateBranch = vi.fn();
   const workspaceGitPull = vi
+    .fn()
+    .mockResolvedValue({ success: true, output: '' });
+  const workspaceGitPush = vi
     .fn()
     .mockResolvedValue({ success: true, output: '' });
   // A stable client so the popover's memoized workspace handle (and thus its
@@ -42,9 +46,7 @@ const {
       workspaceGitBranches,
       workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
       workspaceGitCreateBranch,
-      workspaceGitPush: vi
-        .fn()
-        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPush,
       workspaceGitPull,
     }),
   };
@@ -52,6 +54,7 @@ const {
     workspaceGitBranches,
     workspaceGitCreateBranch,
     workspaceGitPull,
+    workspaceGitPush,
     workspaceClient,
   };
 });
@@ -221,6 +224,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { stash: true },
       undefined,
+      300_000,
     );
     expect(document.body.textContent).not.toContain(
       'Update blocked by uncommitted changes',
@@ -272,6 +276,226 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { force: true },
       undefined,
+      300_000,
+    );
+  });
+
+  it('keeps the resolution panel mounted while a stash pull is in flight', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let resolvePull: ((value: unknown) => void) | undefined;
+    workspaceGitPull
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          { error: 'dirty_working_tree', message: 'would be overwritten' },
+          'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+        ),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePull = resolve;
+          }),
+      );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    // While the stash pull runs, the panel stays mounted with its action
+    // buttons instead of unmounting into the stale blocked status line.
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    resolvePull?.({ success: true, output: '' });
+    await flush();
+
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).toContain('Updated successfully');
+  });
+
+  it('shows a warning instead of success when the stash restore conflicts', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          { error: 'dirty_working_tree', message: 'would be overwritten' },
+          'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+        ),
+      )
+      .mockResolvedValueOnce({
+        success: true,
+        output: '',
+        stashRestoreConflict: true,
+      });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'restoring your stashed changes conflicted',
+    );
+    expect(document.body.textContent).not.toContain('Updated successfully');
+  });
+
+  it('hides the stash option when the tree has unresolved merge conflicts', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'dirty_working_tree',
+          message: 'Pulling is not possible because you have unmerged files.',
+        },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'Update blocked by unresolved merge conflicts',
+    );
+    // Stash cannot recover unmerged entries, so the option is replaced by
+    // an explanation; discard remains available.
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(document.body.textContent).toContain('Discard Changes and Update');
+  });
+
+  it('does not offer the resolution panel for non-dirty pull errors', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        400,
+        { error: 'no_upstream', message: 'no tracking information' },
+        'POST /workspaces/:workspace/git/pull: no_upstream',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(document.body.textContent).toContain('no_upstream');
+  });
+
+  it('shows a competing action status instead of the stale pull panel', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'dirty_working_tree', message: 'would be overwritten' },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    workspaceGitPush.mockRejectedValueOnce(new Error('push rejected'));
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    // A push failing while the panel is up must surface its own status.
+    clickButton('Push');
+    await flush();
+
+    expect(workspaceGitPush).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('push rejected');
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
     );
   });
 
