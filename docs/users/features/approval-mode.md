@@ -113,7 +113,7 @@ deliberately good for one exact invocation only.
 If you have a CLI you know is read-only, list its root command name under
 `permissions.planMode.extraReadOnlyCommands`.
 
-In `.qwen/settings.json` (root command names only, the same shape as the
+In `~/.qwen/settings.json` (root command names only, the same shape as the
 built-in set):
 
 ```json
@@ -126,8 +126,8 @@ built-in set):
 }
 ```
 
-**Where it can be set.** User (`~/.qwen/settings.json`) and system settings
-only, merged across those scopes. A vouch is a standing instruction to run a
+**Where it can be set.** User (`~/.qwen/settings.json`), System, and
+SystemDefaults settings only, merged across those scopes. A vouch is a standing instruction to run a
 binary unattended, so a project's own `.qwen/settings.json` cannot grant one —
 otherwise cloning a repository would be enough to arrange it. Qwen Code warns
 if it finds the key in workspace settings, the same way it treats other
@@ -189,7 +189,11 @@ keystroke; accepting wrongly costs the write.
 
 Anything that is not a bare command name (a path, a command with arguments, or
 a string containing shell metacharacters) is also ignored, and so is the whole
-setting if it is not a list of strings.
+setting if it is not a list of strings. Entries are lowercased, and a command
+is matched by its exact lowercase name — `MyTool` and `mytool` are different
+binaries on Linux, so an invocation spelled with capitals still prompts. A
+trailing `.exe` is ignored on both sides, so listing `mytool` also covers
+`mytool.exe`.
 
 **Scope.** This setting applies only in Plan Mode. In every other mode, use
 `permissions.allow` (e.g. `"Bash(ib *)"`) to auto-approve a command.

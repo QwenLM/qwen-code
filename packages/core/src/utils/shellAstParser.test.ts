@@ -581,16 +581,32 @@ describe('substitution hidden in an expansion pattern word', () => {
 
 describe('substitution hidden in a heredoc body', () => {
   // The body is one leaf too, and bash expands it before feeding it to stdin.
+  // Expansion there follows double-quote rules, so `$(…)`, backticks and the
+  // `@P` operator run while `<(…)` does not.
   it('treats an unquoted-delimiter body containing a substitution as unsafe', async () => {
     expect(
       await classifyShellCommandSafety('cat <<EOF\n`rm -rf build`\nEOF'),
     ).toBe('unknown');
     expect(
-      await classifyShellCommandSafety('cat <<EOF\n<(rm -rf build)\nEOF'),
-    ).toBe('unknown');
-    expect(
       await classifyShellCommandSafety('cat <<-EOF\n`rm -rf build`\nEOF'),
     ).toBe('unknown');
+  });
+
+  it('treats ${v@P} in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the expansion never becomes a
+    // child node the walk above could see.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t${v@P}\n\tEOF'),
+    ).toBe('unknown');
+    expect(await classifyShellCommandSafety('cat <<EOF\n${v@P}\nEOF')).toBe(
+      'unknown',
+    );
+  });
+
+  it('does not flag a process substitution in a body, which bash never runs', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n<(rm -rf build)\nEOF'),
+    ).toBe('read-only');
   });
 
   it('leaves a quoted delimiter alone, which makes the body inert', async () => {
@@ -1255,15 +1271,16 @@ describe('extraReadOnlyRoots', () => {
     'tclsh8.6',
     'node20',
     'java17',
+    'python3.13t',
   ])('refuses to vouch the versioned interpreter %s', async (root) => {
     expect(
-      await classifyShellCommandSafety(`${root} ./verify.py`, {
+      await classifyShellCommandSafety(`${root} verify.py`, {
         extraReadOnlyRoots: new Set([root]),
       }),
     ).toBe('unknown');
     // And as a wrapped argument of some other vouched root.
     expect(
-      await classifyShellCommandSafety(`obscurelauncher ${root} ./verify.py`, {
+      await classifyShellCommandSafety(`obscurelauncher ${root} verify.py`, {
         extraReadOnlyRoots: new Set(['obscurelauncher']),
       }),
     ).toBe('unknown');
@@ -1299,9 +1316,43 @@ describe('extraReadOnlyRoots', () => {
       '.',
       'read',
       'getopts',
+      'crontab',
+      'go',
+      'docker',
     ]) {
       expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
     }
+  });
+
+  it('accepts ordinary path and non-ASCII arguments', async () => {
+    // These are the reads the setting exists to stop prompting on. A path
+    // segment that happens to match a command name must not refuse the vouch,
+    // and neither must a character outside ASCII — every shell metacharacter
+    // is ASCII, so a bare word containing one is still literal.
+    for (const command of [
+      'ib get ./report.json',
+      'ib get docs/history/x.md',
+      'ib get /abs/report.json',
+      'ib get ../up/report.json',
+      'ib get 报告.md',
+      'ib get café.txt',
+      'ib get 文档/报告.md',
+    ]) {
+      expect(await classifyShellCommandSafety(command, withIb)).toBe(
+        'read-only',
+      );
+    }
+  });
+
+  it('matches a vouched root spelled with a .exe suffix', async () => {
+    // The refusal side strips one `.exe`; the acceptance side has to agree, or
+    // the vouch is dead on Windows. A known command under an `.exe` spelling
+    // is still refused first — see the test above.
+    expect(
+      await classifyShellCommandSafety('mytool.exe list', {
+        extraReadOnlyRoots: new Set(['mytool']),
+      }),
+    ).toBe('read-only');
   });
 
   it('applies inside compound statements and subshells', async () => {

@@ -178,13 +178,17 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // Language interpreters. The payload is a code string or a script path, so
   // no argument inspection can tell a read from a write.
   'bun',
+  'bunx',
   'deno',
+  'expect',
   'lua',
+  'luajit',
   'java',
   'node',
   'nodejs',
   'osascript',
   'perl',
+  'pnpx',
   'php',
   'python',
   'python3',
@@ -195,10 +199,15 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // script, or a downloaded package — never argv — so no argument inspection
   // can see it either.
   'cargo',
+  'cc',
   'cmake',
+  'go',
   'g++',
   'gcc',
   'make',
+  // Container runtimes: the payload can live entirely inside the image.
+  'docker',
+  'podman',
   'npm',
   'npx',
   'pnpm',
@@ -206,6 +215,7 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // Privilege, namespace, scheduling, and process launchers.
   'at',
   'batch',
+  'crontab',
   'caffeinate',
   'chroot',
   'doas',
@@ -227,6 +237,7 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'su',
   'sudo',
   'sudoedit',
+  'systemd-run',
   'time',
   'timeout',
   'unshare',
@@ -265,25 +276,31 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Versioned spellings of the interpreters above — `python3.12`, `lua5.4`.
- * Listing every release of every interpreter is not a finite job.
+ * Versioned spellings of the interpreters above — `python3.12`, `lua5.4`, and
+ * the free-threaded `python3.13t`. Listing every release of every interpreter
+ * is not a finite job.
  */
 const VERSIONED_INTERPRETER =
-  /^(?:python|ruby|perl|php|lua|tclsh|wish|node|java)[0-9]+(?:\.[0-9]+)*$/;
+  /^(?:python|ruby|perl|php|lua|tclsh|wish|node|java)[0-9]+(?:\.[0-9]+)*t?$/;
 
 /** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
 const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
 
 /**
- * Whether a word names a command this file decides the safety of. Every
- * `/`, `\\` and `=` separated segment counts, with and without a trailing
- * `.exe`, so `/bin/rm`, `rm.exe` and `--exec=rm` all name `rm`.
+ * Whether a word names a command this file decides the safety of. Each
+ * `=`-separated part contributes its basename, with and without a trailing
+ * `.exe`, so `/bin/rm`, `rm.exe` and `--exec=/bin/rm` all name `rm` while an
+ * ordinary path argument does not — `./report.json` names `report.json`, not
+ * the `.` that is the POSIX spelling of `source`.
  */
 function namesAKnownCommand(word: string): boolean {
   return word
     .toLowerCase()
-    .split(/[\\/=]/)
-    .flatMap((segment) => [segment, segment.replace(/\.exe$/, '')])
+    .split('=')
+    .flatMap((part) => {
+      const basename = part.split(/[\\/]/).pop() ?? '';
+      return [basename, basename.replace(/\.exe$/, '')];
+    })
     .some(
       (name) =>
         READ_ONLY_ROOT_COMMANDS.has(name) ||
@@ -300,8 +317,12 @@ function namesAKnownCommand(word: string): boolean {
  * globbing are each an open-ended way to spell a word the shell rewrites
  * before the binary sees it (`r\m`, `r'm'`, `$cmd`, `*` all reach argv as
  * `rm`), and matching those forms one at a time never terminates.
+ *
+ * Letters, digits and marks are matched by Unicode property, not by `\w`:
+ * every shell metacharacter is ASCII, so a bare non-ASCII word is literal by
+ * construction and refusing it would only cost a prompt on ordinary paths.
  */
-const LITERAL_ARGUMENT = /^[\w@%+=:,./-]+$/;
+const LITERAL_ARGUMENT = /^[\p{L}\p{N}\p{M}_@%+=:,./-]+$/u;
 
 /**
  * Whether a caller-vouched root may classify read-only for this invocation.
@@ -374,6 +395,13 @@ const UNIQ_VALUE_OPTIONS = new Set(
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
 
 /**
+ * The subset that runs inside a heredoc body, where expansion follows
+ * double-quote rules. `<(…)` is not expanded there, so including it would only
+ * refuse a body that quotes the text.
+ */
+const HEREDOC_SUBSTITUTION = /\$\(|`/;
+
+/**
  * `${v@P}` prompt expansion, which runs any `$(…)` held in the variable's
  * value. In a pattern word it is a leaf, so the `@`/`P` child-adjacency check
  * never sees it.
@@ -382,7 +410,9 @@ const PROMPT_EXPANSION = /\$\{[^{}]*@P/;
 
 /**
  * A command or process substitution that survived the substitution-node walk.
- * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)`.
+ * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)` —
+ * in a pattern word, that is. See `HEREDOC_SUBSTITUTION` for the one place it
+ * does not.
  */
 const HIDDEN_SUBSTITUTION = /\$\(|`|<\(|>\(/;
 
@@ -1215,10 +1245,18 @@ function evaluateSubstitutions(
         return 'unknown';
       }
     }
-    // A heredoc body is one leaf too, and bash expands it before feeding it to
+    // A heredoc body is one leaf too (`<<-` bodies always, `<<` bodies when
+    // nothing inside them parsed), and bash expands it before feeding it to
     // stdin — unless the delimiter is quoted, which makes the body inert.
+    // Expansion there follows double-quote rules: `$(…)`, backticks and `@P`
+    // run, `<(…)` does not.
     for (const body of collectDescendants(node, new Set(['heredoc_body']))) {
-      if (!HIDDEN_SUBSTITUTION.test(body.text)) continue;
+      if (
+        !HEREDOC_SUBSTITUTION.test(body.text) &&
+        !PROMPT_EXPANSION.test(body.text)
+      ) {
+        continue;
+      }
       const delimiter = body.parent?.namedChildren.find(
         (child) => child.type === 'heredoc_start',
       );
@@ -1295,7 +1333,7 @@ function evaluateCommandSafety(
     result = 'unknown';
   } else if (READ_ONLY_ROOT_COMMANDS.has(root)) {
     result = 'read-only';
-  } else if (extra.has(root)) {
+  } else if (extra.has(root) || extra.has(root.replace(/\.exe$/, ''))) {
     // Terminal fallback: every root the classifier understands specially is
     // handled above, so a caller-supplied root can only ever add to the
     // built-in read-only set — never override a write classification.

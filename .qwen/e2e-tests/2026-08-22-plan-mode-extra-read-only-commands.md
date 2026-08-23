@@ -32,6 +32,11 @@ to the scratch directory:
 }
 ```
 
+Auth state lives under `QWEN_HOME` too (`oauth_creds.json`), so the scratch
+home starts with no credentials: complete the login flow on first launch, or
+export your API-key environment variable in this shell before starting the
+CLI.
+
 **Launch from `/tmp/ib-e2e`, not from the repo**, with `QWEN_HOME` exported in
 the same shell. `npm run dev` runs the CLI with cwd set to the package root,
 so it cannot be used here. Use either:
@@ -45,8 +50,10 @@ node /path/to/qwen-code/dist/cli.js
 Dry-run the baseline against the globally installed `qwen` first — the setting
 does not exist there, so expect the unknown-read cases to prompt and the
 state-modifying cases to be blocked, exactly as they are after the change.
-Only cases 1, 5b, 7, 8, and 9 change behavior with the setting present; every
-other case behaves identically with and without it.
+Only cases 1, 5b, 6c, 7, 8, and 9 change behavior with the setting present;
+every other case behaves identically with and without it. (Case 6c's startup
+warning names a key the baseline build does not have, so it cannot appear
+there at all.)
 
 ## Cases
 
@@ -91,8 +98,8 @@ other case behaves identically with and without it.
 
 ### 6. The safety net cannot be switched off from settings
 
-Add `"bash"`, `"time"`, `"hash"`, `"python3"`, `"make"`, and `"rm"` to
-`extraReadOnlyCommands` and restart.
+Add `"bash"`, `"time"`, `"hash"`, `"python3"`, `"make"`, `"rm"`, and `"git"`
+to `extraReadOnlyCommands` and restart.
 
 - Ask for `bash -c 'echo hi'`.
   **Expect**: still prompts — the classifier refuses to let any caller vouch a
@@ -102,20 +109,23 @@ Add `"bash"`, `"time"`, `"hash"`, `"python3"`, `"make"`, and `"rm"` to
   vouch for what it wraps.
 - Ask for `hash -p ./bin/git git && git status`.
   **Expect**: still prompts — `hash` re-binds how the later `git` resolves.
-- Ask for `python3 -c "print(1)"` with `"python3"` also listed.
+- Ask for `python3 -c "print(1)"`.
   **Expect**: still prompts — an interpreter's payload is a code string, so
   vouching one says nothing about what it runs.
-- Ask for `make` with `"make"` also listed.
+- Ask for `make`.
   **Expect**: still prompts — the recipe is not in the command line.
 - Ask for `rm -rf tmp`.
   **Expect**: still blocked as state-modifying — `rm` keeps its built-in write
   classification.
-- Ask for `git push origin main` with `"git"` also listed.
-  **Expect**: still blocked as state-modifying.
+- Ask for `git push origin main`.
+  **Expect**: still blocked as state-modifying. `git` is listed, so this is
+  the case that shows a vouch cannot override a command the classifier
+  dispatches on before consulting the vouch.
 
 ### 6b. An unrecognised launcher fails closed too
 
-With only `"ib"` vouched, ask for:
+With `ib` vouched — the case-6 entries are still present and do not affect
+these outcomes, since each refusal happens at the argument layer — ask for:
 
 - `ib exec rm -rf tmp` — **expect** a prompt. A vouched root handed a command
   the classifier recognises (`rm`) is refused on shape, without `ib` needing to
@@ -138,7 +148,9 @@ mv "$QWEN_HOME/settings.json" /tmp/ib-e2e/.qwen/settings.json
 - Restart and ask for `ib domain list` in Plan mode.
 - **Expect**: the prompt is back — the workspace value is stripped during the
   merge — and a startup warning names `permissions.planMode`. Move the file
-  back to `$QWEN_HOME/settings.json` before continuing.
+  back to `$QWEN_HOME/settings.json` **and restart** before continuing: the
+  key is `requiresRestart`, so nothing picks the vouch back up on its own and
+  cases 7 and 8 would fail spuriously.
 
 ### 7. The vouch is scoped to Plan mode
 

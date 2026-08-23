@@ -17,12 +17,21 @@ approval never sticks — it fires again for every exact invocation.
 
 Teams that drive Plan mode sessions through a project-specific read-only CLI are
 therefore prompted on every read, while the built-in equivalents (`cat`, `grep`,
-`git status`) pass silently. There is no configuration escape hatch today:
+`git status`) pass silently. No setting extends the root set, and the mechanism that looks like it should
+is deliberately overridden:
 
 - no setting extends the root set;
 - Plan mode deliberately overrides `permissions.allow` for shell, so an allow
   rule does not help (`planShellRequiresConfirmation` in `coreToolScheduler`);
 - `PreToolUse` hooks run after the permission decision and can only deny or ask.
+
+A `PermissionRequest` hook _can_ suppress these prompts: it fires before the
+dialog, and because shell invocations define no `requiresUserInteraction()`,
+an `allow` decision is accepted and `validatePlanModeShellApproval` passes it
+through. That is a general-purpose mechanism running user-authored code on
+every prompt, not a way to say "this binary is read-only", so it is an escape
+hatch in the sense that a shell script is an escape hatch from a config file —
+worth naming here so the next reader is not told nothing existed.
 
 Reported as issue #9694.
 
@@ -169,8 +178,9 @@ command, or when an argument needs quoting. Refusing costs a prompt; accepting
 wrongly costs the write.
 
 Residual: a launcher absent from the list, wrapping something the classifier
-does not recognise (`mylauncher ./script.sh` — not `time`, which the list
-covers), still classifies read-only under a vouch. That is the documented
+does not recognise (`mylauncher scripts/run.sh` — not `time`, which the list
+covers, and not a bare `./script.sh`, whose basename is what gets tested),
+still classifies read-only under a vouch. That is the documented
 whole-binary scope of a vouch.
 
 ### Substitutions hidden in expansion pattern words
