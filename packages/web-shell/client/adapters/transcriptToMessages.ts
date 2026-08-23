@@ -413,7 +413,7 @@ export function transcriptBlocksToDaemonMessages(
   options: TranscriptMessageOptions = {},
 ): DaemonMessage[] {
   const messages: DaemonMessage[] = [];
-  const includeSourceIdentity = options.includeSourceIdentity === true;
+  const retainSourceIdentity = options.includeSourceIdentity === true;
   const safeToolProjection = options.safeToolProjection === true;
   const promptCancelledText =
     options.labels?.promptCancelled ?? 'Request cancelled.';
@@ -455,7 +455,7 @@ export function transcriptBlocksToDaemonMessages(
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
             timestamp: blockTime,
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
           });
           break;
         }
@@ -499,7 +499,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
-          ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+          sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
           ...(inputAnnotations ? { inputAnnotations } : {}),
         };
@@ -526,7 +526,7 @@ export function transcriptBlocksToDaemonMessages(
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
             timestamp: blockTime,
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
           });
           break;
         }
@@ -536,12 +536,7 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(
-            parentSubAgent,
-            textBlock.text,
-            block.id,
-            includeSourceIdentity,
-          );
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
 
@@ -564,9 +559,7 @@ export function transcriptBlocksToDaemonMessages(
                   role: 'insight_ready',
                   path: seg.data.path,
                   timestamp: blockTime,
-                  ...(includeSourceIdentity
-                    ? { sourceBlockIds: [block.id] }
-                    : {}),
+                  sourceBlockIds: [block.id],
                 });
               } else if (seg.data.type === 'insight_error') {
                 hasTerminal = true;
@@ -575,22 +568,18 @@ export function transcriptBlocksToDaemonMessages(
                   role: 'insight_error',
                   error: seg.data.error,
                   timestamp: blockTime,
-                  ...(includeSourceIdentity
-                    ? { sourceBlockIds: [block.id] }
-                    : {}),
+                  sourceBlockIds: [block.id],
                 });
               }
             } else {
               messages.push({
-                id: options.includeSourceIdentity
+                id: retainSourceIdentity
                   ? `${block.id}-t-${textCount++}`
                   : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
                 timestamp: blockTime,
-                ...(includeSourceIdentity
-                  ? { sourceBlockIds: [block.id] }
-                  : {}),
+                sourceBlockIds: [block.id],
               });
               currentAssistantIdx = messages.length - 1;
               lastAssistantSegmentIndex = currentAssistantIdx;
@@ -614,7 +603,7 @@ export function transcriptBlocksToDaemonMessages(
               progress: lastProgress.progress,
               detail: lastProgress.detail,
               timestamp: blockTime,
-              ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+              sourceBlockIds: [block.id],
             });
           }
           needsNewContentMessage = true;
@@ -637,14 +626,7 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
-            ...(includeSourceIdentity
-              ? {
-                  sourceBlockIds: unionMessageIds(
-                    target.sourceBlockIds,
-                    block.id,
-                  ),
-                }
-              : {}),
+            sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
             ...(textBlock.branchRecordId
               ? { branchRecordId: textBlock.branchRecordId }
               : {}),
@@ -659,7 +641,7 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
             ...(textBlock.branchRecordId
               ? { branchRecordId: textBlock.branchRecordId }
               : {}),
@@ -687,12 +669,7 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(
-            parentSubAgent,
-            textBlock.text,
-            block.id,
-            includeSourceIdentity,
-          );
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
         const target =
@@ -709,14 +686,7 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
-            ...(includeSourceIdentity
-              ? {
-                  sourceBlockIds: unionMessageIds(
-                    target.sourceBlockIds,
-                    block.id,
-                  ),
-                }
-              : {}),
+            sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
           };
           needsNewContentMessage = false;
         } else {
@@ -726,7 +696,7 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
           });
           currentThinkingIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -740,7 +710,6 @@ export function transcriptBlocksToDaemonMessages(
         const toolCall = daemonToolBlockToToolCall(
           toolBlock,
           safeToolProjection,
-          includeSourceIdentity,
         );
         applyBackgroundAgentTaskUpdate(
           toolCall,
@@ -768,24 +737,17 @@ export function transcriptBlocksToDaemonMessages(
               safeToolProjection ||
               getRuntimeToolRawOutput(toolBlock) !== undefined ||
               existingTool.rawOutput === undefined,
-            collectSourceIdentity: includeSourceIdentity,
           });
           break;
         }
 
         if (parentSubAgent) {
-          appendSubTool(parentSubAgent, toolCall, includeSourceIdentity);
+          appendSubTool(parentSubAgent, toolCall);
           toolsByCallId.set(toolCall.callId, toolCall);
           break;
         }
 
-        appendToolCallMessage(
-          messages,
-          block.id,
-          toolCall,
-          blockTime,
-          includeSourceIdentity,
-        );
+        appendToolCallMessage(messages, block.id, toolCall, blockTime);
         toolsByCallId.set(toolCall.callId, toolCall);
         currentAssistantIdx = null;
         currentThinkingIdx = null;
@@ -807,25 +769,14 @@ export function transcriptBlocksToDaemonMessages(
             const nextTool = {
               ...targetTool,
               rawOutput: previousOutput + shellBlock.text,
-              ...(includeSourceIdentity
-                ? {
-                    sourceBlockIds: unionMessageIds(
-                      targetTool.sourceBlockIds,
-                      block.id,
-                    ),
-                  }
-                : {}),
+              sourceBlockIds: unionMessageIds(
+                targetTool.sourceBlockIds,
+                block.id,
+              ),
             };
             messages[messages.length - 1] = {
               ...lastMsg,
-              ...(includeSourceIdentity
-                ? {
-                    sourceBlockIds: unionMessageIds(
-                      lastMsg.sourceBlockIds,
-                      block.id,
-                    ),
-                  }
-                : {}),
+              sourceBlockIds: unionMessageIds(lastMsg.sourceBlockIds, block.id),
               tools: [
                 ...lastMsg.tools.slice(0, targetIdx),
                 nextTool,
@@ -840,7 +791,7 @@ export function transcriptBlocksToDaemonMessages(
           messages.push({
             id: block.id,
             role: 'tool_group',
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
             tools: [
               {
                 callId: block.id,
@@ -848,9 +799,7 @@ export function transcriptBlocksToDaemonMessages(
                 status: 'completed',
                 kind: 'execute',
                 rawOutput: shellBlock.text,
-                ...(includeSourceIdentity
-                  ? { sourceBlockIds: [block.id] }
-                  : {}),
+                sourceBlockIds: [block.id],
               },
             ],
             timestamp: blockTime,
@@ -865,7 +814,7 @@ export function transcriptBlocksToDaemonMessages(
         messages.push({
           id: block.id,
           role: 'user_shell',
-          ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+          sourceBlockIds: [block.id],
           command: shellBlock.command,
           output: shellBlock.text,
           ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
@@ -885,7 +834,6 @@ export function transcriptBlocksToDaemonMessages(
         const permissionToolCall = permissionBlockToToolCall(
           permBlock,
           safeToolProjection,
-          includeSourceIdentity,
         );
         if (!permissionToolCall) break;
         const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
@@ -913,9 +861,7 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.endTime = permBlock.updatedAt;
             }
           }
-          mergeToolCall(existingPermission, permissionToolCall, {
-            collectSourceIdentity: includeSourceIdentity,
-          });
+          mergeToolCall(existingPermission, permissionToolCall);
           if (
             isTerminalToolStatus(previousStatus) ||
             (permBlock.resolved &&
@@ -945,7 +891,6 @@ export function transcriptBlocksToDaemonMessages(
               block.id,
               permissionToolCall,
               blockTime,
-              includeSourceIdentity,
             );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
@@ -961,7 +906,6 @@ export function transcriptBlocksToDaemonMessages(
               block.id,
               permissionToolCall,
               blockTime,
-              includeSourceIdentity,
             );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
@@ -1023,7 +967,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'plan',
             todos,
             timestamp: blockTime,
-            ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+            sourceBlockIds: [block.id],
           });
           needsNewContentMessage = true;
           break;
@@ -1039,7 +983,7 @@ export function transcriptBlocksToDaemonMessages(
           content: text,
           variant: 'info',
           timestamp: blockTime,
-          ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+          sourceBlockIds: [block.id],
           ...(statusBlock.source ? { source: statusBlock.source } : {}),
           ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
         });
@@ -1059,7 +1003,7 @@ export function transcriptBlocksToDaemonMessages(
             errorBlock.source === 'turn_error' &&
             isRetryableTurnErrorKind(errorKind),
           timestamp: blockTime,
-          ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+          sourceBlockIds: [block.id],
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),
         });
@@ -1075,7 +1019,7 @@ export function transcriptBlocksToDaemonMessages(
           variant: 'info',
           source: 'prompt_cancelled',
           timestamp: blockTime,
-          ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+          sourceBlockIds: [block.id],
         });
         needsNewContentMessage = true;
         break;
@@ -1085,7 +1029,8 @@ export function transcriptBlocksToDaemonMessages(
     }
   }
 
-  if (includeSourceIdentity) synchronizeToolGroupSourceIdentity(messages);
+  synchronizeToolGroupSourceIdentity(messages);
+  if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
 }
 
@@ -1107,19 +1052,29 @@ function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {
   }
 }
 
+function stripSourceIdentity(messages: DaemonMessage[]): void {
+  const stripTools = (tools: DaemonMessageToolCall[]): void => {
+    for (const tool of tools) {
+      delete tool.sourceBlockIds;
+      if (tool.subTools) stripTools(tool.subTools);
+    }
+  };
+  for (const message of messages) {
+    delete message.sourceBlockIds;
+    if (message.role === 'tool_group') stripTools(message.tools);
+  }
+}
+
 function appendSubTool(
   parent: DaemonMessageToolCall,
   toolCall: DaemonMessageToolCall,
-  includeSourceIdentity: boolean,
 ): void {
   parent.subTools ||= [];
   parent.subTools.push(toolCall);
-  if (includeSourceIdentity) {
-    parent.sourceBlockIds = unionMessageIds(
-      parent.sourceBlockIds,
-      ...(toolCall.sourceBlockIds ?? []),
-    );
-  }
+  parent.sourceBlockIds = unionMessageIds(
+    parent.sourceBlockIds,
+    ...(toolCall.sourceBlockIds ?? []),
+  );
 }
 
 function unionMessageIds(
@@ -1133,12 +1088,9 @@ function appendSubContent(
   parent: DaemonMessageToolCall,
   text: string,
   blockId: string,
-  includeSourceIdentity: boolean,
 ): void {
   parent.subContent = (parent.subContent || '') + text;
-  if (includeSourceIdentity) {
-    parent.sourceBlockIds = unionMessageIds(parent.sourceBlockIds, blockId);
-  }
+  parent.sourceBlockIds = unionMessageIds(parent.sourceBlockIds, blockId);
 }
 
 function appendToolCallMessage(
@@ -1146,7 +1098,6 @@ function appendToolCallMessage(
   blockId: string,
   toolCall: DaemonMessageToolCall,
   timestamp?: number,
-  includeSourceIdentity = false,
 ): void {
   // Native CLI groups every tool call of one scheduler batch into a single
   // bordered tool_group (mapToDisplay in useReactToolScheduler). The daemon
@@ -1174,9 +1125,7 @@ function appendToolCallMessage(
     !last.tools.some(isStandalone)
   ) {
     last.tools.push(toolCall);
-    if (includeSourceIdentity) {
-      last.sourceBlockIds = unionMessageIds(last.sourceBlockIds, blockId);
-    }
+    last.sourceBlockIds = unionMessageIds(last.sourceBlockIds, blockId);
     return;
   }
   messages.push({
@@ -1184,7 +1133,7 @@ function appendToolCallMessage(
     role: 'tool_group',
     tools: [toolCall],
     timestamp,
-    ...(includeSourceIdentity ? { sourceBlockIds: [blockId] } : {}),
+    sourceBlockIds: [blockId],
   });
 }
 
@@ -1222,19 +1171,16 @@ function mergeToolCall(
   options: {
     replaceArgs?: boolean;
     replaceRawOutput?: boolean;
-    collectSourceIdentity?: boolean;
   } = {},
 ): void {
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
   target.kind = source.kind ?? target.kind;
-  if (options.collectSourceIdentity) {
-    target.sourceBlockIds = unionMessageIds(
-      target.sourceBlockIds,
-      ...(source.sourceBlockIds ?? []),
-    );
-  }
+  target.sourceBlockIds = unionMessageIds(
+    target.sourceBlockIds,
+    ...(source.sourceBlockIds ?? []),
+  );
   target.content = source.content ?? target.content;
   target.endTime = source.endTime ?? target.endTime;
   if (options.replaceRawOutput !== false) {
@@ -1323,7 +1269,6 @@ function getTodoPriority(
 function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
-  includeSourceIdentity: boolean,
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block, safeToolProjection);
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
@@ -1360,7 +1305,7 @@ function daemonToolBlockToToolCall(
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
     ...(content ? { content } : {}),
-    ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+    sourceBlockIds: [block.id],
   };
 }
 
@@ -1377,7 +1322,6 @@ function getToolArgs(
 function permissionBlockToToolCall(
   block: DaemonPermissionTranscriptBlock,
   safeToolProjection: boolean,
-  includeSourceIdentity: boolean,
 ): DaemonMessageToolCall | undefined {
   const toolCall = getRecord(block.toolCall);
   if (!safeToolProjection && !toolCall) return undefined;
@@ -1419,7 +1363,7 @@ function permissionBlockToToolCall(
     kind: inferToolKind(toolName, kind),
     args: rawInput,
     startTime: block.createdAt,
-    ...(includeSourceIdentity ? { sourceBlockIds: [block.id] } : {}),
+    sourceBlockIds: [block.id],
   };
 
   return syntheticTool;

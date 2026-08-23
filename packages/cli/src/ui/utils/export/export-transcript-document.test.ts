@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
-  ExportTranscriptDocumentError,
   assertExportTranscriptDocumentV1,
   classifyPermissionResolutionForExport,
   createExportTranscriptDocumentV1,
-  exportDocumentToTranscriptBlocks,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
 
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
+const EXPORT_OPTIONS = {
+  rendererVersion: '0.21.11-test.1',
+  exportedAt: '2026-08-16T01:00:00.000Z',
+} as const;
 
 function record(
   uuid: string,
@@ -138,7 +140,6 @@ describe('ExportTranscriptDocumentV1', () => {
       severity: 'info',
       count: 1,
     });
-    expect(exportDocumentToTranscriptBlocks(document)).toBe(document.blocks);
   });
 
   it('redacts home paths from visible text without corrupting image data', () => {
@@ -165,10 +166,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text =
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
@@ -208,10 +206,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text = document.blocks
       .flatMap((block) => ('text' in block ? [block.text] : []))
@@ -243,10 +238,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     expect(
@@ -262,10 +254,7 @@ describe('ExportTranscriptDocumentV1', () => {
     const document = createExportTranscriptDocumentV1(
       [],
       { ...sessionData, metadata: { ...sessionData.metadata, cwd: 'C:\\' } },
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     expect(document.metadata.projectName).toBe('[path]');
@@ -313,10 +302,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const previews = document.blocks.flatMap((block) =>
       block.kind === 'tool' ? [block.preview] : [],
@@ -345,10 +331,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text =
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
@@ -372,10 +355,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text =
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
@@ -469,10 +449,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const tool = document.blocks.find((block) => block.kind === 'tool');
 
@@ -578,10 +555,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const serialized = JSON.stringify(document);
     const todoTool = document.blocks.find(
@@ -660,10 +634,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const tool = document.blocks.find(
       (block) =>
@@ -747,10 +718,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     expect(document.metadata).toMatchObject({
@@ -776,10 +744,7 @@ describe('ExportTranscriptDocumentV1', () => {
     const globallyBounded = createExportTranscriptDocumentV1(
       records,
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     expect(globallyBounded.metadata).toMatchObject({
@@ -806,10 +771,7 @@ describe('ExportTranscriptDocumentV1', () => {
             'https://alice:password@example.com/qwen-code?token=secret#fragment',
         },
       },
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const serialized = JSON.stringify(document);
 
@@ -852,10 +814,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const tool = document.blocks.find((block) => block.kind === 'tool');
 
@@ -913,10 +872,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text =
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
@@ -996,10 +952,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const tool = document.blocks.find((block) => block.kind === 'tool');
 
@@ -1026,10 +979,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     const block = document.blocks[0];
@@ -1072,10 +1022,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
 
     expect(document.diagnostics).toContainEqual({
@@ -1126,10 +1073,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const tool = document.blocks.find((block) => block.kind === 'tool');
 
@@ -1197,212 +1141,106 @@ describe('ExportTranscriptDocumentV1', () => {
     ).not.toThrow();
   });
 
-  it('rejects schema widening and floating renderer versions', () => {
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: 'latest',
-        blocks: [],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError(ExportTranscriptDocumentError);
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-        widened: true,
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'duplicate',
-            kind: 'prompt_cancelled',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-          },
-          {
-            id: 'duplicate',
-            kind: 'prompt_cancelled',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('duplicate_block_id');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'permission-safe',
-            kind: 'permission',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+  it('rejects schema and semantic safety violations', () => {
+    const envelope = (
+      blocks: unknown[] = [],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      schemaVersion: 1,
+      rendererVersion: '0.21.11-test.1',
+      blocks,
+      diagnostics: [],
+      metadata: {
+        exportedAt: '2026-08-16T01:00:00.000Z',
+        complete: true,
+        truncated: false,
+      },
+      ...overrides,
+    });
+    const block = (
+      id: string,
+      kind: string,
+      fields: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      id,
+      kind,
+      clientReceivedAt: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      ...fields,
+    });
+    const tool = (fields: Record<string, unknown>): Record<string, unknown> =>
+      block('tool-safe', 'tool', {
+        toolCallId: 'read-1',
+        title: 'Read',
+        status: 'completed',
+        preview: { kind: 'file_read', path: 'index.ts' },
+        ...fields,
+      });
+    const cases: Array<{ value: unknown; error: string }> = [
+      {
+        value: envelope([], { rendererVersion: 'latest' }),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: { ...envelope(), widened: true },
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          block('duplicate', 'prompt_cancelled'),
+          block('duplicate', 'prompt_cancelled'),
+        ]),
+        error: 'duplicate_block_id',
+      },
+      {
+        value: envelope([
+          block('permission-safe', 'permission', {
             requestId: 'permission-1',
             title: 'Allow read?',
             options: [
               { optionId: 'permission-option-1', label: 'Allow', raw: null },
             ],
             preview: { kind: 'generic' },
-            resolved: `selected:${CANARY}`,
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'tool-safe',
-            kind: 'tool',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-            toolCallId: 'read-1',
-            title: 'Read failed',
-            status: 'failed',
-            preview: { kind: 'file_read', path: 'index.ts' },
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'tool-safe',
-            kind: 'tool',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-            toolCallId: 'read-1',
-            title: 'Read completed',
-            status: 'completed',
-            preview: { kind: 'file_read', path: 'index.ts' },
-            resultPreview: { kind: 'generic', summary: '   ' },
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'tool-safe',
-            kind: 'tool',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
-            toolCallId: 'read-1',
-            title: 'Read',
-            status: 'completed',
+            resolved: 'selected:' + CANARY,
+          }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([tool({ status: 'failed', title: 'Read failed' })]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          tool({ resultPreview: { kind: 'generic', summary: '   ' } }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          tool({
             preview: {
               kind: 'file_read',
               path: 'index.ts',
               credential: CANARY,
             },
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'error-safe',
-            kind: 'error',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+          }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          block('error-safe', 'error', {
             text: 'Failed safely',
-            errorKind: `unknown-${CANARY}`,
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'image-safe',
-            kind: 'tool',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+            errorKind: 'unknown-' + CANARY,
+          }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          tool({
             toolCallId: 'image-1',
             title: 'Generate image',
             status: 'cancelled',
@@ -1411,117 +1249,68 @@ describe('ExportTranscriptDocumentV1', () => {
               prompt: 'A safe image',
               thumbnailUrl: 'data:IMAGE/PNG;base64,iVBORw0KGgo=',
             },
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'user-safe',
-            kind: 'user',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+          }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          block('user-safe', 'user', {
             text: 'Hello',
             usage: { inputTokens: 1, outputTokens: 1 },
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('schema_validation_failed');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'user-safe',
-            kind: 'user',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+          }),
+        ]),
+        error: 'schema_validation_failed',
+      },
+      {
+        value: envelope([
+          block('user-safe', 'user', {
             text: '![remote](https://example.invalid/track.png)',
             streaming: false,
-          },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('invalid_markdown_image');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [
-          {
-            id: 'user-safe',
-            kind: 'user',
-            clientReceivedAt: 0,
-            createdAt: 0,
-            updatedAt: 0,
+          }),
+        ]),
+        error: 'invalid_markdown_image',
+      },
+      {
+        value: envelope([
+          block('user-safe', 'user', {
             text: '[credential](https://alice:password@example.com/path?token=canary)',
             streaming: false,
+          }),
+        ]),
+        error: 'invalid_markdown_url',
+      },
+      {
+        value: envelope([], {
+          metadata: {
+            exportedAt: '2026-08-16T01:00:00.000Z',
+            complete: true,
+            truncated: false,
+            repository: 'https://secret@example.com/qwen-code?token=canary',
           },
-        ],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('invalid_markdown_url');
+        }),
+        error: 'invalid_metadata',
+      },
+      {
+        value: envelope([], {
+          diagnostics: [
+            { code: 'url_sanitized', severity: 'warning', count: 1 },
+          ],
+          metadata: {
+            exportedAt: '2026-08-16T01:00:00.000Z',
+            complete: false,
+            truncated: false,
+          },
+        }),
+        error: 'invalid_metadata_state',
+      },
+    ];
 
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [],
-        diagnostics: [],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: true,
-          truncated: false,
-          repository: 'https://secret@example.com/qwen-code?token=canary',
-        },
-      }),
-    ).toThrowError('invalid_metadata');
-
-    expect(() =>
-      assertExportTranscriptDocumentV1({
-        schemaVersion: 1,
-        rendererVersion: '0.21.11-test.1',
-        blocks: [],
-        diagnostics: [{ code: 'url_sanitized', severity: 'warning', count: 1 }],
-        metadata: {
-          exportedAt: '2026-08-16T01:00:00.000Z',
-          complete: false,
-          truncated: false,
-        },
-      }),
-    ).toThrowError('invalid_metadata_state');
+    for (const testCase of cases) {
+      expect(() =>
+        assertExportTranscriptDocumentV1(testCase.value),
+      ).toThrowError(testCase.error);
+    }
   });
 
   it('rejects cyclic envelopes before recursive field validation', () => {
@@ -1642,10 +1431,7 @@ describe('ExportTranscriptDocumentV1', () => {
         }),
       ],
       sessionData,
-      {
-        rendererVersion: '0.21.11-test.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+      EXPORT_OPTIONS,
     );
     const text =
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';

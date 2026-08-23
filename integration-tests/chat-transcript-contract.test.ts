@@ -7,10 +7,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
 import { DAEMON_ERROR_KINDS, type DaemonEvent } from '@qwen-code/sdk/daemon';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import {
-  createExportTranscriptDocumentV1,
-  exportDocumentToTranscriptBlocks,
-} from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
+import { createExportTranscriptDocumentV1 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
 import { TranscriptUpdateIdentityProjector } from '../packages/cli/src/acp-integration/session/transcript-update-identity.js';
 import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 import {
@@ -364,10 +361,9 @@ describe('chat transcript cross-host contract', () => {
         exportedAt: '2026-08-16T01:00:00.000Z',
       },
     );
-    const messages = transcriptBlocksToDaemonMessages(
-      exportDocumentToTranscriptBlocks(exportDocument),
-      { safeToolProjection: true },
-    );
+    const messages = transcriptBlocksToDaemonMessages(exportDocument.blocks, {
+      safeToolProjection: true,
+    });
     const exportedKeys = collectObjectKeys(exportDocument);
 
     expect(projection.complete).toBe(true);

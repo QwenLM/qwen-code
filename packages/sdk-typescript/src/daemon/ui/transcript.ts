@@ -1262,7 +1262,11 @@ function appendShellBlock(
 ): void {
   if (!event.text) return;
   const last = state.blocks[state.blocks.length - 1];
-  if (last?.kind === 'shell' && last.stream === event.stream) {
+  if (
+    last?.kind === 'shell' &&
+    last.stream === event.stream &&
+    last.segmentId === event.segmentId
+  ) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
       writable.text = appendBoundedText(state, writable, event.text);
@@ -1300,6 +1304,7 @@ function appendUserShellBlock(
   if (
     last?.kind === 'user_shell' &&
     last.stream === event.stream &&
+    last.segmentId === event.segmentId &&
     !state.pendingUserShellCommand
   ) {
     const writable = getWritableBlockById(state, last.id);

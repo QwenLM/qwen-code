@@ -14,16 +14,18 @@ let container: HTMLElement | undefined;
 afterEach(() => {
   if (root) act(() => root?.unmount());
   container?.remove();
+  delete document.body.dataset.webShellTranscript;
   root = undefined;
   container = undefined;
 });
 
 function Harness() {
-  const transcript = useAcpTranscript(true);
-  return <pre>{JSON.stringify(transcript.blocks)}</pre>;
+  const transcript = useAcpTranscript();
+  return <pre>{JSON.stringify(transcript)}</pre>;
 }
 
 function mount(): HTMLElement {
+  document.body.dataset.webShellTranscript ??= 'enabled';
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -46,6 +48,16 @@ function textUpdate(text: string, segmentId: string) {
 }
 
 describe('useAcpTranscript', () => {
+  it('uses the host setting and reacts to configuration updates', () => {
+    document.body.dataset.webShellTranscript = 'enabled';
+    const view = mount();
+    expect(view.textContent).toContain('"enabled":true');
+
+    post('webShellTranscriptSettingChanged', { enabled: false });
+
+    expect(view.textContent).toContain('"enabled":false');
+  });
+
   it('drops updates while the active scope is unknown', () => {
     const view = mount();
     post('conversationCleared', {});

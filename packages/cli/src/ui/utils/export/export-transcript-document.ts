@@ -365,13 +365,6 @@ export function assertExportTranscriptDocumentV1(
   assertResourceBudgets(value);
 }
 
-export function exportDocumentToTranscriptBlocks(
-  value: unknown,
-): readonly DaemonTranscriptBlock[] {
-  assertExportTranscriptDocumentV1(value);
-  return value.blocks;
-}
-
 function applyRecordExportPolicy(
   records: readonly unknown[],
   diagnostics: DiagnosticCounter,

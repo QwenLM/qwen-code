@@ -1,11 +1,9 @@
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { EXPORT_TRANSCRIPT_RENDERER_VERSION } from '@qwen-code/web-templates';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
@@ -18,10 +16,6 @@ import {
   toHtml,
 } from '../packages/cli/src/ui/utils/export/formatters/html.js';
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
-import {
-  evaluateVscodeIdentityGate,
-  readJsonLines,
-} from './helpers/chat-transcript-contract.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
@@ -38,24 +32,6 @@ interface ExpectedNetwork {
   readonly unexpectedRequests: number;
   readonly cspViolations: number;
   readonly allowedImageSources: readonly string[];
-}
-
-interface BrowserGateEvidence {
-  readonly durationMs: number;
-  readonly heapDeltaBytes: number;
-  readonly envelopeBytes: number;
-  readonly pdfBytes: number;
-  readonly copiedLength: number;
-  readonly renderedItemCount: number;
-  readonly sourceBlockCount: number;
-  readonly requests: readonly string[];
-  readonly cspErrors: readonly string[];
-}
-
-interface ExpectedGate {
-  readonly overall: 'pass' | 'fail';
-  readonly selectedVscodePath: 'acp' | 'direct-daemon' | null;
-  readonly blockers: readonly string[];
 }
 
 const expectedNetwork = JSON.parse(
@@ -281,101 +257,6 @@ function createMaximumDocument(): ExportTranscriptDocumentV1 {
   return { ...document, blocks };
 }
 
-function writeGateReport(evidence: BrowserGateEvidence): void {
-  const outputRoot = process.env['INTEGRATION_TEST_FILE_DIR'];
-  if (!outputRoot) return;
-  const manifest = JSON.parse(
-    readFileSync(
-      resolve(fixtureRoot, 'cases/representative/manifest.json'),
-      'utf8',
-    ),
-  ) as { hashes: Readonly<Record<string, string>> };
-  const matrix = readFileSync(
-    resolve(fixtureRoot, 'capability-matrix.md'),
-    'utf8',
-  );
-  const expectedGate = JSON.parse(
-    readFileSync(
-      resolve(fixtureRoot, 'cases/representative/expected-gate.json'),
-      'utf8',
-    ),
-  ) as ExpectedGate;
-  const vscodeIdentity = evaluateVscodeIdentityGate({
-    daemonEvents: readJsonLines(
-      resolve(fixtureRoot, 'cases/representative/daemon-events.jsonl'),
-    ) as DaemonEvent[],
-    acpUpdates: readJsonLines(
-      resolve(fixtureRoot, 'cases/representative/acp-session-updates.jsonl'),
-    ),
-    scopeKey: 'workspace-a:session-a',
-  });
-  const identityPassed =
-    vscodeIdentity.directDaemon === 'pass' && vscodeIdentity.acp === 'pass';
-  writeFileSync(
-    resolve(outputRoot, 'chat-transcript-gate-report.json'),
-    `${JSON.stringify(
-      {
-        schemaVersion: 1,
-        generatedBy: 'chat-transcript-contract prevalidation tests',
-        overall: expectedGate.overall,
-        selectedVscodePath: expectedGate.selectedVscodePath,
-        blockers: expectedGate.blockers,
-        vscodeCandidates: {
-          directDaemon: vscodeIdentity.directDaemon,
-          acp: vscodeIdentity.acp,
-        },
-        vscodeBlockers: vscodeIdentity.blockers,
-        gates: {
-          semantic: {
-            status: 'pass',
-            evidence: 'chat-transcript-contract.test.ts',
-          },
-          identity: {
-            status: identityPassed ? 'pass' : 'fail',
-            evidence:
-              'source-stamped live ACP plus direct-daemon/ACP append, partial-prepend, replay and render identity fixtures',
-          },
-          exportSecurity: {
-            status: 'pass',
-            evidence: 'ExportTranscriptDocument allowlist and canary tests',
-          },
-          resourceNetwork: {
-            status: 'pass',
-            evidence:
-              'product HTML export plus maximum document-mode Chromium open/search/copy/print gate',
-          },
-          hostActions: {
-            status: 'deferred',
-            evidence: 'VS Code host-action parity and VSIX gate are pending',
-          },
-          packaging: {
-            status: 'deferred',
-            evidence: 'installed artifact gates are pending',
-          },
-        },
-        thresholds: {
-          maxDurationMs: MAX_DOCUMENT_DURATION_MS,
-          maxHeapDeltaBytes: MAX_HEAP_DELTA_BYTES,
-          maxBlocks: EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
-          maxEnvelopeBytes: EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
-          unexpectedRequests: expectedNetwork.unexpectedRequests,
-          cspViolations: expectedNetwork.cspViolations,
-        },
-        observed: {
-          ...evidence,
-          durationMs: Math.round(evidence.durationMs),
-        },
-        fixtureHashes: manifest.hashes,
-        capabilityMatrixSha256: createHash('sha256')
-          .update(matrix)
-          .digest('hex'),
-      },
-      null,
-      2,
-    )}\n`,
-  );
-}
-
 async function installNetworkAndCspProbe(
   page: Page,
 ): Promise<{ requests: string[]; cspErrors: string[] }> {
@@ -416,7 +297,6 @@ async function expectConnectSrcCspEnforced(page: Page): Promise<void> {
 
 describe('ExportTranscriptDocument browser gate', () => {
   let browser: Browser | undefined;
-  let maximumDocumentEvidence: BrowserGateEvidence | undefined;
 
   afterEach(async () => {
     await browser?.close();
@@ -627,18 +507,6 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
     const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
     expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
-    maximumDocumentEvidence = {
-      durationMs,
-      heapDeltaBytes,
-      envelopeBytes,
-      pdfBytes: pdf.byteLength,
-      copiedLength: interaction.copiedLength,
-      renderedItemCount,
-      sourceBlockCount: exportDocument.blocks.length,
-      requests: probe.requests,
-      cspErrors: probe.cspErrors,
-    };
-
     await page.close();
     await browser.close();
     browser = undefined;
@@ -710,10 +578,6 @@ describe('ExportTranscriptDocument browser gate', () => {
       /(?:1969-12-31|1970-01-01)/,
     );
     await expectConnectSrcCspEnforced(page);
-    if (maximumDocumentEvidence) {
-      writeGateReport(maximumDocumentEvidence);
-    }
-
     await page.close();
     await browser.close();
     browser = undefined;

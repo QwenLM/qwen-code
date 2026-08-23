@@ -7,14 +7,19 @@ import {
 } from '../adapters/acpTranscriptAdapter.js';
 
 interface ScopedTranscriptState extends AcpTranscriptAdapterState {
+  readonly enabled: boolean;
   readonly scopeKey?: string;
 }
 
-const initialState = (): ScopedTranscriptState => ({
+const initialState = (
+  enabled = document.body.dataset.webShellTranscript === 'enabled',
+): ScopedTranscriptState => ({
   ...createAcpTranscriptAdapterState(),
+  enabled,
 });
 
-export function useAcpTranscript(enabled: boolean): {
+export function useAcpTranscript(): {
+  enabled: boolean;
   blocks: readonly DaemonTranscriptBlock[];
   compatible: boolean;
 } {
@@ -30,7 +35,7 @@ export function useAcpTranscript(enabled: boolean): {
         message.type === 'agentConnectionError' ||
         message.type === 'conversationLoaded'
       ) {
-        setState(initialState());
+        setState((previous) => initialState(previous.enabled));
         return;
       }
       if (message.type === 'agentConnected') {
@@ -38,16 +43,22 @@ export function useAcpTranscript(enabled: boolean): {
           typeof message.data?.sessionId === 'string'
             ? message.data.sessionId
             : undefined;
-        setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
+        setState((previous) => ({
+          ...initialState(previous.enabled),
+          ...(scopeKey ? { scopeKey } : {}),
+        }));
         return;
       }
       if (message.type === 'webShellTranscriptSettingChanged') {
+        const enabled = message.data?.enabled === true;
         const scopeKey =
-          message.data?.enabled === true &&
-          typeof message.data.sessionId === 'string'
+          enabled && typeof message.data?.sessionId === 'string'
             ? message.data.sessionId
             : undefined;
-        setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
+        setState({
+          ...initialState(enabled),
+          ...(scopeKey ? { scopeKey } : {}),
+        });
         return;
       }
       if (
@@ -58,15 +69,19 @@ export function useAcpTranscript(enabled: boolean): {
           typeof message.data?.sessionId === 'string'
             ? message.data.sessionId
             : undefined;
-        setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
+        setState((previous) => ({
+          ...initialState(previous.enabled),
+          ...(scopeKey ? { scopeKey } : {}),
+        }));
         return;
       }
-      if (!enabled || message.type !== 'transcriptUpdate') return;
+      if (message.type !== 'transcriptUpdate') return;
       const sessionId =
         typeof message.data?.sessionId === 'string'
           ? message.data.sessionId
           : undefined;
       setState((previous) => {
+        if (!previous.enabled) return previous;
         if (!sessionId || !previous.scopeKey) return previous;
         if (previous.scopeKey !== sessionId) {
           return previous;
@@ -78,13 +93,18 @@ export function useAcpTranscript(enabled: boolean): {
             message.data?.update,
             scopeKey,
           ),
+          enabled: previous.enabled,
           scopeKey,
         };
       });
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [enabled]);
+  }, []);
 
-  return { blocks: state.blocks, compatible: state.compatible };
+  return {
+    enabled: state.enabled,
+    blocks: state.blocks,
+    compatible: state.compatible,
+  };
 }

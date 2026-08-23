@@ -2765,6 +2765,70 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('splits shell output when the producer segment changes', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'shell.output',
+          text: 'first',
+          stream: 'stdout',
+          segmentId: 'segment-1',
+        },
+        {
+          type: 'shell.output',
+          text: 'second',
+          stream: 'stdout',
+          segmentId: 'segment-2',
+        },
+        {
+          type: 'shell.output',
+          text: ' third',
+          stream: 'stdout',
+          segmentId: 'segment-2',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'shell', text: 'first', segmentId: 'segment-1' },
+      { kind: 'shell', text: 'second third', segmentId: 'segment-2' },
+    ]);
+  });
+
+  it('splits user shell output when the producer segment changes', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'user.shell.output',
+          text: 'first',
+          stream: 'stdout',
+          segmentId: 'segment-1',
+        },
+        {
+          type: 'user.shell.output',
+          text: 'second',
+          stream: 'stdout',
+          segmentId: 'segment-2',
+        },
+        {
+          type: 'user.shell.output',
+          text: ' third',
+          stream: 'stdout',
+          segmentId: 'segment-2',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user_shell', text: 'first', segmentId: 'segment-1' },
+      { kind: 'user_shell', text: 'second third', segmentId: 'segment-2' },
+    ]);
+  });
+
   it('provides a batched framework-free external store', async () => {
     const store = createDaemonTranscriptStore();
     let calls = 0;

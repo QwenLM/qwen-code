@@ -27,7 +27,6 @@ export {
   ExportTranscriptDocumentError,
   assertExportTranscriptDocumentV1,
   createExportTranscriptDocumentV1,
-  exportDocumentToTranscriptBlocks,
   type CreateExportTranscriptDocumentOptions,
   type ExportMetadataPresentationV1,
   type ExportTranscriptBlockV1,

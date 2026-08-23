@@ -19,7 +19,6 @@ import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
 import { useAcpTranscript } from './hooks/useAcpTranscript.js';
-import { useWebShellTranscriptEnabled } from './hooks/useWebShellTranscriptEnabled.js';
 import { useWebviewTheme } from './hooks/useWebviewTheme.js';
 import {
   shouldSendMessage,
@@ -297,8 +296,8 @@ function findMessageIndex(
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
-  const webShellTranscriptEnabled = useWebShellTranscriptEnabled();
-  const acpTranscript = useAcpTranscript(webShellTranscriptEnabled);
+  const acpTranscript = useAcpTranscript();
+  const webShellTranscriptEnabled = acpTranscript.enabled;
   const webviewTheme = useWebviewTheme();
 
   // Core hooks
