@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -396,18 +397,84 @@ process.stdout.write(JSON.stringify({
     ).toContain('content filter');
   });
 
-  it('kills the suite’s whole process group — no survivor outlives a run', async () => {
-    // The suite's timeout signals only the runner itself: a child the suite
-    // spawned into its process group survives the deadline — and a normal
-    // exit — outlives every screen, and can swap config between one of them
-    // and the checkout it authorised. The runner leads its own group now and
-    // the whole group dies when a run returns. The fake suite spawns a child
-    // that marks a file after a delay: a survivor would leave the mark.
+  it('the creation and revert checkouts are INERT — a planted post-checkout hook never fires', async () => {
+    // The screens certify FILTERS only; hooks are the spawn's own job.
+    // `worktree add` and a pathspec checkout both fire `post-checkout` from
+    // the shared common hooks dir (measured live), so the creation and revert
+    // spawns empty `core.hooksPath` the way the restore's `inert` array
+    // always has — a hook the suite plants must not run on either checkout.
     const { wt, base } = scaffoldModifiedPr();
-    const marker = join(outside, 'survivor-marker');
+    // beforeEach parks core.hooksPath in a disabled dir; point it back at the
+    // real hooks dir so the plant sits exactly where the pipeline meets it.
+    git(repo, 'config', '--unset', 'core.hooksPath');
+    const pwned = join(outside, 'PWNED-hook');
+    mkdirSync(join(repo, '.git', 'hooks'), { recursive: true });
     writeFileSync(
-      vitestScript(),
-      String.raw`#!/usr/bin/env node
+      join(repo, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\ntouch ${pwned}\n`,
+    );
+    chmodSync(join(repo, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(pwned)).toBe(false);
+    // Inert is not "the checkout failed": the run still reached its verdict.
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
+      'packages/lib/src/f.test.ts',
+    );
+  });
+
+  it('the creation and revert checkouts empty core.fsmonitor — a planted command never fires', async () => {
+    // The screen's regex matches filter keys only, so a fsmonitor-only plant
+    // passes it clean (measured: the `--get-regexp` exits 1) — the checkout
+    // must not run it either. The restore's `inert` array always emptied the
+    // key; the creation and revert spawns now do what that array does.
+    const { wt, base } = scaffoldModifiedPr();
+    const pwned = join(outside, 'PWNED-fsmonitor');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(pwned)).toBe(false);
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
+      'packages/lib/src/f.test.ts',
+    );
+  });
+
+  // Negative-pid kills are POSIX-only — on Windows the kill throws and the
+  // guarantee does not hold, so the skip the sibling tests use.
+  it.skipIf(process.platform === 'win32')(
+    'kills the suite’s in-group children — no child of the runner’s group outlives a run',
+    async () => {
+      // The suite's timeout signals only the runner itself: a child the suite
+      // spawned into its process group survives the deadline — and a normal
+      // exit — outlives every screen, and can swap config between one of them
+      // and the checkout it authorised. The runner leads its own group now
+      // and every IN-GROUP child dies when a run returns — a child the suite
+      // isolated first (`detached: true` or setsid) leads its own group and
+      // escapes, a residual pinned by the next test. The fake suite spawns a
+      // child that marks a file after a delay: an in-group survivor would
+      // leave the mark.
+      const { wt, base } = scaffoldModifiedPr();
+      const marker = join(outside, 'survivor-marker');
+      writeFileSync(
+        vitestScript(),
+        String.raw`#!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 const child = spawn(
@@ -430,6 +497,57 @@ process.stdout.write(JSON.stringify({
   })),
 }));
 `,
+      );
+
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+
+      // Longer than the sleeper's delay: any survivor had time to leave its
+      // mark.
+      await new Promise((res) => setTimeout(res, 2500));
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  it('a detached child ESCAPES the group kill — the documented residual', async () => {
+    // The kill reaches only the runner's own group: a child the suite
+    // isolated first — `detached: true` or setsid — leads its own group and
+    // survives, equivalent to an external writer swapping config between a
+    // screen and the checkout it authorised. This pins the residual the
+    // kill's comment documents (closing it needs a descendant-tree kill, or
+    // a boundary no survivor escapes) so the coverage claim and the evidence
+    // stay together: the survivor's marker MUST exist here.
+    const { wt, base } = scaffoldModifiedPr();
+    const marker = join(outside, 'detached-survivor-marker');
+    writeFileSync(
+      vitestScript(),
+      String.raw`#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+const child = spawn(
+  process.execPath,
+  [
+    '-e',
+    "setTimeout(() => { try { require('fs').writeFileSync(process.argv[1], 'x'); } catch {} }, 1200);",
+    ${JSON.stringify(marker)},
+  ],
+  { stdio: 'ignore', detached: true },
+);
+child.unref();
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
     );
 
     await runHandler({
@@ -439,9 +557,9 @@ process.stdout.write(JSON.stringify({
       out: join(repo, 'out.json'),
     });
 
-    // Longer than the sleeper's delay: any survivor had time to leave its mark.
+    // Longer than the sleeper's delay: the survivor had time to leave its mark.
     await new Promise((res) => setTimeout(res, 2500));
-    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(marker)).toBe(true);
   });
 
   it('a PR-controlled symlink cannot delete outside the tree — by isolation, not the guard', async () => {

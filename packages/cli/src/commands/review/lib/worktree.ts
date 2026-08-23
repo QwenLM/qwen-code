@@ -569,7 +569,11 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
  *
  * Every checkout in this pipeline EXECUTES these filters — the scratch tree's
  * reset and rebuild, the probe tree's creation, per-run restore and revert
- * checkouts — hooks being disabled covers hooks and not filters. The planting
+ * checkouts, the base tree's creation checkout, and the review worktree's own
+ * creation checkout — each is screened before it runs. Where a spawn disables
+ * hooks that covers hooks and not filters; the base tree's and the review
+ * worktree's creation checkouts keep the user's own hooks, which no screen
+ * here reads. The planting
  * surface is two plain writes a probe can make into the COMMON dir this
  * command's report calls shared: `git config filter.evil.smudge CMD` and one
  * line appended to `$(git rev-parse --git-path info/attributes)`. discard and

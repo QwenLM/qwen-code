@@ -131,9 +131,10 @@ export interface ScratchTreeArgs {
  * that repository has (and whatever a probe managed to write into it) as a side
  * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
  * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
- * whichever ones an attributes file selects. `runScratchTree` detects that
- * surface in the repository's own config and refuses rather than run it (see
+ * `filter.<name>.smudge|clean|process` commands are config-driven, and a
+ * checkout runs whichever ones an attributes file selects. `runScratchTree`
+ * detects that surface in the repository's own config and refuses rather than
+ * run it (see
  * `localFilterRefusal`). What a probe does with its own shell is the probe's
  * business, and the report says plainly that the common dir is shared rather
  * than isolated.

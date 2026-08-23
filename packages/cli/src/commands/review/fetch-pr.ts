@@ -38,7 +38,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { localFilterRefusal, sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -968,8 +968,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // once it exists. Tracked so the recomputed numbers replace the zeros.
     const needsLocalStats = platform.kind !== 'github';
 
-    // 4. Create the ephemeral worktree.
+    // 4. Create the ephemeral worktree. Its creation checkout rewrites every
+    //    file the fetched head carries — which EXECUTES a planted content
+    //    filter — and it is the pipeline's actual FIRST checkout: every other
+    //    screen runs inside the tree this call creates, so none exists yet in
+    //    this run. A screen hit refuses the fetch the way the probe-creation
+    //    screen refuses its checkout; the rollback below then removes the
+    //    fetched ref and the outer catch releases the lease.
     try {
+      const filterRefusal = localFilterRefusal(
+        process.cwd(),
+        "the review worktree's creation checkout",
+      );
+      if (filterRefusal) throw new Error(filterRefusal);
       mkdirSync(dirname(wt), { recursive: true });
       git('worktree', 'add', wt, ref);
     } catch (err) {

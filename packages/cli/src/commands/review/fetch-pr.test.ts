@@ -252,6 +252,10 @@ const producerMocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   refExists: vi.fn((..._refs: unknown[]): boolean => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
+  // The screen itself is owned by lib/worktree's own suite; here it is a seam
+  // — the contract under test is that fetch-pr ASKS before the creation
+  // checkout and refuses the fetch on a hit. Default: a clean repository.
+  localFilterRefusal: vi.fn((..._args: unknown[]): string | null => null),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   // The exit-status-aware probe as its own vi.fn: the default mapping (set
   // in beforeEach) can only produce exit 0 and the DEFINITIVE no (exit 1),
@@ -353,6 +357,13 @@ vi.mock('./lib/git.js', () => ({
   releaseWorktree: producerMocks.releaseWorktree,
 }));
 
+// Partial mock: only the filter screen is steered from the tests; everything
+// else (sanitizedGitEnv included) stays the real module.
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  return { ...actual, localFilterRefusal: producerMocks.localFilterRefusal };
+});
+
 vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: producerMocks.resolveMergeBase,
 }));
@@ -422,6 +433,7 @@ describe('fetch-pr report assembly', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
+    producerMocks.localFilterRefusal.mockReturnValue(null);
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
@@ -569,6 +581,40 @@ describe('fetch-pr report assembly', () => {
       ([path]) => path === '/tmp/fetch-report.json',
     );
     expect(reportCall).toBeUndefined();
+  });
+
+  it('refuses the creation worktree when the local filter screen refuses', async () => {
+    // The review worktree's own creation checkout is the pipeline's actual
+    // FIRST checkout — every later screen runs inside the tree it creates —
+    // and it rewrites every fetched file, executing a planted filter. A
+    // screen hit must refuse the fetch before the checkout, roll the fetched
+    // ref back, release the lease, and write no report.
+    producerMocks.localFilterRefusal.mockReturnValue(
+      "the repository's local config defines content filter(s) " +
+        'filter.evil.smudge (in /repo/.git/config) — the review worktree’s ' +
+        'creation checkout would EXECUTE them',
+    );
+
+    await expect(reportFor({})).rejects.toThrow(
+      /Failed to create worktree .*content filter/,
+    );
+    expect(producerMocks.localFilterRefusal).toHaveBeenCalledWith(
+      process.cwd(),
+      "the review worktree's creation checkout",
+    );
+    // The creation checkout itself never ran.
+    expect(
+      producerMocks.git.mock.calls.some(
+        (args: unknown[]) => args[0] === 'worktree' && args[1] === 'add',
+      ),
+    ).toBe(false);
+    // No report: the refusal is a hard stop, not a degraded review.
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
+    // The lease this run created is rolled back with every other failure.
+    expect(clearReviewWorktreeLeaseIfOwned).toHaveBeenCalled();
   });
 
   it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {

@@ -56,6 +56,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
+  localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
@@ -260,6 +261,15 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
   // The parameter re-narrows: TS narrowing does not cross function scopes.
   function buildBaseTree(baseSha: string): BaseTreeReport {
+    // The creation checkout rewrites every file the base commit carries, which
+    // EXECUTES a planted filter — screen it the way the probe tree's creation
+    // is screened. The refusal reads as an unavailable A/B (infrastructure),
+    // never as a finding against the PR.
+    const filterRefusal = localFilterRefusal(
+      worktree,
+      "the base tree's creation checkout",
+    );
+    if (filterRefusal) return unavailable(filterRefusal);
     let sweep: SweepResult | undefined;
     try {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its

@@ -1290,8 +1290,21 @@ interface TestEfficacyArgs {
 // resets, the revert's checkout — so the mutations would land in whichever
 // repository the environment names while every check against the tree passes
 // silently. The trees this file touches are chosen by the paths it is given.
+//
+// The two checkouts this helper serves — the probe tree's creation and the
+// revert's — are the ones `localFilterRefusal` certifies, and that screen
+// reads FILTERS only. Both shapes still fire the other two config-execution
+// surfaces: `worktree add` and a pathspec checkout run `post-checkout` from
+// the shared common hooks dir, and both run a repo-local `core.fsmonitor` —
+// so the spawn empties them the way the restore's `inert` array always has.
+const INERT_GIT_ARGS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...INERT_GIT_ARGS, ...args], {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
@@ -1589,10 +1602,11 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
-  // A pathspec checkout runs no hook — but the config that decides that lives
-  // in a tree this code is defending against, so it is emptied here the way
-  // every other checkout in this pipeline empties it. `--` and a pathspec:
-  // this restores FILES and never moves HEAD.
+  // A pathspec checkout still fires `post-checkout` — measured for both the
+  // `checkout <base> -- <file>` and the `--force HEAD -- .` shapes — but the
+  // config that decides that lives in a tree this code is defending against,
+  // so it is emptied here the way every other checkout in this pipeline
+  // empties it. `--` and a pathspec: this restores FILES and never moves HEAD.
   // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
   // whenever it rewrites a file, and the restore below rewrites every tracked
   // file this tree has — so the same surface `scratch-tree` refuses to reset
@@ -1715,8 +1729,14 @@ function runProbeSuite(
     // The timeout above signals only the runner itself: a child the suite
     // spawned into its process group survives the deadline — and a normal
     // exit — outlives every screen, and can swap config between one of them
-    // and the checkout it authorised. The runner leads its own group, so
-    // the kill below takes every such survivor with it.
+    // and the checkout it authorised. The runner leads its own group, so the
+    // kill below takes every IN-GROUP survivor with it. A child the suite
+    // isolated first — `detached: true` or setsid — leads its own group and
+    // escapes that kill; it is equivalent to an external writer, and the
+    // per-checkout screens are the only guard against it until a
+    // descendant-tree kill (or a boundary no survivor escapes) lands. The
+    // integration suite pins the escape so the claim and the evidence stay
+    // together.
     detached: true,
   };
   const r = spawnSync(
@@ -2559,7 +2579,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let sweep: SweepResult | undefined;
     try {
       // The creation checkout rewrites every file the head commit carries,
-      // which EXECUTES a planted filter — and it is the pipeline's FIRST
+      // which EXECUTES a planted filter — and it is this command's first
       // checkout, before any restore's screen runs. Refuse it the way the
       // per-restore screens refuse theirs; the catch below treats a hit like
       // any other creation failure.

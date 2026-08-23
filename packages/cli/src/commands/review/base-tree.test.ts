@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   utimesSync,
   mkdtempSync,
   mkdirSync,
@@ -111,6 +112,33 @@ describe('runBaseTree', () => {
     const r = run();
     expect(r.path!.startsWith(`${worktree}/`)).toBe(false);
     expect(r.path).toBe(`${worktree}-base`);
+  });
+
+  it('REFUSES the creation checkout when the common config plants a content filter', () => {
+    // The creation checkout rewrites every file the base commit carries,
+    // which EXECUTES a planted filter, and nothing in the pipeline wipes the
+    // common dir the plant persists in. The screen must refuse the build the
+    // way the probe-creation screen refuses its checkout — an unavailable A/B
+    // (infrastructure), never an executed filter.
+    const pwned = join(repo, 'PWNED-base-create');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('content filter');
+    expect(builds).toHaveLength(0);
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
   it('builds in the base tree, and only there', () => {
