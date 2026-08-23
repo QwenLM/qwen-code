@@ -24,12 +24,6 @@ if (typeof tls.getCACertificates === 'function') {
   process.stdout.write(JSON.stringify({ legacy: true }));
 }
 `;
-const STRICT_CERTIFICATE_BLOCK =
-  /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END CERTIFICATE-----[ \t]*(?:\r?\n|$)/gm;
-const LEGACY_SILENT_STOP_HEADER_BLOCK =
-  /^-----BEGIN ([^\r\n]*:[^\r\n]*)-----[ \t]*\r?\n[\s\S]*?^-----END \1-----[ \t]*(?:\r?\n|$)/m;
-const LEGACY_CERTIFICATE_END_NUL =
-  /^(-----END CERTIFICATE-----[ \t]*)\0(?=\r?\n|$)/gm;
 
 /** A block the loader takes, in canonical PEM and as its parsed certificate. */
 interface ScannedCertificateBlock {
@@ -37,31 +31,10 @@ interface ScannedCertificateBlock {
   certificate: X509Certificate;
 }
 
-function legacyCertificateBlocks(contents: string): ScannedCertificateBlock[] {
-  // The legacy line reader skips only a file-start BOM, accepts NUL after an
-  // END line, and silently stops at every other NUL.
-  const loaderInput = (
-    contents.startsWith('\uFEFF') ? contents.slice(1) : contents
-  ).replace(LEGACY_CERTIFICATE_END_NUL, '$1');
-  const nulStop = loaderInput.indexOf('\0');
-  const nulPrefix =
-    nulStop === -1 ? loaderInput : loaderInput.slice(0, nulStop);
-  const silentStop = nulPrefix.search(LEGACY_SILENT_STOP_HEADER_BLOCK);
-  const loadablePrefix =
-    silentStop === -1 ? nulPrefix : nulPrefix.slice(0, silentStop);
-  const blocks: ScannedCertificateBlock[] = [];
-  for (const match of loadablePrefix.matchAll(STRICT_CERTIFICATE_BLOCK)) {
-    try {
-      const certificate = new X509Certificate(match[0]);
-      blocks.push({
-        block: certificate.toString().trimEnd(),
-        certificate,
-      });
-    } catch {
-      return [];
-    }
+class LegacyExtraCaInspectionError extends Error {
+  constructor() {
+    super('Inspecting NODE_EXTRA_CA_CERTS requires Node.js 22.15.0 or newer.');
   }
-  return blocks;
 }
 
 /**
@@ -118,15 +91,12 @@ function scanCertificateBlocks(
       }));
     }
     if (Reflect.get(parsed, 'legacy') !== true) return [];
-    // `tls.getCACertificates('extra')` was added during Node 22. Older Node 22
-    // releases expose no certificate list. Creating a secure context drives
-    // the same loader and reports most malformed files on stderr. The bounded
-    // scanner also stops at the known warning-free header shape, while
-    // retaining the loader's measured surrounding-content tolerance.
-    return result.stderr.includes('Warning: Ignoring extra certs from')
-      ? []
-      : legacyCertificateBlocks(contents);
-  } catch {
+    // Older Node 22 releases expose no certificate list. Their byte-oriented
+    // loader cannot be reproduced by a string parser without drifting, so do
+    // not silently remove operator trust roots from worker bundles.
+    throw new LegacyExtraCaInspectionError();
+  } catch (error) {
+    if (error instanceof LegacyExtraCaInspectionError) throw error;
     return [];
   } finally {
     if (dir) {
