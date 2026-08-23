@@ -15773,16 +15773,24 @@ exit 1
 
     // Staging: the working tree is PR-branch code by post_status, so the
     // script travels as a trusted-base staged copy with a digest recorded
-    // in expression context (the af-111 doctrine).
+    // in expression context (the af-111 doctrine). The script itself is NEW
+    // in this PR, so the trusted base (pre-merge main) lacks it: the cp and
+    // the digest echo carry the same guard the upsert capture below uses —
+    // `|| true` and record-only-if-present — because a bare cp exits this
+    // -e step (killing every pre-merge round) on any run whose workflow
+    // resolves from the PR's own ref, and an empty digest degrades the
+    // consumer instead (witnessed on the merge-base tree).
     const stageStep =
       reviewAddressJob.match(
         /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
       )?.[0] ?? '';
     expect(stageStep).toContain(
-      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true',
     );
     expect(stageStep).toContain(
-      'echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
+      'if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then\n' +
+        '            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"\n' +
+        '          fi',
     );
     expect(postStatusCommentStep).toContain(
       "HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'",
@@ -15795,6 +15803,16 @@ exit 1
     // af-111 doctrine this wiring cites).
     expect(postStatusCommentStep.indexOf('sha256sum -c')).toBeLessThan(
       postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" body'),
+    );
+    // Consumer side of the same guard: an empty digest (script absent from
+    // the trusted base) degrades to the pre-PR inline body and skips the
+    // heartbeat, instead of digest-checking and running a staged copy that
+    // was never staged.
+    expect(postStatusCommentStep).toContain(
+      'if [[ -n "${HEARTBEAT_SHA256}" ]]; then',
+    );
+    expect(postStatusCommentStep).toContain(
+      '🔄 **AutoFix is working on this PR** — round %s/%s.',
     );
 
     // Deep link: attempt-scoped jobs listing, PR number enters jq as DATA
@@ -15860,13 +15878,14 @@ exit 1
 
     // Launch: detached (setsid + self-redirected output), gated on a
     // comment that actually exists (the gate wraps the launch itself, not
-    // just the earlier PATCH-or-create), carrying the round identity and
-    // recording the pid for the killers in EXPRESSION CONTEXT.
+    // just the earlier PATCH-or-create) AND on a staged script (an empty
+    // digest means the trusted base lacks it), carrying the round identity
+    // and recording the pid for the killers in EXPRESSION CONTEXT.
     expect(postStatusCommentStep).toContain(
       'setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &',
     );
     expect(postStatusCommentStep).toContain(
-      'if [[ -n "${STATUS_ID}" ]]; then\n            HB_REPO=',
+      'if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then\n            HB_REPO=',
     );
     expect(postStatusCommentStep).toContain('HB_COMMENT_ID="${STATUS_ID}"');
     expect(postStatusCommentStep).toContain('HB_START_EPOCH="${START_EPOCH}"');

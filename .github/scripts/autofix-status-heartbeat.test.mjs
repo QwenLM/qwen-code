@@ -51,8 +51,8 @@ function fakeGhBin(dir) {
       'set -u',
       'n=$(( $(ls -1 "${GH_RECORD_DIR}" | wc -l) + 1 ))',
       'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/call-${n}"',
-      "printf 'GH_HOST=%s GH_CONFIG_DIR=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
-      '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}" \\',
+      "printf 'GH_HOST=%s GH_CONFIG_DIR=%s GITHUB_TOKEN=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
+      '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}" \\',
       '  >> "${GH_RECORD_DIR}/gh-env.log"',
       '[ "${GH_FAIL:-0}" = "1" ] && exit 1',
       'sleep "${GH_SLEEP_SECONDS:-0}"',
@@ -578,6 +578,14 @@ describe('autofix-status-heartbeat loop', () => {
         assert.ok(cfg, line);
         assert.ok(cfg.startsWith(runnerTemp), line);
         assert.ok(existsSync(cfg), `minted gh config dir must exist: ${cfg}`);
+        // GITHUB_TOKEN is the loop's SOLE credential channel now — witness
+        // the surviving channel reaches gh, not only that the planted ones
+        // do not: a scrub broadened to drop it would keep this suite green
+        // while every production tick fails authentication.
+        assert.ok(
+          line.includes(' GITHUB_TOKEN=fake'),
+          `the step-level GITHUB_TOKEN must reach gh: ${line}`,
+        );
         assert.ok(line.endsWith(' GH_TOKEN= GH_ENTERPRISE_TOKEN='), line);
         assert.ok(!line.includes('planted'), line);
         assert.ok(!line.includes('evil.example'), line);

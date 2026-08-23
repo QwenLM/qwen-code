@@ -3637,7 +3637,13 @@ jobs:
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
-          cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
+          # Absent from the trusted base until this PR merges, and this step
+          # runs under -e: a hard failure here would kill every pre-merge
+          # round — same rule as the upsert capture below. `|| true`, and the
+          # digest records only when the copy exists; an empty output reaches
+          # the consumer's own empty guard, which degrades to the pre-PR
+          # inline body.
+          cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
           # on this host, so record each digest in GITHUB_OUTPUT — expression
@@ -3646,7 +3652,9 @@ jobs:
           # Full rationale → qwen-autofix.md#af-111
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then
+            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          fi
           # The upsert script travels as CONTENT, not as a staged copy: it
           # runs in a clean child that reads it from this expression-context
           # output, so there is no agent-writable copy to protect and no
@@ -4763,12 +4771,22 @@ jobs:
           # subcommand, so they cannot drift. The working tree is PR-branch
           # code by this point — run the staged copy, digest-verified from
           # expression context (same doctrine as resanitize-git-config.sh).
+          # An EMPTY digest means the script was absent from the trusted
+          # base at staging (pre-merge rounds of a PR whose workflow
+          # resolves from its own ref): degrade to the pre-PR inline body
+          # and skip the heartbeat — never fail the round.
           # Full rationale → qwen-autofix.md#af-148
-          /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
           START_EPOCH="$(date +%s)"
-          BODY="$(HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
-            HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
-            bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body)"
+          if [[ -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
+            BODY="$(HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
+              HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
+              bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body)"
+          else
+            BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
+              "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
+              "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
+          fi
           STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
             jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
               '[ .[][] | select((.user.login // "") == $ab)
@@ -4796,7 +4814,7 @@ jobs:
           # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
           # as a kill target. Full rationale → qwen-autofix.md#af-148
           HEARTBEAT_PID=''
-          if [[ -n "${STATUS_ID}" ]]; then
+          if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then
             HB_REPO="${REPO}" HB_COMMENT_ID="${STATUS_ID}" \
             HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
             HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
