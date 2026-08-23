@@ -847,7 +847,7 @@ export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
  * / `session_closed`). The ACP wire frame itself only carries
  * `{outcome:'cancelled'}`; the child uses this to avoid persisting a
  * fabricated "canceled by the user" tool result when an unattended restore
- * prompt's permission wait simply timed out.
+ * prompt's permission wait timed out or the session closed.
  */
 export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
   'qwen.daemon.permissionCancelReason';
