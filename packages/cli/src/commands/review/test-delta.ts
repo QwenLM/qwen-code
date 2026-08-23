@@ -142,6 +142,15 @@ export interface TestDeltaArgs {
   timeout: number;
   /** Test seam — production spawns the real command. */
   exec?: (command: string, cwd: string, timeoutMs: number) => BaseRunResult;
+  /**
+   * Containment gate, injectable for the same reason `exec` is: it resolves
+   * the operator's OWN policy from settings and environment, so without a seam
+   * every test in this file changes its answer on a machine where the operator
+   * opted into `required` — 21 of 31 of them, measured. Tests that are about
+   * delta arithmetic pass a gate that never refuses; the one test that is
+   * about the gate drives the real chain.
+   */
+  refuse?: (root: string) => string | null;
   /** Injectable clock, for tests only — the budget math cannot be driven to
    *  its cutoff in real time. Matches `test-efficacy`'s seam; without it a
    *  test has to reassign the global `Date.now`. */
@@ -227,7 +236,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // is also the honest answer for the measurement itself: with containment
   // unavailable the PR side either refused too or ran somewhere else, and a
   // delta between two differently-shaped runs is worse than no delta.
-  const refusal = refuseUnsandboxedPhase(baseline);
+  const refusal = (args.refuse ?? refuseUnsandboxedPhase)(baseline);
   if (refusal) {
     return empty(
       `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,

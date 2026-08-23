@@ -140,8 +140,8 @@ let probed: ContainerRuntime | null | undefined;
  * command, after an install has already burned minutes — the same reason
  * `qwen-autofix.yml` preflights the daemon before its sandboxed agent starts.
  */
-export function containerRuntime(force = false): ContainerRuntime | null {
-  if (!force && probed !== undefined) return probed;
+export function containerRuntime(): ContainerRuntime | null {
+  if (probed !== undefined) return probed;
   probed = null;
   for (const runtime of RUNTIMES) {
     const r = spawnSync(runtime, ['info'], {
@@ -183,10 +183,22 @@ export function containerRuntime(force = false): ContainerRuntime | null {
  * real uid 0 with this mount writable, and leaves root-owned residue behind.
  * A probe that cannot answer must not pick the silent one.
  */
-export function runtimeIsRootless(runtime: ContainerRuntime): boolean {
-  const cached = rootlessProbed.get(runtime);
-  if (cached !== undefined) return cached;
-  let rootless = false;
+export function runtimeIsRootless(
+  runtime: ContainerRuntime,
+  read: (rt: ContainerRuntime) => string = cachedInfoDocument,
+): boolean {
+  return hasRootlessMarker(read(runtime));
+}
+
+/**
+ * The runtime's `info` document, or an empty string if it could not be had.
+ *
+ * Empty is what makes the unknown case answer rootful WITHOUT a decision: an
+ * empty document carries no marker, so the predicate above says false on its
+ * own, and there is no second code path holding a literal that a mutant could
+ * flip the other way. The direction matters — see `runtimeIsRootless`.
+ */
+export function readInfoDocument(runtime: ContainerRuntime): string {
   try {
     const r = spawnSync(runtime, ['info', '--format', '{{json .}}'], {
       encoding: 'utf8',
@@ -195,13 +207,20 @@ export function runtimeIsRootless(runtime: ContainerRuntime): boolean {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: runtimeClientEnv(),
     });
-    rootless =
-      !r.error && r.status === 0 && hasRootlessMarker(String(r.stdout ?? ''));
+    if (r.error || r.status !== 0) return '';
+    return String(r.stdout ?? '');
   } catch {
-    rootless = false;
+    return '';
   }
-  rootlessProbed.set(runtime, rootless);
-  return rootless;
+}
+
+/** One `info` spawn per runtime per process, not one per command. */
+function cachedInfoDocument(runtime: ContainerRuntime): string {
+  const cached = infoDocuments.get(runtime);
+  if (cached !== undefined) return cached;
+  const doc = readInfoDocument(runtime);
+  infoDocuments.set(runtime, doc);
+  return doc;
 }
 
 /**
@@ -221,13 +240,7 @@ export function hasRootlessMarker(info: string): boolean {
   );
 }
 
-const rootlessProbed = new Map<ContainerRuntime, boolean>();
-
-/** Test seam: forget the probed runtime. */
-export function resetContainerRuntimeProbe(): void {
-  probed = undefined;
-  rootlessProbed.clear();
-}
+const infoDocuments = new Map<ContainerRuntime, string>();
 
 /** What a caller must do with one command. */
 export type SandboxVerdict =
@@ -429,7 +442,30 @@ export function mountRootFor(cwd: string): string | null {
     if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
       return null;
     }
-    return realpathSync(root);
+    const real = realpathSync(root);
+    // `-v src:dst` separates its fields with `:`, so a root that contains one
+    // cannot be spelled in that grammar at all: docker answers `invalid spec
+    // ... too many colons` and every command in the phase hard-fails with a
+    // raw mount error. Under `auto` those land as build/test failures the
+    // report attributes to the PR; under `required` the gate passes and the
+    // refusal that should have explained it never happens. Both designed
+    // degradations are bypassed because this said "mountable" about a root
+    // that is not.
+    //
+    // Refusing it here puts such a checkout back on the path every other
+    // unmountable root already takes. That is the whole fix: the `-v` grammar
+    // has exactly one separator, and `:` in a repository path — legal, if
+    // rare — is the only way to write it.
+    //
+    // On Windows this refuses EVERY absolute path, and that is the right
+    // answer rather than a casualty of it: a drive letter is a colon, and the
+    // mount this builds uses one path as both source and target, which a
+    // Windows path cannot be — the container side has no `C:`. So containment
+    // is not available there, and saying so gives `auto` its direct fallback
+    // and `required` its refusal instead of the runtime's parse error on every
+    // single command.
+    if (real.includes(':')) return null;
+    return real;
   } catch {
     return null;
   }
@@ -464,7 +500,12 @@ export function handOffRefused(
  * `/private/var` on macOS is the everyday case — is present in the container
  * under the canonical name only. Handing `--workdir` the lexical spelling
  * then names a directory the container does not have, and every command
- * fails before it starts. Null when the tree is not under a mountable root.
+ * fails before it starts.
+ *
+ * Null when neither the tree NOR its parent can be canonicalised — a tree
+ * whose directory went away under a cancelled run. Not the same question as
+ * `mountRootFor`'s: that one decides whether a root can be mounted at all,
+ * this one only spells a path that already lives under one.
  */
 export function containerPathFor(cwd: string): string | null {
   const resolved = resolve(cwd);

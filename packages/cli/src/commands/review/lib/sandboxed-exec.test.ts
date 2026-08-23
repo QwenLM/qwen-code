@@ -24,6 +24,8 @@ import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
   hasRootlessMarker,
+  readInfoDocument,
+  runtimeIsRootless,
   boxedRunLeftContainer,
   CONTAINER_HOME,
   containerEnv,
@@ -278,6 +280,10 @@ describe('containerCommand', () => {
     // is done without it. On a rootful engine it is still the only thing
     // between the reviewed code and real uid 0 on the mount.
     if (process.getuid === undefined || process.getgid === undefined) return;
+    // The documented opt-out is a real thing an operator exports, and it
+    // removes the very flag this asserts — without pinning it off, this test
+    // reports a failure of the code in a shell where the code is correct.
+    vi.stubEnv('SANDBOX_SET_UID_GID', '');
     const cwd = join(tmpDir, 'review-pr-9');
     const rootful = containerCommand('npm ci', {
       ...base,
@@ -301,6 +307,24 @@ describe('containerCommand', () => {
     expect(rootless.args).toContain('--volume');
     expect(rootless.args).toContain('--tmpfs');
     expect(rootless.args.at(-4)).toBe(base.image);
+    vi.unstubAllEnvs();
+  });
+
+  it('answers rootful when the runtime will not say', () => {
+    // The unknown case must land on the LOUD side: keeping `--user` breaks a
+    // rootless run visibly, dropping it on a rootful engine runs the reviewed
+    // code as real uid 0 on a writable mount and says nothing. An empty
+    // document is how "could not tell" reaches the predicate.
+    expect(runtimeIsRootless('podman', () => '')).toBe(false);
+    expect(
+      runtimeIsRootless(
+        'podman',
+        () => '{"host":{"security":{"rootless":true}}}',
+      ),
+    ).toBe(true);
+    // ...and a runtime that is not on this machine produces exactly that empty
+    // document rather than throwing out of the argv builder.
+    expect(readInfoDocument('qwen-no-such-runtime' as never)).toBe('');
   });
 
   it("reads rootlessness out of either runtime's info document", () => {
@@ -328,6 +352,11 @@ describe('containerCommand', () => {
     ).toBe(true);
     expect(hasRootlessMarker('{"host":{"security":{"rootless":false}}}')).toBe(
       false,
+    );
+    // Go marshals an exported field under its own name unless a tag renames
+    // it, so the capitalised spelling is a real shape, not a defensive guess.
+    expect(hasRootlessMarker('{"Host":{"Security":{"Rootless":true}}}')).toBe(
+      true,
     );
   });
 
@@ -524,6 +553,24 @@ describe('mountRootFor', () => {
   afterEach(() => {
     for (const dir of made.splice(0))
       rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a root the -v grammar cannot spell', () => {
+    // `-v src:dst` has exactly one separator. A checkout at `/…/my:repo` makes
+    // the spec `…/my:repo/.qwen/tmp:…/my:repo/.qwen/tmp`, which docker rejects
+    // as "too many colons" — measured, not assumed. Saying "mountable" about
+    // that root sends every command in the phase into a raw mount error
+    // instead of the fallback (`auto`) or the refusal (`required`) already
+    // written for roots that cannot be mounted.
+    const root = tmp();
+    const colon = join(root, 'my:repo', '.qwen', 'tmp', 'review-pr-9');
+    mkdirSync(colon, { recursive: true });
+    expect(mountRootFor(colon)).toBeNull();
+    // The comparison case, so this is a statement about the colon and not
+    // about a deep path: docker takes a comma in a `-v` spec without complaint.
+    const comma = join(root, 'my,repo', '.qwen', 'tmp', 'review-pr-9');
+    mkdirSync(comma, { recursive: true });
+    expect(mountRootFor(comma)).not.toBeNull();
   });
 
   it('takes the DEEPEST temp dir, not the first', () => {

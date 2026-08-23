@@ -110,6 +110,9 @@ describe('runTestDelta', () => {
       baseline,
       timeout: 60,
       now,
+      // Hermetic: the real gate reads the operator's own settings, and this
+      // helper's tests are about attribution, not about containment.
+      refuse: () => null,
       exec:
         typeof baseOutput === 'function'
           ? // Pass cwd through: swallowing it made the baseline-dir assertion
@@ -166,6 +169,7 @@ describe('runTestDelta', () => {
       report: writeReport([cmd({ output: ' FAIL  src/new.test.ts > x' })]),
       baseline,
       timeout: 60,
+      refuse: () => null,
       exec: (command) => {
         ran += 1;
         return cmd({ command, output: '' });
@@ -612,6 +616,7 @@ describe('the CLI option contract', () => {
 
     const report = runTestDelta({
       ...parsed,
+      refuse: () => null,
       // The base side prints the SAME failure under its own root.
       exec: (command) => ({
         command,

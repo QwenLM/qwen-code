@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -40,11 +41,19 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...mock, default: mock };
 });
 
+let reviewSettingsIsolation: ReturnType<typeof isolateOperatorReviewSettings>;
+
 beforeEach(() => {
   // Plenty of disk by default, so this suite behaves the same on a nearly-full
   // machine as on an empty one — the low-disk cases below opt in explicitly.
   statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+  // ...and the same for the operator's review policy: with `required` set in
+  // their own settings the phase gate refuses every run here, correctly, and
+  // 82 of this file's tests report that instead of what they measure.
+  reviewSettingsIsolation = isolateOperatorReviewSettings();
 });
+
+afterEach(() => reviewSettingsIsolation?.dispose());
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
