@@ -135,8 +135,9 @@ Also verify:
   on the fast path.
 - Generation leaves `process.env.QWEN_SERVER_TOKEN` absent or byte-for-byte
   unchanged, including when the selected value is whitespace-only.
-- Static review confirms the helper imports no filesystem API and the
-  implementation introduces no credential-file path or write.
+- Static review confirms the helper uses only the filesystem reads required by
+  the existing `resolveWebShellDir()` asset pre-check, performs no filesystem
+  write, and introduces no credential-file path.
 - The normal fast path does not load the helper or full command module.
 - `maybeOpenWebShellBrowser()` receives the daemon's `resolvedToken`, adds it as
   `#token=`, and does not put it in a query parameter or normal success logs.
