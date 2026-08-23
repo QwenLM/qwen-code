@@ -42,7 +42,7 @@ describe('realPathWithin', () => {
     }
   });
 
-  it('returns false for a broken symlink', () => {
+  it.runIf(process.platform !== 'win32')('returns false for a broken symlink', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
       const link = path.join(dir, 'dangling');
@@ -53,7 +53,7 @@ describe('realPathWithin', () => {
     }
   });
 
-  it('returns true for a symlink whose realpath stays inside root', () => {
+  it.runIf(process.platform !== 'win32')('returns true for a symlink whose realpath stays inside root', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
       const target = path.join(dir, 'base.md');
@@ -91,7 +91,7 @@ describe('readExtensionManifest', () => {
     }
   });
 
-  it('throws for a manifest symlinked outside the package', () => {
+  it.runIf(process.platform !== 'win32')('throws for a manifest symlinked outside the package', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
@@ -107,7 +107,7 @@ describe('readExtensionManifest', () => {
     }
   });
 
-  it('reads a symlinked manifest when trustSymlinks is set', () => {
+  it.runIf(process.platform !== 'win32')('reads a symlinked manifest when trustSymlinks is set', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
@@ -203,7 +203,7 @@ describe('resolvePluginRelativeFile', () => {
     expect(resolvePluginRelativeFile('/pkg', '../outside')).toBeNull();
   });
 
-  it('rejects a symlink escaping the plugin', () => {
+  it.runIf(process.platform !== 'win32')('rejects a symlink escaping the plugin', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
@@ -243,7 +243,7 @@ describe('resolvePathWithin', () => {
     );
   });
 
-  it('throws a symlink-escape violation', () => {
+  it.runIf(process.platform !== 'win32')('throws a symlink-escape violation', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
@@ -354,7 +354,7 @@ describe('readExtraJsonFile', () => {
     }
   });
 
-  it('returns null for a symlink escaping the extension', () => {
+  it.runIf(process.platform !== 'win32')('returns null for a symlink escaping the extension', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
@@ -392,7 +392,7 @@ describe('readExtraJsonFile', () => {
     },
   );
 
-  it('reads a symlinked auxiliary file when trustSymlinks is set', () => {
+  it.runIf(process.platform !== 'win32')('reads a symlinked auxiliary file when trustSymlinks is set', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     const siblingName = path.basename(outside);

@@ -397,7 +397,7 @@ describe('isClaudePluginConfig', () => {
     expect(() => isClaudePluginConfig(testDir)).toThrow(/Invalid/);
   });
 
-  it('throws when a standalone manifest symlinks outside the package', () => {
+  it.runIf(process.platform !== 'win32')('throws when a standalone manifest symlinks outside the package', () => {
     const outside = path.join(
       path.dirname(testDir),
       `${path.basename(testDir)}-outside.json`,
@@ -520,7 +520,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
     const pluginSourceDir = path.join(testDir, 'plugin-symlink');
     const skillDir = path.join(pluginSourceDir, 'skills', 'mine');
     fs.mkdirSync(skillDir, { recursive: true });
@@ -565,7 +565,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
+  it.runIf(process.platform !== 'win32')('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
     // A host directory reachable via a symlink whose relative name stays inside
     // the marketplace dir. resolvePluginSource must reject it before copying.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1255,7 +1255,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped
     // host file. The converter must refuse to follow it (realPathWithin guard).
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1294,7 +1294,7 @@ describe('convertClaudePluginPackage', () => {
     );
   });
 
-  it('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
     // existsSync follows the symlink so the strict-missing check passes, but the
     // target is untrusted — strict mode must fail instead of silently falling
     // back to the marketplace entry.
@@ -1330,7 +1330,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('ignores a symlinked plugin.json (non-strict) and uses the marketplace entry', async () => {
+  it.runIf(process.platform !== 'win32')('ignores a symlinked plugin.json (non-strict) and uses the marketplace entry', async () => {
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
     const secretFile = path.join(secretDir, 'plugin.json');
     fs.writeFileSync(
@@ -1517,7 +1517,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('throws when plugin.json is a symlink resolving outside the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('throws when plugin.json is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the manifest itself a symlink to a JSON-shaped host
     // file. The converter must refuse to follow it rather than read the target.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1539,7 +1539,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
     // mcpServers is a relative path whose name stays inside the plugin, but the
     // file is a symlink to a host secret. resolvePluginRelativeFile must reject
     // it so the target is never read into the config.
@@ -1574,7 +1574,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('does not copy a symlink whose target escapes the plugin directory', async () => {
+  it.runIf(process.platform !== 'win32')('does not copy a symlink whose target escapes the plugin directory', async () => {
     // git preserves symlinks, so a hostile repo can embed one pointing at a
     // host file. The bulk copy dereferences symlinks; without confinement the
     // target's content would be shipped inside the converted extension.
@@ -1635,7 +1635,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('does not load a .mcp.json that is a symlink escaping the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('does not load a .mcp.json that is a symlink escaping the plugin', async () => {
     // .mcp.json's name stays inside the plugin but it's a symlink to a host
     // file. realPathWithin must reject it so the target servers are never read.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1848,7 +1848,7 @@ describe('plugin package routing and variable replacement', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
-    'copyDirectory truncates mutual sibling symlink cycles inside the root',
+    'copyDirectory preserves both cycle links and stops the recursion with a stack-scoped guard',
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cyc-'));
       const a = path.join(root, 'a');
@@ -1865,8 +1865,8 @@ describe('plugin package routing and variable replacement', () => {
       const dest = path.join(root, 'dest');
       try {
         await copyDirectory(a, dest);
-        // Both real directories are present and exactly one cycle link was
-        // truncated (readdir order decides which).
+        // Both real directories copied as link/link2 (each holds target contents);
+        // back-edges skipped by the stack guard, neither copy nests into a cycle.
         expect(fs.readFileSync(path.join(dest, 'payload.txt'), 'utf-8')).toBe(
           'a',
         );
@@ -1878,7 +1878,14 @@ describe('plugin package routing and variable replacement', () => {
         ).toBe('b');
         const xLink = fs.existsSync(path.join(dest, 'x', 'link'));
         const bLink = fs.existsSync(path.join(dest, 'b', 'link2'));
-        expect(xLink).not.toBe(bLink);
+        expect(xLink).toBe(true);
+        expect(bLink).toBe(true);
+        expect(
+          fs.existsSync(path.join(dest, 'x', 'link', 'link2')),
+        ).toBe(false);
+        expect(
+          fs.existsSync(path.join(dest, 'b', 'link2', 'link')),
+        ).toBe(false);
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }
@@ -2057,7 +2064,7 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
     );
   });
 
-  it('rejects a subdirectory that is a symlink escaping the clone', async () => {
+  it.runIf(process.platform !== 'win32')('rejects a subdirectory that is a symlink escaping the clone', async () => {
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
     fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
     vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {

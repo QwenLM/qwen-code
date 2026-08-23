@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
@@ -32,12 +32,44 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { resolveCommandPath } from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
+/**
+ * Resolve a PowerShell executable: pwsh (preferred) → powershell (Windows
+ * 5.1 fallback). Cached per-process with a negative cache (`null`); throws
+ * when neither is on PATH.
+ */
+export let cachedPowerShell: string | null | undefined;
+export function __resetPowerShellCache(): void {
+  cachedPowerShell = undefined;
+}
+export function resolvePowerShellExecutable(): string {
+  if (cachedPowerShell !== undefined) {
+    if (cachedPowerShell === null) {
+      throw new Error(
+        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+      );
+    }
+    return cachedPowerShell;
+  }
+  for (const name of ['pwsh', 'powershell']) {
+    const { path } = resolveCommandPath(name);
+    if (path !== null) {
+      cachedPowerShell = name;
+      return name;
+    }
+  }
+  cachedPowerShell = null;
+  throw new Error(
+    'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+  );
+}
+
 /** Match a bare-quoted path (`"..."` or `'...'`); trailer operators only disqualify when UNQUOTED. */
 function isBareQuotedPowerShellCommand(command: string): boolean {
-  const lead = /^\s*(?:"([^"]*)"|'([^']*)')/.exec(command);
+  const lead = /^[ \t\r\n]*(?:"([^"]*)"|'([^']*)')/.exec(command);
   if (!lead) return false;
   const quoted = lead[1] ?? lead[2];
   // A quoted lead is treated as a path (and gets `& `) only when it carries
@@ -276,17 +308,22 @@ export class HookRunner {
     const globalConfig = getShellConfiguration();
 
     // The powershell config is shared by the explicit-shell and the
-    // cmd-fallback branches below, so both stay in sync.
-    const powershellConfig: ShellConfiguration = {
+    // cmd-fallback branches below, so both stay in sync. The executable
+    // is resolved via a PATH probe (pwsh > powershell) so a hook that
+    // says `shell: 'powershell'` works on machines with only one
+    // PowerShell installed. Wrapped in a closure so the probe (and its
+    // potential env-leak / 5s timeout) only fires when powershell is
+    // actually needed.
+    const powershellConfig = (): ShellConfiguration => ({
       shell: 'powershell',
-      executable: 'powershell',
+      executable: resolvePowerShellExecutable(),
       argsPrefix: ['-NoProfile', '-Command'],
-    };
+    });
 
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
       if (hookConfig.shell === 'powershell') {
-        return powershellConfig;
+        return powershellConfig();
       }
 
       // For bash, use global config's executable path or fallback
@@ -301,7 +338,7 @@ export class HookRunner {
     // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
     // quoted path fails; powershell strips them natively.
     if (globalConfig.shell === 'cmd') {
-      return powershellConfig;
+      return powershellConfig();
     }
     return globalConfig;
   }
@@ -679,7 +716,7 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
-      const child = spawn(
+      const child = childProcess.spawn(
         shellConfig.executable,
         [...shellConfig.argsPrefix, resolvedCommand],
         {
@@ -876,7 +913,18 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Expand `$CLAUDE_PROJECT_DIR` / `$GEMINI_PROJECT_DIR` in the command.
+   *
+   * PowerShell branch emits `$env:VAR` (env vars set in `executeCommandHook`)
+   * and lets PowerShell expand it natively in outside / in-double /
+   * in-expandable contexts; the state machine tracks only the four
+   * contexts where PowerShell's expansion differs (in-single, in-verbatim,
+   * in-expandable, backtick-escaped). Command-position placeholders get
+   * `& (…)` wrapping so PowerShell invokes the path instead of treating
+   * `$env:VAR/tail` as division.
+   *
+   * Bash / cmd / sh: simple text replace — bash `$VAR` doesn't expand in
+   * single quotes either, so the in-single substitution is symmetric.
    */
   private expandCommand(
     command: string,
@@ -886,173 +934,105 @@ export class HookRunner {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     if (shellType === 'powershell') {
-      // Pick the right escape per placeholder depending on its surrounding
-      // quote region: outside → wrap in single quotes; inside the author's
-      // own double quotes → backtick-escape without wrapping (the author's
-      // outer quotes provide the string boundary, so wrap-quoting again
-      // would yield `"'C:\proj'"`); inside single quotes → double the `'`
-      // without wrapping.
-      const doubleQuotedCwd = input.cwd.replace(/([$`"])/g, '`$1');
       const singleQuotedCwd = input.cwd.replace(/'/g, "''");
-      const replaceWithContext = (
-        command: string,
-        match: string,
-        tail: string,
-        offset: number,
-      ): string => {
-        let state: 'outside' | 'in-double' | 'in-single' | 'in-opaque' =
-          'outside';
-        // Backtick right before the placeholder's `$` means the author
-        // escaped it (`` `$CLAUDE_PROJECT_DIR `` literal); substituting would
-        // turn the escaped `$` into a parse error.
-        let escapedPlaceholder = false;
-        // parenKind tracks whether each open paren is a $() opener
-        // (restores outer state on close) or a grouping paren (closes
-        // silently). Without subst tracking, `$(Get-X $(Get-Y))` leaks
-        // the outer subst and the enclosing `"..."` is lost.
-        let parenDepth = 0;
-        const parenKind: Array<'subst' | 'group'> = [];
-        const quoteStack: Array<'outside' | 'in-double' | 'in-single'> = [];
-        // # is a comment only at token boundary (start, after
-        // whitespace, or after a quote/operator/paren). Bareword `#`
-        // (fix#123) must NOT start a comment.
-        const isTokenBoundary = (pos: number): boolean => {
-          if (pos === 0) return true;
-          const prev = command[pos - 1];
-          return /\s/.test(prev) || /["'();|&>{}\[\]=,]/.test(prev);
-        };
-        for (let i = 0; i < offset; i++) {
-          const ch = command[i];
-          // Backtick skips the next char inside non-single regions; in
-          // single quotes and opaque regions it's literal.
-          if (state !== 'in-single' && state !== 'in-opaque' && ch === '`') {
-            // The backtick skip lands exactly on the placeholder's `$`.
-            if (i + 1 === offset) escapedPlaceholder = true;
-            i++;
-            continue;
-          }
-          // $() opens a fresh region; literal in single quotes /
-          // opaque regions. The outer state is restored by the matching
-          // `)`.
-          if (
-            (state === 'outside' || state === 'in-double') &&
-            ch === '$' &&
-            command[i + 1] === '('
-          ) {
-            parenKind.push('subst');
-            quoteStack.push(state);
-            state = 'outside';
-            parenDepth++;
-            i++;
-            continue;
-          }
-          // Grouping `(` inside an open subst.
-          if (ch === '(' && parenKind.length > 0 && state === 'outside') {
-            parenKind.push('group');
-            parenDepth++;
-            continue;
-          }
-          // `)` closes the most-recent open paren; subst restores
-          // pre-$( state, group doesn't.
-          if (ch === ')' && parenDepth > 0 && state === 'outside') {
-            parenDepth--;
-            if (parenKind.pop() === 'subst') {
-              state = quoteStack.pop()!;
-            }
-            continue;
-          }
-          // # comment at token boundary (bareword # stays literal).
-          if (state === 'outside' && ch === '#' && isTokenBoundary(i)) {
-            while (i < offset && command[i] !== '\n' && command[i] !== '\r') {
+      return command.replace(
+        /\$(?:GEMINI|CLAUDE)_PROJECT_DIR([^\s"'();|>&,$*]*)/g,
+        (match, tail, offset) => {
+          let state:
+            | 'outside'
+            | 'in-single'
+            | 'in-double'
+            | 'in-verbatim'
+            | 'in-expandable' = 'outside';
+          for (let i = 0; i < offset; i++) {
+            const ch = command[i];
+            // @'…'@ and @"…"@ openers; only meaningful in `outside`.
+            if (
+              state === 'outside' &&
+              ch === '@' &&
+              (command[i + 1] === "'" || command[i + 1] === '"')
+            ) {
+              state =
+                command[i + 1] === "'" ? 'in-verbatim' : 'in-expandable';
               i++;
+              continue;
             }
-            continue;
-          }
-          // Block comment <#…#>: content is opaque.
-          if (state === 'outside' && ch === '<' && command[i + 1] === '#') {
-            const closeIdx = command.indexOf('#>', i + 2);
-            if (closeIdx !== -1) {
-              if (closeIdx > offset) state = 'in-opaque';
-              i = closeIdx + 1;
+            // Here-string closer `'@` / `"@` must be at start of a line
+            // in PowerShell — anchor on `\n` / `\r` so an `'@token` mid-body
+            // does NOT close the here-string.
+            if (
+              (state === 'in-verbatim' || state === 'in-expandable') &&
+              (command[i] === "'" || command[i] === '"') &&
+              command[i + 1] === '@' &&
+              (i === 0 ||
+                command[i - 1] === '\n' ||
+                command[i - 1] === '\r')
+            ) {
+              state = 'outside';
+              i++;
+              continue;
+            }
+            if (state === 'outside' && ch === "'") {
+              state = 'in-single';
+              continue;
+            }
+            if (state === 'in-single' && ch === "'") {
+              state = 'outside';
+              continue;
+            }
+            if (state === 'outside' && ch === '"') {
+              state = 'in-double';
+              continue;
+            }
+            if (state === 'in-double' && ch === '"') {
+              state = 'outside';
               continue;
             }
           }
-          // Here-string @'…'@ / @"…"@: body is opaque.
-          if (state === 'outside' && ch === '@' && i + 1 < command.length) {
-            const open = command[i + 1];
-            if (open === "'" || open === '"') {
-              const closing = open === "'" ? "'@" : '"@';
-              const bodyStart = i + 2;
-              let j = bodyStart;
-              let closeIdx = -1;
-              while (j < command.length) {
-                const k = command.indexOf(closing, j);
-                if (k === -1) break;
-                if (
-                  k === bodyStart ||
-                  command[k - 1] === '\n' ||
-                  command[k - 1] === '\r'
-                ) {
-                  closeIdx = k;
-                  break;
-                }
-                j = k + 1;
-              }
-              if (closeIdx !== -1) {
-                if (closeIdx > offset) {
-                  // @"…"@ is an EXPANDABLE here-string (PowerShell expands
-                  // variables inside it) — treat its body as double-quoted
-                  // context; @'…'@ is verbatim, keep opaque.
-                  state = open === '"' ? 'in-double' : 'in-opaque';
-                  // The jump below skips the whole body, so check the backtick escape here:
-                  // a backtick right before the placeholder's `$` means literal.
-                  if (command[offset - 1] === '`') {
-                    escapedPlaceholder = true;
-                  }
-                }
-                i = closeIdx + 1;
-                continue;
-              }
+          // Backtick-escaped `` `$VAR `` — preserve literal text (backtick
+          // escapes `$` in the rewritten form too).
+          if (state === 'outside' || state === 'in-double') {
+            let j = offset - 1;
+            while (j >= 0 && (command[j] === ' ' || command[j] === '\t')) {
+              j--;
+            }
+            if (j >= 0 && command[j] === '`') {
+              return match;
             }
           }
-          if (state === 'outside') {
-            if (ch === '"') state = 'in-double';
-            else if (ch === "'") state = 'in-single';
-          } else if (state === 'in-double' && ch === '"') {
-            state = 'outside';
-          } else if (state === 'in-single' && ch === "'") {
-            state = 'outside';
+          if (state === 'in-single') {
+            return singleQuotedCwd + tail;
           }
-        }
-        if (escapedPlaceholder) return match;
-        // `tail` is the bareword path run captured right after the
-        // placeholder (`$CLAUDE_PROJECT_DIR/x.cmd` → `tail=/x.cmd`). Inside
-        // the author's quotes it stays literal text; outside it is absorbed
-        // into one quoted token so PowerShell sees a single command path.
-        if (state === 'in-double') return doubleQuotedCwd + tail;
-        if (state === 'in-single') return singleQuotedCwd + tail;
-        // Opaque (literal here-string body / block comment): content stays.
-        if (state === 'in-opaque') return match;
-        // Outside quotes: wrap the placeholder; a bareword path tail right after it
-        // is absorbed into ONE quoted token (PowerShell does not merge a
-        // quoted string with a bare tail). A placeholder at the START of a
-        // fresh statement (after a `\n`/`;`, not at command start — the outer
-        // `& ` covers that) also needs its own call operator or the quoted
-        // string is echoed, never executed.
-        const before = command.slice(0, offset);
-        const statementStart =
-          /(?:^|[\n;])\s*$/.test(before) && before.trim() !== '';
-        const cwd = input.cwd.replace(/'/g, "''");
-        return `${statementStart ? '& ' : ''}'${cwd}${tail}'`;
-      };
-      // Feed both placeholders through ONE replace pass over the ORIGINAL
-      // command, so the quote-region scanner never re-reads text another
-      // substitution inserted (the old two-pass feeding re-scanned the first
-      // pass's injected quotes and slipped the region state).
-      return command.replace(
-        /\$(?:GEMINI|CLAUDE)_PROJECT_DIR([^\s"'();|>&,$*]*)/g,
-        (match, tail, offset) =>
-          replaceWithContext(command, match, tail as string, offset as number),
+          if (state === 'in-verbatim') {
+            return match;
+          }
+          // outside / in-double / in-expandable — $env:VAR form.
+          const envName = match.startsWith('$GEMINI_')
+            ? 'GEMINI_PROJECT_DIR'
+            : 'CLAUDE_PROJECT_DIR';
+          const envVar = `$env:${envName}`;
+          // Command-position (start of command or after `;` `|` `&` \n):
+          // wrap in `& (…)` so PowerShell executes the path instead of
+          // parsing `$env:VAR/tail` as division.
+          let k = offset - 1;
+          while (k >= 0 && (command[k] === ' ' || command[k] === '\t')) {
+            k--;
+          }
+          const isCommandPosition =
+            k < 0 ||
+            command[k] === ';' ||
+            command[k] === '|' ||
+            command[k] === '&' ||
+            command[k] === '\n' ||
+            command[k] === '\r';
+          if (isCommandPosition) {
+            if (tail.length === 0) {
+              return `& ${envVar}`;
+            }
+            return `& (${envVar} + ${JSON.stringify(tail)})`;
+          }
+          return envVar + tail;
+        },
       );
     }
     return command

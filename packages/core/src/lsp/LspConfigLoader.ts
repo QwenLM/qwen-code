@@ -86,9 +86,11 @@ export class LspConfigLoader {
 
       const originBase = `extension ${extension.name}`;
       if (typeof lspServers === 'string') {
-        // Link-mode extensions read the user's own dev tree, so their LSP
-        // config symlinks are trusted the same way as manifest/hooks.
-        const trustSymlinks = extension.installMetadata?.type === 'link';
+        // Link trust is OUT-OF-BAND — derived from extension.trustedLinkSource
+        // (set by loadExtension from the store snapshot or install flow), not
+        // the extension's own installMetadata which a hand-placed payload could
+        // forge.
+        const trustSymlinks = extension.trustedLinkSource !== undefined;
         this.loadExtensionStringLspConfig(
           lspServers,
           extension,

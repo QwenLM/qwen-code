@@ -423,7 +423,7 @@ describe('convertQoderPlugin', () => {
     },
   );
 
-  it('rejects a manifest symlinked outside the package', async () => {
+  it.runIf(process.platform !== 'win32')('rejects a manifest symlinked outside the package', async () => {
     const outside = path.join(
       path.dirname(root),
       `${path.basename(root)}-outside.json`,
@@ -483,7 +483,7 @@ describe('convertQoderPlugin', () => {
     },
   );
 
-  it('does not load an escaping root MCP symlink', async () => {
+  it.runIf(process.platform !== 'win32')('does not load an escaping root MCP symlink', async () => {
     const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
     const externalMcp = path.join(external, '.mcp.json');
     fs.writeFileSync(
@@ -547,7 +547,7 @@ describe('convertQoderPlugin', () => {
     );
   });
 
-  it('does not copy escaping symlinks or load unsafe context paths', async () => {
+  it.runIf(process.platform !== 'win32')('does not copy escaping symlinks or load unsafe context paths', async () => {
     const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
     const externalFile = path.join(external, 'private.txt');
     fs.writeFileSync(externalFile, 'private', 'utf-8');

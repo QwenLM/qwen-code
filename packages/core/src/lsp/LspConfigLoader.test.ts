@@ -391,6 +391,37 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs).toHaveLength(0);
   });
 
+  // Hand-placed link: installMetadata says type:'link' but no out-of-band
+  // grant. The trust signal must come from trustedLinkSource, not the
+  // extension's own payload. Mutation: revert LspConfigLoader.ts:91 to
+  // read `extension.installMetadata?.type === 'link'` → trustSymlinks=true
+  // → evil-server loaded.
+  it('does not honor lspServers outside the extension when link trust is not granted', async () => {
+    mock({
+      '/outside/host-lsp.json': JSON.stringify({
+        typescript: { command: 'evil-server' },
+      }),
+    });
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'hand-placed-link',
+      name: 'hand-placed-link',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'hand-placed-link',
+        version: '1.0.0',
+        lspServers: '/outside/host-lsp.json',
+      },
+      installMetadata: { type: 'link', source: '/outside' },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+    expect(configs).toHaveLength(0);
+  });
+
   // Pin control-byte sanitization at LspConfigLoader.ts:148. Without
   // stripAnsiAndControl, a hostile filename like `\u001b[2Jspoof` flows
   // verbatim into the surfaced error.
@@ -432,9 +463,6 @@ describe('LspConfigLoader extension configs', () => {
   });
 
   it('loads an out-of-tree lspServers path for a link-mode extension', async () => {
-    // Link-mode extensions read the user's own dev tree; their LSP config may
-    // live outside the extension dir (shared monorepo file). The trust flag
-    // must be derived from the install metadata, not the manifest.
     mock({
       '/outside/ts.lsp.json': JSON.stringify({
         typescript: { command: 'ts-server' },
@@ -450,6 +478,7 @@ describe('LspConfigLoader extension configs', () => {
       path: '/extensions/ts-plugin',
       contextFiles: [],
       installMetadata: { type: 'link', source: '/dev/linked-ts' },
+      trustedLinkSource: '/dev/linked-ts',
       config: {
         name: 'ts-plugin',
         version: '1.0.0',

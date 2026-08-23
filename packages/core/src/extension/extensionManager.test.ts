@@ -301,7 +301,7 @@ describe('extension tests', () => {
       );
     }
 
-    it('installs an Agent Plugin without converting package files', async () => {
+    it.runIf(process.platform !== 'win32')('installs an Agent Plugin without converting package files', async () => {
       const sourcePath = path.join(tempWorkspaceDir, 'portable-source');
       createAgentPlugin(sourcePath);
       for (const component of ['commands', 'agents', 'hooks']) {
@@ -536,11 +536,15 @@ describe('extension tests', () => {
       expect(extension?.path).toBe(extensionDir);
     });
 
-    // A link install committed BEFORE the linkedSource field existed: policy
-    // without the grant, on-disk metadata the only record. Trust must
-    // survive the upgrade via the legacy migration, or the extension
-    // silently disappears.
-    it('keeps link trust for a pre-change install through the legacy migration', async () => {
+    // Mutation-tested: revert legacyLinkSource to return metadata.source → loads.
+    // PR-body-declared flip: this case was previously named "keeps link
+    // trust for a pre-change install through the legacy migration" and
+    // asserted `extension.version === '1.0.0'`. The out-of-band trust
+    // migration reverses that direction — the fixture is identical, the
+    // expected outcome is the opposite. The flip is intentional and
+    // documented here because the migration forces legacy users to
+    // reinstall.
+    it('refuses legacy link trust from in-band install metadata', async () => {
       const extName = 'legacy-link';
       const extensionDir = path.join(userExtensionsDir, extName);
       fs.mkdirSync(extensionDir, { recursive: true });
@@ -582,10 +586,172 @@ describe('extension tests', () => {
       const extension = manager
         .getLoadedExtensions()
         .find((ext) => ext.config.name === extName);
-      // The dev-tree manifest loads through the legacy grant; without it the
-      // stub dir would throw "Configuration file not found" and the
-      // extension would silently vanish.
-      expect(extension?.version).toBe('1.0.0');
+      // Without an out-of-band grant the load runs in strict mode from
+      // extensionDir (which has no manifest), so the extension is not loaded.
+      // Mutation: revert legacyLinkSource to return metadata.source → loads.
+      expect(extension).toBeUndefined();
+    });
+
+    // Store grant pinned to devTree; in-band metadata claims attackerTree.
+    // The mismatch is a tamper signal — refuse the load rather than picking
+    // either side. Mutation: drop the disagreement branch → attacker tree
+    // loaded with grant as path.
+    it('refuses load when in-band link source disagrees with the store grant', async () => {
+      const extName = 'mismatched-link';
+      const extensionDir = path.join(userExtensionsDir, extName);
+      fs.mkdirSync(extensionDir, { recursive: true });
+      const devTree = path.join(tempWorkspaceDir, 'mismatched-link-dev');
+      fs.mkdirSync(devTree, { recursive: true });
+      fs.writeFileSync(
+        path.join(devTree, 'qwen-extension.json'),
+        JSON.stringify({ name: extName, version: '1.0.0' }),
+        'utf-8',
+      );
+      const attackerTree = path.join(
+        tempWorkspaceDir,
+        'mismatched-link-attacker',
+      );
+      fs.mkdirSync(attackerTree, { recursive: true });
+      fs.writeFileSync(
+        path.join(attackerTree, 'qwen-extension.json'),
+        JSON.stringify({ name: extName, version: '9.9.9' }),
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(extensionDir, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link', source: attackerTree }),
+        'utf-8',
+      );
+      const storeDir = path.join(tempHomeDir, '.qwen', 'extension-store');
+      fs.mkdirSync(storeDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          version: 2,
+          generation: 1,
+          legacyProjectionHash: '1'.repeat(64),
+          extensions: {
+            ['1'.repeat(64)]: {
+              name: extName,
+              artifactGeneration: 1,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              linkedSource: devTree,
+            },
+          },
+        }),
+        'utf-8',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((ext) => ext.config.name === extName);
+      expect(extension).toBeUndefined();
+    });
+
+    // Mutation-tested: drop the trustedLinkSource field in the Extension literal → undefined.
+    it('propagates context.trustedLinkSource onto the loaded Extension', async () => {
+      const extName = 'trust-prop';
+      const extensionDir = path.join(userExtensionsDir, extName);
+      fs.mkdirSync(extensionDir, { recursive: true });
+      const devTree = path.join(tempWorkspaceDir, 'trust-prop-dev');
+      fs.mkdirSync(devTree, { recursive: true });
+      fs.writeFileSync(
+        path.join(devTree, 'qwen-extension.json'),
+        JSON.stringify({ name: extName, version: '1.0.0' }),
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(extensionDir, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link', source: devTree }),
+        'utf-8',
+      );
+      const storeDir = path.join(tempHomeDir, '.qwen', 'extension-store');
+      fs.mkdirSync(storeDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          version: 2,
+          generation: 1,
+          legacyProjectionHash: '2'.repeat(64),
+          extensions: {
+            ['2'.repeat(64)]: {
+              name: extName,
+              artifactGeneration: 1,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              linkedSource: devTree,
+            },
+          },
+        }),
+        'utf-8',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((ext) => ext.config.name === extName);
+      expect(extension).toBeDefined();
+      expect(extension?.trustedLinkSource).toBe(devTree);
+    });
+
+    // R1-18: grant + missing-source path. The mismatch-check's AND chain
+    // short-circuits when installMetadata.source is absent (typeof check
+    // fails), so a link install whose INSTALL_METADATA_FILENAME has
+    // type='link' but no `source` still trusts the store grant — no
+    // mismatch error, no refusal. Covers the gap so a future tightening
+    // that wants "mismatch OR missing source must refuse" has a test to
+    // catch the regression.
+    it('loads a link extension when installMetadata has type but no source', async () => {
+      const extName = 'link-missing-source';
+      const extensionDir = path.join(userExtensionsDir, extName);
+      fs.mkdirSync(extensionDir, { recursive: true });
+      const devTree = path.join(tempWorkspaceDir, 'link-missing-source-dev');
+      fs.mkdirSync(devTree, { recursive: true });
+      fs.writeFileSync(
+        path.join(devTree, 'qwen-extension.json'),
+        JSON.stringify({ name: extName, version: '1.0.0' }),
+        'utf-8',
+      );
+      // installMetadata present but no `source` field — the case the
+      // AND chain currently lets fall through.
+      fs.writeFileSync(
+        path.join(extensionDir, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link' }),
+        'utf-8',
+      );
+      // Store grant present — grants wins over absent in-band source.
+      const storeDir = path.join(tempHomeDir, '.qwen', 'extension-store');
+      fs.mkdirSync(storeDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          version: 2,
+          generation: 1,
+          legacyProjectionHash: '0'.repeat(64),
+          extensions: {
+            ['0'.repeat(64)]: {
+              name: extName,
+              artifactDirectory: extName,
+              artifactGeneration: 1,
+              linkedSource: devTree,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+            },
+          },
+        }),
+        'utf-8',
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((ext) => ext.config.name === extName);
+      expect(extension).toBeDefined();
+      expect(extension?.trustedLinkSource).toBe(devTree);
       expect(extension?.path).toBe(devTree);
     });
 
@@ -4411,7 +4577,7 @@ describe('extension tests', () => {
       });
     });
 
-    it('rejects a qwen-extension.json that is a symlink escaping the extension', async () => {
+    it.runIf(process.platform !== 'win32')('rejects a qwen-extension.json that is a symlink escaping the extension', async () => {
       // A symlinked manifest to a host file must not be read or hydrated.
       const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-secret-'));
       const secretFile = path.join(secretDir, 'config.json');
@@ -5000,7 +5166,7 @@ describe('extension tests', () => {
       ).toBe(`${extensionDir}/scripts/setup.sh`);
     });
 
-    it('drops a default hooks/hooks.json that is a symlink escaping the extension', async () => {
+    it.runIf(process.platform !== 'win32')('drops a default hooks/hooks.json that is a symlink escaping the extension', async () => {
       const extensionDir = path.join(
         userExtensionsDir,
         'hooks-default-symlink-escape',

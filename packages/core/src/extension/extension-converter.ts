@@ -130,6 +130,7 @@ export async function convertCompatibleExtension(
     signal?.throwIfAborted();
     return { extensionDir, originSource: 'QwenCode', externalContent: false };
   }
+  debugLogger.debug(`Converting from ${detected.source} manifest`);
   // A matched manifest that fails to convert (clone/network) propagates.
   if (detected.source === 'Claude') {
     if (detected.kind === 'marketplace') {

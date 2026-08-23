@@ -174,6 +174,8 @@ export interface Extension {
   config: ExtensionConfig;
   format?: ExtensionPackageFormat;
   installMetadata?: ExtensionInstallMetadata;
+  /** Out-of-band link trust grant — never derived from the extension's own payload. */
+  trustedLinkSource?: string;
 
   mcpServers?: Record<string, MCPServerConfig>;
   contextFiles: string[];
@@ -1487,9 +1489,7 @@ export class ExtensionManager {
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir: cwd,
-        trustedLinkSource:
-          linkedSources.get(subdir) ??
-          this.legacyLinkSource(extensionDir, snapshot, subdir),
+        trustedLinkSource: linkedSources.get(subdir),
       });
       if (
         extension &&
@@ -1533,9 +1533,7 @@ export class ExtensionManager {
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir,
-        trustedLinkSource:
-          linkedSources.get(subdir) ??
-          this.legacyLinkSource(extensionDir, snapshot, subdir),
+        trustedLinkSource: linkedSources.get(subdir),
       });
       if (extension != null) {
         extensions.push(extension);
@@ -1561,17 +1559,25 @@ export class ExtensionManager {
     // OUT-OF-BAND: only the scanning/installing flow grants it (from the
     // store snapshot or the caller-supplied metadata) — never the
     // extension's own .qwen-extension-install.json, which a hand-placed
-    // payload could forge.
+    // payload could forge. The grant is the path authority: when an
+    // in-band source disagrees, the metadata has been tampered with and
+    // we refuse the load.
     const trustSymlinks =
       installMetadata?.type === 'link' &&
       context.trustedLinkSource !== undefined;
 
-    if (
-      trustSymlinks &&
-      typeof installMetadata.source === 'string' &&
-      installMetadata.source.length > 0
-    ) {
-      effectiveExtensionPath = installMetadata.source;
+    if (trustSymlinks) {
+      if (
+        typeof installMetadata?.source === 'string' &&
+        installMetadata.source.length > 0 &&
+        installMetadata.source !== context.trustedLinkSource
+      ) {
+        debugLogger.warn(
+          `Refusing extension ${extensionDir}: in-band source "${installMetadata.source}" does not match trusted link source "${context.trustedLinkSource}"`,
+        );
+        return null;
+      }
+      effectiveExtensionPath = context.trustedLinkSource as string;
     }
 
     try {
@@ -1611,6 +1617,7 @@ export class ExtensionManager {
         config,
         settings: config.settings,
         contextFiles: [],
+        trustedLinkSource: trustSymlinks ? context.trustedLinkSource : undefined,
       };
 
       if (config.mcpServers) {
@@ -1773,6 +1780,16 @@ export class ExtensionManager {
       return extension;
     } catch (e) {
       if (options.throwOnError) throw e;
+      // Pre-migration link installs fail with the generic "Configuration
+      // file not found" because the in-band grant is no longer trusted;
+      // surface a distinct diagnostic so the user reinstalls instead of
+      // chasing a phantom config file.
+      if (installMetadata?.type === 'link') {
+        debugLogger.warn(
+          `Legacy link install at ${effectiveExtensionPath} requires reinstallation after the out-of-band trust migration; run the install command again to register the link source in the store.`,
+        );
+        return null;
+      }
       debugLogger.warn(
         `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
           e,
@@ -1798,30 +1815,6 @@ export class ExtensionManager {
       }
     }
     return grants;
-  }
-
-  /** One-way migration for link installs committed before the linkedSource
-   *  field existed: a directory that HAS a store policy — hand-placed dirs
-   *  can never be in the store — and carries legacy link metadata keeps its
-   *  trust without a reinstall. */
-  private legacyLinkSource(
-    extensionDir: string,
-    snapshot: ExtensionStoreSnapshot,
-    entryName: string,
-  ): string | undefined {
-    const policyExists = Object.values(snapshot.extensions).some(
-      (policy) => (policy.artifactDirectory ?? policy.name) === entryName,
-    );
-    if (!policyExists) return undefined;
-    const metadata = this.loadInstallMetadata(extensionDir);
-    if (
-      metadata?.type === 'link' &&
-      typeof metadata.source === 'string' &&
-      metadata.source.length > 0
-    ) {
-      return metadata.source;
-    }
-    return undefined;
   }
 
   loadInstallMetadata(
