@@ -86,6 +86,13 @@ template at all — no new plumbing anywhere.
    their `**[Critical]**` marker when attribution is on (autofix greps it)
    and lose it when off. All other fixed copy is unchanged — `LGTM! ✅`
    and the `⚠️` clauses stay in both modes.
+3. **`review-footer.ts`** — define the invisible severity markers used by
+   unattributed posts and centralize the footer, marker, and visible-severity
+   stripping needed to produce a safe plain-prose body.
+4. **`presubmit.ts`, `pr-context.ts`, and `comment-status.ts`** — combine an
+   unattributed post's invisible severity marker with the reviewing account's
+   identity so duplicate detection and unresolved-blocker classification keep
+   working without a visible prefix or footer.
 
 ### Known tradeoffs (disclosed, accepted)
 
@@ -104,11 +111,14 @@ template at all — no new plumbing anywhere.
   #8994 therefore stands. `pr-context`'s blocker promotion reads the
   marker's severity, so an unresolved Critical re-enters the re-check
   section every round even without the visible prefix.
-- `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when a counting window's diff-growth budget trips) greps posted bodies
-  for `**[Critical]**`; attribution-off findings no longer match and are
-  deferred as non-Critical. Disclosed in the setting's description. A fix
-  (the workflow parsing the severity marker instead) is possible follow-up,
-  not this PR.
+- `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when
+  a counting window's diff-growth budget trips) recognizes visible
+  `**[Critical]**` markers and Request-changes review state. Attribution-off
+  findings posted under another verdict lose the visible marker and are
+  deferred as non-Critical; attribution-off findings in a Request-changes
+  review remain actionable through that state. Disclosed in the setting's
+  description. A fix that parses the invisible severity marker is a possible
+  follow-up, not part of this PR.
 
 ### Prompt layer (SKILL.md, dogfooded)
 
@@ -127,14 +137,14 @@ template at all — no new plumbing anywhere.
 ## What does not change
 
 - Verdict semantics, severity definitions, exclusion criteria, the reverse
-  audit, presubmit, authorization. Presentation only.
+  audit, and authorization. Presentation only.
 - The fixed review-body copy: `LGTM! ✅`, the `⚠️` clauses, the bilingual
   `<details>中文说明</details>` fold — humans type the first two, and the
   fold is language policy.
 - ` ```suggestion ` blocks.
-- qwen-code's own autofix: `qwen-autofix.yml` keys off prefix + footer, and
-  this repository's CI reviews run with attribution on, so every string the
-  workflow greps for still appears in its posts.
+- qwen-code's own autofix behavior for this repository's CI reviews: they run
+  with attribution on, so the visible `**[Critical]**` markers used by the
+  workflow remain present.
 - The `parse-args` verdict shape: prose style is not conditional, so the
   orchestrator has nothing to branch on.
 
@@ -145,6 +155,10 @@ template at all — no new plumbing anywhere.
 | `packages/cli/src/commands/review/submit.ts`                                 | Prefix strip in the attribution-off post transform |
 | `packages/cli/src/commands/review/compose-review.ts`                         | Body-list markers follow attribution               |
 | `packages/cli/src/commands/review/lib/inline-counts.ts`                      | `stripSeverityPrefix` beside `severityOf`          |
+| `packages/cli/src/commands/review/lib/review-footer.ts`                      | Invisible markers and safe post-body stripping     |
+| `packages/cli/src/commands/review/presubmit.ts`                              | Marker-aware duplicate detection                   |
+| `packages/cli/src/commands/review/pr-context.ts`                             | Marker-aware blocker promotion                     |
+| `packages/cli/src/commands/review/comment-status.ts`                         | Marker-aware blocker status reporting              |
 | `packages/core/src/skills/bundled/review/SKILL.md`                           | Plain-prose body format as the only register       |
 | `docs/users/configuration/settings.md`, `docs/users/features/code-review.md` | Widen `review.attribution` description             |
 | `packages/cli/src/config/settingsSchema.ts` + regenerated IDE schema         | Attribution description widened (no new key)       |
