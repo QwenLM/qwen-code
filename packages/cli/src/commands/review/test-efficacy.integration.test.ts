@@ -456,6 +456,115 @@ process.stdout.write(JSON.stringify({
     );
   });
 
+  it('a certified restore never recurses into submodules — a planted submodule filter never fires', async () => {
+    // A malicious PR ships a submodule; the suite initializes it (the gitdir
+    // is absorbed under the never-wiped common dir), plants a filter into
+    // the ABSORBED config — a file the screen's candidates never include —
+    // plus the attributes that select it and `submodule.recurse=true` into
+    // the common config. Without `-c submodule.recurse=false` on the
+    // restore's checkout the certified restore recurses and EXECUTES the
+    // smudge (measured live); with it, the checkout never reaches inside.
+    const { wt, base } = scaffoldModifiedPr();
+    // commitAll sweeps `git add -A`: the review worktree's directory inside
+    // the repo would land in the commit as a gitlink the same shape as the
+    // submodule, so lift it out of the tree before that commit.
+    git(repo, 'worktree', 'remove', '--force', wt);
+
+    const subrepo = join(outside, 'subrepo');
+    mkdirSync(subrepo);
+    git(subrepo, 'init', '-q', '-b', 'main', '.');
+    writeFileSync(join(subrepo, 'file.txt'), 'sub-content\n');
+    git(subrepo, 'add', '-A');
+    git(
+      subrepo,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-qm',
+      'sub',
+    );
+    git(
+      repo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      subrepo,
+      'sub',
+    );
+    commitAll('add submodule');
+    // Re-create the review worktree at the head that carries the gitlink.
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+
+    const marker = join(outside, 'PWNED-submodule');
+    writeFileSync(
+      vitestScript(),
+      String.raw`#!/usr/bin/env node
+import { execSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+const marker = ${JSON.stringify(marker)};
+// The attacker step: initialize the submodule so its gitdir is absorbed
+// under the common dir, plant a filter into the absorbed config and the
+// attributes line that selects it, dirty a file inside it so a recursing
+// checkout must rewrite it, and turn on the recursion that reaches it.
+try {
+  execSync('git -c protocol.file.allow=always submodule update --init -q');
+  const subGitDir = execSync(
+    'git -C sub rev-parse --path-format=absolute --git-common-dir',
+    { encoding: 'utf8' },
+  ).trim();
+  execSync(
+    'git config --file "' + subGitDir + '/config" filter.evil.smudge "touch ' + marker + '"',
+  );
+  mkdirSync(path.join(subGitDir, 'info'), { recursive: true });
+  writeFileSync(path.join(subGitDir, 'info', 'attributes'), '* filter=evil\n');
+  writeFileSync('sub/file.txt', 'dirtied\n');
+  execSync('git config submodule.recurse true');
+} catch {}
+// The default fake's verdict logic — the injected positive control must
+// still read red, or the harness verdict changes under test.
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    return readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
+      ? 'failed'
+      : 'passed';
+  } catch {
+    return 'passed';
+  }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: st(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(marker)).toBe(false);
+    // Inert is not "the run failed": the verdict still came out.
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
+      'packages/lib/src/f.test.ts',
+    );
+  });
+
   // Negative-pid kills are POSIX-only — on Windows the kill throws and the
   // guarantee does not hold, so the skip the sibling tests use.
   it.skipIf(process.platform === 'win32')(

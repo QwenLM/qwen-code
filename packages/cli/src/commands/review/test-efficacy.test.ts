@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
@@ -2443,5 +2443,128 @@ describe('replacementMutantsOf', () => {
   it('emits at most one candidate per line, most-specific first', () => {
     // Both a `??` and a comparison on one line: coalesce wins.
     expect(same('if ((x ?? fallback) !== y) go();')?.operator).toBe('coalesce');
+  });
+});
+
+describe('probe runner teardown hook', () => {
+  // The runner spawns `detached: true`, so a terminal Ctrl-C or a cancelling
+  // parent reaches THIS process alone: the default action would kill it
+  // inside the blocking spawnSync before the group kill after it runs,
+  // orphaning the runner with its deadline enforcer (measured live). The
+  // hook's listeners suppress the default action — the spawn returns, the
+  // group kill runs — and the queued handler exits run.ts's 128+signum
+  // contract. A fresh module per test: the install is once-per-process.
+  async function freshModule() {
+    vi.resetModules();
+    return import('./test-efficacy.js');
+  }
+
+  function hookSignals(onSpy: { mock: { calls: unknown[][] } }): unknown[][] {
+    return onSpy.mock.calls.filter(([sig]) =>
+      ['SIGHUP', 'SIGINT', 'SIGTERM'].includes(sig as string),
+    );
+  }
+
+  it('runOneMutant installs it before the runner spawn — even a run that never spawns', async () => {
+    const mod = await freshModule();
+    const onSpy = vi.spyOn(process, 'on');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-hook-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // No vitest anywhere up-tree: findVitestBin throws — but only after
+      // the hook the spawn is about to need was installed.
+      expect(() =>
+        mod.runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ),
+      ).toThrow();
+      const signals = hookSignals(onSpy).map(([sig]) => sig);
+      expect(signals).toContain('SIGHUP');
+      expect(signals).toContain('SIGINT');
+      expect(signals).toContain('SIGTERM');
+    } finally {
+      for (const [sig, fn] of hookSignals(onSpy)) {
+        process.removeListener(sig as NodeJS.Signals, fn as never);
+      }
+      onSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('installs exactly once across repeated runner spawns', async () => {
+    const mod = await freshModule();
+    const onSpy = vi.spyOn(process, 'on');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-hook-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      expect(() =>
+        mod.runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ),
+      ).toThrow();
+      expect(() =>
+        mod.runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ),
+      ).toThrow();
+      expect(
+        hookSignals(onSpy).filter(([sig]) => sig === 'SIGINT'),
+      ).toHaveLength(1);
+      expect(hookSignals(onSpy)).toHaveLength(3);
+    } finally {
+      for (const [sig, fn] of hookSignals(onSpy)) {
+        process.removeListener(sig as NodeJS.Signals, fn as never);
+      }
+      onSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the queued handler kills the runner group and exits 128+signum', async () => {
+    const mod = await freshModule();
+    const onSpy = vi.spyOn(process, 'on');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    try {
+      mod.installRunnerTeardownHook();
+      const handler = hookSignals(onSpy).find(
+        ([sig]) => sig === 'SIGINT',
+      )?.[1] as (signal: NodeJS.Signals) => void;
+      expect(handler).toBeDefined();
+
+      mod.setRunnerTeardownGroup(12345);
+      handler('SIGINT');
+      expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+      expect(exitSpy).toHaveBeenNthCalledWith(1, 130);
+      handler('SIGTERM');
+      expect(exitSpy).toHaveBeenNthCalledWith(2, 143);
+      handler('SIGHUP');
+      expect(exitSpy).toHaveBeenNthCalledWith(3, 129);
+
+      // Between spawns there is no group: the handler exits without killing,
+      // and a recycled pid is never signalled as if it were this group.
+      killSpy.mockClear();
+      mod.setRunnerTeardownGroup(undefined);
+      handler('SIGINT');
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenNthCalledWith(4, 130);
+    } finally {
+      for (const [sig, fn] of hookSignals(onSpy)) {
+        process.removeListener(sig as NodeJS.Signals, fn as never);
+      }
+      onSpy.mockRestore();
+      killSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
   });
 });

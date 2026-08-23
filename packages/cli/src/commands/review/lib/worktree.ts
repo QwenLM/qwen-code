@@ -562,23 +562,38 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 
 /**
  * The `-c` overrides every checkout spawn in this pipeline carries. The
- * screen below reads FILTERS only; hooks and fsmonitor are the two other
- * config-driven command surfaces a checkout executes — `worktree add` and a
- * pathspec checkout both fire `post-checkout` from the shared common hooks
- * dir, and both run a repo-local `core.fsmonitor` (measured live, on the
- * branch and the `--detach` forms) — and neither is visible to the screen.
- * Emptying both at the spawn is the half of the boundary the screen cannot
- * carry; the screen is the half the spawn cannot carry. A probe plants a
- * `.git/hooks/post-checkout` or a `[core] fsmonitor` into the never-wiped
- * common dir with the same facility as the filter plant — one write — so a
- * spawn without these overrides simply moves the persistence channel this
- * PR closes from a config key to a hook file or a fsmonitor command.
+ * screen below reads repo-local config for filters and for the
+ * transport-command keys a lazy-fetch EXECUTES; the surfaces the screen
+ * cannot read, the spawn neutralizes — each carries the half the other
+ * cannot. A probe plants every one of these into the never-wiped common
+ * dir with the same facility as the filter plant — one write — so a spawn
+ * without these overrides simply moves the persistence channel this PR
+ * closes from a config key to another executable surface:
+ *
+ * - hooks: `worktree add` and a pathspec checkout both fire
+ *   `post-checkout` from the shared common hooks dir (measured live, on
+ *   the branch and the `--detach` forms).
+ * - fsmonitor: both shapes also run a repo-local `core.fsmonitor`
+ *   (measured live); the empty value disables it.
+ * - submodule recursion: `submodule.recurse=true` makes a certified
+ *   checkout recurse into initialized submodules and EXECUTE filters
+ *   planted in their absorbed configs — files the screen's candidates
+ *   never include (measured live). The pipeline never initializes a
+ *   submodule itself — `worktree add` does not recurse — so nothing
+ *   legitimate depends on the recursion this override turns off.
+ *
+ * The transport-command keys ride the screen instead of this list: they
+ * are list-valued or have fallback semantics an empty `-c` override does
+ * not reliably neutralize, so repo-local hits refuse fail-closed there
+ * (see `localFilterRefusal`).
  */
 export const INERT_GIT_ARGS = [
   '-c',
   'core.hooksPath=/dev/null/no-hooks',
   '-c',
   'core.fsmonitor=',
+  '-c',
+  'submodule.recurse=false',
 ];
 
 // A padded config can hand this refusal tens of thousands of keys, and
@@ -635,6 +650,15 @@ function nameScreenKeys(
  * re-import `filter.lfs.clean`, the permanent-refusal failure.) The state
  * cannot be told apart from a filter the user set deliberately, and cannot be
  * safely wiped, so a hit is a refusal upstream, not a cleanup here.
+ *
+ * The transport-command keys a lazy-fetch EXECUTES ride this screen for the
+ * same reason filters do: `extensions.partialClone` + a promisor remote +
+ * one deleted loose object makes a certified checkout fetch, and
+ * `core.sshCommand`, `core.gitProxy`, `credential.helper`, and `ext::`
+ * remote URLs under `protocol.ext.allow` are commands `INERT_GIT_ARGS`
+ * cannot neutralize — two are list-valued or fall back when emptied — so
+ * repo-local hits refuse fail-closed too (measured live through all three
+ * pipeline spawn shapes).
  */
 export function localFilterRefusal(
   worktree: string,
@@ -674,11 +698,21 @@ export function localFilterRefusal(
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
     }
-  } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // EACCES after a `chmod 0100` — the same write class as the filter
+      // plant — drops every sibling candidate while lookup by exact path
+      // still works: the checkout git runs then reads a config this screen
+      // never saw, so it fails closed instead of certifying (measured live:
+      // the certified reset EXECUTED the plant through the x-only dir).
+      return `the repository's linked worktrees could not be enumerated (${inertPath((e as Error).message)}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
+    }
+    // ENOENT: no linked worktrees registered — the two candidates above are
+    // all of it.
   }
   const filters: Array<{ key: string; file: string }> = [];
   const includes: Array<{ key: string; file: string }> = [];
+  const transport: Array<{ key: string; file: string }> = [];
   // Neither a config key nor a path can carry NUL, so the pair separator is
   // unambiguous — and an O(1) dedup, because a padded config can hand this
   // loop tens of thousands of keys.
@@ -726,8 +760,12 @@ export function localFilterRefusal(
         // of three is how the first cut of this screen read as complete.
         // Include directives ride along: `--file` does not expand them while
         // the checkout's merged read does, so anything behind one EXECUTES
-        // unseen (the docstring's fail-closed interim, measured live).
-        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path)$',
+        // unseen (the docstring's fail-closed interim, measured live). The
+        // transport-command keys a lazy-fetch EXECUTES join them for the
+        // reason the docstring gives — a checkout that hits a missing object
+        // in a promisor-configured repo fetches through whatever command
+        // these name (measured live on all three pipeline spawn shapes).
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|core\\.sshcommand|core\\.gitproxy|credential\\.helper|protocol\\.ext\\.allow)$',
       ],
       {
         cwd: worktree,
@@ -763,11 +801,18 @@ export function localFilterRefusal(
         // move — `git config --local --get-regexp '^filter\.'` in the review
         // worktree — can see.
         seen.add(pair);
-        (key.startsWith('filter.') ? filters : includes).push({ key, file });
+        if (key.startsWith('filter.')) filters.push({ key, file });
+        else if (key.startsWith('include')) includes.push({ key, file });
+        else transport.push({ key, file });
       }
     }
   }
-  if (filters.length === 0 && unreadable.length === 0 && includes.length === 0)
+  if (
+    filters.length === 0 &&
+    unreadable.length === 0 &&
+    includes.length === 0 &&
+    transport.length === 0
+  )
     return null;
   // Keys and paths arrive from config files a probe can write, so both go
   // through `inertPath` the way `scratch-tree`'s note always has: a caught
@@ -790,6 +835,14 @@ export function localFilterRefusal(
       )} — the screen reads these files without expanding ` +
         'includes, and the checkout reads merged config, which does: a ' +
         `content filter behind one would EXECUTE unseen in ${checkout}`,
+    );
+  }
+  if (transport.length > 0) {
+    parts.push(
+      `the repository's local config names command-execution key(s) ${nameScreenKeys(
+        transport,
+        'command-execution key',
+      )} — a checkout that lazy-fetches EXECUTES the commands they name, and the screen cannot certify that ${checkout} would not`,
     );
   }
   if (unreadable.length > 0) {

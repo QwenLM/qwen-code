@@ -160,6 +160,121 @@ describe('runScratchTree', () => {
     expect(existsSync(join(repo, 'PWNED-include'))).toBe(false);
   });
 
+  it('routes the remediation by the variant that fired — never by a substring a planted name carries', () => {
+    // The refusal interpolates attacker-controlled keys and paths, and
+    // `inertPath` preserves spaces: an includeIf section NAMED to carry the
+    // filter variant's phrase flipped the old substring routing and appended
+    // the filter remedy to an include refusal (measured live). Routing by
+    // each part's fixed prefix leaves the decoy deciding nothing.
+    const behind = join(repo, 'behind-spoof.config');
+    writeFileSync(behind, '[core]\n');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[includeIf "gitdir:/x/ defines content filter(s) /"]\n\tpath = ${behind}\n`,
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive');
+    expect(r.note).toContain('Remove the include directive');
+    expect(r.note).not.toContain('Remove the filter config');
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'concatenates the remediations a composite refusal names — filter hit plus unreadable file',
+    () => {
+      // The screen joins up to four independent parts; the note must carry
+      // EVERY variant's remedy — a refusal combining a filter hit with an
+      // unreadable config.worktree used to instruct only the filter remedy,
+      // so the oncall removed a filter and was still refused (measured
+      // live). Root bypasses mode bits, hence the skip.
+      const first = run();
+      expect(first.available).toBe(true);
+
+      git(
+        worktree,
+        'config',
+        'filter.evil.smudge',
+        `touch ${join(repo, 'PWNED-comp')}`,
+      );
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const scratchConfig = join(
+        common,
+        'worktrees',
+        basename(first.path!),
+        'config.worktree',
+      );
+      writeFileSync(scratchConfig, '');
+      chmodSync(scratchConfig, 0o000);
+      try {
+        const r = run();
+
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('Remove the filter config');
+        expect(r.note).toContain('Restore read access');
+      } finally {
+        chmodSync(scratchConfig, 0o644);
+      }
+    },
+  );
+
+  it('refuses transport-command keys with the remediation that fits them', () => {
+    // A lazy-fetch EXECUTES whatever command these name; `INERT_GIT_ARGS`
+    // cannot neutralize them, so repo-local hits refuse — and the remedy is
+    // theirs, not the filter's or the include's.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: worktree, encoding: 'utf8' }).trim();
+    g('config', 'core.repositoryformatversion', '1');
+    g('config', 'extensions.partialClone', 'evil');
+    g('config', 'core.sshCommand', 'evil-ssh');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('command-execution key(s)');
+    expect(r.note).toContain('extensions.partialclone');
+    expect(r.note).toContain('core.sshcommand');
+    expect(r.note).toContain('Remove the command-execution config keys');
+    expect(r.note).not.toContain('Remove the filter config');
+    expect(r.note).not.toContain('Remove the include directive');
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses an unlistable worktrees admin dir with the remediation that fits it',
+    () => {
+      // EACCES on the admin directory drops every sibling config.worktree
+      // candidate while path lookup still works; the screen fails closed on
+      // it, and the remedy names the directory, not a filter. Root bypasses
+      // mode bits, hence the skip.
+      const first = run();
+      expect(first.available).toBe(true);
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const admin = join(common, 'worktrees');
+      chmodSync(admin, 0o100);
+      try {
+        const r = run();
+
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('linked worktrees could not be enumerated');
+        expect(r.note).toContain(
+          'Restore the ability to list the worktrees admin directory',
+        );
+        expect(r.note).not.toContain('Remove the filter config');
+      } finally {
+        chmodSync(admin, 0o755);
+      }
+    },
+  );
+
   it('empties core.fsmonitor on every spawn — a planted command never fires', () => {
     // The screen matches filter keys only, so a fsmonitor-only plant passes
     // it clean — the checkouts themselves must not run it. Both the rebuild

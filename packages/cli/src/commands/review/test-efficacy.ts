@@ -1660,6 +1660,67 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   return null;
 }
 
+// The teardown signals that reach a terminal or a cancelling parent — the
+// same set run.ts forwards — and its exit-code contract for a run ended by
+// one of them (128 + signum).
+const RUNNER_TEARDOWN_SIGNALS: NodeJS.Signals[] = [
+  'SIGHUP',
+  'SIGINT',
+  'SIGTERM',
+];
+const RUNNER_TEARDOWN_EXIT_CODES: Record<string, number> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
+let runnerGroupPid: number | undefined;
+let runnerTeardownHookInstalled = false;
+
+/**
+ * Keep the parent alive long enough to reach the group kill beside the
+ * detached runner spawn, and leave with the signal's exit code when the run
+ * ends.
+ *
+ * The runner spawns `detached: true`, so a terminal Ctrl-C — or a cancelling
+ * parent's SIGTERM — reaches this process ALONE: the default action kills it
+ * inside the blocking `spawnSync`, the group kill after the spawn never runs,
+ * and the runner whose deadline enforcer just died keeps executing the PR's
+ * own test code with no bound — the exact survivor class the detached spawn
+ * exists to contain, reachable through ordinary teardown (measured live).
+ * Registering these listeners suppresses the default action (measured: the
+ * parent survives the blocking call), so the spawn returns, the group kill
+ * runs, and the queued handler fires on the next event-loop turn — killing
+ * the runner's group if it is still alive and exiting run.ts's 128 + signum
+ * contract. Every step between spawns here is synchronous, so that turn
+ * comes when the synchronous stack unwinds: the interrupt is delayed until
+ * then, but never lost. The hook stays installed until it fires — removing
+ * a listener first DISCARDS the queued signal (measured), which would
+ * swallow the interrupt and leave the exit code lying about it.
+ */
+export function installRunnerTeardownHook(): void {
+  if (runnerTeardownHookInstalled) return;
+  runnerTeardownHookInstalled = true;
+  const onTeardownSignal = (signal: NodeJS.Signals): void => {
+    if (runnerGroupPid !== undefined) {
+      try {
+        process.kill(-runnerGroupPid, 'SIGKILL');
+      } catch {
+        // The group is already gone — the kill beside the spawn usually ran.
+      }
+    }
+    process.exit(RUNNER_TEARDOWN_EXIT_CODES[signal] ?? 1);
+  };
+  for (const signal of RUNNER_TEARDOWN_SIGNALS) {
+    process.on(signal, onTeardownSignal);
+  }
+}
+
+/** The runner group the teardown hook kills, or none between spawns. */
+export function setRunnerTeardownGroup(pid: number | undefined): void {
+  runnerGroupPid = pid;
+}
+
 /**
  * One vitest run over the probe files, classified per file. Shared by the
  * baseline run, every mutant run, and the revert probe — the same suite, the
@@ -1695,6 +1756,10 @@ function runProbeSuite(
   const exposed = exposeDependencies(probeTree, dependencyRoot, {
     rebuild: true,
   });
+  // Registered BEFORE the spawn below: while spawnSync blocks, the parent
+  // must not be killable by a teardown signal, or the detached runner is
+  // orphaned with its deadline enforcer (see installRunnerTeardownHook).
+  installRunnerTeardownHook();
   // Node honours `detached` here — it reaches the same `spawn()` the async
   // API uses — but @types/node declares it only on the async `SpawnOptions`,
   // so the option is named in an intersection instead of at the call site.
@@ -1728,7 +1793,11 @@ function runProbeSuite(
   );
   // Best effort, after EVERY outcome including the timeout: on a clean exit
   // the group is already gone. Negative-pid kills are POSIX-only; on Windows
-  // this throws and the behaviour stays as it was.
+  // this throws and the behaviour stays as it was. The pid is also what the
+  // teardown hook kills when its queued signal fires after an interrupt
+  // landed mid-spawn; clearing it once the group is dead keeps a recycled
+  // pid from ever being killed as if it were this group.
+  setRunnerTeardownGroup(r.pid);
   if (r.pid) {
     try {
       process.kill(-r.pid, 'SIGKILL');
@@ -1736,6 +1805,7 @@ function runProbeSuite(
       // Nothing left in the group to kill.
     }
   }
+  setRunnerTeardownGroup(undefined);
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no

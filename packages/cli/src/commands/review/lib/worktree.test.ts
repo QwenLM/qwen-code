@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1165,7 +1166,7 @@ describe('discardWorktree', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-discard-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-discard-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
@@ -1412,7 +1413,10 @@ describe('localFilterRefusal', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-filter-screen-'));
+    // realpathSync because macOS's tmpdir is a symlink (/var -> /private/var)
+    // while git reports resolved paths — the sibling real-git suites' convention,
+    // which the FIFO test's absolute-path assertion depends on.
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-filter-screen-')));
     gitRepo('init', '-q', '-b', 'main');
     gitRepo('config', 'user.email', 't@t.t');
     gitRepo('config', 'user.name', 't');
@@ -1591,4 +1595,64 @@ describe('localFilterRefusal', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails CLOSED when the worktrees admin dir cannot be listed — EACCES is not ENOENT',
+    () => {
+      // A `chmod 0100` on the admin directory drops every sibling
+      // config.worktree candidate — readdir EACCES — while lookup by exact
+      // path still works: the certified checkout then reads a config the
+      // screen never saw (measured live: the reset EXECUTED the plant
+      // through the x-only dir). Only ENOENT means "no linked worktrees".
+      // Root bypasses mode bits, hence the skip.
+      const admin = join(repo, '.git', 'worktrees');
+      const sibling = join(admin, 'planted');
+      mkdirSync(sibling, { recursive: true });
+      writeFileSync(
+        join(sibling, 'config.worktree'),
+        `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+      );
+      chmodSync(admin, 0o100);
+      try {
+        const r = localFilterRefusal(tree, 'the probe checkout');
+        expect(r).not.toBeNull();
+        expect(r).toContain('linked worktrees could not be enumerated');
+        expect(r).toContain('the probe checkout');
+      } finally {
+        chmodSync(admin, 0o755);
+      }
+    },
+  );
+
+  it('refuses the transport-command keys a lazy-fetch EXECUTES — all five', () => {
+    // `extensions.partialClone` + a promisor remote + one deleted loose
+    // object makes a certified checkout lazy-fetch, and the four
+    // command-valued keys name what that fetch EXECUTES (measured live on
+    // every pipeline spawn shape). `INERT_GIT_ARGS` cannot neutralize them
+    // — two are list-valued or fall back when emptied — so repo-local hits
+    // refuse here, each key named in the refusal.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'core.repositoryformatversion', '1');
+    g('config', 'extensions.partialClone', 'evil');
+    g('config', 'core.sshCommand', 'evil-ssh');
+    g('config', 'core.gitProxy', 'evil-proxy');
+    g('config', 'credential.helper', 'evil-helper');
+    g('config', 'protocol.ext.allow', 'always');
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('command-execution key(s)');
+    expect(r).toContain('extensions.partialclone');
+    expect(r).toContain('core.sshcommand');
+    expect(r).toContain('core.gitproxy');
+    expect(r).toContain('credential.helper');
+    expect(r).toContain('protocol.ext.allow');
+    expect(r).toContain('the probe checkout');
+    // They are not misfiled as filters or includes — the remediation
+    // routing downstream keys on these exact part prefixes.
+    expect(r).not.toContain('defines content filter(s)');
+    expect(r).not.toContain('names include directive(s)');
+  });
 });
