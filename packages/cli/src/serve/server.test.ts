@@ -15441,6 +15441,54 @@ describe('createServeApp', () => {
       expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
     });
 
+    it('keeps sidecar binding-time order when a persisted-only binding is newer', async () => {
+      // Mixed-writer ordering: GitDialog binds #9500 (enters the live entry
+      // AND the sidecar), then the shell hook binds #9517 — the hook writes
+      // the sidecar directly but never updates the live entry, so the live
+      // entry stays [9500] while the sidecar is [9500, 9517]. The merged
+      // list must keep the sidecar's binding-time order [9500, 9517]
+      // (last = latest); positional concatenation (persisted-only first)
+      // would flip it to [9517, 9500] and render the OLDER PR as latest.
+      const id = '550e8400-e29b-41d4-a716-446655440006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            // Live entry only saw the GitDialog binding; the shell-hook
+            // binding (9517) is persisted-only.
+            prs: [{ number: 9500, url: 'https://github.com/o/r/pull/9500' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
     it('dedupes by number on merge, preferring the live url', async () => {
       // Overlap is the common production case (a route binding is persisted
       // AND enters the live entry). Without the number-keyed filter the

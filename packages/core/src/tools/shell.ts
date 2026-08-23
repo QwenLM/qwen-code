@@ -3076,9 +3076,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
-        // The execution directory, not the target dir: the `directory`
-        // parameter may point at another registered workspace, and gh
-        // attributes the branch of the repo the command actually ran in.
+        // The launch directory (`directory` param, else target dir), not a
+        // repo the command may have `cd`'d into: gh resolves THIS repo's
+        // branch, so an internal-`cd` create binds only when this branch's
+        // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd);
         if (!created || !output.includes(created.url)) return;
         const prPath = this.config

@@ -16,10 +16,14 @@ import {
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
-import type { WorkspaceRuntime } from '../workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 import {
   refreshWorkspaceSessionPrStates,
   resolveSessionPrRefreshIntervalMs,
+  startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -31,11 +35,6 @@ const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
 const SESSION_A = '00000000-0000-4000-8000-000000000001';
 const SESSION_B = '00000000-0000-4000-8000-000000000002';
-
-// The sweep only updates bindings whose URL belongs to the workspace repo;
-// tests seed github.com/o/r URLs, so resolve the workspace remote to it.
-const resolveRemote = async (): Promise<string | undefined> =>
-  'https://github.com/o/r';
 
 function pr(number: number, state: string) {
   return {
@@ -147,11 +146,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     const persisted = await readSessionPrs(prPath);
@@ -198,11 +193,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'open')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
@@ -223,11 +214,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       kind: 'cli_unavailable',
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
@@ -249,17 +236,13 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
   });
 
-  it('updates nothing when neither the remote nor the gh page can vouch', async () => {
+  it('updates nothing when the gh page is unavailable', async () => {
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
@@ -274,14 +257,10 @@ describe('refreshWorkspaceSessionPrStates', () => {
       kind: 'cli_unavailable',
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      async () => undefined,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
-    // An unresolvable origin alone no longer blocks the round — the page
-    // gh resolves can still vouch — but without any page nothing stamps.
+    // Stamping authority is the page gh lists; without any page nothing
+    // stamps, whatever the workspace's git remote looks like.
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
   });
@@ -307,11 +286,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       ],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      async () => 'https://github.com/me/fork',
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
@@ -367,11 +342,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 0, updated: 0 });
     const raw = JSON.parse(await fsp.readFile(escapedSidecar, 'utf8'));
@@ -402,11 +373,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(500, 'merged'), pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     const persisted = await readSessionPrs(prPath);
@@ -436,12 +403,127 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(10, 'merged'), pr(11, 'open')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(
-      runtime,
-      undefined,
-      resolveRemote,
-    );
+    const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
+  });
+
+  it('never stamps a fork-URL binding from the parent page it passes through', async () => {
+    // Fork layout, reverse corner: the binding's URL is the FORK's web URL
+    // while the page is the PARENT's. PR numbers collide between fork and
+    // parent routinely, so the parent page's same-number state must not
+    // reach the fork binding — its repo is not the one gh listed.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 12,
+      url: 'https://github.com/me/fork/pull/12',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        { ...pr(12, 'merged'), url: 'https://github.com/parent/repo/pull/12' },
+      ],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+});
+
+describe('startSessionPrRefreshTimer', () => {
+  let runtimeDir: string;
+  let workspaceCwd: string;
+  let runtime: WorkspaceRuntime;
+  let sessionService: SessionService;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-refresh-timer-runtime-'),
+    );
+    workspaceCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-refresh-timer-work-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    runtime = {
+      workspaceId: 'primary',
+      workspaceCwd,
+      sessionRuntimeBaseDir: runtimeDir,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+    } as unknown as WorkspaceRuntime;
+    sessionService = createWorkspaceRuntimeSessionService(runtime);
+  });
+
+  afterEach(async () => {
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.useRealTimers();
+    await fsp.rm(runtimeDir, { recursive: true, force: true });
+    await fsp.rm(workspaceCwd, { recursive: true, force: true });
+  });
+
+  it('marks the session catalog when a sweep rewrites states', async () => {
+    // State transitions rewrite sidecars the daemon never sees; the tick
+    // must bump the catalog revision or live-state clients keep rendering
+    // the stale badge until unrelated churn.
+    vi.useFakeTimers();
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-user-1`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    await upsertSessionPr(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      { number: 42, url: 'https://github.com/o/r/pull/42', state: 'open' },
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const markSessionCatalogChanged = vi.fn();
+    const timer = startSessionPrRefreshTimer({
+      workspaceRegistry: {
+        listAll: () => [{ ...runtime, bridge: { markSessionCatalogChanged } }],
+      } as unknown as WorkspaceRegistry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '5' },
+    });
+    expect(timer).toBeDefined();
+
+    // Past the first-run delay: the sweep rewrites open -> merged and bumps
+    // the catalog. waitFor keeps advancing the fake clock and yielding until
+    // the tick's async sweep settles.
+    await vi.advanceTimersByTimeAsync(61_000);
+    await vi.waitFor(() =>
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0]?.state,
+    ).toBe('merged');
+    timer?.dispose();
   });
 });

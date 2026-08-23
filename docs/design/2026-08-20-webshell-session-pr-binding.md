@@ -59,16 +59,16 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 新增 daemon 路由 `POST /sessions/backfill-prs`（进程级、按需触发，启动不自动扫描），实现见 `packages/cli/src/serve/routes/session-pr-backfill.ts`：
 
 - 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived，`isValidSessionId` 门禁先于一切路径构造），解析三源（按权威升序插入，最强者最后、不被 tail-10 挤出）：
-  1. **`/review <N|url>` 显式指令**：transcript 用户消息解析（`#N` 与 `pull/N` 两种形态），review 会话绑到**被 review 的 PR**——搜索"PR N 的 review 会话"的正确语义；
-  2. **`gh pr create` 配对痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，命令段首过执行闸门（`commandRunsGhPrCreate`，排除 `--dry-run`），且打印 URL 必须与 workspace 同仓库（repo-key 校验）——配对响应即 gh 该次执行的 stdout，归因成立；
+  1. **`/review <N|url>` 显式指令**：仅解析 **user 文本记录**（`#N` 与 `pull/N` 两种形态；assistant 散文/工具调用/工具结果里的引用不绑），review 会话绑到**被 review 的 PR**——搜索"PR N 的 review 会话"的正确语义；
+  2. **`gh pr create` 配对痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，命令段首过执行闸门（`commandRunsGhPrCreate`，排除 `--dry-run`），且打印 URL 必须与 workspace 同仓库（repo-key 校验）、非省略占位（`...`）——配对响应即 gh 该次执行的 stdout，归因成立；
   3. **约定**：worktree sidecar slug `pr-<N>` / branch `worktree-pr-<N>`（`[1-9]` 开头，无 PR 0）直接给出 PR 号（零网络），会话"为该 PR 存在"，权威最高。
-- **明确不用裸 `gitBranch`**：首版曾把 transcript gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理了前两轮写入的 596 条错误绑定后重跑。
+- **明确不用裸 `gitBranch`**：首版曾把 transcript gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理错误绑定后重跑。
 - 每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})` 提供 number→url/state 映射；`slim` 只取 number/url/headRefName（全字段 + 500 触发 GitHub GraphQL 504，slim 约 4s/60KB）。
-- **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**，页内 PR 属于另一仓库——与 workspace origin key 不一致的条目一律跳过（fail-closed）；workspace key 不可解析时同样 fail-closed。
-- URL 兜底链：gh 映射 → 创建时打印的 URL（仅 direct 源，已同仓库校验）→ git remote web URL 推导 `<repo>/pull/<N>`（`fetchRemoteWebUrl`，支持 https / scp 风格 ssh / `ssh://` 与 enterprise host；仅约定号与 review 号）；解析不到号的会话原样跳过。
-- 已绑定同一 number 的结果跳过（不刷新 createdAt，保持绑定序）；**驱逐修复**：若本轮新绑定把已绑定的约定号挤过 tail-10，恢复它；重复调用幂等；写入复用 `upsertSessionPr`（进程内队列 + 跨进程文件锁，与 shell/daemon 侧写入序列化）。
+- **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**，页内 PR 属于另一仓库——与 workspace origin key 不一致的条目一律跳过（fail-closed）；workspace key 不可解析时同样 fail-closed。约定号不受闸门影响：gh 页已归属该号时取 gh 自己的权威 URL（父仓库），不与 origin 推导混用。
+- URL 兜底链：gh 映射 → 创建时打印的 URL（仅 direct 源，已同仓库校验）→ gh 页按号归属 / git remote web URL 推导 `<repo>/pull/<N>`（`fetchRemoteWebUrl`，支持 https / scp 风格 ssh / `ssh://` 与 enterprise host；仅约定号与 review 号）；解析不到号的会话原样跳过。
+- 已绑定同一 number 的结果跳过（不刷新 createdAt，保持绑定序）；**挤出修复**：本轮新绑定若把既有条目（含约定号与 live gh-backed 绑定）挤过 tail-10，按运行前快照恢复；重复调用幂等；写入复用 `upsertSessionPr`（进程内队列 + 跨进程文件锁），按候选隔离——单个 sidecar 写失败计入 `failed` 并继续，不中止整个 workspace 运行。
 - 路由在 `bound > 0` 时 `markSessionCatalogChanged()`，live-state 客户端 ~2s 内 refetch。
-- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`；untrusted workspace 跳过。
+- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved/failed`；untrusted workspace 跳过。
 
 ### 合入状态快照 + 定时刷新
 
