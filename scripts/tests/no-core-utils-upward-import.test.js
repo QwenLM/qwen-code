@@ -4,7 +4,7 @@ import tsParser from '@typescript-eslint/parser';
 import rule from '../../eslint-rules/no-core-utils-upward-import.js';
 
 function runRule(code, filename) {
-  const linter = new Linter({ configType: 'flat' });
+  const linter = new Linter({ configType: 'flat', cwd: '/' });
   return linter.verify(
     code,
     [
@@ -64,6 +64,24 @@ describe('no-core-utils-upward-import', () => {
     expect(
       runRule("import('../tools/foo.js');", 'packages/core/src/utils/bar.ts'),
     ).toHaveLength(1);
+    expect(
+      runRule('import(`../tools/foo.js`);', 'packages/core/src/utils/bar.ts'),
+    ).toHaveLength(1);
+  });
+
+  it('rejects deep package self-references that leave utils/', () => {
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/dist/config/storage.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
   });
 
   it('allows type-only imports', () => {
@@ -76,6 +94,12 @@ describe('no-core-utils-upward-import', () => {
     expect(
       runRule(
         "export type { X } from '../tools/foo.js';",
+        'packages/core/src/utils/bar.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "export type * from '../tools/foo.js';",
         'packages/core/src/utils/bar.ts',
       ),
     ).toHaveLength(0);
@@ -118,6 +142,35 @@ describe('no-core-utils-upward-import', () => {
         'packages/core/src/utils/debugLogger.ts',
       ),
     ).toHaveLength(0);
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';",
+        'packages/core/src/utils/debugLogger.ts',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('limits deferred inversions to debugLogger', () => {
+    expect(
+      runRule(
+        "import { Storage } from '../config/storage.js';",
+        'packages/core/src/utils/other.ts',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('anchors the core source root on the last marker', () => {
+    const nestedRoot =
+      '/tmp/packages/core/src/checkout/repo/packages/core/src/utils/';
+    expect(
+      runRule(
+        "import { Storage } from '../config/storage.js';",
+        `${nestedRoot}debugLogger.ts`,
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule("import { X } from '../tools/foo.js';", `${nestedRoot}bar.ts`),
+    ).toHaveLength(1);
   });
 
   it('ignores test files and non-utils consumers', () => {
@@ -125,6 +178,12 @@ describe('no-core-utils-upward-import', () => {
       runRule(
         "import { X } from '../tools/foo.js';",
         'packages/core/src/utils/foo.test.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import { X } from '../tools/foo.js';",
+        'packages/core/src/utils/foo.spec.ts',
       ),
     ).toHaveLength(0);
     expect(

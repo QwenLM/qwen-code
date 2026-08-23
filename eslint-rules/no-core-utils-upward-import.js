@@ -21,13 +21,15 @@ import path from 'node:path';
 
 const CORE_SRC_MARKER = 'packages/core/src/';
 const UTILS_SRC_MARKER = 'packages/core/src/utils/';
+const CORE_PACKAGE_SPECIFIER = '@qwen-code/qwen-code-core';
+const CORE_PACKAGE_SRC_PREFIX = `${CORE_PACKAGE_SPECIFIER}/src/`;
+const CORE_PACKAGE_DIST_PREFIX = `${CORE_PACKAGE_SPECIFIER}/dist/`;
 
-// Deferred inversions. Each entry is the import target relative to
-// packages/core/src, without its extension. See the file header for why these
-// are tolerated rather than moved.
-const ALLOWED_UPWARD_TARGETS = new Set([
-  'config/storage',
-  'telemetry/trace-context',
+// Deferred inversions, keyed by the utils-relative importer. Targets are
+// relative to packages/core/src and omit their extension. See the file header
+// for why these are tolerated rather than moved.
+const ALLOWED_UPWARD_IMPORTS = new Map([
+  ['debugLogger.ts', new Set(['config/storage', 'telemetry/trace-context'])],
 ]);
 
 function isUtilsProductionFile(filename) {
@@ -76,12 +78,30 @@ export default {
       return {};
     }
     const utilsRoot = path.join(srcRoot, 'utils');
+    const importer = path
+      .relative(utilsRoot, path.resolve(filename))
+      .replaceAll('\\', '/');
 
     function reportIfUpward(sourceNode, importedPath) {
-      if (typeof importedPath !== 'string' || !importedPath.startsWith('.')) {
+      if (typeof importedPath !== 'string') {
         return;
       }
-      const resolved = path.resolve(path.dirname(filename), importedPath);
+      let resolved;
+      if (importedPath.startsWith('.')) {
+        resolved = path.resolve(path.dirname(filename), importedPath);
+      } else if (importedPath.startsWith(CORE_PACKAGE_SRC_PREFIX)) {
+        resolved = path.resolve(
+          srcRoot,
+          importedPath.slice(CORE_PACKAGE_SRC_PREFIX.length),
+        );
+      } else if (importedPath.startsWith(CORE_PACKAGE_DIST_PREFIX)) {
+        resolved = path.resolve(
+          srcRoot,
+          importedPath.slice(CORE_PACKAGE_DIST_PREFIX.length),
+        );
+      } else {
+        return;
+      }
 
       // Leave cross-package relative imports to no-relative-cross-package-imports.
       const relToCore = path.relative(srcRoot, resolved).replaceAll('\\', '/');
@@ -89,7 +109,9 @@ export default {
         return;
       }
 
-      if (ALLOWED_UPWARD_TARGETS.has(stripExtension(relToCore))) {
+      if (
+        ALLOWED_UPWARD_IMPORTS.get(importer)?.has(stripExtension(relToCore))
+      ) {
         return;
       }
 

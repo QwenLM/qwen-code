@@ -13,7 +13,7 @@ import type { Config } from '../config/config.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../tools/tool-response-finalizer.js';
+} from './tool-response-finalizer.js';
 
 describe('tool response finalization persistence', () => {
   const tempDirs: string[] = [];

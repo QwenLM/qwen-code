@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import type { MCPServerConfig } from '../config/config.js';
-import { buildMcpServerInstructionsReminder } from '../core/environmentContext.js';
+import { buildMcpServerInstructionsReminder } from './environmentContext.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { CallableTool } from '@google/genai';
 import {
