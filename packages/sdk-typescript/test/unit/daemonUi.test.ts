@@ -1282,6 +1282,44 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('stamps background tools on create and existing-block update paths', () => {
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'background-create',
+          status: 'completed',
+          rawOutput: { status: 'background' },
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'background-update',
+          status: 'in_progress',
+          rawOutput: { status: 'running' },
+        },
+      ],
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'background-update',
+          status: 'completed',
+          rawOutput: { status: 'background' },
+        },
+      ],
+      { now: 3 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'tool', toolCallId: 'background-create', background: true },
+      { kind: 'tool', toolCallId: 'background-update', background: true },
+    ]);
+  });
+
   it('bounds trimmed tool indexes while keeping recent trimmed diagnostics', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ maxBlocks: 2, now: 1 }),

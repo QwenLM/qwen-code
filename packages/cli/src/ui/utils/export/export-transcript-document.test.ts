@@ -7,6 +7,7 @@ import {
   createExportTranscriptDocumentV1,
   exportDocumentToTranscriptBlocks,
 } from './export-transcript-document.js';
+import { escapeJsonForHtmlScriptData } from './html-script-data.js';
 
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 
@@ -226,6 +227,37 @@ describe('ExportTranscriptDocumentV1', () => {
     );
   });
 
+  it('preserves visible slash-command output', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('slash-result', null, {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/summary',
+            outputHistoryItems: [
+              { type: 'assistant', text: 'SLASH_VISIBLE_OUTPUT' },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
+    expect(
+      document.blocks.some(
+        (block) =>
+          'text' in block && block.text.includes('SLASH_VISIBLE_OUTPUT'),
+      ),
+    ).toBe(true);
+    expect(document.metadata.complete).toBe(true);
+  });
+
   it('sanitizes Windows drive-root metadata instead of aborting', () => {
     const document = createExportTranscriptDocumentV1(
       [],
@@ -358,7 +390,7 @@ describe('ExportTranscriptDocumentV1', () => {
     const raster = 'A'.repeat(
       Math.floor(EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes / 3) * 4,
     );
-    const escapeDenseText = '"'.repeat(100_000);
+    const escapeDenseText = '<'.repeat(100_000);
     const records = Array.from({ length: 75 }, (_, index) =>
       record(
         `large-envelope-${index}`,
@@ -385,7 +417,9 @@ describe('ExportTranscriptDocumentV1', () => {
     });
 
     expect(
-      new TextEncoder().encode(JSON.stringify(document)).byteLength,
+      new TextEncoder().encode(
+        escapeJsonForHtmlScriptData(JSON.stringify(document)),
+      ).byteLength,
     ).toBeLessThanOrEqual(EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes);
     expect(document.metadata).toMatchObject({
       complete: false,
@@ -854,6 +888,8 @@ describe('ExportTranscriptDocumentV1', () => {
                   '[safe](https://example.com/path)',
                   '[credential](https://alice:password@example.com/private?CHAT_TRANSCRIPT_URL_CANARY#fragment)',
                   '[unsafe](javascript:CHAT_TRANSCRIPT_URL_CANARY)',
+                  '[space]( javascript:CHAT_TRANSCRIPT_URL_CANARY )',
+                  '<javascript:CHAT_TRANSCRIPT_URL_CANARY>',
                   '<https://bob:password@example.com/autolink?CHAT_TRANSCRIPT_URL_CANARY>',
                   'https://carol:password@example.com/bare?CHAT_TRANSCRIPT_URL_CANARY#fragment',
                   '`[unequal](javascript:CHAT_TRANSCRIPT_URL_CANARY)``',
@@ -862,6 +898,11 @@ describe('ExportTranscriptDocumentV1', () => {
                   '```js `not-a-fence`',
                   '[after-invalid-fence](javascript:CHAT_TRANSCRIPT_URL_CANARY)',
                   '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
+                  'You can clone with:',
+                  '    git clone https://frank:password@example.com/repo.git?CHAT_TRANSCRIPT_URL_CANARY',
+                  '> ```bash',
+                  '> curl https://grace:password@example.com/api?CHAT_TRANSCRIPT_URL_CANARY',
+                  '> ```',
                   '```text',
                   'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
                   '```',
@@ -882,23 +923,28 @@ describe('ExportTranscriptDocumentV1', () => {
 
     expect(text).toContain('[safe](https://example.com/path)');
     expect(text).toContain('[credential](https://example.com/private)');
-    expect(text).toContain('<https://example.com/autolink>');
+    expect(text).toContain('https://example.com/autolink');
     expect(text).toContain('https://example.com/bare');
     expect(text).toContain(
       '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
+    );
+    expect(text).toContain('https://example.com/repo.git');
+    expect(text).toContain(
+      '> curl https://grace:password@example.com/api?CHAT_TRANSCRIPT_URL_CANARY',
     );
     expect(text).toContain(
       'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
     );
     expect(text).not.toContain('javascript:');
+    expect(text).not.toContain('frank:password');
     expect(document.metadata).toMatchObject({
       complete: false,
       truncated: true,
     });
     expect(document.diagnostics).toEqual(
       expect.arrayContaining([
-        { code: 'url_rejected', severity: 'warning', count: 4 },
-        { code: 'url_sanitized', severity: 'warning', count: 3 },
+        { code: 'url_rejected', severity: 'warning', count: 6 },
+        { code: 'url_sanitized', severity: 'warning', count: 4 },
       ]),
     );
   });
@@ -995,6 +1041,43 @@ describe('ExportTranscriptDocumentV1', () => {
       complete: true,
       truncated: false,
     });
+    expect(document.diagnostics).toContainEqual({
+      code: 'rich_render_budget_exceeded',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('counts renderer-compatible fence variants and container fences', () => {
+    const fence = (index: number): string => {
+      switch (index % 4) {
+        case 0:
+          return `\`\`\`\`mermaid\ngraph TD; A${index}-->B${index}\n\`\`\`\``;
+        case 1:
+          return `~~~~ mermaid\ngraph TD; A${index}-->B${index}\n~~~~`;
+        case 2:
+          return `> \`\`\`mermaid\n> graph TD; A${index}-->B${index}\n> \`\`\``;
+        default:
+          return `\`\`\`\tmermaid\ngraph TD; A${index}-->B${index}\n\`\`\``;
+      }
+    };
+    const content = Array.from(
+      { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks + 1 },
+      (_, index) => fence(index),
+    ).join('\n');
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('rich-variants', null, {
+          message: { role: 'user', parts: [{ text: content }] },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
     expect(document.diagnostics).toContainEqual({
       code: 'rich_render_budget_exceeded',
       severity: 'warning',
@@ -1533,11 +1616,17 @@ describe('ExportTranscriptDocumentV1', () => {
                   '![remote](https://example.invalid/track.png)',
                   '![svg](data:image/svg+xml;base64,PHN2Zy8+)',
                   '![safe](data:image/png;base64,iVBORw0KGgo=)',
+                  '',
                   '![animated reference][animated-gif]',
+                  '',
                   '[animated-gif]: data:image/gif;base64,LAAs',
+                  '',
                   '![remote reference][tracker]',
+                  '',
                   '[tracker]: https://example.invalid/reference.png',
+                  '',
                   '<img src="https://example.invalid/html.png">',
+                  '',
                   '`![inline code](https://example.invalid/inline-code.png)`',
                   '```md',
                   '![fenced code](https://example.invalid/fenced-code.png)',

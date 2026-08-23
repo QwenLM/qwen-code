@@ -199,7 +199,10 @@ export class WebViewProvider {
             type: 'webShellTranscriptSettingChanged',
             data: {
               enabled,
-              sessionId: this.agentManager.currentSessionId ?? undefined,
+              sessionId:
+                this.agentManager.currentSessionId ??
+                this.agentManager.rehydratingTranscriptSessionId ??
+                undefined,
             },
           });
         }
@@ -267,9 +270,13 @@ export class WebViewProvider {
       const enabled = vscode.workspace
         .getConfiguration('qwen-code')
         .get<boolean>('experimental.webShellTranscript', false);
+      const currentSessionId = this.agentManager.currentSessionId;
+      const rehydratingSessionId =
+        this.agentManager.rehydratingTranscriptSessionId;
       if (
         !enabled ||
-        notification.sessionId !== this.agentManager.currentSessionId
+        (notification.sessionId !== currentSessionId &&
+          notification.sessionId !== rehydratingSessionId)
       ) {
         return;
       }
@@ -1374,7 +1381,7 @@ export class WebViewProvider {
           // Notify webview that agent is connected
           this.sendMessageToWebView({
             type: 'agentConnected',
-            data: {},
+            data: { sessionId: this.agentManager.currentSessionId },
           });
         } else {
           logger.log(
@@ -1605,7 +1612,7 @@ export class WebViewProvider {
       // Notify webview that agent is connected after refresh
       this.sendMessageToWebView({
         type: 'agentConnected',
-        data: {},
+        data: { sessionId: this.agentManager.currentSessionId },
       });
     } catch (_error) {
       const errorMsg = getErrorMessage(_error);
@@ -2555,6 +2562,9 @@ export class WebViewProvider {
       const sessionId = await this.agentManager.createNewSession(workingDir, {
         forceNew: true,
       });
+      if (!sessionId) {
+        throw new Error('The agent did not return a session id.');
+      }
       this.messageHandler.setCurrentConversationId(null);
 
       // Clear current conversation UI

@@ -1450,6 +1450,18 @@ describe('createTranscriptReplayMachine', () => {
       'agent_message_chunk',
       'agent_message_chunk',
     ]);
+    expect(
+      assistant
+        .slice(0, 2)
+        .map(
+          (update) =>
+            (
+              update._meta as
+                | { qwenTranscript?: { segmentId?: string } }
+                | undefined
+            )?.qwenTranscript?.segmentId,
+        ),
+    ).toEqual(['assistant-1:0', 'assistant-1:1']);
 
     const plan = updates(
       machine,

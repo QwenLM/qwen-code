@@ -743,7 +743,13 @@ const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
  * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
  * Every other href keeps the default sanitizer.
  */
-export function markdownUrlTransform(url: string): string {
+export function markdownUrlTransform(
+  url: string,
+  documentMode = false,
+): string {
+  if (documentMode && SAFE_DOCUMENT_IMAGE_DATA_URI.test(url.trim())) {
+    return url;
+  }
   return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
 }
 
@@ -1019,6 +1025,10 @@ export const Markdown = memo(function Markdown({
       ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
       : [rehypeKatex];
   }, [sourceMarkdown?.rehypePlugins]);
+  const urlTransform = useMemo(
+    () => (url: string) => markdownUrlTransform(url, documentMode),
+    [documentMode],
+  );
 
   if (!content) return null;
 
@@ -1040,7 +1050,7 @@ export const Markdown = memo(function Markdown({
       components={componentsWithCharts}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      urlTransform={markdownUrlTransform}
+      urlTransform={urlTransform}
     />
   );
   const chartAwareMarkdown = chart ? (

@@ -32,6 +32,10 @@ export class TranscriptUpdateIdentityProjector {
         this.activeSegmentId = existingSegmentId;
         this.predecessorId = existingSegmentId;
       }
+      if (isDiscreteMessage(update)) {
+        this.activeLane = undefined;
+        this.activeSegmentId = undefined;
+      }
       return update;
     }
     if (!lane) {
@@ -61,7 +65,12 @@ export class TranscriptUpdateIdentityProjector {
       this.predecessorId = this.activeSegmentId;
     }
 
-    return withSegmentId(update, this.activeSegmentId);
+    const projected = withSegmentId(update, this.activeSegmentId);
+    if (isDiscreteMessage(update)) {
+      this.activeLane = undefined;
+      this.activeSegmentId = undefined;
+    }
+    return projected;
   }
 }
 

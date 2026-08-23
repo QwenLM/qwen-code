@@ -8,7 +8,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { collectDependencies, findLicenseFile } from './generate-notices.js';
+import {
+  collectDependencies,
+  fallbackLicenseText,
+  findLicenseFile,
+  findSupplementalNoticeFiles,
+} from './generate-notices.js';
 
 describe('findLicenseFile', () => {
   let packageDir;
@@ -86,5 +91,45 @@ describe('collectDependencies', () => {
         resolvedKey: 'packages/core/node_modules/nested',
       },
     ]);
+  });
+});
+
+describe('license fallbacks and supplemental notices', () => {
+  let packageDir;
+
+  afterEach(async () => {
+    if (packageDir) {
+      await fs.rm(packageDir, { recursive: true, force: true });
+      packageDir = undefined;
+    }
+  });
+
+  it('uses package metadata for MIT dependencies without a license file', () => {
+    expect(
+      fallbackLicenseText({
+        name: 'example',
+        license: 'MIT',
+        author: 'Example Author',
+      }),
+    ).toContain('Copyright (c) Example Author');
+    expect(
+      fallbackLicenseText({ name: 'example', license: 'Apache-2.0' }),
+    ).toBeUndefined();
+  });
+
+  it('collects NOTICE and Apache secondary license files', async () => {
+    packageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notices-'));
+    await fs.mkdir(path.join(packageDir, 'licenses'));
+    await fs.writeFile(path.join(packageDir, 'NOTICE'), 'notice');
+    await fs.writeFile(
+      path.join(packageDir, 'licenses', 'LICENSE-secondary'),
+      'secondary',
+    );
+
+    expect(
+      (await findSupplementalNoticeFiles(packageDir, 'Apache-2.0')).map(
+        (entry) => path.relative(packageDir, entry),
+      ),
+    ).toEqual(['NOTICE', 'licenses/LICENSE-secondary']);
   });
 });

@@ -3078,6 +3078,9 @@ export class Session implements SessionContext {
       );
     }
     await recording.recordRealtimeConversation(entries, model);
+    promptIdContext.enterWith(
+      `${this.config.getSessionId()}########realtime${Date.now()}`,
+    );
     for (const entry of entries) {
       try {
         await this.sendUpdate({
@@ -8378,6 +8381,7 @@ export class Session implements SessionContext {
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
+        promptIdContext.enterWith(promptId);
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;

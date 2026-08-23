@@ -86,4 +86,36 @@ describe('useAcpTranscript', () => {
 
     expect(view.textContent).toContain('RUNTIME CONTENT');
   });
+
+  it('resets stale blocks and binds the fresh scope after reconnect', () => {
+    const view = mount();
+    post('qwenSessionSwitched', { sessionId: 'old-session' });
+    post('transcriptUpdate', {
+      sessionId: 'old-session',
+      update: textUpdate('OLD CONTENT', 'old-1'),
+    });
+    expect(view.textContent).toContain('OLD CONTENT');
+
+    post('conversationLoaded', { id: 'local-conversation', messages: [] });
+    expect(view.textContent).not.toContain('OLD CONTENT');
+    post('agentConnected', { sessionId: 'fresh-session' });
+    post('transcriptUpdate', {
+      sessionId: 'fresh-session',
+      update: textUpdate('FRESH CONTENT', 'fresh-1'),
+    });
+    expect(view.textContent).toContain('FRESH CONTENT');
+  });
+
+  it('clears transcript blocks when the agent connection fails', () => {
+    const view = mount();
+    post('qwenSessionSwitched', { sessionId: 'old-session' });
+    post('transcriptUpdate', {
+      sessionId: 'old-session',
+      update: textUpdate('OLD CONTENT', 'old-1'),
+    });
+
+    post('agentConnectionError', { message: 'connection failed' });
+
+    expect(view.textContent).not.toContain('OLD CONTENT');
+  });
 });

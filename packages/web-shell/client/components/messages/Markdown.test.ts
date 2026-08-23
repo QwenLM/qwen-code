@@ -156,6 +156,15 @@ describe('markdownUrlTransform', () => {
     expect(markdownUrlTransform('javascript:alert(1)')).toBe('');
     expect(markdownUrlTransform('data:text/html;base64,PHN2Zz4=')).toBe('');
   });
+
+  it('allows only approved data images in document mode', () => {
+    expect(
+      markdownUrlTransform('data:image/png;base64,iVBORw0KGgo=', true),
+    ).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(
+      markdownUrlTransform('data:image/svg+xml;base64,PHN2Zz4=', true),
+    ).toBe('');
+  });
 });
 
 describe('qwen-session:// links', () => {

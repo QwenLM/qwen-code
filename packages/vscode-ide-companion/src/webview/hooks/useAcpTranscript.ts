@@ -26,6 +26,21 @@ export function useAcpTranscript(enabled: boolean): {
         type?: unknown;
         data?: { enabled?: unknown; sessionId?: unknown; update?: unknown };
       };
+      if (
+        message.type === 'agentConnectionError' ||
+        message.type === 'conversationLoaded'
+      ) {
+        setState(initialState());
+        return;
+      }
+      if (message.type === 'agentConnected') {
+        const scopeKey =
+          typeof message.data?.sessionId === 'string'
+            ? message.data.sessionId
+            : undefined;
+        setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
+        return;
+      }
       if (message.type === 'webShellTranscriptSettingChanged') {
         const scopeKey =
           message.data?.enabled === true &&

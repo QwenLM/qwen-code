@@ -25,6 +25,12 @@ const fixtureRoot = resolve(
   repoRoot,
   'integration-tests/fixtures/chat-transcript-contract/v1',
 );
+const sharedFixtureHashes = {
+  'capability-matrix.md':
+    'beebee1595b78ad82bc178523b0a440b6709df027987c57ebf4879a70d1a99f1',
+  'schema/manifest.schema.json':
+    'c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa',
+} as const;
 const caseRoot = resolve(fixtureRoot, 'cases/representative');
 const scopeKey = 'workspace-a:session-a';
 
@@ -100,6 +106,15 @@ function expectManifestToMatchSchema(
   const hashSchema = (
     properties['hashes'] as { additionalProperties: { pattern: string } }
   ).additionalProperties;
+  for (const key of ['sources', 'consumers', 'capabilities']) {
+    expect((properties[key] as { uniqueItems?: boolean }).uniqueItems).toBe(
+      true,
+    );
+  }
+  expect((properties['capabilities'] as { minItems?: number }).minItems).toBe(
+    1,
+  );
+  expect(hashSchema.pattern).toBe('^[a-f0-9]{64}$');
   const pattern = new RegExp(hashSchema.pattern, 'u');
   for (const hash of Object.values(manifest.hashes))
     expect(hash).toMatch(pattern);
@@ -278,6 +293,11 @@ describe('chat transcript cross-host contract', () => {
       manifest.hashes,
     )) {
       expect(sha256(resolve(caseRoot, relativePath))).toBe(expectedHash);
+    }
+    for (const [relativePath, expectedHash] of Object.entries(
+      sharedFixtureHashes,
+    )) {
+      expect(sha256(resolve(fixtureRoot, relativePath))).toBe(expectedHash);
     }
     expect(matrix).toContain('pass; stable under append/prepend/replay');
     expect(matrix).toContain('pass; selected product path, rollout pending');

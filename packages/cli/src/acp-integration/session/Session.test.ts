@@ -2034,10 +2034,13 @@ describe('Session', () => {
       update: {
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: '你好' },
-        _meta: {
+        _meta: expect.objectContaining({
           source: 'realtime_voice',
           qwenDiscreteMessage: true,
-        },
+          qwenTranscript: {
+            segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+          },
+        }),
       },
     });
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -2045,12 +2048,32 @@ describe('Session', () => {
       update: {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '你好！' },
-        _meta: {
+        _meta: expect.objectContaining({
           source: 'realtime_voice',
           qwenDiscreteMessage: true,
-        },
+          qwenTranscript: {
+            segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+          },
+        }),
       },
     });
+    const realtimeSegmentIds = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.map(([notification]) => notification.update)
+      .filter(
+        (update) =>
+          (update._meta as { source?: string } | undefined)?.source ===
+          'realtime_voice',
+      )
+      .map(
+        (update) =>
+          (
+            update._meta as {
+              qwenTranscript?: { segmentId?: string };
+            }
+          ).qwenTranscript?.segmentId,
+      );
+    expect(new Set(realtimeSegmentIds)).toHaveLength(2);
   });
 
   it('rejects a conflicting tool at the reserved Live Appshot name', async () => {
@@ -6366,16 +6389,19 @@ describe('Session', () => {
             type: 'text',
             text: 'Background agent "worker" completed.',
           },
-          _meta: {
+          _meta: expect.objectContaining({
             source: 'background_notification',
             qwenDiscreteMessage: true,
+            qwenTranscript: {
+              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+            },
             backgroundTask: {
               taskId: 'agent-1',
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
             },
-          },
+          }),
         },
       });
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -6383,18 +6409,38 @@ describe('Session', () => {
         update: {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'I saw the background result.' },
-          _meta: {
+          _meta: expect.objectContaining({
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
+            qwenTranscript: {
+              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+            },
             backgroundTask: {
               taskId: 'agent-1',
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
             },
-          },
+          }),
         },
       });
+      const backgroundSegmentIds = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter((update) =>
+          String(
+            (update._meta as { source?: string } | undefined)?.source,
+          ).startsWith('background_notification'),
+        )
+        .map(
+          (update) =>
+            (
+              update._meta as {
+                qwenTranscript?: { segmentId?: string };
+              }
+            ).qwenTranscript?.segmentId,
+        );
+      expect(new Set(backgroundSegmentIds)).toHaveLength(2);
       expect(mockClient.extNotification).toHaveBeenCalledWith(
         '_qwencode/end_turn',
         {
@@ -7679,16 +7725,19 @@ describe('Session', () => {
             type: 'text',
             text: 'Background shell "npm test" completed.',
           },
-          _meta: {
+          _meta: expect.objectContaining({
             source: 'background_notification',
             qwenDiscreteMessage: true,
+            qwenTranscript: {
+              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+            },
             backgroundTask: {
               taskId: 'shell-1',
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
             },
-          },
+          }),
         },
       });
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -7699,18 +7748,38 @@ describe('Session', () => {
             type: 'text',
             text: 'The shell finished successfully.',
           },
-          _meta: {
+          _meta: expect.objectContaining({
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
+            qwenTranscript: {
+              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+            },
             backgroundTask: {
               taskId: 'shell-1',
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
             },
-          },
+          }),
         },
       });
+      const backgroundSegmentIds = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter((update) =>
+          String(
+            (update._meta as { source?: string } | undefined)?.source,
+          ).startsWith('background_notification'),
+        )
+        .map(
+          (update) =>
+            (
+              update._meta as {
+                qwenTranscript?: { segmentId?: string };
+              }
+            ).qwenTranscript?.segmentId,
+        );
+      expect(new Set(backgroundSegmentIds)).toHaveLength(2);
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

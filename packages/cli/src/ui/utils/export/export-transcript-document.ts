@@ -17,6 +17,12 @@ import { SchemaValidator } from '@qwen-code/qwen-code-core';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
 import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
+import { escapeJsonForHtmlScriptData } from './html-script-data.js';
+import {
+  countRichMarkdownTasks,
+  sanitizeMarkdownDocument,
+  transformRichMarkdownTasks,
+} from './markdown-document-policy.js';
 
 export const EXPORT_TRANSCRIPT_LIMITS_V1 = Object.freeze({
   maxBlocks: 1_000,
@@ -254,10 +260,16 @@ export function createExportTranscriptDocumentV1(
       sourceRecordIds.some((recordId) => policy.visibleRecordIds.has(recordId))
     );
   });
-  const blocks = visibleBlocks.flatMap((block) => {
+  const blocks: ExportTranscriptBlockV1[] = [];
+  for (const block of visibleBlocks) {
+    const checkpoint = budget.checkpoint();
     const safe = sanitizeBlock(block, budget, ids, diagnostics);
-    return safe ? [safe] : [];
-  });
+    if (budget.textBudgetExceeded) {
+      budget.restore(checkpoint);
+      break;
+    }
+    if (safe) blocks.push(safe);
+  }
   const initialTruncated = projection.truncated || budget.truncated;
   const metadataPresentation = createMetadataPresentation(
     sessionData,
@@ -404,6 +416,7 @@ function applyRecordExportPolicy(
 }
 
 const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
+  'slash_command',
   'notification',
   'cron',
   'mid_turn_user_message',
@@ -906,8 +919,27 @@ class ExportBudget {
   totalRasterBytes = 0;
   richRenderTasks = 0;
   truncated = false;
+  textBudgetExceeded = false;
 
   constructor(private readonly diagnostics: DiagnosticCounter) {}
+
+  checkpoint(): {
+    visibleTextBytes: number;
+    totalRasterBytes: number;
+    richRenderTasks: number;
+  } {
+    return {
+      visibleTextBytes: this.visibleTextBytes,
+      totalRasterBytes: this.totalRasterBytes,
+      richRenderTasks: this.richRenderTasks,
+    };
+  }
+
+  restore(checkpoint: ReturnType<ExportBudget['checkpoint']>): void {
+    this.visibleTextBytes = checkpoint.visibleTextBytes;
+    this.totalRasterBytes = checkpoint.totalRasterBytes;
+    this.richRenderTasks = checkpoint.richRenderTasks;
+  }
 
   array<T>(value: readonly T[]): T[] {
     if (value.length > EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength) {
@@ -929,7 +961,10 @@ class ExportBudget {
   label(value: unknown, maxLength: number): string {
     const safe = safeLabel(value, maxLength);
     if (safe !== value) this.markTruncated('label_sanitized');
-    return this.plainText(safe);
+    return this.applyTextBudgetWithFallback(
+      redactHomePaths(safe),
+      safeLabel('[content omitted]', maxLength),
+    );
   }
 
   optionalLabel(value: unknown, maxLength: number): string | undefined {
@@ -943,102 +978,48 @@ class ExportBudget {
 
   text(value: string): string {
     value = redactHomePaths(value);
-    const definitions = new Map<string, string>();
-    const markdownSegments = splitMarkdownFenceSegments(value);
-    for (const segment of markdownSegments) {
-      if (!segment.prose) continue;
-      transformMarkdownProse(segment.value, (prose) => {
-        for (const match of prose.matchAll(
-          /^(?: {0,3}> ?)*\s*\[([^\]]+)\]:\s*(?:<([^>]+)>|([^\s]+))(?:\s+.*)?$/gm,
-        )) {
-          const label = match[1]?.trim().toLowerCase();
-          const source = match[2] ?? match[3];
-          if (label && source) definitions.set(label, source);
-        }
-        return prose;
-      });
-    }
     const replaceImage = (alt: string, source: string | undefined): string => {
+      const safeAlt = safeLabel(alt, 200).replace(/([\\[\]])/g, '\\$1');
       const parsed = source ? parseApprovedImageDataUrl(source) : undefined;
       if (parsed && this.image(parsed)) {
-        return `![${alt}](${formatApprovedImageDataUrl(parsed)})`;
+        return `![${safeAlt}](${formatApprovedImageDataUrl(parsed)})`;
       }
       this.truncated = true;
       this.diagnostics.add('markdown_image_rejected', 'warning');
-      return `[image omitted${alt ? `: ${alt}` : ''}]`;
+      return `[image omitted${safeAlt ? `: ${safeAlt}` : ''}]`;
     };
-    const replaceReferenceImage = (
-      alt: string,
-      source: string | undefined,
-    ): string =>
-      source && parseApprovedImageDataUrl(source)
-        ? `![${alt}](${source})`
-        : replaceImage(alt, undefined);
-    const resourceSafeValue = markdownSegments
-      .map((segment) => {
-        if (!segment.prose) return segment.value;
-        return transformMarkdownProse(segment.value, (prose) => {
-          let safe = replaceActiveMarkdownSyntax(
-            prose,
-            /!\[([^\]]*)\]\[([^\]]*)\]/g,
-            (match) =>
-              replaceReferenceImage(
-                match[1] ?? '',
-                definitions.get(
-                  (match[2] || match[1] || '').trim().toLowerCase(),
-                ),
-              ),
-          );
-          safe = replaceActiveMarkdownSyntax(
-            safe,
-            /!\[([^\]]+)\](?![([])/g,
-            (match) =>
-              replaceReferenceImage(
-                match[1] ?? '',
-                definitions.get((match[1] ?? '').trim().toLowerCase()),
-              ),
-          );
-          safe = replaceActiveMarkdownSyntax(safe, /<img\b[^>]*>/gi, () =>
-            replaceImage('', undefined),
-          );
-          safe = replaceActiveMarkdownSyntax(
-            safe,
-            /!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^)]*["'])?\)/g,
-            (match) => replaceImage(match[1] ?? '', match[2]),
-          );
-          return sanitizeMarkdownNavigableUrls(safe, (code) => {
-            this.truncated = true;
-            this.diagnostics.add(code, 'warning', 1, true);
-          });
-        });
-      })
-      .join('');
-    const richTaskSafeValue = resourceSafeValue.replace(
-      /^(\s*)(```|~~~)([^\s`~]+)(.*)$/gm,
-      (
-        match,
-        indent: string,
-        fence: string,
-        language: string,
-        rest: string,
-      ) => {
-        if (['text', 'plain', 'plaintext'].includes(language.toLowerCase())) {
-          return match;
-        }
+    const resourceSafeValue = sanitizeMarkdownDocument(value, {
+      normalizeUrl: normalizeNavigableUrl,
+      replaceImage,
+      onUrlChange: (code) => {
+        this.truncated = true;
+        this.diagnostics.add(code, 'warning', 1, true);
+      },
+    });
+    const richTaskSafeValue = transformRichMarkdownTasks(
+      resourceSafeValue,
+      () => {
         this.richRenderTasks += 1;
         if (
           this.richRenderTasks <= EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks
         ) {
-          return match;
+          return true;
         }
         this.diagnostics.add('rich_render_budget_exceeded', 'warning');
-        return `${indent}${fence}text${rest} [source fallback: ${safeLabel(language, 32)}]`;
+        return false;
       },
     );
     return this.applyTextBudget(richTaskSafeValue);
   }
 
   private applyTextBudget(value: string): string {
+    return this.applyTextBudgetWithFallback(
+      value,
+      '[content omitted: export text budget exceeded]',
+    );
+  }
+
+  private applyTextBudgetWithFallback(value: string, fallback: string): string {
     const bytes = utf8Bytes(value);
     const normalTextLimit =
       EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes -
@@ -1048,8 +1029,8 @@ class ExportBudget {
       this.visibleTextBytes + bytes > normalTextLimit
     ) {
       this.truncated = true;
+      this.textBudgetExceeded = true;
       this.diagnostics.add('text_budget_exceeded', 'warning');
-      const fallback = '[content omitted: export text budget exceeded]';
       const fallbackBytes = utf8Bytes(fallback);
       if (
         this.visibleTextBytes + fallbackBytes <=
@@ -1549,7 +1530,7 @@ function serializedEnvelopeBytes(value: unknown): number {
     if (serialized === undefined) {
       throw new ExportTranscriptDocumentError('invalid_envelope');
     }
-    return utf8Bytes(serialized);
+    return utf8Bytes(escapeJsonForHtmlScriptData(serialized));
   } catch (error) {
     if (error instanceof ExportTranscriptDocumentError) throw error;
     throw new ExportTranscriptDocumentError('invalid_envelope');
@@ -1590,58 +1571,36 @@ function assertResourceBudgets(value: unknown): void {
       const markdownText = isMarkdownExportText(key, parent, path);
       if (key && VISIBLE_EXPORT_TEXT_FIELDS.has(key)) {
         visibleTextBytes += bytes;
-        if (markdownText) {
-          richRenderTasks += [
-            ...entry.matchAll(/^(\s*)(```|~~~)([^\s`~]+)/gm),
-          ].filter(
-            (match) => !['text', 'plain', 'plaintext'].includes(match[3] ?? ''),
-          ).length;
-        }
       }
       if (markdownText) {
-        for (const segment of splitMarkdownFenceSegments(entry)) {
-          if (!segment.prose) continue;
-          transformMarkdownProse(segment.value, (prose) => {
-            if (sanitizeMarkdownNavigableUrls(prose, () => {}) !== prose) {
-              throw new ExportTranscriptDocumentError('invalid_markdown_url');
+        richRenderTasks += countRichMarkdownTasks(entry);
+        const sanitized = sanitizeMarkdownDocument(entry, {
+          normalizeUrl: normalizeNavigableUrl,
+          onUrlChange: () => {
+            throw new ExportTranscriptDocumentError('invalid_markdown_url');
+          },
+          replaceImage: (alt, source) => {
+            const image = source
+              ? parseApprovedImageDataUrl(source)
+              : undefined;
+            const imageBytes = image
+              ? decodedBase64Bytes(image.data)
+              : undefined;
+            if (
+              !image ||
+              imageBytes === undefined ||
+              imageBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
+              (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+            ) {
+              throw new ExportTranscriptDocumentError('invalid_markdown_image');
             }
-            for (const pattern of [
-              /!\[[^\]]*\]\[[^\]]*\]/g,
-              /!\[[^\]]+\](?![([])/g,
-              /<img\b[^>]*>/gi,
-            ]) {
-              replaceActiveMarkdownSyntax(prose, pattern, () => {
-                throw new ExportTranscriptDocumentError(
-                  'invalid_markdown_image',
-                );
-              });
-            }
-            replaceActiveMarkdownSyntax(
-              prose,
-              /!\[[^\]]*\]\(([^\s)]+)(?:\s+["'][^)]*["'])?\)/g,
-              (match) => {
-                const source = match[1];
-                const image = source
-                  ? parseApprovedImageDataUrl(source)
-                  : undefined;
-                const imageBytes = image
-                  ? decodedBase64Bytes(image.data)
-                  : undefined;
-                if (
-                  imageBytes === undefined ||
-                  imageBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
-                  (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
-                ) {
-                  throw new ExportTranscriptDocumentError(
-                    'invalid_markdown_image',
-                  );
-                }
-                totalRasterBytes += imageBytes;
-                return match[0];
-              },
-            );
-            return prose;
-          });
+            totalRasterBytes += imageBytes;
+            const safeAlt = safeLabel(alt, 200).replace(/([\\[\]])/g, '\\$1');
+            return `![${safeAlt}](${formatApprovedImageDataUrl(image)})`;
+          },
+        });
+        if (sanitized !== entry) {
+          throw new ExportTranscriptDocumentError('invalid_markdown_image');
         }
       }
       return;
@@ -1695,159 +1654,6 @@ function isMarkdownExportText(
     ['user', 'assistant', 'thought', 'status', 'error'].includes(
       String(parent?.['kind']),
     )
-  );
-}
-
-function splitMarkdownFenceSegments(
-  value: string,
-): Array<{ value: string; prose: boolean }> {
-  const segments: Array<{ value: string; prose: boolean }> = [];
-  let fence: { character: string; length: number } | undefined;
-  for (const line of value.match(/[^\n]*(?:\n|$)/g) ?? []) {
-    if (line === '') continue;
-    const markerMatch = /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line);
-    const marker =
-      markerMatch?.[1]?.startsWith('`') && markerMatch[2]?.includes('`')
-        ? undefined
-        : markerMatch?.[1];
-    const isClosing =
-      fence !== undefined &&
-      marker?.[0] === fence.character &&
-      marker.length >= fence.length &&
-      /^ {0,3}(?:`{3,}|~{3,})\s*$/.test(line.replace(/\n$/, ''));
-    const indentedCode =
-      fence === undefined && marker === undefined && /^(?: {4}|\t)/.test(line);
-    const prose = fence === undefined && marker === undefined && !indentedCode;
-    const previous = segments.at(-1);
-    if (previous?.prose === prose) previous.value += line;
-    else segments.push({ value: line, prose });
-    if (fence === undefined && marker) {
-      fence = { character: marker[0] ?? '', length: marker.length };
-    } else if (isClosing) {
-      fence = undefined;
-    }
-  }
-  return segments;
-}
-
-function transformMarkdownProse(
-  value: string,
-  transform: (value: string) => string,
-): string {
-  let result = '';
-  let cursor = 0;
-  for (const match of value.matchAll(/(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g)) {
-    const index = match.index;
-    result += transform(value.slice(cursor, index));
-    result += match[0];
-    cursor = index + match[0].length;
-  }
-  return result + transform(value.slice(cursor));
-}
-
-function replaceActiveMarkdownSyntax(
-  value: string,
-  pattern: RegExp,
-  replace: (match: RegExpMatchArray) => string,
-): string {
-  let result = '';
-  let cursor = 0;
-  for (const match of value.matchAll(pattern)) {
-    const index = match.index;
-    if (isEscapedMarkdownSyntax(value, index)) continue;
-    result += value.slice(cursor, index);
-    result += replace(match);
-    cursor = index + match[0].length;
-  }
-  return result + value.slice(cursor);
-}
-
-function isEscapedMarkdownSyntax(value: string, index: number): boolean {
-  let backslashes = 0;
-  for (
-    let cursor = index - 1;
-    cursor >= 0 && value[cursor] === '\\';
-    cursor -= 1
-  ) {
-    backslashes += 1;
-  }
-  return backslashes % 2 === 1;
-}
-
-function sanitizeMarkdownNavigableUrls(
-  value: string,
-  onChange: (code: 'url_rejected' | 'url_sanitized') => void,
-): string {
-  const replaceDestination = (
-    source: string,
-    render: (safe: string) => string,
-    fallback: string,
-    original: string,
-  ): string => {
-    const safe = normalizeNavigableUrl(source);
-    if (safe === source) return original;
-    if (safe === undefined) {
-      onChange('url_rejected');
-      return fallback;
-    }
-    onChange('url_sanitized');
-    return render(safe);
-  };
-  let safe = replaceActiveMarkdownSyntax(
-    value,
-    /(?<!!)\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(\s+["'][^)]*["'])?\)/g,
-    (match) => {
-      const label = match[1] ?? '';
-      const source = match[2] ?? match[3] ?? '';
-      const title = match[4] ?? '';
-      return replaceDestination(
-        source,
-        (destination) => `[${label}](${destination}${title})`,
-        label,
-        match[0],
-      );
-    },
-  );
-  safe = replaceActiveMarkdownSyntax(
-    safe,
-    /^((?: {0,3}> ?)*\s*\[[^\]]+\]:\s*)(?:<([^>]+)>|([^\s]+))(\s+.*)?$/gm,
-    (match) => {
-      const prefix = match[1] ?? '';
-      const source = match[2] ?? match[3] ?? '';
-      const suffix = match[4] ?? '';
-      return replaceDestination(
-        source,
-        (destination) => `${prefix}${destination}${suffix}`,
-        '',
-        match[0],
-      );
-    },
-  );
-  safe = replaceActiveMarkdownSyntax(
-    safe,
-    /<((?:https?|mailto):[^>\s]+)>/gi,
-    (match) => {
-      const source = match[1] ?? '';
-      return replaceDestination(
-        source,
-        (destination) => `<${destination}>`,
-        '[link omitted]',
-        match[0],
-      );
-    },
-  );
-  return replaceActiveMarkdownSyntax(
-    safe,
-    /https?:\/\/[^\s<>"'`)\]]+/gi,
-    (match) => {
-      const source = match[0];
-      return replaceDestination(
-        source,
-        (destination) => destination,
-        '[link omitted]',
-        source,
-      );
-    },
   );
 }
 

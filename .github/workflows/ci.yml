@@ -766,6 +766,9 @@ jobs:
           echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
           echo "Using web-shell Playwright port ${port}"
 
+      - name: 'Run transcript document browser gate'
+        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
+
       - name: 'Run web-shell browser smoke'
         run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
 

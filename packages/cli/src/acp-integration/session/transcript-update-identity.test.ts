@@ -98,6 +98,26 @@ describe('TranscriptUpdateIdentityProjector', () => {
     expect(run()).toEqual(first);
   });
 
+  it('closes a discrete segment before same-lane streaming resumes', () => {
+    const projector = new TranscriptUpdateIdentityProjector();
+    const promptId = 'session-a########1';
+    const discrete = projector.project(
+      {
+        ...textUpdate('agent_message_chunk', 'notice'),
+        _meta: { qwenDiscreteMessage: true },
+      } as SessionUpdate,
+      promptId,
+    );
+    const streaming = projector.project(
+      textUpdate('agent_message_chunk', 'answer'),
+      promptId,
+    );
+
+    expect(segmentId(discrete)).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentId(streaming)).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentId(streaming)).not.toBe(segmentId(discrete));
+  });
+
   it('preserves persisted replay identity and unrelated metadata', () => {
     const projector = new TranscriptUpdateIdentityProjector();
     const update = {

@@ -541,14 +541,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         activeSegmentLane = undefined;
         activeSegmentId = undefined;
       }
+      const projectedUpdate =
+        lane && activeSegmentId
+          ? withTranscriptSegmentId(update, activeSegmentId)
+          : update;
+      if (isTranscriptDiscreteMessage(update)) {
+        activeSegmentLane = undefined;
+        activeSegmentId = undefined;
+      }
       return {
         sourceRecordId: record.uuid,
         ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
         emissionOrdinal,
-        update:
-          lane && activeSegmentId
-            ? withTranscriptSegmentId(update, activeSegmentId)
-            : update,
+        update: projectedUpdate,
       };
     };
     const meta = {
@@ -1261,6 +1266,12 @@ function isTranscriptSegmentBoundary(update: SessionUpdate): boolean {
     kind !== 'agent_thought_chunk' &&
     kind !== 'user_message_chunk'
   );
+}
+
+function isTranscriptDiscreteMessage(update: SessionUpdate): boolean {
+  const record = update as unknown as Record<string, unknown>;
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  return meta?.['qwenDiscreteMessage'] === true;
 }
 
 function projectGoalControlCommand(

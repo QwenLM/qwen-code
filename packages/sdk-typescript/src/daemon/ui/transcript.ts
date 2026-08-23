@@ -843,18 +843,26 @@ function canMergeTextDelta(
   ) {
     return false;
   }
-  if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (existing.kind !== 'user' && existing.meta?.qwenDiscreteMessage === true) {
+    return false;
+  }
   if (
     existing.promptId !== undefined &&
     event.promptId !== undefined &&
     existing.promptId !== event.promptId
   )
     return false;
-  if (existing.segmentId !== event.segmentId) return false;
+  if (existing.kind !== 'user' && existing.segmentId !== event.segmentId) {
+    return false;
+  }
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
-  return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+  return (
+    existing.kind === 'user' ||
+    !('meta' in event) ||
+    event.meta?.qwenDiscreteMessage !== true
+  );
 }
 
 function findFinalVisibleAssistantForPrompt(

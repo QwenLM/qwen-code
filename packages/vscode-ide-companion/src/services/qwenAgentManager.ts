@@ -1521,6 +1521,10 @@ export class QwenAgentManager {
     return this.connection.currentSessionId;
   }
 
+  get rehydratingTranscriptSessionId(): string | null {
+    return this.rehydratingSessionId;
+  }
+
   private applySessionStateFromResult(result: unknown): void {
     const modelInfo = extractModelInfoFromNewSessionResult(result);
     if (modelInfo) {

@@ -17,6 +17,7 @@ import {
   renderExportTranscriptDocumentToHtml,
   toHtml,
 } from '../packages/cli/src/ui/utils/export/formatters/html.js';
+import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 import {
   evaluateVscodeIdentityGate,
   readJsonLines,
@@ -506,7 +507,9 @@ describe('ExportTranscriptDocument browser gate', () => {
       complete: true,
       truncated: false,
     });
-    const envelopeBytes = new TextEncoder().encode(serialized).byteLength;
+    const envelopeBytes = new TextEncoder().encode(
+      escapeJsonForHtmlScriptData(serialized),
+    ).byteLength;
     expect(envelopeBytes).toBeLessThanOrEqual(
       EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
     );
@@ -647,8 +650,11 @@ describe('ExportTranscriptDocument browser gate', () => {
         ...record(
           'remote-image',
           null,
-          'user',
-          '![tracking](https://example.invalid/track.png)',
+          'assistant',
+          [
+            '![tracking](https://example.invalid/track.png)',
+            '![inline-safe](data:image/png;base64,iVBORw0KGgo=)',
+          ].join('\n'),
         ),
         rawInput: CANARY,
       },
@@ -693,6 +699,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(await page.locator('body').innerText()).toContain(
       '[image omitted: tracking]',
     );
+    expect(
+      await page.locator('img[alt="inline-safe"]').getAttribute('src'),
+    ).toBe('data:image/png;base64,iVBORw0KGgo=');
     expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,

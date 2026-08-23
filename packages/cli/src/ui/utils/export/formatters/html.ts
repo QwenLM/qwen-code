@@ -16,19 +16,7 @@ import {
   createExportTranscriptDocumentV1,
   type ExportTranscriptDocumentV1,
 } from '../export-transcript-document.js';
-
-/**
- * Escapes JSON for safe embedding in HTML.
- */
-function escapeJsonForHtml(json: string): string {
-  return json
-    .replace(/<\/script/gi, '<\\/script')
-    .replace(/&/g, '\\u0026')
-    .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e')
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
-}
+import { escapeJsonForHtmlScriptData } from '../html-script-data.js';
 
 /**
  * Loads the HTML template built from assets.
@@ -50,7 +38,7 @@ export function injectDataIntoHtmlTemplate(
   },
 ): string {
   const jsonData = JSON.stringify(data, null, 2);
-  const escapedJsonData = escapeJsonForHtml(jsonData);
+  const escapedJsonData = escapeJsonForHtmlScriptData(jsonData);
   const idAttribute = 'id="chat-data"';
   const idIndex = template.indexOf(idAttribute);
   if (idIndex === -1) {
@@ -117,7 +105,7 @@ function injectJsonScript(
   data: unknown,
 ): string {
   const jsonData = JSON.stringify(data);
-  const escapedJsonData = escapeJsonForHtml(jsonData);
+  const escapedJsonData = escapeJsonForHtmlScriptData(jsonData);
   const idAttribute = `id="${elementId}"`;
   const idIndex = template.indexOf(idAttribute);
   if (idIndex === -1) {
