@@ -2597,6 +2597,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '1a',
     '1b',
     '1c',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',
@@ -2643,6 +2645,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // no guard at all — a rename, a comment, a docs line.
     expect(brief).toContain(
       'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
+    );
+  });
+
+  it('keeps the language-agnostic falsy-zero shape in the Agent 1a brief', () => {
+    // The #9788 split moved the language-pitfall CHECKLIST and wrapper/proxy
+    // routing out of 1a, but the falsy-zero shape is general correctness, not
+    // a checklist item — and its promoted replacement (Agent 1d) is high-only
+    // and files it under JS/TS alone. Deleting it here leaves medium reviews
+    // — the default for local and file targets — and non-JS highs with no
+    // agent prompted toward `if (x)` where 0 or '' is a valid value.
+    expect(buildRoleBrief(PLAN, '1a')).toContain(
+      "falsy-zero checks (`if (x)` where `0` or `''` is a valid value)",
     );
   });
 
@@ -3730,6 +3744,8 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
   it.each([
     '1a',
     '1b',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',

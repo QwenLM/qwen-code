@@ -199,9 +199,10 @@ export const planDiffCommand: CommandModule = {
         choices: ['low', 'medium', 'high'],
         describe:
           'The review effort. `medium` (balanced) drops the adversarial ' +
-          'personas from the required roster; recorded in the plan so ' +
-          'check-coverage, agent-prompt --roster and compose-review all read ' +
-          'one value. Omit for the full (high) roster.',
+          'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
+          'specialists (1d/1e) from the required roster; recorded in the plan ' +
+          'so check-coverage, agent-prompt --roster and compose-review all ' +
+          'read one value. Omit for the full (high) roster.',
       }),
   handler: (argv) => {
     // The sibling handlers' contract: usage errors (a TypeError — the

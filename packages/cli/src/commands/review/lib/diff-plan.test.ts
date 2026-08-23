@@ -925,4 +925,21 @@ describe('the wrapper signal — the roster gate for Agent 1e', () => {
     ].join('\n');
     expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(true);
   });
+
+  it('signals on the refined path when the header guess diverges', () => {
+    // Pins WHEN the path check runs: only after `+++` / `rename to` refine the
+    // header's guess. `splitHeaderPaths` splits at the LAST ` b/` and lands on
+    // `plain.ts` — no vocabulary match — while the refined path carries it.
+    // Moving the check up to the raw `diff --git` header computes false here,
+    // and Agent 1e silently leaves the roster on exactly this shape.
+    const diff = [
+      'diff --git a/src/old.ts b/src/wrapper b/plain.ts',
+      '--- a/src/old.ts',
+      '+++ b/src/wrapper b/plain.ts',
+      'rename to src/wrapper b/plain.ts',
+      '@@ -1,1 +1,1 @@',
+      '+const x = 1;',
+    ].join('\n');
+    expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(true);
+  });
 });

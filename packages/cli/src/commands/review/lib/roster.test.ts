@@ -304,6 +304,10 @@ describe('requiredAgents — the angles promoted out of Agent 1a (#9788)', () =>
     expect(keys({ ...PR, wrapperSignal: true })).toContain('1e');
     expect(keys({ ...PR, wrapperSignal: 'nope' })).toContain('1e');
     expect(keys({ ...PR, wrapperSignal: false })).not.toContain('1e');
+    // The explicit false drops ONLY 1e: 1d is unconditional at high effort,
+    // so a refactor nesting `add('1d')` inside the wrapper gate must fail
+    // here — every other fixture omits the field, which reads as true.
+    expect(keys({ ...PR, wrapperSignal: false })).toContain('1d');
   });
 
   it('does not demand either in a Step 3B fan-out — a chunk agent owns the dimensions for its lines', () => {

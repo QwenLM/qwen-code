@@ -250,7 +250,7 @@ If the fetch fails (auth, rate limit, network), **retry the command once**. If i
 
 Walk **every hunk, line by line**. For each hunk, read the **enclosing function or method** in the worktree (paging if \`isTruncated\`) so the hunk is judged in its real context and not from three lines of diff context. For every changed line ask: what input, state, timing, or platform makes this line wrong?
 
-- Inverted or wrong conditions; off-by-one and fence-post errors; null/undefined dereference; a missing \`await\`; wrong-variable copy-paste; an error swallowed by a \`catch\` that should propagate; unescaped regex metacharacters
+- Inverted or wrong conditions; off-by-one and fence-post errors; null/undefined dereference; a missing \`await\`; falsy-zero checks (\`if (x)\` where \`0\` or \`''\` is a valid value); wrong-variable copy-paste; an error swallowed by a \`catch\` that should propagate; unescaped regex metacharacters
 - Edge cases: empty collections; single- versus multi-element; very large inputs; special characters and unicode; integer overflow
 - Race conditions and concurrency; type-safety holes; error-handling gaps and exception propagation
 

@@ -105,11 +105,19 @@ effort-gated cost decisions the roster owns.
 - `packages/core/src/skills/bundled/review/SKILL.md` — agent counts, medium
   skip list, `--role` selector list, 3B ownership sentence, whiff-check agent
   list, role table (trim 1a, add 1d/1e rows).
-- Tests: `roster.test.ts`, `diff-plan.test.ts`, `report.test.ts`, plus any
-  fixture the larger 3A roster reaches.
+- `packages/cli/src/commands/review/agent-prompt.ts` — extends the existing
+  diff-only precision-degradation clause to 1e (its forwarding-completeness
+  walk greps call sites that live outside the diff, like 1b's replacements
+  and 1c's consumers).
+- `docs/users/features/code-review.md` — agent counts, capability table,
+  cost table.
+- Tests: `roster.test.ts`, `diff-plan.test.ts`, `report.test.ts`,
+  `agent-prompt.test.ts`, `SKILL.test.ts`, plus any fixture the larger 3A
+  roster reaches.
 
-`agent-prompt`, `check-coverage` and `compose-review` need no code change:
-they are BRIEFS- and `requiredAgents(plan)`-driven.
+`check-coverage` and `compose-review` need no code change: they are BRIEFS-
+and `requiredAgents(plan)`-driven. (`agent-prompt` only extends the existing
+diff-only degradation clause to 1e — see "Files affected".)
 
 ## Scope boundaries
 
