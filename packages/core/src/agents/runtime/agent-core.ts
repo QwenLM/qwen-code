@@ -970,7 +970,12 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
-            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+            if (
+              checkSubagentLoop({
+                type: GeminiEventType.Retry,
+                isContinuation: streamEvent.isContinuation,
+              })
+            ) {
               terminateMode = AgentTerminateMode.LOOP_DETECTED;
               loopDetectedInStream = true;
               break;

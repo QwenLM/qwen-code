@@ -30,6 +30,7 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { GeminiEventType } from '../../core/turn.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -61,6 +62,7 @@ import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -3433,6 +3435,52 @@ describe('subagent.ts', () => {
         );
         expect(writeResult!.error).not.toContain(
           'rejected to prevent writing truncated content',
+        );
+      });
+
+      it('forwards continuation retry events to subagent loop detection', async () => {
+        const loopSpy = vi
+          .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+          .mockReturnValue(false);
+
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockResolvedValue(
+          (async function* () {
+            yield {
+              type: 'retry',
+              isContinuation: true,
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+          new AgentEventEmitter(),
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(loopSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: GeminiEventType.Retry,
+            isContinuation: true,
+          }),
         );
       });
 
