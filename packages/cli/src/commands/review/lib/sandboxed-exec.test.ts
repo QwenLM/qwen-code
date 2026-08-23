@@ -25,6 +25,8 @@ import {
   containerCommand,
   CONTAINER_HOME,
   containerEnv,
+  containerName,
+  handOffRefused,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
@@ -90,6 +92,7 @@ describe('values a repository must not be able to set', () => {
         kind: 'install',
         runtime: 'docker',
         image: 'example/image:tag',
+        name: 'qwen-review-test',
       });
       expect(args).toContain('--user');
     } finally {
@@ -156,6 +159,7 @@ describe('the operator opt-out still works', () => {
           kind: 'install',
           runtime: 'docker',
           image: 'example/image:tag',
+          name: 'qwen-review-test',
         });
         expect(args).not.toContain('--user');
       } finally {
@@ -247,6 +251,7 @@ describe('containerCommand', () => {
     tmpDir,
     runtime: 'docker' as const,
     image: 'example/image:tag',
+    name: 'qwen-review-test',
   };
 
   it('mounts the review temp dir, not the tree the command runs in', () => {
@@ -357,6 +362,23 @@ describe('containerCommand', () => {
     },
   );
 
+  it('names the container so a deadline can reach it', () => {
+    // `--rm` fires only when the container exits on its own, and a `spawnSync`
+    // timeout kills the runtime CLIENT: measured on docker 29.1.3, an attached
+    // client forwards the signal and waits, so a workload whose own trap
+    // ignores it keeps running with this mount writable — past the budget and
+    // past the end of the review. Without a name there is nothing to aim at.
+    const { args } = containerCommand('npm test', {
+      ...base,
+      cwd: join(tmpDir, 'review-pr-9-probe'),
+      kind: 'test',
+    });
+    expect(args[args.indexOf('--name') + 1]).toBe(base.name);
+    // ...and two calls never collide, or one run's cleanup would reach
+    // another's container.
+    expect(containerName()).not.toBe(containerName());
+  });
+
   it('runs one ephemeral container per command', () => {
     // Not one long-lived container per phase: that would be cheaper by about
     // a percent of the efficacy budget and would re-introduce the cross-run
@@ -377,6 +399,23 @@ describe('containerCommand', () => {
       kind: 'install',
     });
     expect(args.slice(-3)).toEqual(['sh', '-lc', 'npm ci && npm test']);
+  });
+});
+
+describe('handOffRefused', () => {
+  it('turns the agent-shell hand-off into a refusal under `required`', () => {
+    // `unsupportedReport` tells the agent to install and build with its own
+    // shell — contained by nothing here — and the phase gate cannot catch it,
+    // because that gate passes exactly when a runtime answered and the tree is
+    // mountable, which is when a repo the adapters cannot scope still reaches
+    // the hand-off.
+    expect(handOffRefused('unsupported', 'required')).toBe(true);
+    // Under the other policies a hand-off is what it has always been.
+    expect(handOffRefused('unsupported', 'auto')).toBe(false);
+    expect(handOffRefused('unsupported', 'off')).toBe(false);
+    // ...and a real run is never converted.
+    expect(handOffRefused('npm', 'required')).toBe(false);
+    expect(handOffRefused('refused', 'required')).toBe(false);
   });
 });
 

@@ -69,12 +69,15 @@ import { probeWorktreePath } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   containerCommand,
+  containerName,
   containerPathFor,
+  killContainer,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeClientEnv,
   sandboxVerdict,
+  type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
   discardWorktree,
@@ -1536,7 +1539,12 @@ export function probeCleanupFailureDetail(
 function probeContainer(
   command: string,
   probeTree: string,
-): { file: string; args: string[] } | null {
+): {
+  file: string;
+  args: string[];
+  name: string;
+  runtime: ContainerRuntime;
+} | null {
   const verdict = sandboxVerdict();
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(probeTree);
@@ -1544,13 +1552,19 @@ function probeContainer(
   // Canonical, matching the mount — see the twin in `build-test.ts`.
   const workdir = containerPathFor(probeTree);
   if (workdir === null) return null;
-  return containerCommand(command, {
-    cwd: workdir,
-    tmpDir,
-    kind: 'test',
+  const name = containerName();
+  return {
+    ...containerCommand(command, {
+      cwd: workdir,
+      tmpDir,
+      kind: 'test',
+      name,
+      runtime: verdict.runtime,
+      image: reviewSandboxImage(),
+    }),
+    name,
     runtime: verdict.runtime,
-    image: reviewSandboxImage(),
-  });
+  };
 }
 
 function restoreProbeTreeTracked(probeTree: string): string | null {
@@ -1719,7 +1733,23 @@ function runProbeSuite(
   // own test code: a suite that plants or replaces a module in `node_modules`
   // would otherwise decide every later run's verdict. Re-linking costs about a
   // second per run against the budget's minutes.
-  const exposed = exposeDependencies(probeTree, dependencyRoot, {
+  // The farm's link TARGETS must be spelled the way the mount is. The mount and
+  // `--workdir` are canonical (`mountRootFor` realpaths), while
+  // `exposeDependencies` builds targets from the argument it is given — so
+  // under a symlinked ancestor (macOS `/tmp` → `/private/tmp` is the everyday
+  // one) every link dangles INSIDE the container, and the phase reports "every
+  // file was red or collected nothing": a wiring failure published as a
+  // statement about the PR's own suite. Canonicalise what crosses the
+  // boundary, and only there — the direct path keeps the caller's spelling.
+  let farmRoot = dependencyRoot;
+  if (sandboxVerdict().kind === 'container') {
+    try {
+      farmRoot = realpathSync(dependencyRoot);
+    } catch {
+      // Unresolvable: the farm below reports what it could not link.
+    }
+  }
+  const exposed = exposeDependencies(probeTree, farmRoot, {
     rebuild: true,
   });
   // The reviewed repository's own suite, run once per baseline / control /
@@ -1773,6 +1803,12 @@ function runProbeSuite(
   // SIGTERM", which is a less useful sentence about the same event. The reason
   // tag is derived from the whole result either way, so it does not depend on
   // which message wins.
+  if (boxed && (r.error || r.signal)) {
+    // The deadline killed the CLIENT; the container outlives it — `--rm` fires
+    // only on a self-exit. Reach the daemon before reporting, or a
+    // TERM-ignoring suite keeps this mount writable past the end of the review.
+    killContainer(boxed.runtime, boxed.name);
+  }
   if (r.error)
     throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
   if (r.signal) {

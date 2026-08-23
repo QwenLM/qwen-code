@@ -369,6 +369,27 @@ export function mountRootFor(cwd: string): string | null {
 }
 
 /**
+ * Whether a hand-off report must become a refusal.
+ *
+ * The hand-off — `toolchain: "unsupported"`, which the brief reads as "install
+ * and build it yourself" — is an execution that leaves this process for an
+ * agent's own shell, contained by nothing here. Under `required` that is the
+ * one route the phase gate cannot catch, because the gate passes exactly when
+ * a runtime answered and the tree is mountable, which is when a repo the
+ * adapters cannot scope still reaches the hand-off.
+ *
+ * A predicate, and exported, because the first attempt at this lived inline as
+ * `!applicable` — the filtered adapter ARRAY, never falsy — and shipped as dead
+ * code that no test could see.
+ */
+export function handOffRefused(
+  toolchain: string,
+  policy: SandboxPolicy = sandboxPolicy(),
+): boolean {
+  return toolchain === 'unsupported' && policy === 'required';
+}
+
+/**
  * The path a tree has INSIDE the container.
  *
  * The bind mount is created from the root's realpath, so a tree named by a
@@ -397,6 +418,8 @@ export function containerPathFor(cwd: string): string | null {
 export interface ContainerCommandOptions {
   /** Where the command runs — a tree under `tmpDir`. */
   cwd: string;
+  /** The container's name, so a timeout can reach it — see `containerName`. */
+  name: string;
   /** The review temp dir (`<repo>/.qwen/tmp`): the mount, and the farm's far end. */
   tmpDir: string;
   kind: CommandKind;
@@ -408,6 +431,33 @@ export interface ContainerCommandOptions {
  * The argv that runs `command` in a container, for `spawnSync` WITHOUT a
  * shell — the command itself still reaches a shell, inside.
  */
+let containerSeq = 0;
+
+/** A name no other run of this pipeline can collide with. */
+export function containerName(): string {
+  return `qwen-review-${process.pid}-${Date.now().toString(36)}-${containerSeq++}`;
+}
+
+/**
+ * Kill a container the deadline could not.
+ *
+ * Best-effort by construction: this runs after a timeout has already cost the
+ * phase its result, so a failure here must not become a second one. What it
+ * must not do is nothing — see `containerCommand`'s `--name` comment for what
+ * survives otherwise.
+ */
+export function killContainer(runtime: ContainerRuntime, name: string): void {
+  try {
+    spawnSync(runtime, ['rm', '-f', name], {
+      stdio: 'ignore',
+      timeout: 30_000,
+      env: runtimeClientEnv(),
+    });
+  } catch {
+    // Nothing to add: the caller is already reporting the timeout.
+  }
+}
+
 export function containerCommand(
   command: string,
   opts: ContainerCommandOptions,
@@ -416,6 +466,15 @@ export function containerCommand(
     'run',
     '--rm',
     '--init',
+    // A NAME, so the deadline has something to aim at. `--rm` fires only when
+    // the container exits on its own, and a `spawnSync` timeout kills the
+    // runtime CLIENT — measured on docker 29.1.3, an attached client forwards
+    // the signal and waits rather than dying, and a workload whose own trap
+    // ignores it keeps running with this mount writable, past the budget and
+    // past the end of the review. On a persistent runner that is one orphan
+    // per malicious review, holding the tree other agents are reading.
+    '--name',
+    opts.name,
     // One ephemeral container per command, deliberately. A long-lived one per
     // phase would be cheaper by a few hundred milliseconds a run — against a
     // 540-second budget, one to two percent — and would re-introduce exactly
@@ -511,6 +570,19 @@ export function runtimeClientEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const scrubbed = { ...env };
+  // Deleting is the half the round-3 case-fold missed. `isFileSourcedEnvKey`
+  // now answers case-insensitively on Windows, but `delete scrubbed['DOCKER_HOST']`
+  // does not remove a `docker_host` the loader wrote — and Windows resolves the
+  // two to the same variable for the child. So the deletion matches the same
+  // way the query does.
+  const drop = (key: string) => {
+    delete scrubbed[key];
+    if (process.platform !== 'win32') return;
+    const lower = key.toLowerCase();
+    for (const present of Object.keys(scrubbed)) {
+      if (present.toLowerCase() === lower) delete scrubbed[present];
+    }
+  };
   for (const key of [
     'DOCKER_HOST',
     'DOCKER_CERT_PATH',
@@ -525,7 +597,7 @@ export function runtimeClientEnv(
     'CONTAINERS_REGISTRIES_CONF',
     'CONTAINERS_STORAGE_CONF',
   ]) {
-    if (isFileSourcedEnvKey(key)) delete scrubbed[key];
+    if (isFileSourcedEnvKey(key)) drop(key);
   }
   return scrubbed;
 }

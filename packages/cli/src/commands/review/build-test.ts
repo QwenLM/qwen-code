@@ -44,14 +44,17 @@ import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   containerCommand,
+  containerName,
   containerPathFor,
+  handOffRefused,
+  killContainer,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeClientEnv,
-  sandboxPolicy,
   sandboxVerdict,
   type CommandKind,
+  type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_S,
@@ -344,7 +347,12 @@ function containerised(
   command: string,
   cwd: string,
   kind: CommandKind,
-): { file: string; args: string[] } | null {
+): {
+  file: string;
+  args: string[];
+  name: string;
+  runtime: ContainerRuntime;
+} | null {
   const verdict = sandboxVerdict();
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(cwd);
@@ -354,13 +362,19 @@ function containerised(
   // container does not have and every command fails before it starts.
   const workdir = containerPathFor(cwd);
   if (workdir === null) return null;
-  return containerCommand(command, {
-    cwd: workdir,
-    tmpDir,
-    kind,
+  const name = containerName();
+  return {
+    ...containerCommand(command, {
+      cwd: workdir,
+      tmpDir,
+      kind,
+      name,
+      runtime: verdict.runtime,
+      image: reviewSandboxImage(),
+    }),
+    name,
     runtime: verdict.runtime,
-    image: reviewSandboxImage(),
-  });
+  };
 }
 
 export function run(
@@ -404,6 +418,12 @@ export function run(
         stdio: ['ignore', 'pipe', 'pipe'],
         env: buildRunEnv(),
       });
+  if (boxed && spawnTimedOut(r)) {
+    // The deadline killed the CLIENT; the container outlives it — see the
+    // `--name` comment in `containerCommand`. Reach the daemon instead, then
+    // report the timeout exactly as before.
+    killContainer(boxed.runtime, boxed.name);
+  }
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
@@ -839,6 +859,28 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       `not read this as a passing build, and do not run the commands by hand ` +
       `to fill the gap.`,
   });
+  // The hand-off is an EXECUTION too, and it is the one that leaves this
+  // process: `unsupportedReport` tells the agent to install and build with its
+  // own shell — see the `toolchain: "unsupported"` rule in the brief — and that
+  // shell is contained by nothing here. The phase gate above cannot catch it,
+  // because it passes exactly when a runtime answered and the tree is
+  // mountable, which is when a yarn/pnpm/bun repo still reaches the hand-off.
+  //
+  // Judged on the RESULT rather than on preconditions. The first attempt tested
+  // `!applicable` before the run — and `applicable` is the filtered ADAPTER
+  // ARRAY, never falsy, so the gate was dead code that shipped green. There are
+  // also two routes to a hand-off (no adapter applies; an adapter applies and
+  // cannot scope, from inside the npm one), and only the report distinguishes
+  // neither from a real run.
+  const refusedIfHandedOff = (report: BuildTestReport): BuildTestReport =>
+    handOffRefused(report.toolchain)
+      ? refusedReport(
+          `review.sandbox is "required" and no toolchain adapter could scope ` +
+            `this repository, so the only remaining route was to hand its ` +
+            `install, build and test commands to an agent shell this policy ` +
+            `cannot contain`,
+        )
+      : report;
   const refusal = refuseUnsandboxedPhase(root);
   if (refusal && args.resume) {
     // THROW on a continuation, never return. The handler writes whatever this
@@ -863,20 +905,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     root,
     toolchainAdapters,
   );
-  // The hand-off is an EXECUTION too, and it is the one that leaves this
-  // process. `unsupportedReport` tells the agent to install and build with its
-  // own shell — see the `toolchain: "unsupported"` rule in the brief — and
-  // that shell is not contained by anything here. Under `required` the phase
-  // gate above passes whenever a runtime answers and the tree is mountable,
-  // which is exactly when a yarn/pnpm/bun repo still reaches this branch. So
-  // an inapplicable adapter is a refusal under that policy, not a hand-off.
-  if (!applicable && sandboxPolicy() === 'required') {
-    return refusedReport(
-      `review.sandbox is "required" and no toolchain adapter can scope this ` +
-        `repository, so the only remaining route is to hand its install, build ` +
-        `and test commands to an agent shell this policy cannot contain`,
-    );
-  }
   if (!adapter) {
     // A continuation must never answer with a FRESH report. The handler writes
     // whatever this returns to `--out`, which for a resume is the very file
@@ -924,7 +952,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // unsupported report before executing any command on every root where
     // applies() is false.
     if (existsSync(join(root, 'package.json'))) {
-      return { ...npmToolchainAdapter.run(runArgs), run: runIdentity };
+      return refusedIfHandedOff({
+        ...npmToolchainAdapter.run(runArgs),
+        run: runIdentity,
+      });
     }
     return {
       toolchain: 'unsupported',
@@ -942,7 +973,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'and give each command a deadline it can actually meet.',
     };
   }
-  return { ...adapter.run(runArgs), run: runIdentity };
+  return refusedIfHandedOff({ ...adapter.run(runArgs), run: runIdentity });
 }
 
 export const buildTestCommand: CommandModule = {
