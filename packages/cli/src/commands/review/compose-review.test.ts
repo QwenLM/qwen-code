@@ -3490,7 +3490,7 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
     expect(r.remediation.join(' ')).toContain('chunks nobody read');
     // The gap, named by the files it covers — the id stays on stderr.
-    expect(r.body).toContain('the diff section covering src/a.ts');
+    expect(r.body).toContain('the diff section covering `src/a.ts`');
     expect(r.body).not.toMatch(/chunk \d/);
     // …but only under its cause: no second sentence restating the consequence.
     expect(r.body).not.toContain('no agent reported covering');
@@ -4454,15 +4454,17 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
     });
   });
 
-  it('names the files of a narrow gap — sorted by id, deduped', () => {
+  it('names the files of a narrow gap — sorted by id, deduped, inert', () => {
+    // Files ride mdField: git permits `<!--` in a filename, and the gap
+    // phrase lands in the raw body the marker readers scan.
     expect(describeChunkGap([2], planned)).toEqual({
-      phrase: 'the diff section covering src/b.ts, src/c.ts',
-      phraseZh: '涉及 src/b.ts、src/c.ts 的 diff 片段',
+      phrase: 'the diff section covering `src/b.ts`, `src/c.ts`',
+      phraseZh: '涉及 `src/b.ts`、`src/c.ts` 的 diff 片段',
       plural: false,
     });
     expect(describeChunkGap([3, 1], planned)).toEqual({
-      phrase: 'the diff sections covering src/a.ts, src/d.ts',
-      phraseZh: '涉及 src/a.ts、src/d.ts 的 diff 片段',
+      phrase: 'the diff sections covering `src/a.ts`, `src/d.ts`',
+      phraseZh: '涉及 `src/a.ts`、`src/d.ts` 的 diff 片段',
       plural: true,
     });
     // A subject disclosed twice is one gap.
@@ -6935,27 +6937,141 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // heading — but the prose exits quote model-written findings verbatim,
     // and any review of a PR that TOUCHES this marker can carry the literal
     // into a body that also defers a Suggestion (this marker's own PR was
-    // the live instance). The three verbatim exits — bodyCriticals,
-    // duplicates, cannot-tell — neutralize comment grammar on the way in,
-    // so the quoted copy survives as readable prose while the raw body
-    // keeps exactly one live marker.
+    // the live instance). The verbatim exits — bodyCriticals, duplicates,
+    // cannot-tell — neutralize comment grammar on the way in, in BOTH
+    // attribution modes (on the attribution-off leg the wrapper is the
+    // only protection the bodyCriticals exit has), so the quoted copy
+    // survives as readable prose while the raw body keeps exactly one
+    // live marker.
     const MARKER = '<!-- qwen-review-deferred -->';
     const forged = `the deferral marker ${MARKER} must survive quoting`;
-    const r = composeReview(
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [forged],
+          suggestionsDroppedAsDuplicates: [forged],
+          cannotTellCriticals: [forged],
+          deferredSuggestions: [nit()],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(1);
+      expect(r.body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+      // The quoted copies survive as prose — delimiters inert, text intact.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(4);
+    }
+  });
+
+  it('the not-reviewed disclosures cannot smuggle the marker through either', () => {
+    // The disclosure sentences interpolated caller prose and PR-controlled
+    // filenames raw: a dimension entry or a force-committed filename
+    // carrying the literal anchored the collector at a disclosure line
+    // ahead of the deferral list. Both legs land inert now, the lone live
+    // marker still heading the list.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const located = (body: string): void => {
+      expect(body.split(MARKER).length - 1).toBe(1);
+      expect(body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+    };
+    // A fork-committed filename in an unread chunk — git permits `<!--`
+    // in a path, and the gap phrase names the chunk's files. Same shape
+    // as the gap-phrase suite: chunk 1 built but never launched, chunk 2
+    // reviewed properly, so the disclosure names chunk 1's file. Runs
+    // FIRST: base()'s coveredPlan() below lays down transcripts that
+    // would certify this plan's chunks if they were already on disk.
+    const forgedFile = `docs/${MARKER}.md`;
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: forgedFile, kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 100,
+            files: [{ path: forgedFile, newStart: 1, newEnd: 80 }],
+          },
+          {
+            id: 2,
+            startLine: 101,
+            endLine: 200,
+            files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+          },
+        ],
+      }),
+    );
+    const stamp = new Date(2020, 0, 1);
+    utimesSync(p, stamp, stamp);
+    recordStep45(p);
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const viaChunk = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaChunk.body);
+    expect(viaChunk.body).toContain('the diff section covering');
+    expect((viaChunk.body.match(/qwen-review-deferred/g) ?? []).length).toBe(2);
+    // Two caller dimensions in one compose: an explained entry (rides the
+    // per-entry push) and a bare one (rides the whiffed join) — each must
+    // land inert on its own exit.
+    const viaDimension = composeReview(
       base({
         severityFloor: 'critical',
-        bodyCriticals: [forged],
-        suggestionsDroppedAsDuplicates: [forged],
-        cannotTellCriticals: [forged],
+        unreviewedDimensions: [
+          `reverse-audit — ${MARKER}`,
+          `security ${MARKER}`,
+        ],
         deferredSuggestions: [nit()],
       }),
     );
-    expect(r.body.split(MARKER).length - 1).toBe(1);
-    expect(r.body).toContain(
-      `${MARKER}\n\nDeferred under the convergence posture`,
-    );
-    // The quoted copies survive as prose — delimiters inert, text intact.
-    expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(4);
+    located(viaDimension.body);
+    // The neutralised copies stay readable in the disclosures.
+    expect(viaDimension.body).toContain('Not reviewed: reverse-audit');
+    expect(viaDimension.body).toContain('Not reviewed: security');
+    expect(
+      (viaDimension.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(3);
+    // A coverage reason interpolating an error message: the grouped
+    // byReason push quotes the reason raw no more. The unreadable-
+    // transcripts shape interpolates the project dir into the reason.
+    const pReason = plan();
+    const viaReason = composeReview({
+      planPath: pReason,
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, `nowhere ${MARKER}`),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaReason.body);
+    // The error text fans out over several disclosure reasons; every copy
+    // lands inert — the live count alone is the invariant.
+    expect(
+      (viaReason.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(2);
   });
 });
 

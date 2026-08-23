@@ -1862,6 +1862,13 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
         run: |-
           set -uo pipefail
+          STAGE="${RUNNER_TEMP:?}/qwen-review-upload"
+          # Wipe BEFORE the guard: the upload step runs unconditionally
+          # (`if: always()`) and reads this exact directory, and on this
+          # persistent pool the previous job's successful stage still
+          # occupies it — an early exit that skipped the wipe would publish
+          # that previous job's record as this run's.
+          rm -rf "$STAGE" 2>/dev/null || true
           # The value rides find's -name patterns — pin it to digits so a
           # dispatch-supplied string can never widen the glob.
           case "${PR_NUMBER}" in
@@ -1870,8 +1877,6 @@ jobs:
               exit 0
               ;;
           esac
-          STAGE="${RUNNER_TEMP:?}/qwen-review-upload"
-          rm -rf "$STAGE" 2>/dev/null || true
           mkdir -p "$STAGE"
           find .qwen/reviews -maxdepth 1 -type f \
             \( -name "*-pr-${PR_NUMBER}.*" -o -name "*-pr-${PR_NUMBER}-cost-ledger.json" \) \
