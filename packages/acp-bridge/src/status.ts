@@ -518,6 +518,7 @@ export interface ServeWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface ServeWorkspaceProviderStatus extends ServeStatusCell {
