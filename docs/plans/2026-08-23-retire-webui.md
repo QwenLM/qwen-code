@@ -2,7 +2,8 @@
 
 Status: Draft
 
-Depends on the complete VS Code Web Shell cutover draft.
+Depends on the complete VS Code Web Shell cutover draft
+[#9811](https://github.com/QwenLM/qwen-code/pull/9811).
 
 ## Outcome
 
