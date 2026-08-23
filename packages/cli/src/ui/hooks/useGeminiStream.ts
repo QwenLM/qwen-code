@@ -916,9 +916,20 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
-          const releaseToolCompletionActivity = isSubmittingQueryRef.current
-            ? retainSubmissionActivity(submissionLeaseGenerationRef.current)
-            : undefined;
+          // The scheduler empties the display list before this callback
+          // (#9420), so once the issuing stream has settled nothing else
+          // keeps streamingState off Idle while the callback runs. A
+          // phantom Idle commit mid-turn would drain queued turns
+          // concurrently with the pending ToolResult continuation, fire
+          // YOLO turn-finished telemetry at the batch boundary, and no-op
+          // Esc cancellation. Re-assert the in-flight flags for the whole
+          // window; the release in finally settles them once the
+          // continuation is done.
+          setSubmissionInFlight(true);
+          setIsResponding(true);
+          const releaseToolCompletionActivity = retainSubmissionActivity(
+            submissionLeaseGenerationRef.current,
+          );
           // Captured before the await: the continuation scheduled inside
           // handleCompletedTools may re-register a reused callId for the
           // NEXT batch, and the cleanup below must not delete that entry.
@@ -940,7 +951,7 @@ export const useGeminiStream = (
               completedToolCallsFromScheduler as TrackedToolCall[],
             );
           } finally {
-            releaseToolCompletionActivity?.();
+            releaseToolCompletionActivity();
             // Entries are only needed until the batch commits; the scheduler
             // clears its display copy right after this callback returns.
             // Delete only entries still pointing at this batch's id: a
