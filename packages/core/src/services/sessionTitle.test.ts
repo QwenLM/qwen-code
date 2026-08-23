@@ -12,7 +12,11 @@ import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
 } from '../utils/environmentContext.js';
-import { sanitizeTitle, tryGenerateSessionTitle } from './sessionTitle.js';
+import {
+  sanitizeTitle,
+  TITLE_PROMPT_EXAMPLE_TITLES,
+  tryGenerateSessionTitle,
+} from './sessionTitle.js';
 
 interface MockOptions {
   fastModel?: string | undefined;
@@ -235,6 +239,37 @@ describe('tryGenerateSessionTitle', () => {
         outcome,
         `wrapped echo not rejected: ${JSON.stringify(title)}`,
       ).toEqual({ ok: false, reason: 'empty_result' });
+    }
+  });
+
+  it('rejects echoes of decorated prompt examples (#9772)', async () => {
+    // The guard normalizes the candidate title's edges; the example side
+    // must go through the same normalization, or a "Good example" entry
+    // carrying leading/trailing punctuation would let a bare echo of its
+    // inner text slip past (#9772).
+    const originalLength = TITLE_PROMPT_EXAMPLE_TITLES.length;
+    TITLE_PROMPT_EXAMPLE_TITLES.push(
+      '** Upgrade Node runtime **',
+      '《部署网关灰度》',
+    );
+    try {
+      for (const title of ['Upgrade Node runtime', '部署网关灰度']) {
+        const { config } = makeConfig({
+          fastModel: 'qwen-turbo',
+          history: DIALOG_HISTORY,
+          generateJsonResult: { title },
+        });
+        const outcome = await tryGenerateSessionTitle(
+          config,
+          new AbortController().signal,
+        );
+        expect(
+          outcome,
+          `decorated-example echo not rejected: ${JSON.stringify(title)}`,
+        ).toEqual({ ok: false, reason: 'empty_result' });
+      }
+    } finally {
+      TITLE_PROMPT_EXAMPLE_TITLES.length = originalLength;
     }
   });
 

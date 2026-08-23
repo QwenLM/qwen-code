@@ -27,8 +27,10 @@ const RECENT_MESSAGE_WINDOW = 20;
 // schema-valid answer and parrots one of these back verbatim (#9706). A
 // canned example says nothing about the session, so matches are rejected
 // like empty results. The prompt's "Good examples" block is rendered from
-// this array, so the two cannot drift apart.
-const TITLE_PROMPT_EXAMPLE_TITLES = [
+// this array, so the two cannot drift apart. Exported for unit tests so the
+// guard can be exercised against decorated examples without changing the
+// prompt the model actually sees.
+export const TITLE_PROMPT_EXAMPLE_TITLES = [
   'Fix login button on mobile',
   'Add OAuth authentication flow',
   'Debug failing CI pipeline tests',
@@ -233,6 +235,20 @@ export function sanitizeTitle(s: string): string {
 }
 
 /**
+ * Normalize one side of the echo comparison: trim, lowercase, and strip
+ * leading/trailing runs of non-letter/non-digit characters. Applied to BOTH
+ * the candidate title and each prompt example (#9772) — normalizing only the
+ * candidate would let a decorated example entry slip past the guard.
+ */
+function normalizeForEchoCompare(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}]+$/u, '');
+}
+
+/**
  * Detect a sanitized title that is just the model echoing one of the
  * prompt's own "Good examples" back (#9706). Exact, case-insensitive match
  * after sanitization — deliberately not fuzzy, so a genuinely topical title
@@ -248,13 +264,9 @@ export function sanitizeTitle(s: string): string {
  * falling outside an enumerated character class.
  */
 function isPromptExampleEcho(title: string): boolean {
-  const normalized = title
-    .trim()
-    .toLowerCase()
-    .replace(/^[^\p{L}\p{N}]+/u, '')
-    .replace(/[^\p{L}\p{N}]+$/u, '');
+  const normalized = normalizeForEchoCompare(title);
   return TITLE_PROMPT_EXAMPLE_TITLES.some(
-    (example) => example.toLowerCase() === normalized,
+    (example) => normalizeForEchoCompare(example) === normalized,
   );
 }
 
