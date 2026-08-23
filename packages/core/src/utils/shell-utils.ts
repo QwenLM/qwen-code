@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AnyToolInvocation } from '../index.js';
+import type { AnyToolInvocation } from '../tools/tools.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
