@@ -146,6 +146,20 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(p).toContain('say what you examined');
   });
 
+  it('conditions the carved-out counter-frame duty on the run owing 6d', () => {
+    // The carve-out tells a chunk agent a dedicated whole-diff agent owns the
+    // counter-frame — but `countersFrame` only owes 6d on a PR target at
+    // non-medium effort, while `isTerritoryFanOut` is size-only. A medium 3B
+    // review, or any large PR-less local one, fans out with no 6d at all: an
+    // unconditional carve-out would tell every chunk agent to defer an
+    // out-of-frame signal to an agent that never launched, and nothing in the
+    // run would own the dimension. The sibling prose-exec clause has carried
+    // its qualifier since it was written; this one is pinned to keep it.
+    const p = buildChunkAgentPrompt(PLAN, 13);
+    expect(p).toContain('the counter-frame audit, where the run owes it');
+    expect(p).toContain('where the diff owes it, a dedicated agent runs it');
+  });
+
   it('tells the agent to page a truncated read', () => {
     const p = buildChunkAgentPrompt(PLAN, 13);
     expect(p).toContain('isTruncated');

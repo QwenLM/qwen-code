@@ -800,10 +800,11 @@ export function buildChunkAgentPrompt(
       'removed-behavior audit of your own deleted lines, security, code quality, performance, ' +
       'test coverage, and the adversarial reading. Some duties are NOT yours, because a chunk ' +
       'agent is structurally blind to them: cross-file tracing (a caller in another chunk); ' +
-      "the cross-chunk half of removed-behavior; the counter-frame audit (the author's frame " +
-      'spans every territory — a dedicated whole-diff agent owns it); and the prose-execution ' +
-      "audit of instruction files (a recipe's steps rarely respect chunk boundaries — where " +
-      'the diff owes it, a dedicated agent runs it). Audit the deletions in your own territory; do ' +
+      'the cross-chunk half of removed-behavior; the counter-frame audit, where the run owes ' +
+      "it (the author's frame spans every territory — a dedicated whole-diff agent owns it); " +
+      "and the prose-execution audit of instruction files (a recipe's steps rarely respect " +
+      'chunk boundaries — where the diff owes it, a dedicated agent runs it). Audit the ' +
+      'deletions in your own territory; do ' +
       'not conclude a deletion is unreplaced merely because its replacement is not in your range.',
     '',
     '**Shape check (part of code quality — the altitude lens, scoped to your ' +
