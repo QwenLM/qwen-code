@@ -718,6 +718,7 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
         'external-tool-guard-endpoint',
@@ -845,6 +846,18 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { experimentalLsp: true },
+    });
+  });
+
+  it('keeps --restore-ask-user-question on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--restore-ask-user-question',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { restoreAskUserQuestion: true },
     });
   });
 
