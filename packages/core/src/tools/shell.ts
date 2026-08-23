@@ -2723,7 +2723,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     if (!result.aborted && result.exitCode === 0) {
-      this.bindGhPrCreate(commandToExecute, result.output);
+      this.bindGhPrCreate(commandToExecute, result.output, cwd);
     }
 
     const abortReasonName = getAbortReasonName(combinedSignal);
@@ -3072,13 +3072,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * command/output text alone cannot attribute a printed URL to gh's own
    * execution, so a text-matched URL never binds on its own.
    */
-  private bindGhPrCreate(command: string, output: string): void {
+  private bindGhPrCreate(command: string, output: string, cwd: string): void {
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
-        const created = await fetchCurrentBranchPullRequest(
-          this.config.getTargetDir(),
-        );
+        // The execution directory, not the target dir: the `directory`
+        // parameter may point at another registered workspace, and gh
+        // attributes the branch of the repo the command actually ran in.
+        const created = await fetchCurrentBranchPullRequest(cwd);
         if (!created || !output.includes(created.url)) return;
         const prPath = this.config
           .getSessionService()

@@ -19,6 +19,7 @@ import {
   updateSessionPrStates,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
+import { isValidSessionId } from '../../config/session-id.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -80,6 +81,11 @@ export async function refreshWorkspaceSessionPrStates(
         archiveState,
       });
       for (const item of page.items) {
+        // `item.sessionId` comes verbatim from the transcript's first
+        // record and names the sidecar path below — a traversal id must be
+        // rejected before path construction (the backfill route shares
+        // this sink).
+        if (!isValidSessionId(item.sessionId)) continue;
         const prPath = sessionService.getPrSessionPathForArchiveState(
           item.sessionId,
           archiveState,
@@ -106,18 +112,15 @@ export async function refreshWorkspaceSessionPrStates(
   }
   if (pendingBindings.length === 0) return { scanned, updated: 0 };
 
-  // The sweep queries exactly one repository (the workspace's), but PR
-  // numbers are dense small integers — stamping states by bare number would
-  // hit a same-numbered PR of another repository whenever a binding's URL
-  // points elsewhere. Each binding's own URL names its repository, so only
-  // bindings belonging to the queried repo are updated; an unresolvable
-  // workspace remote cannot vouch for any binding, and the round updates
-  // nothing.
+  // PR numbers are dense small integers — stamping states by bare number
+  // would hit a same-numbered PR of another repository whenever a
+  // binding's URL points elsewhere. Each binding's own URL names its
+  // repository, so only bindings belonging to a repository this run
+  // actually queried are updated.
   const remoteWebUrl = await resolveRemoteWebUrl(runtime.workspaceCwd);
   const workspaceRepoKey = remoteWebUrl
     ? repoKeyFromWebUrl(remoteWebUrl)
     : undefined;
-  if (!workspaceRepoKey) return { scanned, updated: 0 };
 
   const result = await fetchPullRequests(
     runtime.workspaceCwd,
@@ -131,11 +134,24 @@ export async function refreshWorkspaceSessionPrStates(
     numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
   }
 
+  // Stamping authority is the repository this run actually queried, and the
+  // page's own URLs name it. In the fork layout origin is the fork while
+  // gh lists the PARENT repo's PRs — the same repo the writers bind — so
+  // gating on the origin key alone would freeze every fork-layout binding.
+  // Accept both identities; bindings matching neither stay skipped.
+  const acceptedRepoKeys = new Set<string>();
+  if (workspaceRepoKey) acceptedRepoKeys.add(workspaceRepoKey);
+  for (const pr of result.pullRequests) {
+    const key = repoKeyFromWebUrl(pr.url);
+    if (key) acceptedRepoKeys.add(key);
+  }
+
   let updated = 0;
   for (const target of pendingBindings) {
     const states = new Map<number, SessionPrState>();
     for (const binding of target.bindings) {
-      if (repoKeyFromWebUrl(binding.url) !== workspaceRepoKey) continue;
+      const bindingRepoKey = repoKeyFromWebUrl(binding.url);
+      if (!bindingRepoKey || !acceptedRepoKeys.has(bindingRepoKey)) continue;
       const state = numberToState.get(binding.number);
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that

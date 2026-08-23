@@ -201,6 +201,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   }
 
   it('binds the PR named by the slug convention using the gh URL', async () => {
+    seedWorkspaceRemote();
     await seedSession(SESSION_A);
     await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
     fetchGitHubPullRequestsMock.mockResolvedValue({
@@ -249,6 +250,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('maps custom-slug worktree branches through gh headRefName', async () => {
+    seedWorkspaceRemote();
     await seedSession(SESSION_C);
     await seedWorktreeSidecar(
       SESSION_C,
@@ -344,6 +346,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('binds PRs whose head branch appears in the transcript gitBranch', async () => {
+    seedWorkspaceRemote();
     await seedSession(SESSION_G, 'fix/thing');
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
@@ -363,6 +366,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('binds one session to several PRs from multiple branches', async () => {
+    seedWorkspaceRemote();
     await seedSession(SESSION_G, 'fix/a');
     const chatsDir = path.join(
       new Storage(workspaceCwd).getProjectDir(),
@@ -533,6 +537,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   it('maps a shared head branch to the newest PR', async () => {
     // gh emits newest-updatedAt first; first-wins keeps the current PR
     // reachable instead of resolving to the oldest one on the branch.
+    seedWorkspaceRemote();
     await seedSession(SESSION_A, 'fix/login');
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
@@ -549,6 +554,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('keeps the convention binding when weaker numbers overflow the cap', async () => {
+    seedWorkspaceRemote();
     await seedSession(SESSION_A);
     await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
     const chatsDir = path.join(
@@ -689,6 +695,135 @@ describe('backfillWorkspaceSessionPrs', () => {
     // candidate.
     expect(fetchRemoteWebUrlMock).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects traversal sessionIds before building sidecar paths', async () => {
+    // listSessions returns the transcript's first-record sessionId
+    // verbatim; a planted transcript may carry a path-escape id. Unguarded,
+    // the scan would read the escaped transcript for branches and WRITE the
+    // binding at the escaped sidecar path.
+    const fileName = '00000000-0000-4000-8000-00000000000a';
+    const traversalId = '../../pwn';
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${fileName}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${fileName}-user-1`,
+        parentUuid: null,
+        sessionId: traversalId,
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    // Plant the escape transcript the unguarded scan reads for branches, so
+    // the pre-gate code path binds instead of skipping the session.
+    const escapedDir = path.dirname(
+      sessionService.getWorktreeSessionPathForArchiveState(
+        traversalId,
+        'active',
+      ),
+    );
+    await fsp.mkdir(escapedDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(escapedDir, `${traversalId}.jsonl`),
+      `${JSON.stringify({ gitBranch: 'fix/thing' })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/thing')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 0, bound: 0 });
+    const escapedSidecar = sessionService.getPrSessionPathForArchiveState(
+      traversalId,
+      'active',
+    );
+    expect(path.relative(chatsDir, escapedSidecar).startsWith('..')).toBe(true);
+    await expect(fsp.access(escapedSidecar)).rejects.toThrow();
+  });
+
+  it('keeps sidecar order and createdAt when a run binds nothing new', async () => {
+    // The sidecar's ordering contract — binding-time order, last entry
+    // latest — is what the badge and tooltip render by. A re-run finding
+    // only already-bound numbers must not re-upsert them: moving an entry
+    // to the end with a fresh createdAt flips which PR renders as latest.
+    seedWorkspaceRemote();
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/o/r/pull/42',
+            createdAt: '2026-08-01T00:00:00.000Z',
+          },
+          {
+            number: 57,
+            url: 'https://github.com/o/r/pull/57',
+            createdAt: '2026-08-02T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'worktree-pr-42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 1 });
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted).toEqual([
+      {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        createdAt: '2026-08-01T00:00:00.000Z',
+      },
+      {
+        number: 57,
+        url: 'https://github.com/o/r/pull/57',
+        createdAt: '2026-08-02T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('fails branch mapping closed when the workspace repo key is unknown', async () => {
+    // Without a resolvable origin, gh may resolve a default repo that is
+    // not this workspace's — its page must not feed branch mapping.
+    fetchRemoteWebUrlMock.mockResolvedValue(undefined);
+    await seedSession(SESSION_G, 'master');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(31415, 'master')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('registerSessionPrBackfillRoutes', () => {
@@ -736,5 +871,84 @@ describe('registerSessionPrBackfillRoutes', () => {
     );
     expect(untrusted.error).toBe('untrusted workspace skipped');
     expect(response.body).toMatchObject({ v: 1, bound: 0 });
+  });
+
+  it('marks the session catalog only when a run binds new PRs', async () => {
+    // New sidecar bindings are invisible to live-state clients until the
+    // catalog revision bumps; a re-run binding nothing must not bump again.
+    const workCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-work-'),
+    );
+    const runtimeBase = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-runtime-'),
+    );
+    try {
+      fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+      const sessionId = '00000000-0000-4000-8000-000000000001';
+      const chatsDir = path.join(
+        new Storage(workCwd, runtimeBase).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workCwd,
+        })}\n`,
+        'utf8',
+      );
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.worktree.json`),
+        JSON.stringify({
+          slug: 'pr-7',
+          worktreePath: `${workCwd}/.qwen/worktrees/pr-7`,
+          worktreeBranch: 'worktree-pr-7',
+          originalCwd: workCwd,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        }),
+        'utf8',
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(7, 'worktree-pr-7')],
+      });
+      const markSessionCatalogChanged = vi.fn();
+      const app = express();
+      registerSessionPrBackfillRoutes(app, {
+        workspaceRegistry: registry([
+          {
+            workspaceId: 'primary',
+            workspaceCwd: workCwd,
+            sessionRuntimeBaseDir: runtimeBase,
+            primary: true,
+            trusted: true,
+            env: { mode: 'parent-process', overlayKeys: [] },
+            bridge: { markSessionCatalogChanged },
+          } as unknown as WorkspaceRuntime,
+        ]),
+        sendBridgeError,
+        mutate: passthroughMutate,
+      });
+
+      const first = await request(app).post('/sessions/backfill-prs');
+
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({ bound: 1 });
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+
+      const second = await request(app).post('/sessions/backfill-prs');
+      expect(second.body).toMatchObject({ bound: 0 });
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      await fsp.rm(workCwd, { recursive: true, force: true });
+      await fsp.rm(runtimeBase, { recursive: true, force: true });
+    }
   });
 });

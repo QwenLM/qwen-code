@@ -17,6 +17,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { isValidSessionId } from '../../config/session-id.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -120,6 +121,11 @@ export async function backfillWorkspaceSessionPrs(
         archiveState,
       });
       for (const item of page.items) {
+        // `item.sessionId` comes verbatim from the transcript's first
+        // record, and every sidecar path below embeds it — a traversal id
+        // must be rejected before path construction, the same way the
+        // sibling sidecar routes gate.
+        if (!isValidSessionId(item.sessionId)) continue;
         result.scanned += 1;
         const dir = path.dirname(
           sessionService.getWorktreeSessionPathForArchiveState(
@@ -187,9 +193,12 @@ export async function backfillWorkspaceSessionPrs(
       // Fork layout: gh resolves the PARENT repo for list queries when the
       // origin is a fork, so the page can hold another repository's PRs. A
       // bare head-branch collision with one of them would bind a stranger's
-      // PR into this workspace's sessions — reject every foreign URL.
+      // PR into this workspace's sessions — reject every foreign URL. Fail
+      // CLOSED when the workspace key is unknown (no resolvable origin): gh
+      // may then resolve a default repo that is not this workspace's, and
+      // the convention URL fallback is already disabled in that state.
       if (
-        workspaceRepoKey !== undefined &&
+        workspaceRepoKey === undefined ||
         repoKeyFromWebUrl(pr.url) !== workspaceRepoKey
       ) {
         continue;
@@ -236,17 +245,16 @@ export async function backfillWorkspaceSessionPrs(
     } catch {
       existing = null;
     }
-    const have = new Set(existing?.map((pr) => pr.number));
+    const initialNumbers = new Set(existing?.map((pr) => pr.number));
+    let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
     for (const number of numbers) {
       const isConvention = number === candidate.conventionNumber;
-      if (have.has(number)) {
+      if (initialNumbers.has(number)) {
         result.alreadyBound += 1;
-        // Cross-run eviction: an already-bound convention number keeps its
-        // original position unless re-upserted, while newly bound weaker
-        // numbers append after it and push it past the tail cap. The
-        // re-upsert moves it to the end with a fresh createdAt; a
-        // branch-mapped number keeps the plain skip.
-        if (!isConvention) continue;
+        // Plain skip for EVERY already-bound number: a re-upsert would move
+        // the entry to the end with a fresh createdAt, violating the
+        // binding-time order the badge and tooltip render by.
+        continue;
       }
       let url = numberToUrl.get(number);
       if (url === undefined && isConvention && remote !== undefined) {
@@ -257,14 +265,34 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       const state = numberToState.get(number);
-      await upsertSessionPr(prPath, {
+      persisted = await upsertSessionPr(prPath, {
         number,
         url,
         ...(state ? { state } : {}),
       });
-      if (!have.has(number)) {
-        have.add(number);
-        result.bound += 1;
+      result.bound += 1;
+    }
+    // Eviction repair: when this run's NEW bindings pushed an already-bound
+    // convention number past the tail cap, restore it — the session exists
+    // for that PR. Runs that bind nothing new leave the sidecar untouched.
+    const conventionNumber = candidate.conventionNumber;
+    if (
+      conventionNumber !== undefined &&
+      initialNumbers.has(conventionNumber) &&
+      persisted !== undefined &&
+      !persisted.some((pr) => pr.number === conventionNumber)
+    ) {
+      let url = numberToUrl.get(conventionNumber);
+      if (url === undefined && remote !== undefined) {
+        url = `${remote}/pull/${conventionNumber}`;
+      }
+      if (url !== undefined) {
+        const state = numberToState.get(conventionNumber);
+        await upsertSessionPr(prPath, {
+          number: conventionNumber,
+          url,
+          ...(state ? { state } : {}),
+        });
       }
     }
   }
@@ -296,7 +324,12 @@ export function registerSessionPrBackfillRoutes(
           continue;
         }
         try {
-          workspaces.push(await backfillWorkspaceSessionPrs(runtime));
+          const result = await backfillWorkspaceSessionPrs(runtime);
+          // New bindings write sidecars the daemon never sees; bump the
+          // catalog revision so live-state clients refetch, the way every
+          // other daemon-side writer of persisted session state does.
+          if (result.bound > 0) runtime.bridge.markSessionCatalogChanged();
+          workspaces.push(result);
         } catch (error) {
           workspaces.push({
             workspaceCwd: runtime.workspaceCwd,

@@ -387,6 +387,41 @@ describe('ShellTool', () => {
 
       expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
     });
+
+    it('attributes against the execution directory, not the target dir', async () => {
+      // The `directory` parameter may point at another registered
+      // workspace; gh must attribute the repo the command actually ran in,
+      // or a `directory`-parameter create binds nothing (or a wrong-repo
+      // PR whose URL happens to appear in the output).
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+      });
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir/nested',
+        is_background: false,
+      });
+      const resultPromise = invocation.execute(new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      } as ShellExecutionResult);
+      await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+        '/test/dir/nested',
+      );
+      expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        expect.objectContaining({ number: 77 }),
+      );
+    });
   });
 
   describe('isCommandAllowed', () => {
