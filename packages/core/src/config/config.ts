@@ -9031,3 +9031,40 @@ export class Config {
     return this.subSessionSpawner;
   }
 }
+
+/**
+ * Install the Session Workflow plan-revision write-through shims on a
+ * prototype-wrapper Config (`Object.create(base)`).
+ *
+ * Plan-revision state is session-global and lives on the root Config. The
+ * Config prototype methods assign `this.sessionWorkflowPlanRevision`, which
+ * on a wrapper lands as an OWN property and shadows the base value — e.g. a
+ * subagent's divergent todo_write clearing the approved revision only for
+ * itself while the parent keeps rejecting Agent launches against a plan that
+ * no longer exists. The shims forward set/clear to the wrapped Config (which
+ * may itself be a write-through wrapper — the chain bottoms out at the root
+ * Config); reads keep walking the prototype.
+ *
+ * Apply at EVERY wrapper builder — `createApprovalModeOverride`
+ * (tools/agent/agent.ts), `buildSubagentContextOverride`
+ * (subagents/subagent-manager.ts), and both branches of
+ * `InProcessBackend.createPerAgentConfig` — otherwise the un-shimmed family
+ * silently diverges the session-global revision.
+ */
+export function installSessionWorkflowRevisionWriteThrough(
+  wrapper: Config,
+  base: Config,
+): void {
+  // The shims intentionally mirror Config's TS-private field name through
+  // the prototype method signatures; keep the any-cast local.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = wrapper as any;
+  ov.setSessionWorkflowPlanRevision = (
+    revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+  ): void => {
+    base.setSessionWorkflowPlanRevision(revision);
+  };
+  ov.clearSessionWorkflowPlanRevision = (): void => {
+    base.clearSessionWorkflowPlanRevision();
+  };
+}

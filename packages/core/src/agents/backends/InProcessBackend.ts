@@ -13,7 +13,11 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { ApprovalMode, Config } from '../../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  installSessionWorkflowRevisionWriteThrough,
+} from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
 import { type ContentGenerator } from '../../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
@@ -513,6 +517,23 @@ async function createPerAgentConfig(
     override = handle.config as unknown as Record<string, unknown>;
     cleanup = handle.cleanup;
   }
+
+  // Session Workflow plan-revision state is session-global on the root
+  // Config. Both wrapper branches above (the plain Object.create wrapper and
+  // the approval-mode override) rebuild the tool registry below with
+  // TodoWriteTool bound to `this.config = override`, so a divergent
+  // todo_write would assign `this.sessionWorkflowPlanRevision` as an OWN
+  // property on the wrapper — clearing the approved revision only for this
+  // teammate/arena agent while the base keeps rejecting Agent launches
+  // against the stale plan. Forward mutations to the wrapped Config
+  // (runtimeContext may itself be a write-through wrapper — the chain
+  // bottoms out at the root Config); keep in sync with
+  // `createApprovalModeOverride` in tools/agent/agent.ts and
+  // `buildSubagentContextOverride` in subagents/subagent-manager.ts.
+  installSessionWorkflowRevisionWriteThrough(
+    override as unknown as Config,
+    base,
+  );
 
   let agentRegistry: ToolRegistry | undefined;
   try {
