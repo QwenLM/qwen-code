@@ -1183,10 +1183,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const task of tasks) {
       if (signal.aborted || !this.connected) return;
       this.todoTargets.set(todoChatId(task.taskId), task.taskId);
+      const fingerprint = todoFingerprint(task);
+      if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
+      let detail: DwsTodoTask;
       try {
-        const fingerprint = todoFingerprint(task);
-        if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
-        if (await this.processTodoTask(task, fingerprint, signal)) {
+        detail = await this.client.getTodoTask(task.taskId, signal);
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        // A failed fetch ran no agent turn, so it must not spend the R4-1
+        // budget: charging it would permanently fingerprint away a still-open
+        // todo after a transient outage. Retry on the next poll instead.
+        process.stderr.write(
+          `[Channel:${this.name}] failed to fetch DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+        continue;
+      }
+      try {
+        if (await this.processTodoTask(task, detail, fingerprint)) {
           this.clearInboundFailure(todoFailureKey(task.taskId));
           this.rememberTodoState(task.taskId, fingerprint);
           processedTaskIds.add(task.taskId);
@@ -1224,10 +1237,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   private async processTodoTask(
     summary: DwsTodoTask,
+    detail: DwsTodoTask,
     fingerprint: string,
-    signal: AbortSignal,
   ): Promise<boolean> {
-    const detail = await this.client.getTodoTask(summary.taskId, signal);
     const senderId =
       detail.creatorId ?? summary.creatorId ?? `todo-creator:${summary.taskId}`;
     const senderName = detail.creatorName ?? summary.creatorName ?? senderId;

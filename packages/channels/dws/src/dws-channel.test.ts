@@ -3779,6 +3779,47 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
+  // R13-2: the R4-1 budget above is for turns that keep throwing. A
+  // `getTodoTask` fetch failure runs no agent turn, so charging the budget
+  // for it permanently fingerprinted away a still-open todo after a mere
+  // transient outage.
+  it('processes a todo once its repeatedly failing detail fetch recovers', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-flaky', 'Flaky task'),
+    ];
+    let fetchFailures = 0;
+    client.getTodoTask.mockImplementation(async (taskId) => {
+      const task = client.todoTasks.find((item) => item.taskId === taskId);
+      if (!task) throw new Error(`Missing fake todo ${taskId}.`);
+      if (taskId === 'task-flaky' && fetchFailures < 5) {
+        fetchFailures += 1;
+        throw new Error('transient dws failure');
+      }
+      return task;
+    });
+
+    for (let round = 0; round < 5; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+    expect(fetchFailures).toBe(5);
+    expect(channel.inboundAttempts).toBe(0);
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ threadId: 'task-flaky' }),
+    ]);
+  });
+
   it('does not let a deeply nested todo block later tasks', async () => {
     let nested: Record<string, unknown> = { value: 'leaf' };
     for (let depth = 0; depth < 20_000; depth += 1) {
