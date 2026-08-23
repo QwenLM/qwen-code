@@ -834,12 +834,18 @@ describe('bundled review skill', () => {
     // list parses as a setext-heading underline and `>>>>>>>` renders as a
     // blockquote, silently restructuring the instructions a review runs on.
     expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
-    // The cap keeps an Approve at Comment; a Request-changes verdict still
-    // posts its blocking summary — not the stale bullet's blanket cap.
+    // The forced cap is GONE now that pr-context is backed: approve fires
+    // exactly when the run read the MR's context (the same gate as
+    // GitHub), and only a context-unavailable run stays capped at COMMENT
+    // — neither the stale bullet's blanket cap nor a forced one.
     expect(body).toContain(
-      'the context-unavailable cap keeps an **Approve** verdict at Comment (a Request-changes verdict still posts its blocking summary)',
+      'fires for an APPROVE verdict exactly when the run read the MR',
     );
+    expect(body).toContain('a context-unavailable run stays capped at COMMENT');
     expect(body).not.toContain('which caps the verdict at');
+    expect(body).not.toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment',
+    );
     // The drift re-review is bounded by the once-per-review restart bound;
     // the stale variant ordered it unconditionally.
     expect(body).toContain(
