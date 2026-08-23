@@ -265,6 +265,7 @@ export interface ComputedSessionStats {
 interface SessionStatsContextValue {
   stats: SessionStatsState;
   startNewSession: (sessionId: string) => void;
+  rekeySessionId: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
   seedPromptCount: (count: number) => void;
@@ -427,6 +428,20 @@ export const SessionStatsProvider: React.FC<{
     }));
   }, []);
 
+  // Re-key the display to an EXISTING session. Unlike startNewSession this
+  // must not reset promptCount/sessionStartTime: a failed swap's rollback
+  // returns the user to the session they never left, and zeroing the
+  // counter makes the next prompt_id collide with the session's first
+  // recorded prompt.
+  const rekeySessionId = useCallback((sessionId: string) => {
+    setStats((prevState) => ({
+      ...prevState,
+      sessionId,
+      metrics: getMetricsForDisplay(sessionId),
+      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    }));
+  }, []);
+
   const startNewPrompt = useCallback(() => {
     setStats((prevState) => ({
       ...prevState,
@@ -450,11 +465,19 @@ export const SessionStatsProvider: React.FC<{
     () => ({
       stats,
       startNewSession,
+      rekeySessionId,
       startNewPrompt,
       getPromptCount,
       seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
+    [
+      stats,
+      startNewSession,
+      rekeySessionId,
+      startNewPrompt,
+      getPromptCount,
+      seedPromptCount,
+    ],
   );
 
   return (

@@ -51,6 +51,7 @@ function renderSessionTab(metrics: SessionMetrics) {
       promptCount: 1,
     },
     startNewSession: vi.fn(),
+    rekeySessionId: vi.fn(),
     getPromptCount: () => 1,
     startNewPrompt: vi.fn(),
     seedPromptCount: vi.fn(),

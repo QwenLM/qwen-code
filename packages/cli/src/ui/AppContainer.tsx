@@ -827,6 +827,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     stats: sessionStats,
     startNewSession,
+    rekeySessionId,
     seedPromptCount,
   } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
@@ -1633,6 +1634,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    rekeySessionId,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1643,6 +1645,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    rekeySessionId,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,

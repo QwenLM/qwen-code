@@ -23,6 +23,7 @@ describe('useBranchCommand', () => {
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
+  let rekeySessionId: ReturnType<typeof vi.fn>;
   let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
@@ -59,6 +60,7 @@ describe('useBranchCommand', () => {
     settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    rekeySessionId,
     clearPendingState,
     setSessionName,
     remount,
@@ -98,6 +100,7 @@ describe('useBranchCommand', () => {
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    rekeySessionId = vi.fn();
     clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
@@ -296,10 +299,12 @@ describe('useBranchCommand', () => {
     });
 
     expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
-    // UI never swapped to the fork; the stats display is only re-keyed back
-    // to the parent.
-    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
-    expect(startNewSessionUI).toHaveBeenCalledWith(
+    // UI never swapped to the fork; the stats display is re-keyed back to
+    // the parent via the re-key-only primitive, which preserves the
+    // continuing session's promptCount/sessionStartTime.
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(rekeySessionId).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledWith(
       '12345678-aaaa-bbbb-cccc-dddddddddddd',
     );
     expect(clearItems).not.toHaveBeenCalled();
@@ -609,10 +614,12 @@ describe('useBranchCommand', () => {
     );
     // The forward path already keyed the stats display on the fork; the
     // rollback re-keys it back to the parent so usage reads don't hit the
-    // bucket the undo just removed and render zeros.
-    expect(startNewSessionUI).toHaveBeenCalledTimes(2);
-    expect(startNewSessionUI).toHaveBeenNthCalledWith(
-      2,
+    // bucket the undo just removed and render zeros. It must use the
+    // re-key-only primitive so the continuing session's
+    // promptCount/sessionStartTime survive the failed swap.
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledWith(
       '12345678-aaaa-bbbb-cccc-dddddddddddd',
     );
   });
@@ -688,11 +695,14 @@ describe('useBranchCommand', () => {
     // against the parent session.
     expect(initialize).toHaveBeenCalledTimes(2);
     // UI never switched — no cleared history, no UI sessionId swap; the
-    // stats display is only re-keyed back to the parent.
+    // stats display is re-keyed back to the parent via the re-key-only
+    // primitive, preserving the continuing session's
+    // promptCount/sessionStartTime.
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
-    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
-    expect(startNewSessionUI).toHaveBeenCalledWith(oldSessionId);
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(rekeySessionId).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledWith(oldSessionId);
     expect(setSessionName).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
     expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();

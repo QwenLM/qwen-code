@@ -69,6 +69,11 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  /**
+   * Re-key the stats display back to an existing session WITHOUT resetting
+   * its promptCount/sessionStartTime. Rollback path only.
+   */
+  rekeySessionId: (sessionId: string) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -99,6 +104,7 @@ export function useBranchCommand(
     config,
     historyManager,
     startNewSession,
+    rekeySessionId,
     clearPendingState,
     setSessionName,
     remount,
@@ -306,8 +312,9 @@ export function useBranchCommand(
           // already have keyed it to the fork, and SessionStatsProvider seeds
           // its session id once — left on the abandoned fork, every usage
           // display reads a bucket the undo just removed and renders zeros
-          // until the next successful swap.
-          startNewSession(oldSessionId);
+          // until the next successful swap. Re-key only — startNewSession
+          // would reset the continuing session's promptCount/startTime.
+          rekeySessionId(oldSessionId);
         }
         if (forkCreated && !uiSwapped) {
           try {
@@ -333,6 +340,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      rekeySessionId,
       clearPendingState,
       setSessionName,
       remount,

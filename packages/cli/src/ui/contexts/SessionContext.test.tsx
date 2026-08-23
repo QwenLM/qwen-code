@@ -327,6 +327,51 @@ describe('SessionStatsContext', () => {
     uiTelemetryService.reset();
   });
 
+  it('re-keys to an existing session without resetting prompt count or start time', () => {
+    uiTelemetryService.reset();
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    uiTelemetryService.recordSkillInvocation('review', true, 'session-a');
+    uiTelemetryService.recordSkillInvocation('testing', true, 'session-b');
+
+    render(
+      <SessionStatsProvider sessionId="session-a">
+        <TestHarness contextRef={contextRef} />
+      </SessionStatsProvider>,
+    );
+
+    act(() => {
+      contextRef.current?.startNewPrompt();
+      contextRef.current?.startNewPrompt();
+      contextRef.current?.startNewPrompt();
+    });
+    expect(contextRef.current?.stats.promptCount).toBe(3);
+    const startTime = contextRef.current?.stats.sessionStartTime;
+
+    act(() => {
+      contextRef.current?.rekeySessionId('session-b');
+    });
+
+    const stats = contextRef.current?.stats;
+    expect(stats?.sessionId).toBe('session-b');
+    // The user is back on a session they never left: the counters survive,
+    // only the key and its metrics bucket move.
+    expect(stats?.promptCount).toBe(3);
+    expect(stats?.sessionStartTime).toBe(startTime);
+    expect(stats?.metrics.skills).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        testing: { count: 1, success: 1, fail: 0 },
+      },
+    });
+
+    uiTelemetryService.reset();
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

@@ -41,6 +41,11 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  /**
+   * Re-key the stats display back to an existing session WITHOUT resetting
+   * its promptCount/sessionStartTime. Rollback path only.
+   */
+  rekeySessionId: (sessionId: string) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -91,6 +96,7 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
+    rekeySessionId,
     clearPendingState,
     setSessionName,
     remount,
@@ -284,7 +290,9 @@ export function useResumeCommand(
           // SessionStatsProvider seeds its session id once — left on the
           // abandoned session, every usage display reads a bucket the undo
           // just removed and renders zeros until the next successful swap.
-          startNewSession(oldSessionId);
+          // Re-key only — startNewSession would reset the continuing
+          // session's promptCount/startTime.
+          rekeySessionId(oldSessionId);
         }
         addItem(
           {
@@ -304,6 +312,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      rekeySessionId,
       clearPendingState,
       setSessionName,
       remount,

@@ -33,6 +33,7 @@ function renderWithMockedStats(metrics: SessionMetrics) {
     startNewPrompt: vi.fn(),
     seedPromptCount: vi.fn(),
     startNewSession: vi.fn(),
+    rekeySessionId: vi.fn(),
   });
 
   return render(<SkillStatsDisplay />);

@@ -120,6 +120,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        rekeySessionId: vi.fn(),
       }),
     );
 
@@ -137,6 +138,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        rekeySessionId: vi.fn(),
       }),
     );
 
@@ -158,6 +160,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        rekeySessionId: vi.fn(),
       }),
     );
 
@@ -183,6 +186,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
 
     const { result, rerender } = renderHook(() =>
       useResumeCommand({
@@ -190,6 +194,7 @@ describe('useResumeCommand', () => {
         config: null,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -211,6 +216,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -218,6 +224,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -240,6 +247,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
     const clearPendingState = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -292,6 +300,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
         clearPendingState,
       }),
     );
@@ -401,6 +410,7 @@ describe('useResumeCommand', () => {
         // rebuilt history must flow through it, not the raw manager.
         loadHistory: overrideLoadHistory,
         startNewSession: vi.fn(),
+        rekeySessionId: vi.fn(),
       }),
     );
 
@@ -431,6 +441,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
@@ -481,6 +492,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -518,6 +530,7 @@ describe('useResumeCommand', () => {
 
   it('applies collapseOnResume policy when resuming a session', async () => {
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
     const geminiClient = {
       initialize: vi.fn(),
     };
@@ -577,6 +590,7 @@ describe('useResumeCommand', () => {
         settings: settingsWithCollapse,
         historyManager,
         startNewSession,
+        rekeySessionId,
       });
       return { historyManager, resumeCommand };
     });
@@ -616,6 +630,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
     const geminiClient = {
       initialize: vi.fn(),
     };
@@ -671,6 +686,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -696,6 +712,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
 
     const config = {
       getBackgroundTaskRegistry: () => ({
@@ -740,6 +757,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -772,6 +790,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
 
     const config = {
       getBackgroundTaskRegistry: () => ({
@@ -815,6 +834,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -842,6 +862,7 @@ describe('useResumeCommand', () => {
 
   it('rolls core back when persisted Goal state is malformed', async () => {
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
@@ -896,6 +917,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
 
@@ -917,10 +939,12 @@ describe('useResumeCommand', () => {
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',
     );
-    // UI never swapped to the incoming session; the stats display is only
-    // re-keyed back to the old one.
-    expect(startNewSession).toHaveBeenCalledTimes(1);
-    expect(startNewSession).toHaveBeenCalledWith('old-session-id');
+    // UI never swapped to the incoming session; the stats display is
+    // re-keyed back to the old one via the re-key-only primitive, which
+    // preserves the continuing session's promptCount/sessionStartTime.
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(rekeySessionId).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledWith('old-session-id');
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
     // User sees the failure.
@@ -1008,6 +1032,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const rekeySessionId = vi.fn();
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -1015,6 +1040,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        rekeySessionId,
       }),
     );
     await act(async () => {
@@ -1049,9 +1075,11 @@ describe('useResumeCommand', () => {
     );
     // UI never swapped to the incoming session; the stats display is
     // re-keyed back to the old one so usage reads don't hit the bucket the
-    // undo just removed.
-    expect(startNewSession).toHaveBeenCalledTimes(1);
-    expect(startNewSession).toHaveBeenCalledWith('old-session-id');
+    // undo just removed — via the re-key-only primitive, so the continuing
+    // session's promptCount/sessionStartTime survive the failed swap.
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(rekeySessionId).toHaveBeenCalledTimes(1);
+    expect(rekeySessionId).toHaveBeenCalledWith('old-session-id');
   });
 
   it('settles the replay when the resume commits', async () => {
@@ -1068,6 +1096,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession: vi.fn(),
+        rekeySessionId: vi.fn(),
       }),
     );
     await act(async () => {
