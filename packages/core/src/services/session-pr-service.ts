@@ -226,3 +226,24 @@ export function updateSessionPrStates(
     return next;
   });
 }
+
+/**
+ * Replace the sidecar with a precomputed list atomically with respect to
+ * concurrent mutations: the planner runs inside the mutation queue against
+ * the freshest list, so a plan-then-write cycle cannot clobber a binding
+ * that lands between the caller's read and write. The planner returns the
+ * replacement list, or null to leave the file untouched. Resolves with the
+ * persisted list, or null when nothing changed.
+ */
+export function replaceSessionPrs(
+  filePath: string,
+  plan: (existing: SessionPr[]) => SessionPr[] | null,
+): Promise<SessionPr[] | null> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const next = plan(existing);
+    if (next === null) return null;
+    await writeSessionPrs(filePath, next);
+    return next;
+  });
+}

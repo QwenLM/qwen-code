@@ -12,6 +12,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   mergeSessionPrLists,
   readSessionPrs,
+  replaceSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
   writeSessionPrs,
@@ -254,6 +255,46 @@ describe('updateSessionPrStates', () => {
     const persisted = await readSessionPrs(filePath);
     expect(persisted?.find((p) => p.number === 100)?.state).toBe('merged');
     expect(persisted?.find((p) => p.number === 101)).toBeDefined();
+  });
+});
+
+describe('replaceSessionPrs', () => {
+  it('runs the planner against the freshest list inside the queue', async () => {
+    // The planner must see the result of mutations queued ahead of it —
+    // planning from a stale outer read would clobber a binding that lands
+    // between the caller's read and write.
+    await writeSessionPrs(filePath, [entry(100)]);
+    const seen: number[][] = [];
+    const upsert = upsertSessionPr(filePath, {
+      number: 101,
+      url: entry(101).url,
+    });
+    const replace = replaceSessionPrs(filePath, (existing) => {
+      seen.push(existing.map((p) => p.number));
+      return [...existing, entry(102)];
+    });
+    await Promise.all([upsert, replace]);
+    expect(seen).toEqual([[100, 101]]);
+    expect((await readSessionPrs(filePath))?.map((p) => p.number)).toEqual([
+      100, 101, 102,
+    ]);
+  });
+
+  it('leaves the file untouched when the planner returns null', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(await replaceSessionPrs(filePath, () => null)).toBeNull();
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('persists the planner result and returns it', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const persisted = await replaceSessionPrs(filePath, (existing) =>
+      existing.filter((p) => p.number !== 100),
+    );
+    expect(persisted).toEqual([]);
+    // An empty list reads back as null (isValidSessionPrList rejects it).
+    expect(await readSessionPrs(filePath)).toBeNull();
   });
 });
 

@@ -13,8 +13,9 @@ import {
   fetchGitHubPullRequests,
   readSessionPrs,
   readWorktreeSession,
-  upsertSessionPr,
+  replaceSessionPrs,
   type SessionArchiveState,
+  type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
@@ -61,10 +62,16 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
   const trimmed = remote.trim();
   if (!trimmed) return undefined;
   let input = trimmed;
+  // An ssh:// remote's explicit port is the SSH port, almost never the web
+  // port — ssh-derived URLs drop it (scp-style remotes cannot carry one).
+  // An https remote's port IS the web port and must survive.
+  let sshDerived = false;
   if (input.startsWith('git@')) {
     input = `https://${input.slice('git@'.length).replace(':', '/')}`;
+    sshDerived = true;
   } else if (input.startsWith('ssh://')) {
     input = `https://${input.slice('ssh://'.length)}`;
+    sshDerived = true;
   }
   let url: URL;
   try {
@@ -75,7 +82,8 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
   const pathname = url.pathname.replace(/\.git\/?$/, '');
   if (!pathname || pathname === '/') return undefined;
-  return `${url.protocol}//${url.host}${pathname}`.replace(/\/$/, '');
+  const host = sshDerived ? url.hostname : url.host;
+  return `${url.protocol}//${host}${pathname}`.replace(/\/$/, '');
 }
 
 function getRemoteWebUrl(cwd: string): string | undefined {
@@ -248,28 +256,11 @@ export async function backfillWorkspaceSessionPrs(
       }
     }
     if (numbers.length === 0) continue;
-    // The convention number is bound last so it is the sidecar's newest
-    // entry: a capped write evicts the oldest entries, which must be
-    // branch mappings, not the session's own PR.
+    // The convention number is planned last so a fresh write makes it the
+    // sidecar's newest entry: capped lists evict from the oldest end, which
+    // must stay branch mappings, not the session's own PR.
     if (candidate.conventionNumber !== undefined) {
       numbers = [...numbers.slice(1), candidate.conventionNumber];
-    }
-    // Bind only the cap's tail: upsertSessionPr evicts the oldest entries
-    // beyond the cap, so binding more would leave the evicted numbers
-    // looking unbound — re-bound (with a fresh createdAt) on every run,
-    // rotating the list forever instead of converging.
-    if (numbers.length > SESSION_PR_LIST_LIMIT) {
-      result.overLimit += numbers.length - SESSION_PR_LIST_LIMIT;
-      if (candidate.conventionNumber !== undefined) {
-        // Keep the pr-<N> slug's PR and evict the oldest branch-mapped
-        // numbers instead.
-        numbers = [
-          ...numbers.slice(0, -1).slice(-(SESSION_PR_LIST_LIMIT - 1)),
-          candidate.conventionNumber,
-        ];
-      } else {
-        numbers = numbers.slice(-SESSION_PR_LIST_LIMIT);
-      }
     }
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
@@ -281,12 +272,11 @@ export async function backfillWorkspaceSessionPrs(
     } catch {
       existing = null;
     }
-    const have = new Set(existing?.map((pr) => pr.number));
+    const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
+    const urls = new Map<number, string>();
+    const states = new Map<number, SessionPr['state']>();
     for (const number of numbers) {
-      if (have.has(number)) {
-        result.alreadyBound += 1;
-        continue;
-      }
+      if (existingNumbers.has(number)) continue;
       let url = numberToUrl.get(number);
       if (url === undefined && number === candidate.conventionNumber) {
         // Cache the miss too: an unresolvable remote must cost one
@@ -301,26 +291,84 @@ export async function backfillWorkspaceSessionPrs(
         result.unresolved += 1;
         continue;
       }
+      urls.set(number, url);
       const state = numberToState.get(number);
-      try {
-        const persisted = await upsertSessionPr(prPath, {
-          number,
-          url,
-          ...(state ? { state } : {}),
-        });
-        // A capped write can evict a number this run's start-of-run
-        // snapshot still counts as bound — including the convention
-        // number when an earlier run left it in the oldest slot. Rebuild
-        // `have` from what is actually on disk so an evicted number is
-        // re-bound later in this loop instead of silently dropped.
-        have.clear();
-        for (const entry of persisted) have.add(entry.number);
-      } catch {
-        // One unwritable sidecar must not abort the whole workspace.
-        result.writeErrors = (result.writeErrors ?? 0) + 1;
-        continue;
+      if (state !== undefined) states.set(number, state);
+    }
+    // Plan the final list before writing anything. The cap is shared with
+    // entries this run did not resolve and cannot re-resolve (dialog-created
+    // bindings, PRs that fell out of the gh window): reserve their slots
+    // first, then trim the resolved numbers, counting the displaced in
+    // overLimit. Sequential capped upserts instead cascaded — each write
+    // evicted an entry a later run re-bound by evicting the next one,
+    // rotating the list until it deleted bindings reported as preserved.
+    const droppable = new Set(
+      numbers.filter(
+        (number) => existingNumbers.has(number) || urls.has(number),
+      ),
+    );
+    const foreignCount = (existing ?? []).filter(
+      (entry) => !droppable.has(entry.number),
+    ).length;
+    const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
+    let planned = numbers.filter((number) => droppable.has(number));
+    if (planned.length > slots) {
+      result.overLimit += planned.length - slots;
+      const convention = candidate.conventionNumber;
+      if (slots === 0) {
+        planned = [];
+      } else if (
+        convention !== undefined &&
+        planned[planned.length - 1] === convention
+      ) {
+        // Keep the pr-<N> slug's PR and displace the oldest branch-mapped
+        // numbers instead.
+        const branchSlots = slots - 1;
+        planned = [
+          ...(branchSlots > 0 ? planned.slice(0, -1).slice(-branchSlots) : []),
+          convention,
+        ];
+      } else {
+        planned = planned.slice(-slots);
       }
-      result.bound += 1;
+    }
+    const plannedSet = new Set(planned);
+    result.alreadyBound += planned.filter((number) =>
+      existingNumbers.has(number),
+    ).length;
+    const createdAt = new Date().toISOString();
+    const additions: SessionPr[] = planned
+      .filter((number) => !existingNumbers.has(number))
+      .map((number) => {
+        const state = states.get(number);
+        return {
+          number,
+          // A planned number that is not already bound was resolved above.
+          url: urls.get(number) as string,
+          createdAt,
+          ...(state !== undefined ? { state } : {}),
+        };
+      });
+    try {
+      const persisted = await replaceSessionPrs(prPath, (fresh) => {
+        const freshNumbers = new Set(fresh.map((entry) => entry.number));
+        const kept = fresh.filter(
+          (entry) =>
+            plannedSet.has(entry.number) || !droppable.has(entry.number),
+        );
+        const next = [
+          ...kept,
+          ...additions.filter((entry) => !freshNumbers.has(entry.number)),
+        ];
+        return next.length === fresh.length &&
+          next.every((entry, index) => entry === fresh[index])
+          ? null
+          : next;
+      });
+      if (persisted !== null) result.bound += additions.length;
+    } catch {
+      // One unwritable sidecar must not abort the whole workspace.
+      result.writeErrors = (result.writeErrors ?? 0) + 1;
     }
   }
   return result;
