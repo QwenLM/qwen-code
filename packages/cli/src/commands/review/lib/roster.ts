@@ -69,6 +69,11 @@ export interface RosterPlan {
   prNumber?: unknown;
   untrackedFiles?: unknown;
   /**
+   * The wrapper-vocabulary signal the capturing command computed from the diff
+   * (diff-plan.ts). Gates Agent 1e; the gate fails safe (see `hasWrapperTypes`).
+   */
+  wrapperSignal?: unknown;
+  /**
    * The review's effort, as the capturing command recorded it (`--effort`).
    * `'medium'` is the balanced tier and drops the adversarial personas; anything
    * else — including absent — keeps the full roster. It lives in the plan, not in
@@ -109,6 +114,23 @@ function hasDeletions(plan: RosterPlan): boolean {
   // one return; a removed guard nobody looked for costs whatever it was guarding.
   if (files.length === 0) return true;
   return files.some((f) => Number(f?.removedLines ?? 0) > 0);
+}
+
+/**
+ * Does the diff signal a wrapping type — the gate for Agent 1e.
+ *
+ * Only an EXPLICIT `wrapperSignal: false` answers no. The signal is a cheap
+ * vocabulary heuristic computed at capture time (diff-plan.ts) with imperfect
+ * recall, and since this change also removes the wrapper-routing clause from
+ * Agent 1a, a miss here would leave the class owned by nobody — so everything
+ * but the one value a current capture command writes is "run the check": an
+ * absent field (a plan an older CLI wrote — the version skew this skill has
+ * already measured once), `true`, or junk. Same asymmetry as `hasDeletions`:
+ * an agent with nothing to find costs one return; a wrapper that re-enters
+ * itself costs whatever it wraps.
+ */
+function hasWrapperTypes(plan: RosterPlan): boolean {
+  return plan.wrapperSignal !== false;
 }
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
@@ -230,6 +252,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The two checks promoted out of Agent 1a's line-by-line brief (#9788):
+      // a checklist pattern-match and a structural routing expectation are
+      // different attention modes from the walk, and folded into it they were
+      // diluted by its rhythm. 1d always runs at high; 1e runs when the diff
+      // signals a wrapping type — fail-safe, see `hasWrapperTypes`.
+      add('1d');
+      if (hasWrapperTypes(plan)) add('1e');
     }
   }
 

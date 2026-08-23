@@ -1551,12 +1551,16 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       // PLAN has no srcDiffLines and no worktree: a diff-only 3A review, and its
       // `files[]` is absent, so the removed-behaviour audit is owed (an unknown
-      // deletion count is not "no deletions"). Pinned literally: this list IS the
-      // contract, and a drift here is a drift in who reviews.
+      // deletion count is not "no deletions") — and no `wrapperSignal`, so the
+      // wrapper/proxy check is owed too (an absent signal is not "no wrapping
+      // types"). Pinned literally: this list IS the contract, and a drift here
+      // is a drift in who reviews.
       const recorded = readRecordedPrompts(plan);
       expect([...recorded.keys()].sort()).toEqual([
         '1a',
         '1b',
+        '1d',
+        '1e',
         '2',
         '3a',
         '3b',
@@ -1570,7 +1574,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('11 agents required');
+      expect(printed).toContain('13 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1578,7 +1582,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 13 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3793,11 +3797,12 @@ describe('lightweight mode — the diff, and nothing else', () => {
     );
   });
 
-  it('stops 1b and 1c asserting what they cannot check', () => {
+  it('stops 1b, 1c and 1e asserting what they cannot check', () => {
     // A precision rule, not a convenience. An agent that cannot grep for a
     // re-establishment and asserts one is missing files a false Critical, and a
-    // false Critical blocks a merge.
-    for (const role of ['1b', '1c'] as const) {
+    // false Critical blocks a merge. 1e's forwarding-completeness walk greps
+    // the wrapper's call sites — a caller outside the diff is the same shape.
+    for (const role of ['1b', '1c', '1e'] as const) {
       const b = buildRoleBrief(LIGHT, role);
       expect(b).toContain('`Confidence: low`');
       expect(b).toContain('must not assert it is missing');
