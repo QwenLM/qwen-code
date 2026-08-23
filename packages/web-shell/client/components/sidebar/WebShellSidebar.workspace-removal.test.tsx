@@ -226,6 +226,9 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         renameSessionCatalog(workspaceCwd, sessionId, displayName);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
+      // These tests render pages straight from listWorkspaceSessions, so the
+      // store-owned pin toggle has no loaded catalog pages to patch.
+      toggleSessionPinned: vi.fn(),
     }),
     useSessionCatalogPolling: useSessionCatalogPollingSpy,
     useSessionCatalogQuery: (

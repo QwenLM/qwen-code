@@ -38,7 +38,12 @@ import {
 } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
+  aboveChurnBar,
+  CHURN_MIN_FRESH,
+  CHURN_STREAK_TO_FILE,
+  churnCensusOf,
   composeReview,
+  nonConvergenceCritical,
   deferrableSuggestionsInline,
   draftedFindingsOf,
   floorEnforcedReroute,
@@ -5572,6 +5577,47 @@ describe('buildLedger', () => {
     expect(l.findings.map((f) => f.id)).toEqual(['R1-2', 'R1-3']);
     expect(l.findings[0]?.title).toBe('still leaking');
   });
+
+  it('keeps the fix-induced marking out of the carried entry title', () => {
+    // The marking is machine vocabulary about how to COUNT the comment, not
+    // part of the claim. Left in, it rides the work list into the next round,
+    // where "R1-2 (fix-induced) the retry guard drops a valid case" is the
+    // text Step 6 re-locates the claim by and the text the status table
+    // prints — the token outliving the round it described, on every carried
+    // entry, forever.
+    const l = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** R1-2: (fix-induced) the guard drops a valid case',
+        },
+      ],
+      [],
+    );
+    expect(l.findings[0].id).toBe('R1-2');
+    expect(l.findings[0].title).toBe('the guard drops a valid case');
+    expect(l.findings[0].title).not.toContain('fix-induced');
+
+    // ...and the stripping happens ONLY beside an id. With no id there is no
+    // entry for the token to qualify, so it is ordinary claim text and must
+    // survive into the title — stripping it there would edit a finding's own
+    // words on the strength of a word it happened to open with.
+    const idless = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** (fix-induced) a brand new hole',
+        },
+      ],
+      [],
+    );
+    expect(idless.findings[0].id).toBe('R4-1');
+    expect(idless.findings[0].title).toBe('(fix-induced) a brand new hole');
+  });
 });
 
 describe('the ledger marker reaches the POSTED body', () => {
@@ -7552,7 +7598,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // `contextUnavailableClause` is `keep: 1` so the rung-3 cut spends
     // blockers before the diff-only trust warning; no truncation fixture
     // carried the clause, so deleting the tag shipped green — the untagged
-    // clause sorted to rank 3 and the cut spent the warning first.
+    // clause sorted to `keep` 3 (the cut's axis, not a `trim` rank) and the
+    // cut spent the warning first.
     const r = composeReview(
       base({
         criticalsInline: 1,
@@ -9379,9 +9426,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // against a 56,830-character budget. Shed early it could pay for at
     // most 4% of an overflow, so any overflow bigger than itself spent it
     // AND went on to spend the disclosures — and the rounds this fires on
-    // are the high-volume ones where that is the normal case. It is rank 3
-    // now: the last rank to go, because it is the cheapest to keep and the
-    // only one whose reader is the PR author alone.
+    // are the high-volume ones where that is the normal case. It is trim
+    // rank 3 now: the last rank to go, because it is the cheapest to keep
+    // and the only one whose reader is the PR author alone.
     //
     // The blocker is sized to land in the window where the ladder sheds
     // rank 2 and stops. To retune after a body-copy change: raise it until
@@ -9419,9 +9466,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // notice say so instead of the paragraph vanishing silently.
     //
     // Sized one rung past the test above: the ladder sheds rank 2, still
-    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
-    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
-    // appears.
+    // does not fit, sheds trim rank 3, and stops before the hard cut. To
+    // retune: raise it until `Convergence:` disappears, and stop before
+    // `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -9723,6 +9770,48 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.findings.map((x) => x.id)).toEqual(['R2-1', 'R4-1']);
     expect(marker.fresh).toBe(1);
     expect(r.postedFresh).toBe(1);
+  });
+
+  it('counts a fix-induced re-report as first-time work', () => {
+    // Issue #9674. A carried id means two different things since the
+    // fix-induced disposition shipped: a claim re-asserted, and a NEW defect
+    // wearing the id of the entry whose fix produced it. Reading the id alone
+    // called both re-posts, so the trend's baseline fell on exactly the
+    // churning pull requests where new work was not falling.
+    //
+    // Both arms over ONE fixture: same id, same work list, same everything
+    // but the marking. Without the differential the assertion would pass on
+    // a count that simply never moves.
+    const round = (body: string) => {
+      sideFile({
+        round: 3,
+        posted: 1,
+        fresh: 1,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'src/p.ts', title: 'x' }],
+      });
+      return composeReview({
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        draftedComments: [{ path: 'src/p.ts', line: 1, body }],
+      });
+    };
+    const stillStands = round('**[Critical]** R2-1: still open');
+    expect(parseLedger(stillStands.body)!.fresh).toBe(0);
+    expect(stillStands.postedFresh).toBe(0);
+
+    const fixInduced = round(
+      '**[Critical]** R2-1: (fix-induced) the fix opened a new hole',
+    );
+    expect(parseLedger(fixInduced.body)!.fresh).toBe(1);
+    expect(fixInduced.postedFresh).toBe(1);
+    // ...and the id still carries, so the author still reads one thread for
+    // the site. Counting it first-time is a change to the COUNT, never to
+    // which finding the comment is.
+    const marker = parseLedger(fixInduced.body)!;
+    expect(marker.findings.map((x) => x.id)).toEqual(['R2-1']);
+    expect(marker.findings[0].title).toBe('the fix opened a new hole');
   });
 
   it('re-mints a stray id, and keeps one a shortened list may have shed', () => {
@@ -10428,6 +10517,520 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   });
 });
 
+describe('the convergence census and the non-convergence finding', () => {
+  // The reviewer-side half of #9578. The loop's largest single source of its
+  // own next round is the fix round before it; this is the machinery that
+  // MEASURES that and, after two rounds counted against the bar, says so as
+  // a blocker instead of filing a third round of derived findings.
+  const prevLedger = (over: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...over }),
+    );
+  // The census's denominator is cross-checked against everything the round
+  // reports, so a fixture claiming `fresh` findings must REPORT them: one
+  // drafted comment per first-appearing finding.
+  const round = (
+    convergence: unknown,
+    planOpts: Record<string, unknown> = {},
+  ) => {
+    const fresh = (convergence as { fresh?: number } | undefined)?.fresh;
+    return composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        ...planOpts,
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      ...(convergence === undefined
+        ? {}
+        : { convergence: convergence as { fresh: number; induced: number } }),
+      draftedComments: Array.from(
+        { length: Math.max(fresh ?? 1, 1) },
+        (_, i) => ({
+          path: 'src/a.ts',
+          line: i + 1,
+          body: `**[Suggestion]** finding ${i + 1}`,
+        }),
+      ),
+    });
+  };
+
+  it('reads a census only when it can be one', () => {
+    expect(churnCensusOf({ fresh: 10, induced: 5 })).toEqual({
+      fresh: 10,
+      induced: 5,
+    });
+    expect(churnCensusOf({ fresh: 0, induced: 0 })).toEqual({
+      fresh: 0,
+      induced: 0,
+    });
+    // `induced` counts a SUBSET of `fresh`. A numerator past its denominator
+    // is not a large ratio, it is a census that cannot be true — and this
+    // field comes from a model-written state file, so the failing direction
+    // is to decide nothing with it rather than to clamp it into a ratio that
+    // would clear every bar.
+    expect(churnCensusOf({ fresh: 4, induced: 5 })).toBeNull();
+    expect(churnCensusOf({ fresh: 4.5, induced: 3 })).toBeNull();
+    expect(churnCensusOf({ fresh: 4, induced: -1 })).toBeNull();
+    expect(churnCensusOf({ fresh: 4 })).toBeNull();
+    expect(churnCensusOf({ fresh: '4', induced: '2' })).toBeNull();
+    expect(churnCensusOf(undefined)).toBeNull();
+  });
+
+  it('sets the bar at half or more, over a round big enough to have one', () => {
+    // A ratio over two or three findings is rounding, not a trend: 2/2 is
+    // 100% and says nothing, which is what the minimum exists to refuse.
+    expect(aboveChurnBar({ fresh: CHURN_MIN_FRESH - 1, induced: 3 })).toBe(
+      false,
+    );
+    // Exactly the minimum is the weakest statement that is still a statement
+    // — pinned from BOTH sides, or a raised constant silently disarms the
+    // streak at exactly four first-appearing findings.
+    expect(aboveChurnBar({ fresh: CHURN_MIN_FRESH, induced: 2 })).toBe(true);
+    // And the bar itself is half or more, not the measured baseline: roughly
+    // a third of an ordinary re-review's findings are fix-induced, so a bar
+    // set there would fire on every pull request that ever gets a second
+    // round.
+    expect(aboveChurnBar({ fresh: 12, induced: 4 })).toBe(false);
+    expect(aboveChurnBar({ fresh: 10, induced: 4 })).toBe(false);
+    expect(aboveChurnBar({ fresh: 10, induced: 5 })).toBe(true);
+    expect(aboveChurnBar({ fresh: 11, induced: 7 })).toBe(true);
+    expect(aboveChurnBar(null)).toBe(false);
+  });
+
+  it('advances the streak without filing on the first round above the bar', () => {
+    prevLedger({ round: 2 });
+    const r = round({ fresh: 10, induced: 6 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(1);
+    // One round above the bar is an ordinary re-review — the fix round
+    // touched the code, so of course this round's findings are on it.
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('files the blocker on the second round counted against the bar', () => {
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 11, induced: 7 });
+    expect(parseLedger(r.body)!.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    // Pins the WHOLE corrected claim: the counted-rounds phrasing (a
+    // reversion to "consecutive" reds) and the half-or-more premise (a
+    // reversion to "most" reds at the even-fresh boundary the bar allows).
+    expect(r.body).toContain(
+      'This pull request is not converging. Of the 11 defects round 4 ' +
+        "newly identified, 7 were introduced by the previous round's fixes " +
+        "for this review's own findings — the 2nd round counted against the " +
+        'churn bar (rounds that could not measure carry the count rather ' +
+        'than reset it), and in every counted round at least half of its ' +
+        "newly identified defects were introduced by the previous round's " +
+        'fixes.',
+    );
+    // It blocks. A claim that the loop cannot close itself is worth nothing
+    // if the review then approves the pull request anyway.
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('rides the GATE channel, so it owes no verifier and caps nothing', () => {
+    // The regression this pins is a one-line move: pushed above
+    // `modelBodyCriticals` instead of below it, the finding becomes one of
+    // the model's Criticals, the verifier-delivery floor demands a verifier
+    // that can never exist for it, and the mechanism turns into a permanent
+    // cap on every round it fires.
+    //
+    // The fixture has to be one where that floor CAN fire, or the assertion
+    // is vacuous — the first cut of this test used a fully covered plan,
+    // where Step 4 is on record, `unverifiedFindings` is false, and the cap
+    // never fires for anybody. So: `coveredPlan(['reverse-audit'])` leaves
+    // the verifier absent, and the third arm below proves the fixture
+    // detects a model Critical before the first two claim it does not detect
+    // this one.
+    const VERIFIER_ABSENT = ['reverse-audit'];
+    prevLedger({ round: 3, churnRounds: 1 });
+    const control = composeReview({
+      planPath: coveredPlan(VERIFIER_ABSENT, { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+    });
+    expect(control.cappedBy).not.toContain('criticals-unverified');
+
+    prevLedger({ round: 3, churnRounds: 1 });
+    const filed = composeReview({
+      planPath: coveredPlan(VERIFIER_ABSENT, { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 11, induced: 7 },
+      // The census's denominator is cross-checked against the round's own
+      // reports, so the fixture must report what its census claims.
+      draftedComments: Array.from({ length: 11 }, (_, i) => ({
+        path: 'src/a.ts',
+        line: i + 1,
+        body: `**[Suggestion]** finding ${i + 1}`,
+      })),
+    });
+    expect(filed.body).toContain('is not converging');
+    expect(filed.cappedBy).not.toContain('criticals-unverified');
+
+    // The fixture's own teeth: a MODEL body Critical on the same plan does
+    // cap. Without this arm, a floor that stopped firing entirely would keep
+    // the two assertions above green and retire the guard silently.
+    const modelCritical = composeReview({
+      planPath: coveredPlan(VERIFIER_ABSENT, { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+    });
+    expect(modelCritical.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('resets the streak on a round that measured itself converging', () => {
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 10, induced: 2 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBeUndefined();
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('CARRIES the streak through a round that could not measure itself', () => {
+    // Absence is a fact about the run — no `commitId`, no worktree, the
+    // context-unavailable state — not an observation that the round
+    // converged. Reading it as zero would let one unmeasurable round wipe a
+    // standing claim about the pull request, which is the cheapest way to
+    // make this mechanism unreachable on exactly the messy pull requests it
+    // exists for.
+    // The streak is set to the FILING bar on purpose: with it carried
+    // through, `churnRounds >= CHURN_STREAK_TO_FILE` holds and the only
+    // thing left standing between this round and a blocker is the
+    // census-in-hand condition. A softer streak would let that condition be
+    // deleted with the suite still green.
+    prevLedger({ round: 3, churnRounds: CHURN_STREAK_TO_FILE });
+    const r = round(undefined);
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('never files on a recovered streak alone', () => {
+    // The streak arrives from a posted review body — another account's
+    // writable surface. Gated on the recovered number alone, a forged
+    // `churnRounds` would block an arbitrary pull request; requiring THIS
+    // round's own census to be above the bar too reduces the worst a forgery
+    // can do to one round of earliness on a genuinely churning PR.
+    prevLedger({ round: 3, churnRounds: 9 });
+    const r = round({ fresh: 20, induced: 1 });
+    expect(r.body).not.toContain('is not converging');
+    expect(parseLedger(r.body)!.churnRounds).toBeUndefined();
+  });
+
+  it('cannot arm itself on round 1, whatever the side file says', () => {
+    // No usable round means no predecessor to have churned against, so the
+    // streak cannot be placed and must not be carried onto a round-1 review.
+    prevLedger({ round: 0, churnRounds: 9 });
+    const r = round({ fresh: 11, induced: 7 });
+    const l = parseLedger(r.body)!;
+    expect(l.round).toBe(1);
+    // And no census either — the symmetric guard. Round 1 has no predecessor
+    // whose fixes could have induced anything, so a shape-valid
+    // `{fresh: 11, induced: 7}` there is the same impossible-census class
+    // `churnCensusOf` refuses for `induced > fresh`. Accepted, it arms the
+    // streak at 1, and the next round's honest above-bar census advances to
+    // 2 and files the blocker one round early — asserting "in every counted
+    // round at least half..." of a round that has no counted predecessor. A
+    // legitimate round-1 census can only carry `induced = 0`, which never
+    // trips the bar, so refusing it changes no verdict.
+    expect(l.churnRounds).toBeUndefined();
+    expect(r.body).not.toContain('is not converging');
+    // The refusal arms nothing but breaks nothing: round 2, with a real
+    // predecessor, reads its honest above-bar census and arms the streak
+    // exactly once — the filing still needs its two counted rounds.
+    prevLedger({ round: 1 });
+    const r2 = round({ fresh: 11, induced: 7 });
+    const l2 = parseLedger(r2.body)!;
+    expect(l2.churnRounds).toBe(1);
+    expect(r2.body).not.toContain('is not converging');
+  });
+
+  it('refuses a census that out-counts the round’s own reports', () => {
+    // The census is model-written, and the module holds the cross-check
+    // that needs no verifier: a FRESH finding only exists as something the
+    // round reports — inline, body or deferred — so a denominator past all
+    // three channels combined cannot be describing this round. Without the
+    // bound, a round that reports nothing files the blocker on the model's
+    // say-so alone.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 11, induced: 7 },
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toContain('is not converging');
+    const l = parseLedger(r.body)!;
+    // The refused census arms nothing; the streak carries, exactly as an
+    // absent census does.
+    expect(l.churnRounds).toBe(1);
+  });
+
+  it('pins the three-channel sum on BOTH non-drafted channels', () => {
+    // The cross-check's denominator sums inline drafts, body Criticals and
+    // deferrals, but the suite exercised the sum with only the drafted term
+    // populated — dropping either other term from the sum shipped green. A
+    // round reporting its first-appearing findings through body Criticals or
+    // deferrals would then trip `fresh > reported`, the census would be
+    // refused, and the streak carried instead of reset on a converging
+    // round: a genuinely churning PR's blocker arriving one round early,
+    // caused by the module itself. Each arm reports its whole census through
+    // ONE non-drafted channel, at the boundary from both sides.
+    const deferral = (i: number): DeferredEntry => ({
+      file: 'src/a.ts',
+      line: i + 1,
+      source: 'review',
+      severity: 'Suggestion',
+      title: `deferral ${i + 1}`,
+    });
+    // Equality — accepted: fresh equals the channel count, below the bar,
+    // so the streak RESETS. A mutant dropping the term refuses the census,
+    // carries the streak, and reds on the undefined assertion.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const byBody = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      bodyCriticals: ['blocker 1', 'blocker 2', 'blocker 3', 'blocker 4'],
+    });
+    expect(parseLedger(byBody.body)!.churnRounds).toBeUndefined();
+
+    prevLedger({ round: 3, churnRounds: 1 });
+    const byDeferral = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      deferredSuggestions: [deferral(0), deferral(1), deferral(2), deferral(3)],
+    });
+    expect(parseLedger(byDeferral.body)!.churnRounds).toBeUndefined();
+
+    // One past — refused: the streak CARRIES. Pins the `>` boundary in the
+    // deferral channel (the drafted channel's refusal is pinned above).
+    prevLedger({ round: 3, churnRounds: 1 });
+    const onePast = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 2 },
+      deferredSuggestions: [deferral(0), deferral(1), deferral(2)],
+    });
+    const l = parseLedger(onePast.body)!;
+    expect(l.churnRounds).toBe(1);
+    expect(onePast.body).not.toContain('is not converging');
+  });
+
+  it("never borrows the posting trend's words for its own count", () => {
+    // The two counts in one body: this blocker counts DEFECTS newly
+    // identified, the convergence diagnosis counts inline comments POSTED
+    // for the first time, and they legitimately differ — this one takes
+    // every finding the round newly identified, the trend only those that
+    // reached the pull request as a first-time comment. (A fix-induced
+    // re-report used to be the sharpest case of the two diverging; since
+    // #9674 the trend counts a MARKED one as first-time too, and an
+    // unmarked carried id is still a re-post there.) They collided in
+    // VOCABULARY, not arithmetic: "findings first
+    // filed in round 4" sat beside "2 of them reported for the first time"
+    // over the same round, so one body published two numbers under one
+    // phrase and neither could be trusted. Pin the separation from both
+    // sides — the words this sentence must use, and the ones it must not.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 11, induced: 7 });
+    expect(r.body).toContain('11 defects round 4 newly identified');
+    expect(r.body).toContain('newly identified defects were introduced');
+    expect(r.body).not.toContain('first filed');
+    expect(r.body).not.toContain('first-appearing');
+  });
+
+  it('sums the channels rather than taking the largest of them', () => {
+    // Every arm above populates exactly ONE channel, so the suite pinned
+    // which channels are counted but never that they are ADDED. A
+    // non-additive reduction — `Math.max(drafted, body, deferred)` — ships
+    // green against all of them and diverges only where two channels are
+    // populated together, which is the ordinary shape of a round with body
+    // blockers beside inline findings.
+    //
+    // Split 4 across two channels at the equality boundary: the sum reads 4,
+    // accepts the census, and (1 of 4 induced, below the bar) RESETS the
+    // streak. Under a max mutant the denominator reads 2, `fresh > reported`
+    // trips, the census is refused, and the streak CARRIES — so a converging
+    // round keeps a standing claim it should have cleared, and the blocker
+    // lands a round early on the next above-bar round.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const mixed = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** one' },
+        { path: 'src/a.ts', line: 4, body: '**[Suggestion]** two' },
+      ],
+      bodyCriticals: ['blocker 1', 'blocker 2'],
+    });
+    const l = parseLedger(mixed.body)!;
+    expect(l.churnRounds).toBeUndefined();
+    expect(mixed.body).not.toContain('is not converging');
+  });
+
+  it('CARRIES the streak through a below-minimum census', () => {
+    // Three findings cannot speak for a trend — that is what CHURN_MIN_FRESH
+    // exists to refuse — so a sub-minimum census is a round that COULD NOT
+    // measure, exactly as an absent one is: it carries the count without
+    // adding to it. Resetting instead wiped a standing claim on exactly the
+    // looping shape this mechanism targets: a pull request alternating
+    // above-bar rounds with below-minimum rounds then never reached the
+    // filing bar, because every small round zeroed what the churning one
+    // had counted.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 3, induced: 3 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(1);
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('never files the blocker ON a below-minimum census', () => {
+    // The carry above must not turn a carried streak into a filing this
+    // round cannot itself vouch: the filing condition's invariant is that
+    // the round filing is measurably churning. With the reset softened to a
+    // carry, a streak already at the bar and a sub-minimum census in hand
+    // satisfy `churnCensus && churnRounds >= CHURN_STREAK_TO_FILE` — the
+    // explicit above-bar guard is what keeps the blocker off a round of
+    // three findings. The guard's revival is the code's own contract for
+    // softening the reset (see the filing-condition comment).
+    prevLedger({ round: 3, churnRounds: CHURN_STREAK_TO_FILE });
+    const r = round({ fresh: 3, induced: 3 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    expect(r.body).not.toContain('is not converging');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('the alternating loop DOES reach the filing bar', () => {
+    // The defect the carry closes, end to end: above-bar, below-minimum,
+    // above-bar. Under the old reset the middle round zeroed the streak and
+    // the blocker never fired; with the carry, the third round counts as
+    // the second counted round and files.
+    prevLedger({ round: 2 });
+    const first = round({ fresh: 10, induced: 6 });
+    expect(parseLedger(first.body)!.churnRounds).toBe(1);
+    prevLedger({ round: 3, churnRounds: 1 });
+    const small = round({ fresh: 3, induced: 3 });
+    expect(parseLedger(small.body)!.churnRounds).toBe(1);
+    prevLedger({ round: 4, churnRounds: 1 });
+    const third = round({ fresh: 11, induced: 7 });
+    expect(parseLedger(third.body)!.churnRounds).toBe(CHURN_STREAK_TO_FILE);
+    expect(third.body).toContain('is not converging');
+    expect(third.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('keeps filing on every counted round past the streak bar', () => {
+    // Pins the `>=` in the filing condition: every other filing test lands
+    // the streak at exactly the bar, so mutating `>=` to `===` keeps them
+    // green while a genuinely churning pull request — blocker already
+    // filed, next round above the bar again — silently never receives it
+    // again. The ordinal assertion doubles as the `rd` pin for
+    // `ordinalSuffix`.
+    prevLedger({ round: 4, churnRounds: CHURN_STREAK_TO_FILE });
+    const r = round({ fresh: 12, induced: 8 });
+    expect(r.body).toContain('the 3rd round counted against the churn bar');
+    expect(parseLedger(r.body)!.churnRounds).toBe(3);
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('renders the ordinal past the filing bar — rd, teen th, and st', () => {
+    // `ordinalSuffix` is exercised at streak 2 only by the filing tests;
+    // the `rd` branch, the teens guard and the `st` branch are reachable on
+    // a genuinely churning pull request (the streak caps at
+    // LEDGER_MAX_ROUND), and a "11st" inside the blocker must not ship with
+    // the suite green.
+    const body = (streak: number) =>
+      nonConvergenceCritical({ fresh: 11, induced: 7 }, streak, streak + 2);
+    expect(body(3)).toContain('the 3rd round counted');
+    expect(body(11)).toContain('the 11th round counted');
+    expect(body(12)).toContain('the 12th round counted');
+    expect(body(21)).toContain('the 21st round counted');
+  });
+
+  it('clamps a side-file streak to the file round, as the marker read does', () => {
+    // `parseLedger` clamps a recovered marker's streak to the marker's own
+    // round; the side file is the same untrusted shape arriving by another
+    // route (a planted or hand-edited file), and this read applied only the
+    // LEDGER_MAX_ROUND cap. An unclamped streak then armed the bar past
+    // every round the pull request ever ran — one honest above-bar round
+    // later, the blocker filed claiming a 10000-round streak after a single
+    // counted round, against the mechanism's documented bound that reaching
+    // the bar takes at least two above-bar rounds. The clamp restores the
+    // marker path's invariant: a streak cannot name more counted rounds
+    // than the file's round. The filing still needs this round's own
+    // above-bar census, so the worst a clamped plant reaches is the one
+    // round of earliness the mechanism documents for forged streaks.
+    prevLedger({ round: 5, churnRounds: 9999 });
+    const r = round({ fresh: 11, induced: 7 });
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(6);
+    expect(r.body).toContain('the 6th round counted against the churn bar');
+    expect(r.body).not.toContain('the 10000th');
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a census under context-unavailable, symmetric with round 1', () => {
+    // The census rule instructs omission under the context-unavailable
+    // state — the fix-induced test's age operand cannot be computed without
+    // a context, so a census presented in that state did not come from the
+    // mechanical test that defines "measured". Round 1, the other
+    // unmeasurable state, is refused by the module itself; this one was
+    // left to the model's obedience, and a census accepted under it filed
+    // the blocker while `cappedBy` carried 'context-unavailable' inert.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      contextUnavailable: true,
+      convergence: { fresh: 11, induced: 7 },
+      draftedComments: Array.from({ length: 11 }, (_, i) => ({
+        path: 'src/a.ts',
+        line: i + 1,
+        body: `**[Suggestion]** finding ${i + 1}`,
+      })),
+    });
+    expect(r.cappedBy).toContain('context-unavailable');
+    // Refused as no census at all — the streak carries, exactly as absence
+    // does — so nothing files and the cap is the only effect.
+    expect(r.body).not.toContain('is not converging');
+    expect(r.event).toBe('COMMENT');
+    const l = parseLedger(r.body)!;
+    expect(l.churnRounds).toBe(1);
+  });
+});
+
 describe('deferrableSuggestionsInline — the manifestation the posture-gap clause asserts', () => {
   // Direct pin on the three-way exclusion, which downstream tests reach only
   // through composeReview: a future exclusion path that diverges from
@@ -10563,5 +11166,100 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
         critical({ path: 42 }),
       ]),
     ).toEqual([{ file: '' }, { file: '' }]);
+  });
+
+  it('reads the fix-induced marking beside the id it qualifies', () => {
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: (fix-induced) the new hole' }),
+    ]);
+    expect(d.carriedId).toBe('R1-2');
+    expect(d.fixInduced).toBe(true);
+    // A still-stands re-post is the SAME id shape without the marking, and
+    // must stay a re-post: the whole point of the token is that a carried id
+    // no longer answers the first-time question on its own.
+    const [plain] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: the same old claim' }),
+    ]);
+    expect(plain.carriedId).toBe('R1-2');
+    expect(plain.fixInduced).toBeUndefined();
+  });
+
+  it('tolerates case and inner spacing in the marking', () => {
+    // It governs a COUNT, never which finding a comment is, so the reading is
+    // deliberately lenient. A spelling it still misses costs the count and
+    // nothing else — the id is already in hand by then.
+    for (const marked of [
+      '**[Critical]** R1-2: (Fix-Induced) x',
+      '**[Critical]** R1-2: ( fix-induced ) x',
+      '**[Critical]** R1-2: (FIX-INDUCED)- x',
+    ]) {
+      const [d] = draftedFindingsOf([critical({ body: marked })]);
+      expect(d.carriedId).toBe('R1-2');
+      expect(d.fixInduced).toBe(true);
+    }
+  });
+
+  it('ignores the marking where there is no id to qualify', () => {
+    // Nothing induced a defect that names no previous entry, and the comment
+    // is already counted first-time by the absent id. Honouring the token
+    // there would let a stray parenthetical speak about an entry the comment
+    // does not name.
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** (fix-induced) a brand new hole' }),
+    ]);
+    expect(d.carriedId).toBeUndefined();
+    expect(d.fixInduced).toBeUndefined();
+  });
+
+  it('never emits the marking without the id it qualifies', () => {
+    // The shape invariant, pinned where it is actually reachable: a SECOND
+    // draft under an id this round already spent has its `carriedId` dropped
+    // (the ledger mints it a fresh one), and the marking must go with it.
+    // Kept, the finding would claim to have been induced by an entry it no
+    // longer names — a shape this field's own contract forbids.
+    //
+    // This case is why the assertion above could not carry the whole rule:
+    // there the id is absent because the body has none, and the two gates
+    // that enforce this — the readback's and the projection's — masked each
+    // other, so neither could be reddened alone.
+    const both = draftedFindingsOf([
+      critical({ body: '**[Critical]** R2-1: (fix-induced) first' }),
+      critical({ body: '**[Critical]** R2-1: (fix-induced) second' }),
+    ]);
+    expect(both[0].carriedId).toBe('R2-1');
+    expect(both[0].fixInduced).toBe(true);
+    expect(both[1].carriedId).toBeUndefined();
+    expect(both[1].fixInduced).toBeUndefined();
+  });
+
+  it('never lets the marking cost the id', () => {
+    // The reason the token sits AFTER the separator instead of inside the id
+    // grammar. `LEDGER_ID_READBACK` is shared with `idFor`, so widening it to
+    // swallow a parenthetical would put the ledger's carry on the same regex
+    // as a model-written adjective: a spacing the wider grammar failed to
+    // anticipate would stop matching the id and the finding would be silently
+    // renumbered.
+    //
+    // Written as a DIFFERENTIAL rather than as a list of ids to expect. The
+    // first cut asserted `R1-2:(fix-induced) x` carries its id and reddened —
+    // correctly: `R1-2:claim` loses the id with no marking anywhere near it,
+    // because the shared grammar wants whitespace after the separator. That
+    // is pre-existing and not this token's business. What IS this token's
+    // business is that it changes nothing: every shape reads exactly the id
+    // it would have read with the marking deleted.
+    const idOf = (body: string) =>
+      draftedFindingsOf([critical({ body })])[0]?.carriedId;
+    for (const [marked, bare] of [
+      ['**[Critical]** R1-2: (fix-induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2 (fix-induced) x', '**[Critical]** R1-2 x'],
+      ['**[Critical]** R1-2: (fix induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2: (fix-induced x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2:(fix-induced) x', '**[Critical]** R1-2:x'],
+    ]) {
+      expect(idOf(marked)).toBe(idOf(bare));
+    }
+    // ...and the differential is not vacuously true because every arm is
+    // undefined: the prescribed shape does carry its id.
+    expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
   });
 });
