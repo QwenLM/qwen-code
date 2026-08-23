@@ -79,7 +79,8 @@ Then run:
 "${QWEN_CODE_CLI:-qwen}" review presubmit \
   {pr_number} {commit_sha} {owner}/{repo} \
   .qwen/tmp/qwen-review-{target}-presubmit.json \
-  [--new-findings .qwen/tmp/qwen-review-{target}-new-findings.json]
+  [--new-findings .qwen/tmp/qwen-review-{target}-new-findings.json] \
+  [--host <host>]     # the PR's host — pass for every PR target, including github.com (pins the platform)
 ```
 
 Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
@@ -198,6 +199,7 @@ Then reference each finding's `assets` URLs in its inline comment body as `![evi
 - **Unauthorised run, no publish** — it reads the same verbatim args record `submit` reads, through the same shared gate (`lib/authorization.ts`), and refuses unless this run was authorised to post the review itself (an effective `--comment` naming this PR — typed as the flag or standing via the `review.comment` setting — or `--user-authorized` under Step 7's rules). A terminal-only review must not push the PR's behaviour to a public branch. Since an effective `--comment` forces high effort at Step 1's parse, a run started under one cannot be low or medium — no separate rule needed. (One stability assumption: the gate re-resolves `review.comment` at write time, so it reflects the setting as it stands then, not as it stood at Step 1 — an operator who enables it mid-session thereby authorises the run in hand, and Step 7's effort rule, which declines low and medium runs independently of the gate, is what still holds the tier in that case.)
 - **Images only, capped** — an extension allowlist (png/jpg/jpeg/gif/webp — SVG is a script container and is refused), per-file and per-batch size caps, and all-or-nothing validation: one refused file refuses the batch before anything is pushed.
 - **Immutable references** — files land on `pr-assets/<pr>-review` of the assets repo (the manual `pr-assets/<PR>-verify` convention, suffixed so the two flows never collide), and every URL is pinned to the **commit**, not the branch, so a posted comment's evidence cannot be changed from under it. Content-hashed remote names make a re-run idempotent rather than accumulative.
+- **The weave is last and all-or-nothing** — the `--findings-out` rewrite runs only after every file has landed and the manifest is written, so the artifact either keeps every local `assetFiles` path (any refusal or earlier failure) or carries every published URL; a run that fails partway through the push is completed by an idempotent re-run.
 - **Auditable** — the manifest names every file pushed and the commit they landed on, next to the other review artifacts, where Step 9's sweep and a curious human can find it.
 
 **What you must still judge: the image's content.** The command checks extensions, sizes and image magic bytes (a shell script named `evidence.png` refuses on content) — that catches mislabeled or corrupted captures, not a deliberate payload riding behind a real image header; it cannot see that a terminal screenshot has an env dump in the scrollback. Publish only evidence the review itself produced — a capture of a rendering the verification ran, a before/after the A/B produced — and never a capture of the user's own terminal or editor. When in doubt, keep the finding's evidence as prose and local paths.
