@@ -35,7 +35,7 @@ Provenance remains authoritative for loading and listing, but it does not preven
 
 ## Conflict repair
 
-Archive and unarchive keep their current default behavior: an active/archive conflict is returned as a per-session error and neither transcript is changed.
+Archive and unarchive keep the non-mutating default behavior: an active/archive conflict is returned as a per-session error and neither transcript is changed. The batch lifecycle routes, including workspace-qualified routes, return that outcome in a `200` response instead of the earlier workspace-qualified `409 session_conflict` envelope.
 
 Callers may send `resolveConflicts: true`:
 
@@ -52,7 +52,7 @@ The selected runtime generation is checked after coordinator acquisition, before
 
 ## API compatibility
 
-The REST and ACP archive/unarchive request bodies accept the optional boolean `resolveConflicts`. Omitting it preserves the old conflict behavior. Non-boolean values are invalid requests.
+The REST and ACP archive/unarchive request bodies accept the optional boolean `resolveConflicts`. Omitting it preserves the non-mutating conflict behavior, while the workspace-qualified REST transport now reports the conflict in the batch result as described above. Non-boolean values are invalid requests.
 
 Archive and unarchive responses add `resolvedConflicts`. SDK result types keep that field optional so clients remain compatible with older daemons, while new daemons always return the array. Existing SDK client-ID call forms remain valid; options use an additional overload position.
 

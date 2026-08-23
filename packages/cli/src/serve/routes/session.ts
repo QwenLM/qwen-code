@@ -1156,7 +1156,7 @@ export function registerSessionRoutes(
     } catch (error) {
       if (
         error instanceof SessionStorageEntryError &&
-        error.reason === 'non_regular'
+        error.reason !== 'foreign_project'
       ) {
         return true;
       }
@@ -2013,6 +2013,7 @@ export function registerSessionRoutes(
 
     let internalRuntime: WorkspaceRuntime | undefined;
     let hasInternalSession = false;
+    let hasOrdinaryLiveSession = false;
     const findOrdinarySessions = async (
       sessionId: string,
     ): Promise<Set<WorkspaceRuntime> | undefined> => {
@@ -2020,19 +2021,39 @@ export function registerSessionRoutes(
       for (const entry of workspaceRegistry.listAllEntries()) {
         const generation = entry.current;
         if (entry.internal || !generation) continue;
-        const exists = await hasLifecycleStorageEvidence(
-          createWorkspaceRuntimeSessionService(generation.runtime),
-          sessionId,
-        );
-        if (!exists) continue;
+        const wasCurrent =
+          entry.state === 'active' &&
+          entry.current === generation &&
+          !generation.guard.closed;
+        if (wasCurrent) generation.guard.assertOpen();
+        let exists: boolean;
+        try {
+          exists = await hasLifecycleStorageEvidence(
+            createWorkspaceRuntimeSessionService(generation.runtime),
+            sessionId,
+          );
+        } catch (error) {
+          if (
+            wasCurrent &&
+            (entry.state !== 'active' ||
+              entry.current !== generation ||
+              generation.guard.closed)
+          ) {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          throw error;
+        }
         if (
-          entry.state !== 'active' ||
-          entry.current !== generation ||
-          generation.guard.closed
+          (wasCurrent || exists) &&
+          (entry.state !== 'active' ||
+            entry.current !== generation ||
+            generation.guard.closed)
         ) {
           sendWorkspaceRuntimeUnavailable(res);
           return undefined;
         }
+        if (!exists) continue;
         generation.guard.assertOpen();
         runtimes.add(generation.runtime);
       }
@@ -2057,6 +2078,7 @@ export function registerSessionRoutes(
           candidates.add(owner.runtime);
         } else {
           ordinaryLiveCandidates.add(owner.runtime);
+          hasOrdinaryLiveSession = true;
         }
       }
       if (owner.kind === 'ambiguous') {
@@ -2065,6 +2087,7 @@ export function registerSessionRoutes(
             candidates.add(runtime);
           } else {
             ordinaryLiveCandidates.add(runtime);
+            hasOrdinaryLiveSession = true;
           }
         }
       }
@@ -2084,6 +2107,10 @@ export function registerSessionRoutes(
         candidates.add(runtime);
       }
       if (candidates.size > 0 || hasInternalSession) {
+        if (hasOrdinaryLiveSession && ordinaryLiveCandidates.size === 0) {
+          sendBatchWorkspaceConflict();
+          return undefined;
+        }
         for (const runtime of ordinaryLiveCandidates) {
           candidates.add(runtime);
         }

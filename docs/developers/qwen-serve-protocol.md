@@ -2451,6 +2451,8 @@ Response:
 
 `resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors` and neither file changes. With `resolveConflicts: true`, archive keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
 
+Lifecycle conflicts are batch item outcomes: the workspace-less and workspace-qualified routes return HTTP `200` with the conflict in `errors`. This replaces the earlier workspace-qualified HTTP `409 session_conflict` envelope; clients that called that route must inspect the batch response.
+
 ### `POST /sessions/unarchive`
 
 Restore archived sessions to the active directory. This does not resume the session by itself; it only moves `chats/archive/<id>.jsonl` back to `chats/<id>.jsonl`. After unarchive succeeds, clients may call `POST /session/:id/load` or `POST /session/:id/resume`.
@@ -2473,7 +2475,7 @@ Response:
 }
 ```
 
-`resolveConflicts` is optional and defaults to `false`. By default, an existing active JSONL produces a conflict in `errors` and neither file changes. With `resolveConflicts: true`, unarchive keeps the active copy, removes the archived copy, and reports the id in both `unarchived` and `resolvedConflicts`. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+`resolveConflicts` is optional and defaults to `false`. By default, simultaneous active and archived JSONL files produce a conflict in `errors` and neither file changes; an active-only session is returned in `alreadyActive`. With `resolveConflicts: true`, unarchive keeps the active copy, removes the archived copy, and reports the id in both `unarchived` and `resolvedConflicts`. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
 
 ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 

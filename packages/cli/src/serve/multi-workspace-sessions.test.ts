@@ -2413,6 +2413,43 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('rejects a cross-workspace lifecycle batch independently of id order', async () => {
+    await withRuntimeDir(async () => {
+      const ordinaryId = '550e8400-e29b-41d4-a716-446655440113';
+      const internalId = '550e8400-e29b-41d4-a716-446655440114';
+      const fixture = await writeLifecycleFixture({
+        sessionId: internalId,
+        shape: 'damaged',
+        state: 'active',
+      });
+      const { app } = makeHarness({
+        primarySummaries: [makeSummary(ordinaryId, PRIMARY_CWD)],
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+
+      for (const sessionIds of [
+        [ordinaryId, internalId],
+        [internalId, ordinaryId],
+      ]) {
+        const response = await request(app)
+          .post('/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds });
+
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe('session_workspace_conflict');
+      }
+      await expect(fsp.readFile(fixture.activePath)).resolves.toEqual(
+        fixture.contents,
+      );
+      await expect(fsp.stat(fixture.archivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
   it('rejects an internal physical-only owner when an ordinary persisted owner is transitioning', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440112';

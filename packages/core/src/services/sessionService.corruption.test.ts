@@ -332,6 +332,10 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
 describe('SessionService lifecycle maintenance', () => {
   type Privates = {
     getSessionFilePath: (id: string, state: 'active' | 'archived') => string;
+    sessionBelongsToCurrentProject: (
+      sessionId: string,
+      cwd: string,
+    ) => Promise<boolean>;
   };
 
   function createHarness(content: string, state: 'active' | 'archived') {
@@ -779,6 +783,70 @@ describe('SessionService lifecycle maintenance', () => {
         ).toBe(true);
       }
     }
+  });
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a record naming another session when cwd is missing',
+    async (action) => {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths } = createHarness('', state);
+      const sourcePath = paths[state];
+      const record = {
+        ...recordFor('u1', 'user', null),
+        sessionId: randomUUID(),
+      } as Record<string, unknown>;
+      delete record['cwd'];
+      const content = `${JSON.stringify(record)}\n`;
+      fs.writeFileSync(sourcePath, content);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).resolves.toBe(false);
+      } else {
+        await expect(
+          service[`${action}Sessions`]([sessionId]),
+        ).resolves.toMatchObject({ notFound: [sessionId], errors: [] });
+      }
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
+    },
+  );
+
+  it('rejects an oversized first physical record without buffering the whole file', async () => {
+    const { service, sessionId, paths } = createHarness('', 'active');
+    fs.writeFileSync(paths.active, 'x'.repeat(1024 * 1024 + 1));
+
+    await expect(
+      service.getMaintainableSessionLocation(sessionId),
+    ).rejects.toMatchObject({
+      name: 'SessionStorageEntryError',
+      reason: 'unreadable_record',
+    });
+    expect(fs.statSync(paths.active).size).toBe(1024 * 1024 + 1);
+  });
+
+  it('rejects an in-place rewrite during ownership classification', async () => {
+    const { service, sessionId, paths, cwd } = createHarness('', 'active');
+    fs.writeFileSync(
+      paths.active,
+      `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`,
+    );
+    const inode = fs.statSync(paths.active).ino;
+    vi.spyOn(
+      service as unknown as Privates,
+      'sessionBelongsToCurrentProject',
+    ).mockImplementation(async () => {
+      fs.writeFileSync(paths.active, 'replacement');
+      return true;
+    });
+
+    await expect(
+      service.getMaintainableSessionLocation(sessionId),
+    ).rejects.toThrow('changed outside its active writer');
+    expect(fs.statSync(paths.active).ino).toBe(inode);
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe('replacement');
   });
 
   it.each(['delete', 'archive', 'unarchive'] as const)(

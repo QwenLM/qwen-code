@@ -555,9 +555,11 @@ export class SessionAttachmentStore {
     await fs.rm(directory, { recursive: true, force: true });
   }
 
-  async delete(): Promise<void> {
+  async delete(options: { assertCanCommit?: () => void } = {}): Promise<void> {
+    options.assertCanCommit?.();
     this.closing = true;
     await this.waitForCopy();
+    options.assertCanCommit?.();
     if (!this.closed) {
       this.closed = true;
       this.pendingItems = 0;
@@ -567,7 +569,10 @@ export class SessionAttachmentStore {
     const directory =
       this.persistentDirectory ??
       (await this.directoryPromise?.catch(() => undefined));
-    if (directory) await fs.rm(directory, { recursive: true, force: true });
+    if (directory) {
+      options.assertCanCommit?.();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
   }
 
   private assertStored(reference: SessionAttachmentReference): void {

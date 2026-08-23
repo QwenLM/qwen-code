@@ -11162,11 +11162,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return await entry.attachments.remove(attachmentId);
     },
 
-    async deleteSessionAttachments(sessionId) {
+    async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
         new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
-      await store.delete();
+      await store.delete(options);
     },
 
     removePendingPrompt(sessionId, promptId, context) {

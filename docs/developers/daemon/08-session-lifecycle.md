@@ -248,7 +248,10 @@ Empty, damaged, and orphaned regular transcript files remain eligible for these
 lifecycle operations even when they cannot be loaded as conversations. When
 `session_storage_conflict_repair` is advertised, archive and unarchive accept
 `resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
-the active copy. The default conflict behavior remains unchanged.
+the active copy. Without that option, active/archive conflicts remain
+non-mutating and are returned in the batch `errors` array. Workspace-qualified
+lifecycle routes now use that HTTP `200` batch envelope instead of their earlier
+HTTP `409 session_conflict` response.
 
 ### Context Usage (`session_context_usage` capability tag)
 

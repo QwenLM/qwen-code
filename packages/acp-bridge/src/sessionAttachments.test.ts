@@ -763,6 +763,31 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('checks the runtime generation before deleting persisted attachments', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-fence-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    const reference = await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'kept.bin',
+    );
+    const generationClosed = new Error('generation closed');
+
+    await expect(
+      store.delete({
+        assertCanCommit: () => {
+          throw generationClosed;
+        },
+      }),
+    ).rejects.toBe(generationClosed);
+    await expect(
+      fs.stat(path.join(root, 'session-session-a', reference.attachmentId)),
+    ).resolves.toBeDefined();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
   it('forgets attachments whose backing file disappeared', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'qwen-attachment-gone-'));
     const store = new SessionAttachmentStore(root, 'session-a');

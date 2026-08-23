@@ -170,17 +170,21 @@ interface MaintainableSessionSnapshot {
   identities: MaintainableSessionFileIdentity[];
 }
 
+const MAX_MAINTAINABLE_FIRST_RECORD_BYTES = 1024 * 1024;
+
 export class SessionStorageEntryError extends Error {
   override readonly name = 'SessionStorageEntryError';
 
   constructor(
     readonly sessionId: string,
-    readonly reason: 'non_regular' | 'foreign_project',
+    readonly reason: 'non_regular' | 'foreign_project' | 'unreadable_record',
   ) {
     super(
       reason === 'non_regular'
         ? `Session storage entry for "${sessionId}" is not a regular file.`
-        : `Session "${sessionId}" belongs to a different workspace.`,
+        : reason === 'foreign_project'
+          ? `Session "${sessionId}" belongs to a different workspace.`
+          : `Session storage entry for "${sessionId}" cannot be safely classified.`,
     );
   }
 }
@@ -972,18 +976,21 @@ export class SessionService {
       const firstRecord = await this.readFirstMaintainableRecord(
         fileHandle,
         filePath,
+        sessionId,
       );
-      if (
-        firstRecord &&
-        typeof firstRecord.sessionId === 'string' &&
-        typeof firstRecord.cwd === 'string' &&
-        (firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase() ||
+      if (firstRecord && typeof firstRecord.sessionId === 'string') {
+        if (firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase()) {
+          throw new SessionStorageEntryError(sessionId, 'foreign_project');
+        }
+        if (
+          typeof firstRecord.cwd === 'string' &&
           !(await this.sessionBelongsToCurrentProject(
             firstRecord.sessionId,
             firstRecord.cwd,
-          )))
-      ) {
-        throw new SessionStorageEntryError(sessionId, 'foreign_project');
+          ))
+        ) {
+          throw new SessionStorageEntryError(sessionId, 'foreign_project');
+        }
       }
 
       const current = this.maintainableSessionIdentity(
@@ -999,10 +1006,8 @@ export class SessionService {
         await fileHandle.stat(),
       );
       if (
-        opened.dev !== current.dev ||
-        opened.ino !== current.ino ||
-        opened.dev !== stillOpened.dev ||
-        opened.ino !== stillOpened.ino
+        !this.sameMaintainableSessionIdentity(opened, current) ||
+        !this.sameMaintainableSessionIdentity(opened, stillOpened)
       ) {
         throw new SessionTranscriptChangedError();
       }
@@ -1015,6 +1020,7 @@ export class SessionService {
   private async readFirstMaintainableRecord(
     fileHandle: fs.promises.FileHandle,
     filePath: string,
+    sessionId: string,
   ): Promise<Partial<ChatRecord> | undefined> {
     const buffer = Buffer.allocUnsafe(64 * 1024);
     const decoder = new TextDecoder();
@@ -1025,6 +1031,10 @@ export class SessionService {
         stream: bytesRead > 0,
       });
       let newline = pending.indexOf('\n');
+      const firstLineLength = newline >= 0 ? newline : pending.length;
+      if (firstLineLength > MAX_MAINTAINABLE_FIRST_RECORD_BYTES) {
+        throw new SessionStorageEntryError(sessionId, 'unreadable_record');
+      }
       while (newline >= 0) {
         const line = pending.slice(0, newline).trim();
         pending = pending.slice(newline + 1);
@@ -1306,12 +1316,26 @@ export class SessionService {
     );
   }
 
-  private async removeSessionOrganization(sessionId: string): Promise<void> {
+  private async removeSessionOrganization(
+    sessionId: string,
+    assertCanMutate?: () => void,
+  ): Promise<void> {
     try {
-      await new SessionOrganizationService(this.projectRoot, (message) => {
-        this.warn(message);
-      }).removeSession(sessionId);
+      const service = new SessionOrganizationService(
+        this.projectRoot,
+        (message) => {
+          this.warn(message);
+        },
+      );
+      if (assertCanMutate) {
+        await service.removeSession(sessionId, {
+          assertCanCommit: assertCanMutate,
+        });
+      } else {
+        await service.removeSession(sessionId);
+      }
     } catch (error) {
+      assertCanMutate?.();
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
       );
@@ -1391,12 +1415,14 @@ export class SessionService {
   private async movePrSidecar(
     sourcePath: string,
     destinationPath: string,
+    assertCanMutate?: () => void,
   ): Promise<void> {
     if (!fs.existsSync(sourcePath)) {
       return;
     }
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     if (!fs.existsSync(destinationPath)) {
+      assertCanMutate?.();
       fs.renameSync(sourcePath, destinationPath);
       return;
     }
@@ -1405,8 +1431,15 @@ export class SessionService {
       (await readSessionPrs(sourcePath)) ?? [],
     );
     if (merged.length > 0) {
-      await writeSessionPrs(destinationPath, merged);
+      if (assertCanMutate) {
+        await writeSessionPrs(destinationPath, merged, {
+          assertCanCommit: assertCanMutate,
+        });
+      } else {
+        await writeSessionPrs(destinationPath, merged);
+      }
     }
+    assertCanMutate?.();
     fs.unlinkSync(sourcePath);
   }
 
@@ -2179,7 +2212,7 @@ export class SessionService {
   ): Promise<boolean> {
     const removed = await this.removeSessionFiles(sessionId, options);
     if (removed) {
-      await this.removeSessionOrganization(sessionId);
+      await this.removeSessionOrganization(sessionId, options.assertCanMutate);
     }
     return removed;
   }
@@ -2357,13 +2390,16 @@ export class SessionService {
           await this.movePrSidecar(
             this.getPrSessionPathForState(sessionId, 'active'),
             this.getPrSessionPathForState(sessionId, 'archived'),
+            options.assertCanMutate,
           );
         } catch (sidecarError) {
+          options.assertCanMutate?.();
           this.warn(
             `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
         }
         try {
+          options.assertCanMutate?.();
           this.moveLedgerSidecar(activeLedger, archivedLedger);
         } catch (ledgerError) {
           this.warn(
@@ -2475,8 +2511,10 @@ export class SessionService {
           await this.movePrSidecar(
             this.getPrSessionPathForState(sessionId, 'archived'),
             this.getPrSessionPathForState(sessionId, 'active'),
+            options.assertCanMutate,
           );
         } catch (sidecarError) {
+          options.assertCanMutate?.();
           this.warn(
             `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
@@ -2490,6 +2528,7 @@ export class SessionService {
           'active',
         );
         try {
+          options.assertCanMutate?.();
           this.moveLedgerSidecar(archivedLedger, activeLedger);
         } catch (ledgerError) {
           this.warn(

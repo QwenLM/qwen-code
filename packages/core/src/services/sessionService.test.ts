@@ -2116,6 +2116,37 @@ describe('SessionService', () => {
       );
     });
 
+    it('passes the generation fence to an asynchronous pr-sidecar commit', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
+        );
+      });
+      const entry = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([entry])
+        .mockResolvedValueOnce([entry]);
+      const assertCanMutate = vi.fn();
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        [entry],
+        { assertCanCommit: assertCanMutate },
+      );
+    });
+
     it('should archive JSONL and warn when archiving worktree sidecar fails', async () => {
       mockActiveSessionOnly();
       mockActiveWorktreeSidecarOnly();

@@ -320,14 +320,24 @@ function updateScheduledTaskForMaintenance(
   service: SessionService,
   sessionId: string,
   action: DaemonMaintenanceAction,
+  assertCanMutate?: () => void,
 ): Promise<void> {
   if (action === 'archive') {
-    return disableTasksForSessions(service.getProjectRoot(), [sessionId]);
+    return disableTasksForSessions(service.getProjectRoot(), [sessionId], {
+      assertCanCommit: assertCanMutate,
+    });
   }
   if (action === 'unarchive') {
-    return enableTasksForSessions(service.getProjectRoot(), [sessionId]);
+    return enableTasksForSessions(
+      service.getProjectRoot(),
+      [sessionId],
+      Date.now(),
+      { assertCanCommit: assertCanMutate },
+    );
   }
-  return removeTasksForSessions(service.getProjectRoot(), [sessionId]);
+  return removeTasksForSessions(service.getProjectRoot(), [sessionId], {
+    assertCanCommit: assertCanMutate,
+  });
 }
 
 type DeleteOneResult =
@@ -380,7 +390,12 @@ async function deletePersistedSessionWithLease(
       (await classifySessionLocation(service, sessionId)) === undefined,
     afterMutationApplied: async () => {
       assertCanMutate?.();
-      await updateScheduledTaskForMaintenance(service, sessionId, 'delete');
+      await updateScheduledTaskForMaintenance(
+        service,
+        sessionId,
+        'delete',
+        assertCanMutate,
+      );
     },
   });
   if (mutation.error !== undefined) {
@@ -446,7 +461,13 @@ export async function deleteDaemonSessions(params: {
               return result;
             }
             try {
-              await bridge.deleteSessionAttachments(sessionId);
+              if (assertCanMutate) {
+                await bridge.deleteSessionAttachments(sessionId, {
+                  assertCanCommit: assertCanMutate,
+                });
+              } else {
+                await bridge.deleteSessionAttachments(sessionId);
+              }
               return result;
             } catch (error) {
               onError?.({
@@ -760,9 +781,28 @@ export async function archiveDaemonSessions(params: {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
           if (initialLocation === 'archived') {
+            let maintenanceError: unknown;
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
             return {
               kind: 'alreadyArchived' as const,
               mutationApplied: false,
+              maintenanceError,
             };
           }
           if (initialLocation === 'conflict' && !resolveConflicts) {
@@ -828,6 +868,7 @@ export async function archiveDaemonSessions(params: {
                 service,
                 sessionId,
                 'archive',
+                assertCanMutate,
               );
             },
           });
@@ -876,6 +917,9 @@ export async function archiveDaemonSessions(params: {
       alreadyArchived.push(sessionId);
     } else if (result.kind === 'notFound') notFound.push(sessionId);
     else errors.push({ sessionId, error: result.error });
+    if ('maintenanceError' in result && result.maintenanceError !== undefined) {
+      errors.push({ sessionId, error: result.maintenanceError });
+    }
   }
 
   logSessionArchiveResult('archive', {
@@ -938,6 +982,7 @@ export async function unarchiveDaemonSessions(params: {
                 service,
                 sessionId,
                 'unarchive',
+                assertCanMutate,
               );
             } catch (error) {
               maintenanceError = error;
@@ -1017,6 +1062,7 @@ export async function unarchiveDaemonSessions(params: {
                 service,
                 sessionId,
                 'unarchive',
+                assertCanMutate,
               );
             },
           });

@@ -917,6 +917,36 @@ describe('archiveDaemonSessions', () => {
       true,
     );
   });
+
+  it('recovers an enabled task whose session is already archived', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440063';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'stranded',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.alreadyArchived).toEqual([sessionId]);
+    const stranded = (await readCronTasks(workspaceDir)).find(
+      (task) => task.id === 'stranded',
+    );
+    expect(stranded!.enabled).toBe(false);
+    expect(stranded!.disabledByArchive).toBe(true);
+  });
 });
 
 describe('unarchiveDaemonSessions', () => {
