@@ -182,6 +182,7 @@ function createEmptyMcpDraft(): McpDraft {
     env: '',
     headers: '',
     timeout: '',
+    versionNegotiation: undefined,
     trust: false,
     description: '',
     includeTools: '',
@@ -199,6 +200,7 @@ type McpDraft = {
   env: string;
   headers: string;
   timeout: string;
+  versionNegotiation?: 'auto' | 'legacy';
   trust: boolean;
   description: string;
   includeTools: string;
@@ -222,6 +224,7 @@ function serverToDraft(entry: QwenMcpServerEntry): McpDraft {
     env: stringifyKeyValueLines(server.env),
     headers: stringifyKeyValueLines(server.headers),
     timeout: server.timeout === undefined ? '' : String(server.timeout),
+    versionNegotiation: server.versionNegotiation,
     trust: server.trust ?? false,
     description: server.description ?? '',
     includeTools: stringifyLines(server.includeTools),
@@ -236,6 +239,7 @@ function draftToServer(draft: McpDraft): QwenMcpServerConfig {
   const base = {
     transport: draft.transport,
     timeout,
+    versionNegotiation: draft.versionNegotiation,
     trust: draft.trust,
     description: draft.description.trim() || undefined,
     includeTools: parseLines(draft.includeTools),

@@ -83,6 +83,7 @@ import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
+import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
@@ -1776,6 +1777,7 @@ export function createServeApp(
       : [];
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
+    mountMcpAppSandbox(app);
   }
 
   if (deps.enqueueChannelWebhookTask) {
