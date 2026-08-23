@@ -666,4 +666,56 @@ describe('useWebViewMessages', () => {
     expect(input.textContent).toBe('@notes.txt ');
     expect(rendered.handlers.setInputText).toHaveBeenCalledWith('@notes.txt ');
   });
+
+  it('marks locally generated error notices so the App can render them outside the ACP transcript', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'agentConnectionError',
+            data: { message: 'spawn failed' },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authError',
+            data: { message: 'bad token' },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'error',
+            data: { message: 'boom' },
+          },
+        }),
+      );
+    });
+
+    const added = rendered.handlers.messageHandling.addMessage.mock.calls.map(
+      (call) =>
+        call[0] as { role?: string; content?: string; localOnly?: boolean },
+    );
+    expect(added).toHaveLength(3);
+    for (const message of added) {
+      expect(message.localOnly).toBe(true);
+      expect(message.role).toBe('assistant');
+    }
+    expect(added[0]?.content).toContain('Failed to connect to Qwen agent');
+    expect(added[1]?.content).toBe('bad token');
+    expect(added[2]?.content).toBe('boom');
+  });
 });
