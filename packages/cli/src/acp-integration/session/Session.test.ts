@@ -10768,6 +10768,39 @@ describe('Session', () => {
           return execute;
         };
 
+        // Like installTaskListTool, but every non-task_list tool also
+        // resolves to an executable mock so diverse productive calls run
+        // instead of tripping the missing-tool guard.
+        const installTaskListAndGenericTools = (boards: () => string) => {
+          mockToolRegistry.getTool.mockImplementation((name: string) => {
+            const execute =
+              name === 'task_list'
+                ? vi.fn().mockImplementation(async () => ({
+                    llmContent: boards(),
+                    returnDisplay: 'ok',
+                  }))
+                : vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  });
+            return {
+              name,
+              kind: core.Kind.Read,
+              displayName: name,
+              description: name,
+              build: vi.fn().mockImplementation((args) => ({
+                params: args,
+                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                getDescription: vi.fn().mockReturnValue(name),
+                toolLocations: vi.fn().mockReturnValue([]),
+                execute,
+              })),
+              canUpdateOutput: false,
+              isOutputMarkdown: false,
+            };
+          });
+        };
+
         const runTaskListPoll = (
           loopState: ReturnType<typeof freshLoopState>,
           round: number,
@@ -10878,6 +10911,70 @@ describe('Session', () => {
           expect(fired).toBe(false);
           expect(thawed).toBe(true);
           expect(loopState.loopDetected).toBe(false);
+        });
+
+        it('releases the daemon cap when a frozen task_list poller is abandoned for productive work', async () => {
+          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
+          // cap's stateful stuck signal is the ONLY live halt path. The
+          // streak map must not latch a stale peak from an abandoned key:
+          // interleaved frozen polls peak the signal, then the model stops
+          // polling and does diverse productive work. Pre-fix the add-only
+          // streak map kept the peak for the whole turn, so the productive
+          // turn was halted as TURN_TOOL_CALL_CAP just past the soft cap
+          // (issue #9450; core twin in loopDetectionService).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          const loopState = freshLoopState();
+
+          // 8 interleaved frozen task_list polls: the stuck signal peaks at
+          // 8 without halting (still under the soft cap).
+          for (let round = 0; round < 8; round++) {
+            const result = await runTaskListPoll(loopState, round);
+            expect(result.loopDetected ?? false).toBe(false);
+          }
+          expect(loopState.statefulMaxResultRepeat).toBe(8);
+
+          // Abandon polling; do diverse productive work past the soft cap
+          // of 20. The abandoned key's peak must decay at the batch
+          // boundaries, so no TURN_TOOL_CALL_CAP halt fires.
+          const runDiverseBatch = (round: number) =>
+            (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-diverse-${round}`,
+              [
+                {
+                  id: `diverse_${round}`,
+                  name: 'generic_tool',
+                  args: { step: round },
+                },
+              ],
+              loopState,
+            );
+
+          let fired = false;
+          for (let round = 0; round < 20 && !fired; round++) {
+            const result = await runDiverseBatch(round);
+            fired = result.loopDetected ?? false;
+          }
+          expect(fired).toBe(false);
+          expect(loopState.loopDetected).toBe(false);
+          expect(loopState.totalToolCalls).toBeGreaterThan(20);
         });
       });
     });

@@ -675,6 +675,14 @@ export type DaemonToolLoopState = {
    * Disarmed when a result changes, so a thawed board releases the cap.
    */
   statefulMaxResultRepeat: number;
+  /**
+   * Stateful keys that recorded a result since the previous batch (mirrors
+   * core's statefulResultKeysSinceLastFinished). At each batch boundary,
+   * keys absent from this set are abandoned and their streaks stop feeding
+   * statefulMaxResultRepeat (issue #9450). Optional: lazily initialized so
+   * pre-existing hand-built states stay compatible.
+   */
+  statefulResultKeysSinceLastBatch?: Set<string>;
   loopDetected: boolean;
   loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
@@ -705,6 +713,7 @@ function createDaemonToolLoopState(
     maxToolCallKeyRepeat: 0,
     statefulResultStreaks: new Map(),
     statefulMaxResultRepeat: 0,
+    statefulResultKeysSinceLastBatch: new Set(),
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -845,6 +854,41 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
+/**
+ * Batch-boundary decay for the cap's stateful stuck signal — the daemon
+ * twin of core's LoopDetectionService.decayAbandonedStatefulStreaks; the
+ * two runtimes must not drift (issue #9450 requirement #6). A stateful key
+ * that produced no result since the previous batch was abandoned: the model
+ * moved on to other work, so its frozen-phase streak must stop feeding
+ * statefulMaxResultRepeat. Without this the streak map is add-only and the
+ * peak latches for the whole turn — under the CLI default
+ * skipLoopDetection=true the cap's stuck signal is the ONLY live halt path
+ * for a frozen daemon poller, and the latched peak would halt a productive
+ * turn just past the soft cap. Keys polled in every batch appear in the set
+ * and keep their streaks, so a continuously frozen board still arms the cap.
+ */
+function decayAbandonedDaemonStreaks(loopState: DaemonToolLoopState): void {
+  const sinceLastBatch = (loopState.statefulResultKeysSinceLastBatch ??=
+    new Set<string>());
+  let decayed = false;
+  for (const [key, state] of loopState.statefulResultStreaks) {
+    if (sinceLastBatch.has(key)) continue;
+    if (state.consecutiveIdenticalResults > 0) {
+      state.consecutiveIdenticalResults = 0;
+      decayed = true;
+    }
+  }
+  sinceLastBatch.clear();
+  if (!decayed) return;
+  let peak = 0;
+  for (const state of loopState.statefulResultStreaks.values()) {
+    if (state.consecutiveIdenticalResults > peak) {
+      peak = state.consecutiveIdenticalResults;
+    }
+  }
+  loopState.statefulMaxResultRepeat = peak;
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -853,6 +897,11 @@ function recordDaemonToolCalls(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
+  // Batch boundary: the previous batch's results have all been recorded by
+  // now (results are recorded during execution, before the next batch is
+  // streamed), so this is the safe point to decay stateful keys absent from
+  // them — the daemon twin of core's Finished-boundary decay (issue #9450).
+  decayAbandonedDaemonStreaks(loopState);
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
     // Stateful read tools are counted post-execution in
@@ -959,6 +1008,11 @@ function recordDaemonToolResult(
   const fingerprint = fingerprintToolResult(responseParts);
   if (fingerprint === null) return false;
   const key = getToolCallRepeatKey(toolCall.name, toolCall.args);
+
+  // Batch bookkeeping: this key produced a result in the current batch, so
+  // the next batch boundary must not decay it (see
+  // decayAbandonedDaemonStreaks).
+  (loopState.statefulResultKeysSinceLastBatch ??= new Set<string>()).add(key);
 
   let state = loopState.statefulResultStreaks.get(key);
   if (!state) {
