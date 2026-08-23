@@ -7,7 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType, type HistoryItemAbout } from '../types.js';
-import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
+import { getExtendedSystemInfo } from '../systemInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectSessionPathInfo,
