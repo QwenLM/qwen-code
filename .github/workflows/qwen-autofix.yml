@@ -4727,6 +4727,17 @@ jobs:
           HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'
         run: |-
           set -uo pipefail
+          # The gh calls in this step (deep-link lookup, comment upsert) and
+          # the heartbeat loop launched here all carry the bot PAT: take the
+          # af-112 hermetic pins BEFORE the first call — pinned host, planted
+          # tokens dropped, and a fresh empty GH_CONFIG_DIR instead of the
+          # default ~/.config/gh on the shared attacker-writable HOME (its
+          # config.yml http_unix_socket would deliver the Authorization
+          # header — the PAT — to a planted same-UID listener).
+          # Full rationale → qwen-autofix.md#af-112
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
           # ROUND counts rounds already DONE; every other message numbers the
@@ -4958,14 +4969,20 @@ jobs:
           # overlap is bounded to the sandboxed agent phase, never the
           # host-side gate. Kill from the pid the launch recorded in
           # expression context; WORKDIR files are sandbox-writable and are
-          # never read as kill targets. Absolute-path/builtin-only command
-          # words, same doctrine as the gate body below.
+          # never read as kill targets. The session kill covers a kill
+          # landing MID-TICK: each tick's `timeout 60 gh` subtree sits in
+          # its OWN process group (coreutils timeout default), which the
+          # group+pid kills miss — but the loop owns its session via
+          # setsid, so -s <pid> targets exactly this round's tree.
+          # Absolute-path/builtin-only command words, same doctrine as the
+          # gate body below.
           # Full rationale → qwen-autofix.md#af-148
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             builtin kill -- -"${HB_PID}" 2> /dev/null || true
             builtin kill "${HB_PID}" 2> /dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
           fi
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -6098,15 +6115,18 @@ jobs:
           # is the belt to its braces (a missed kill there must not outlive
           # the round). Kill target comes from expression context — a pid
           # read from a WORKDIR file would be an untrusted kill target
-          # (WORKDIR is sandbox-writable). The stop marker ends the loop on
-          # its next self-check even if BOTH kills miss, and the sleep lets
-          # an already-dispatched tick PATCH land before the terminal text
-          # goes up. Full rationale → qwen-autofix.md#af-148
+          # (WORKDIR is sandbox-writable). The session kill covers a kill
+          # landing mid-tick (the tick's timeout/gh subtree sits in its own
+          # process group under the loop's session). The stop marker ends
+          # the loop on its next self-check even if the kills miss, and the
+          # sleep lets an already-dispatched tick PATCH land before the
+          # terminal text goes up. Full rationale → qwen-autofix.md#af-148
           touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             kill -- -"${HB_PID}" 2>/dev/null || true
             kill "${HB_PID}" 2>/dev/null || true
+            pkill -TERM -s "${HB_PID}" 2>/dev/null || true
             sleep 2
           fi
           MARKER='<!-- autofix-status -->'
@@ -6158,11 +6178,13 @@ jobs:
         run: |-
           # Last heartbeat kill (the gate and finalize already did this on
           # their paths) from the expression-context pid — never from a
-          # WORKDIR file, which is sandbox-writable.
+          # WORKDIR file, which is sandbox-writable. The session kill
+          # covers the mid-tick subtree, same as its twins.
           # Full rationale → qwen-autofix.md#af-148
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             kill -- -"${HB_PID}" 2>/dev/null || true
             kill "${HB_PID}" 2>/dev/null || true
+            pkill -TERM -s "${HB_PID}" 2>/dev/null || true
           fi
           rm -rf "${WORKDIR}"

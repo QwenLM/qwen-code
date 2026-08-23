@@ -10650,6 +10650,9 @@ exit 1
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [prepareStep, 'PR_LIVE="$(gh pr view'],
+      // The heartbeat's step: deep-link lookup, comment upsert, and the
+      // loop launch all carry the PAT; the first gh call is the deep link.
+      [postStatusCommentStep, 'JOB_ID="$(gh api'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -11487,6 +11490,11 @@ exit 1
       'if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then',
       'builtin kill -- -"${HB_PID}" 2> /dev/null || true',
       'builtin kill "${HB_PID}" 2> /dev/null || true',
+      // The mid-tick cover: each tick's `timeout 60 gh` subtree runs in
+      // its OWN process group (coreutils timeout default) under the
+      // loop's setsid session, so the group+pid kills above miss a kill
+      // landing mid-tick and leave it holding the PAT for up to 60s.
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true',
       'fi',
     ];
     // Bash breaks words only on ASCII space/tab/newline: strip ASCII
@@ -15736,6 +15744,26 @@ exit 1
     expect(heartbeatScript).toContain('heartbeat-stop');
     expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS');
     expect(heartbeatScript).toContain('HB_INTERVAL_SECONDS');
+    // The default age cap sits just past the 330-minute job envelope: a
+    // live round's loop dies at the gate or finalize well inside the job,
+    // so only a crash orphan reaches it — and the cap bounds how long that
+    // orphan holds the PAT in /proc/<pid>/environ. A 12h default would
+    // reopen the window this cap exists to shrink.
+    expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS:-20400');
+    expect(heartbeatScript).toContain('|| max_age=20400');
+    // Every tick's gh call runs under the af-112 hermetic pins, minted
+    // inside the loop itself: a planted http_unix_socket in the shared
+    // HOME's gh config would otherwise deliver the tick's Authorization
+    // header (the PAT) to a planted same-UID listener.
+    expect(heartbeatScript).toContain('export GH_HOST=github.com');
+    expect(heartbeatScript).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
+    expect(heartbeatScript).toContain(
+      'export GH_CONFIG_DIR="${gh_config_dir}"',
+    );
+    // Auth rides on the step-level GITHUB_TOKEN only: the pins drop any
+    // planted GH_TOKEN, so the fail-fast check must not admit it.
+    expect(heartbeatScript).toContain('GITHUB_TOKEN is required');
+    expect(heartbeatScript).not.toContain('${GITHUB_TOKEN:-}${GH_TOKEN:-}');
     // A failed PATCH skips one tick, never the pulse.
     expect(heartbeatScript).toContain('PATCH failed; continuing');
     // The loop must not hold the launching step's pipes or the step never
@@ -15891,6 +15919,23 @@ exit 1
     expect(gateStep).toContain('builtin kill "${HB_PID}"');
     expect(finalizeStatusCommentStep).toContain('kill "${HB_PID}"');
     expect(cleanupStep).toContain('kill "${HB_PID}"');
+    // A kill landing MID-TICK must reach the tick too: each tick's
+    // `timeout 60 gh` subtree runs in its OWN process group (coreutils
+    // timeout default) inside the loop's setsid session, so the group+pid
+    // kills alone leave it alive holding the PAT for up to 60s (witnessed
+    // on the pool's host class). Every killer therefore also kills the
+    // session — the gate's copy rides its statement-list pin above in the
+    // absolute-path form of its shadowing doctrine — and it must land
+    // where the others do: before the terminal PATCH (finalize) and before
+    // the workdir wipe (cleanup).
+    expect(finalizeStatusCommentStep).toContain('pkill -TERM -s "${HB_PID}"');
+    expect(cleanupStep).toContain('pkill -TERM -s "${HB_PID}"');
+    expect(
+      finalizeStatusCommentStep.indexOf('pkill -TERM -s "${HB_PID}"'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    expect(cleanupStep.indexOf('pkill -TERM -s "${HB_PID}"')).toBeLessThan(
+      cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
+    );
     // Neither reset step carries a kill (a cross-run pid could only come
     // from the untrusted file class; the comments may still explain why),
     // and none of the kill sites EXECUTES the heartbeat script (the

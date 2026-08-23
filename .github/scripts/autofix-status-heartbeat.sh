@@ -19,21 +19,28 @@
 # HB_CAP, HB_URL, HB_WORKDIR, HB_START_EPOCH; NOW_EPOCH overrides the
 # clock for tests. loop additionally needs: HB_REPO, HB_COMMENT_ID, and
 # GITHUB_TOKEN for gh; HB_INTERVAL_SECONDS (default 600) and
-# HB_MAX_AGE_SECONDS (default 43200) bound the pulse.
+# HB_MAX_AGE_SECONDS (default 20400) bound the pulse.
 #
 # Kill contract: the loop writes heartbeat.pid (diagnostics + its own
 # self-exit check), checks heartbeat-stop, and exits on either signal or
 # when its own age cap trips. The killers target the pid the launch
 # recorded in EXPRESSION CONTEXT (steps.post_status.outputs.heartbeat_pid)
 # — WORKDIR is sandbox-writable, so no WORKDIR file is ever read as a kill
-# target. The round's verification gate kills the loop before running any
-# branch code on the host; finalize and the always() cleanup kill again.
+# target — and kill the pid, its process group, AND its whole session:
+# each tick's `timeout 60 gh` subtree runs in its OWN process group
+# (coreutils timeout default) under the loop's setsid session, so a
+# group/pid kill alone leaves it alive holding the PAT for up to 60s. The
+# round's verification gate kills the loop before running any branch code
+# on the host; finalize and the always() cleanup kill again.
 #
 # PAT note: the loop holds the bot PAT in its environment. Its lifetime is
 # bounded to the sandboxed agent phase — the agent executes PR content only
 # inside the docker sandbox there, so no fork code runs on the host beside
 # this loop; the verification gate ends the loop BEFORE the first step that
-# runs branch code on the host. See af-148 for the trade.
+# runs branch code on the host. Every gh call additionally runs under the
+# af-112 hermetic pins (pinned GH_HOST, dropped GH_TOKEN/GH_ENTERPRISE_TOKEN,
+# fresh GH_CONFIG_DIR), so a transport reroute planted in the shared HOME's
+# gh config cannot intercept the token. See af-148 for the trade.
 
 # -e is deliberately absent: the (( ... < 0 )) clamp guards exit non-zero
 # on a false test and are load-bearing here. pipefail matches the sibling
@@ -80,23 +87,42 @@ run_loop() {
   # that never pulses — the exact "healthy round looks dead" failure this
   # feature eliminates. Fail fast instead.
   require HB_REPO HB_COMMENT_ID HB_WORKDIR HB_ROUND HB_CAP HB_URL HB_START_EPOCH
-  # gh auth rides on GITHUB_TOKEN (or GH_TOKEN): a launch without it must
-  # fail fast like any other missing input, not degrade to an immortal
-  # loop that logs "PATCH failed" every tick and never pulses.
-  [[ -n "${GITHUB_TOKEN:-}${GH_TOKEN:-}" ]] || {
-    echo "autofix-status-heartbeat: GITHUB_TOKEN (or GH_TOKEN) is required" >&2
+  # gh auth rides on the step-level GITHUB_TOKEN only: the hermetic pins
+  # below drop any planted GH_TOKEN/GH_ENTERPRISE_TOKEN (a planted channel
+  # must not outrank the inline token), so accepting them here would admit
+  # a launch the pins then leave credential-less — an immortal loop logging
+  # "PATCH failed" every tick and never pulsing. Fail fast instead.
+  [[ -n "${GITHUB_TOKEN:-}" ]] || {
+    echo "autofix-status-heartbeat: GITHUB_TOKEN is required" >&2
     exit 2
   }
+  # Hermetic pins for every gh call this loop makes (the af-112 doctrine):
+  # pinned host, planted tokens dropped, and a fresh empty GH_CONFIG_DIR
+  # instead of the default ~/.config/gh on the shared attacker-writable
+  # HOME — its config.yml can carry http_unix_socket, which would deliver
+  # the tick's Authorization header (the bot PAT) to a planted listener.
+  local gh_config_dir
+  if ! gh_config_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/autofix-gh-config.XXXXXX")"; then
+    echo "autofix-status-heartbeat: could not create a gh config dir" >&2
+    exit 2
+  fi
+  export GH_HOST=github.com
+  unset GH_ENTERPRISE_TOKEN GH_TOKEN
+  export GH_CONFIG_DIR="${gh_config_dir}"
   # Self-detach from the launching step: log to WORKDIR and never hold the
   # step's pipes, or the step would never report completion.
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null
   echo "$$" > "${HB_WORKDIR}/heartbeat.pid"
   local interval="${HB_INTERVAL_SECONDS:-600}"
-  local max_age="${HB_MAX_AGE_SECONDS:-43200}"
+  # Just past the 330-minute job envelope: a live round's loop dies at the
+  # gate or finalize well inside the job, so only a crash-leftover orphan
+  # ever reaches the cap — and the cap bounds how long that orphan holds
+  # the PAT in /proc/<pid>/environ, so it stays tight.
+  local max_age="${HB_MAX_AGE_SECONDS:-20400}"
   # Numeric guards: a malformed or zero override must degrade to the
   # defaults, never into a sleep-less busy loop hammering the API.
   [[ "${interval}" =~ ^[1-9][0-9]*$ ]] || interval=600
-  [[ "${max_age}" =~ ^[1-9][0-9]*$ ]] || max_age=43200
+  [[ "${max_age}" =~ ^[1-9][0-9]*$ ]] || max_age=20400
   local start="${HB_START_EPOCH}"
   echo "$(date -u +%FT%TZ) heartbeat started: comment ${HB_COMMENT_ID} interval ${interval}s max_age ${max_age}s"
   while :; do

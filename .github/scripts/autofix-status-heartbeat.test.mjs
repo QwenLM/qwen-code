@@ -35,7 +35,9 @@ afterEach(() => {
 });
 
 // A fake `gh` that records every invocation (NUL-separated argv, one file
-// per call) and fails when GH_FAIL=1.
+// per call), logs the gh-visible env channels the hermetic-pin witness
+// asserts on, fails when GH_FAIL=1, and holds the tick in flight for
+// GH_SLEEP_SECONDS (default 0) so kill-topology tests can land mid-tick.
 function fakeGhBin(dir) {
   const bin = join(dir, 'bin');
   const records = join(dir, 'calls');
@@ -49,7 +51,11 @@ function fakeGhBin(dir) {
       'set -u',
       'n=$(( $(ls -1 "${GH_RECORD_DIR}" | wc -l) + 1 ))',
       'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/call-${n}"',
+      "printf 'GH_HOST=%s GH_CONFIG_DIR=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
+      '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}" \\',
+      '  >> "${GH_RECORD_DIR}/gh-env.log"',
       '[ "${GH_FAIL:-0}" = "1" ] && exit 1',
+      'sleep "${GH_SLEEP_SECONDS:-0}"',
       'exit 0',
     ].join('\n'),
   );
@@ -364,7 +370,7 @@ describe('autofix-status-heartbeat loop', () => {
       );
       assert.ok(ok, 'the loop must start and log its parameters');
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
-      assert.match(logText, /interval 600s max_age 43200s/);
+      assert.match(logText, /interval 600s max_age 20400s/);
     } finally {
       killGroup(child);
     }
@@ -424,6 +430,7 @@ describe('autofix-status-heartbeat loop', () => {
     const { env, workdir } = loopEnv(dir, gh);
     delete env.GITHUB_TOKEN;
     delete env.GH_TOKEN;
+    delete env.GH_ENTERPRISE_TOKEN;
     const child = spawn('bash', [script, 'loop'], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -435,10 +442,36 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const code = await awaitExit(child, 8000);
     assert.equal(code, 2);
-    assert.match(stderr, /GITHUB_TOKEN \(or GH_TOKEN\) is required/);
+    assert.match(stderr, /GITHUB_TOKEN is required/);
     // Fail fast BEFORE registering anything: no pid file, no log.
     assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
     assert.ok(!existsSync(join(workdir, 'heartbeat.log')));
+  });
+
+  it('refuses a GH_TOKEN-only launch — the pins drop that channel before gh', async () => {
+    // The hermetic pins unset GH_TOKEN/GH_ENTERPRISE_TOKEN before any gh
+    // call, so accepting them at the fail-fast check would admit a launch
+    // the pins then leave credential-less — an immortal loop logging
+    // "PATCH failed" every tick and never pulsing. Auth rides on the
+    // step-level GITHUB_TOKEN only.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    delete env.GITHUB_TOKEN;
+    env.GH_TOKEN = 'planted';
+    const child = spawn('bash', [script, 'loop'], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    const code = await awaitExit(child, 8000);
+    assert.equal(code, 2);
+    assert.match(stderr, /GITHUB_TOKEN is required/);
+    assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
   });
 
   it('refuses to loop when a BODY var is missing — no immortal unpulsing loop', async () => {
@@ -510,4 +543,121 @@ describe('autofix-status-heartbeat loop', () => {
       killGroup(child);
     }
   });
+
+  it('pins gh hermetically for every tick — planted channels never reach it', async () => {
+    // The loop holds the bot PAT in env and calls gh on a shared host: a
+    // planted http_unix_socket in the default ~/.config/gh would deliver
+    // the tick's Authorization header to a planted listener, and a planted
+    // GH_TOKEN would outrank the step-level GITHUB_TOKEN. Witness the
+    // af-112 pins from the tick's own point of view: the fake gh records
+    // what it actually sees.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const poisonedConfig = join(dir, 'poisoned-gh-config');
+    const runnerTemp = join(dir, 'runner-temp');
+    mkdirSync(poisonedConfig, { recursive: true });
+    mkdirSync(runnerTemp, { recursive: true });
+    const { env } = loopEnv(dir, gh, {
+      GH_HOST: 'evil.example',
+      GH_TOKEN: 'planted-token',
+      GH_ENTERPRISE_TOKEN: 'planted-enterprise-token',
+      GH_CONFIG_DIR: poisonedConfig,
+      RUNNER_TEMP: runnerTemp,
+    });
+    const child = startLoop(env);
+    try {
+      const ok = await waitFor(() => readCalls(gh.records).length >= 1, 8000);
+      assert.ok(ok, 'expected at least one PATCH call');
+      const lines = readFileSync(join(gh.records, 'gh-env.log'), 'utf8')
+        .trim()
+        .split('\n');
+      assert.ok(lines.length >= 1, 'every tick must log its gh-visible env');
+      for (const line of lines) {
+        assert.ok(line.startsWith('GH_HOST=github.com '), line);
+        const cfg = line.match(/GH_CONFIG_DIR=(\S*) /)?.[1];
+        assert.ok(cfg, line);
+        assert.ok(cfg.startsWith(runnerTemp), line);
+        assert.ok(existsSync(cfg), `minted gh config dir must exist: ${cfg}`);
+        assert.ok(line.endsWith(' GH_TOKEN= GH_ENTERPRISE_TOKEN='), line);
+        assert.ok(!line.includes('planted'), line);
+        assert.ok(!line.includes('evil.example'), line);
+        assert.ok(!line.includes(poisonedConfig), line);
+      }
+    } finally {
+      killGroup(child);
+    }
+  });
+
+  // The mid-tick kill-topology witness needs coreutils `timeout` (which
+  // gives the tick its own process group) and procps pkill/pgrep (the
+  // session kill and its oracle); hosts without them still carry the
+  // pinned statement list in the workflow test.
+  const haveSessionKillTools =
+    spawnSync('bash', [
+      '-c',
+      'command -v timeout >/dev/null && command -v pkill >/dev/null && command -v pgrep >/dev/null',
+    ]).status === 0;
+
+  function processAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it(
+    'a session kill empties the whole loop even when it lands mid-tick',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout + procps pkill/pgrep',
+    },
+    async () => {
+      // Each tick's `timeout 60 gh` subtree runs in its OWN process group
+      // (coreutils timeout default) inside the loop's setsid session, so a
+      // group+pid kill landing mid-tick leaves it alive holding the token
+      // for up to 60s — the witness that drove the session kill at every
+      // killer. Part 1 proves the escape, part 2 proves the fix. The real
+      // (unshimmed) timeout runs — no fake timeout on PATH here — and a
+      // slow fake gh holds the tick in flight.
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env } = loopEnv(dir, gh, { GH_SLEEP_SECONDS: '15' });
+      const child = startLoop(env);
+      const pid = child.pid;
+      try {
+        const inFlight = await waitFor(
+          () => readCalls(gh.records).length >= 1,
+          8000,
+        );
+        assert.ok(inFlight, 'the slow gh must put a tick in flight');
+        // Part 1 — the defect: group+pid kills alone leave the tick
+        // subtree alive in the loop's session.
+        spawnSync('bash', [
+          '-c',
+          `kill -- -${pid} 2>/dev/null || true; kill ${pid} 2>/dev/null || true`,
+        ]);
+        const escaped = await waitFor(
+          () =>
+            !processAlive(pid) &&
+            spawnSync('pgrep', ['-s', String(pid)]).status === 0,
+          5000,
+        );
+        assert.ok(escaped, 'the mid-tick subtree must escape a group+pid kill');
+        // Part 2 — the fix: the session kill reaches everything sharing
+        // the loop's session.
+        spawnSync('bash', ['-c', `pkill -TERM -s ${pid} 2>/dev/null || true`]);
+        const emptied = await waitFor(
+          () => spawnSync('pgrep', ['-s', String(pid)]).status !== 0,
+          5000,
+        );
+        assert.ok(emptied, 'the session kill must empty the loop session');
+      } finally {
+        spawnSync('bash', ['-c', `pkill -KILL -s ${pid} 2>/dev/null || true`]);
+        killGroup(child);
+      }
+    },
+  );
 });
