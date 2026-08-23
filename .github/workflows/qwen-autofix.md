@@ -239,6 +239,8 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…](#af-148)
+- [149. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…](#af-149)
 
 ---
 
@@ -3716,4 +3718,112 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…
+
+In `review-address` · `Post autofix status comment`.
+
+```text
+Round heartbeat: the announcement freezes at "working" for
+the whole round — up to the 130-minute agent step plus gate
+and repair — so on the PR page a healthy long round and a
+dead one look identical (observed on #9739: ~1.5h of
+silence). A detached loop started here re-PATCHes the SAME
+comment every 10 min with elapsed time and last agent
+activity (agent.log mtime — run-agent.mjs writes every
+stream event there; no parsing, and the thinking phase's
+10-minute stream-idle window shows as an honest "active N
+min ago"). EDITING one comment, not posting: a managed PR
+can run 100 rounds, and edits raise no issue_comment events
+(no workflow fan-out) and no notifications. The body renders
+through the heartbeat script's 'body' subcommand for the
+initial post AND every tick, so the two texts cannot drift.
+
+LIFETIME is bounded to the sandboxed agent phase: the
+verification gate kills the loop BEFORE it runs the
+branch's own build/tests ON THE HOST. The first design
+claimed "no fork code runs on the host beside this loop"
+for the whole round and review proved that false — the gate
+script says plainly that the branch's code runs there as
+the runner user. A PAT-holding host process concurrent with
+host-side branch code is a /proc/<pid>/environ read away
+from leaking the token (same UID; only the pool's ptrace
+scope stands between, and it is not pinned anywhere), so
+the pulse covers the agent step — the longest, sandboxed
+phase — and dies before the gate. The comment holds its
+last tick through gate/repair; finalize flips the terminal
+text.
+
+KILL TARGETS travel through EXPRESSION CONTEXT: post_status
+records $! as heartbeat_pid, and the gate / finalize / the
+always() cleanup kill that value. Never a pid read from a
+WORKDIR file: the agent's docker sandbox mounts the host
+/tmp on the same path and runs as this same user, so branch
+code the agent executes can plant any value in
+heartbeat.pid — an arbitrary same-UID kill in the hand of
+the next killer (this file class is known-hostile: the gate
+refuses to re-read its verdict from WORKDIR for the same
+reason). The on-disk pid file survives for diagnostics and
+the loop's OWN existence self-check only — tampering there
+can at worst end the pulse early or forge its "active"
+figure, never reach a kill or the token. The killers are
+INLINE bash in the yml: no PR-branch-controlled file is
+ever executed in a PAT-bearing or post-agent context, and
+the gate's own kill uses absolute-path/builtin command
+words per that step's shadowing doctrine.
+
+PAT TRADE, chosen deliberately within that lifetime: the
+loop holds the bot PAT in env — a temporal overlap the
+"THIS step holds no PAT" rule (af-126) otherwise avoids.
+Accepted because within the agent phase the token never
+touches disk, the only host processes concurrent with the
+loop are trusted (run-agent.mjs, the bundled CLI), and the
+overlap ends deterministically at the gate. The alternative
+— heartbeat from the schedule scan or a watcher job — lands
+every ~40-70 min in this repo (af-027) and would re-derive
+comment id, run identity and liveness remotely: too slow
+and too much machinery for a pulse.
+
+ORPHAN DISCIPLINE on the persistent pool: the loop
+self-exits on a missing pid file (a crashed prior round's
+orphan ends at its next self-check once this round's reset
+wipes the dir — no cross-run kill, which would need a file
+pid and re-open the untrusted-target hole), a heartbeat-stop
+marker, or a 12h age cap far past the 330-minute job
+timeout; each tick's gh call is additionally wrapped in a
+60s timeout so a black-holed connection cannot stall the
+loop past the cap. Killers that run in-round touch the stop
+marker BEFORE killing so a missed kill still ends the loop
+at its next self-check — a tick landing after the terminal
+text would overwrite it with a live-looking "working" line
+— and finalize additionally sleeps past one PATCH
+round-trip so an already-dispatched tick cannot land after
+the terminal text server-side.
+```
+
+<a id="af-149"></a>
+
+### 149. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…
+
+In `review-address` · `Post autofix status comment`.
+
+```text
+Deep-link "Watch live progress" to THIS matrix leg's live
+log, not just the run page: the run page lists every leg of
+the scan and the reader must find which one is theirs. The
+job id comes from the current run ATTEMPT's jobs listing
+matched on the name prefix "review-address (<pr>," — the
+matrix name format this job has always used — read through
+jq with --arg so the PR number enters as data, never string
+interpolation. BEST-EFFORT by construction: any lookup
+failure (API error, unexpected shape) leaves the run URL, so
+the link is never worse than before this existed. The
+finalize text keeps the run URL on purpose: once the round
+ends the run page is the right destination (all steps, all
+attempts), and one less thing to re-resolve on the
+crashed-agent paths where this step's outputs may be all
+that survived.
 ```

@@ -40,6 +40,8 @@ const reviewVerificationRunner = readFileSync(
 );
 const pushAndReportScriptPath = '.github/scripts/autofix-push-and-report.sh';
 const pushAndReportScript = readFileSync(pushAndReportScriptPath, 'utf8');
+const heartbeatScriptPath = '.github/scripts/autofix-status-heartbeat.sh';
+const heartbeatScript = readFileSync(heartbeatScriptPath, 'utf8');
 const upsertDeferredScript = readFileSync(
   '.github/scripts/upsert-deferred-issue.sh',
   'utf8',
@@ -3129,7 +3131,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflowWithScripts.split('--paginate').length - 1).toBe(21);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(22);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
@@ -3149,7 +3151,11 @@ describe('qwen-autofix workflow', () => {
     // fetch in resolve_and_reply_threads is the same class again — a GraphQL
     // paginate whose `--jq '…nodes[]'` stream is slurped straight into
     // THREADS_JSON — so it bumps the total pin above without joining the
-    // normalizer count below.
+    // normalizer count below. The heartbeat's deep-link job lookup (af-149)
+    // is the same class once more: the run-attempt jobs listing is slurped
+    // by `jq -rs` into a shell variable to resolve ONE job id, never a
+    // WORKDIR file, so it bumps the total pin without joining the count
+    // below.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(12);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -11469,6 +11475,20 @@ exit 1
         index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
       ),
     ];
+    // The review gate additionally kills the round heartbeat FIRST — it is
+    // the first step that runs branch code on the host, and the loop holds
+    // the bot PAT (af-148). Parent-shell statements under the same
+    // doctrine: absolute-path/builtin command words, step-level pin as the
+    // kill target, nothing executable read from disk. The repair gate does
+    // not repeat it — the loop is already dead by then.
+    const heartbeatKillStatements = [
+      '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
+      'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
+      'if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then',
+      'builtin kill -- -"${HB_PID}" 2> /dev/null || true',
+      'builtin kill "${HB_PID}" 2> /dev/null || true',
+      'fi',
+    ];
     // Bash breaks words only on ASCII space/tab/newline: strip ASCII
     // whitespace only, so a line carrying any other "whitespace" (NBSP,
     // U+2000–U+200A, U+2028, ...) keeps it and fails the exact match.
@@ -11482,12 +11502,15 @@ exit 1
         .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
         .filter((line) => line !== '' && !line.startsWith('#'));
     expect(gateBodyStatementsOf('run: |-\n  \u00a0# x')).toEqual(['\u00a0# x']);
-    for (const step of [
-      reviewVerificationGateStep,
-      repairVerificationGateStep,
+    for (const [step, bodyStatements] of [
+      [
+        reviewVerificationGateStep,
+        [...heartbeatKillStatements, ...gateBodyStatements],
+      ],
+      [repairVerificationGateStep, gateBodyStatements],
     ]) {
       expect(step).toMatch(gateLaunchPin);
-      expect(gateBodyStatementsOf(step)).toEqual(gateBodyStatements);
+      expect(gateBodyStatementsOf(step)).toEqual(bodyStatements);
       // Exactly one launch per step: a second, unpinned `bash --norc` (the
       // pinned block demoted into a never-run arm) must fail here (R2-1).
       expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
@@ -15562,7 +15585,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -15586,7 +15609,13 @@ exit 1
     expect(postStatusCommentStep).toContain(
       'actions/runs/${{ github.run_id }}',
     );
-    expect(postStatusCommentStep).toContain('Watch live progress');
+    // The working-comment text renders through the heartbeat script's 'body'
+    // subcommand — the initial post and every later tick use the SAME body,
+    // so they cannot drift (af-148). The strings themselves are pinned on
+    // the script below.
+    expect(postStatusCommentStep).toContain(
+      'bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body',
+    );
     // Announced only for a round that will really run, and never on a dry run.
     expect(postStatusCommentStep).toContain(
       "steps.prepare.outputs.stale != 'true'",
@@ -15603,8 +15632,10 @@ exit 1
     expect(postStatusCommentStep).toContain('continuing.');
     expect(finalizeStatusCommentStep).toContain('set -uo pipefail');
     expect(finalizeStatusCommentStep).toContain('continuing.');
-    // Repository convention for anything posted verbatim as a PR comment.
-    expect(postStatusCommentStep).toContain('<summary>中文说明</summary>');
+    // Repository convention for anything posted verbatim as a PR comment —
+    // the bilingual wrapper lives in the heartbeat script now (same body on
+    // every tick).
+    expect(heartbeatScript).toContain('<summary>中文说明</summary>');
 
     // Runs on every ending (including a crashed agent) so no finished round
     // leaves a live-looking "working" line behind.
@@ -15678,6 +15709,175 @@ exit 1
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
+    );
+  });
+
+  it('keeps the round status comment live with a heartbeat and a job deep link', () => {
+    // A round can run for hours while the announcement freezes at
+    // "working" — on the PR page a long round and a dead one look
+    // identical (#9739). The heartbeat re-PATCHes the same comment every
+    // ~10 min with elapsed time and last agent activity; the deep link
+    // lands the "Watch live progress" anchor on the leg's own log page.
+    // Full rationale → qwen-autofix.md#af-148, af-149.
+
+    // The comment body is owned by the script: the initial post and every
+    // tick render through the same 'body' subcommand, so pin the text
+    // there, not on one step.
+    expect(heartbeatScript).toContain('<!-- autofix-status -->');
+    expect(heartbeatScript).toContain('Watch live progress');
+    expect(heartbeatScript).toContain('查看实时进度');
+    expect(heartbeatScript).toContain('round %s/%s');
+    expect(heartbeatScript).toContain('agent active');
+    expect(heartbeatScript).toContain('agent starting');
+    // Loop self-discipline on the persistent pool: an orphan loop would
+    // edit the comment forever, so it must die on every teardown signal
+    // AND on its own age cap.
+    expect(heartbeatScript).toContain('heartbeat.pid');
+    expect(heartbeatScript).toContain('heartbeat-stop');
+    expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS');
+    expect(heartbeatScript).toContain('HB_INTERVAL_SECONDS');
+    // A failed PATCH skips one tick, never the pulse.
+    expect(heartbeatScript).toContain('PATCH failed; continuing');
+    // The loop must not hold the launching step's pipes or the step never
+    // completes.
+    expect(heartbeatScript).toContain('exec >> "${HB_WORKDIR}/heartbeat.log"');
+    expect(spawnSync('bash', ['-n', heartbeatScriptPath]).status).toBe(0);
+
+    // Staging: the working tree is PR-branch code by post_status, so the
+    // script travels as a trusted-base staged copy with a digest recorded
+    // in expression context (the af-111 doctrine).
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(stageStep).toContain(
+      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+    );
+    expect(stageStep).toContain(
+      'echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(postStatusCommentStep).toContain(
+      "HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'",
+    );
+    expect(postStatusCommentStep).toContain(
+      '/usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null',
+    );
+    // ...and the check must precede the FIRST use: a check moved below
+    // the invocation would verify nothing before the script runs (the
+    // af-111 doctrine this wiring cites).
+    expect(postStatusCommentStep.indexOf('sha256sum -c')).toBeLessThan(
+      postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" body'),
+    );
+
+    // Deep link: attempt-scoped jobs listing, PR number enters jq as DATA
+    // (--arg, never interpolation), and any lookup failure keeps the run
+    // URL fallback — never worse than before.
+    expect(postStatusCommentStep).toContain(
+      'repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs',
+    );
+    expect(postStatusCommentStep).toContain('--arg pr "${PR}"');
+    expect(postStatusCommentStep).toContain(
+      'startswith("review-address (\\($pr),")',
+    );
+    expect(postStatusCommentStep).toContain('JOB_URL="${RUN_URL}"');
+    expect(postStatusCommentStep).toContain(
+      'JOB_URL="${SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}/job/${JOB_ID}"',
+    );
+    // The deep link must actually REACH the consumers: the initial body
+    // and every loop tick both render HB_URL, and the JOB_ID gate + empty
+    // fallback are the "never worse than before" semantics.
+    expect(postStatusCommentStep.split('HB_URL="${JOB_URL}"').length - 1).toBe(
+      2,
+    );
+    expect(postStatusCommentStep).toContain('if [[ "${JOB_ID}" =~ ^[0-9]+$ ]]');
+    expect(postStatusCommentStep).toContain("JOB_ID=''");
+
+    // Launch: detached (setsid + self-redirected output), gated on a
+    // comment that actually exists (the gate wraps the launch itself, not
+    // just the earlier PATCH-or-create), carrying the round identity and
+    // recording the pid for the killers in EXPRESSION CONTEXT.
+    expect(postStatusCommentStep).toContain(
+      'setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &',
+    );
+    expect(postStatusCommentStep).toContain(
+      'if [[ -n "${STATUS_ID}" ]]; then\n            HB_REPO=',
+    );
+    expect(postStatusCommentStep).toContain('HB_COMMENT_ID="${STATUS_ID}"');
+    expect(postStatusCommentStep).toContain('HB_START_EPOCH="${START_EPOCH}"');
+    expect(postStatusCommentStep).toContain('HEARTBEAT_PID=$!');
+    expect(postStatusCommentStep).toContain(
+      'echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"',
+    );
+
+    // Kill discipline (af-148): kill targets come from expression context
+    // — a pid read from a WORKDIR file would be an untrusted kill target,
+    // the sandbox mounts the host /tmp on the same path and runs as this
+    // same user. The verification gate kills FIRST — before the first step
+    // that runs branch code on the host — finalize and the always()
+    // cleanup kill again. NOBODY kills from heartbeat.pid: the resets do
+    // not kill at all (a cross-run pid could only come from that
+    // untrusted file; wiping the dir ends the loop at its own next
+    // self-check).
+    const killTarget = '${{ steps.post_status.outputs.heartbeat_pid }}';
+    // The review lane's gate — extracted from reviewAddressJob itself, so
+    // a kill planted in the issue lane's same-named step cannot satisfy
+    // these pins.
+    const gateStep =
+      reviewAddressJob.match(
+        /- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/,
+      )?.[0] ?? '';
+    expect(gateStep).toContain('heartbeat-stop');
+    expect(gateStep).toContain(`HB_PID="${killTarget}"`);
+    expect(gateStep).toContain('kill -- -"${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain('heartbeat-stop');
+    expect(finalizeStatusCommentStep).toContain(`HB_PID="${killTarget}"`);
+    expect(finalizeStatusCommentStep).toContain('kill -- -"${HB_PID}"');
+    expect(finalizeStatusCommentStep.indexOf('heartbeat-stop')).toBeLessThan(
+      finalizeStatusCommentStep.indexOf('--method PATCH'),
+    );
+    // A tick already dispatched when the kill lands can still be applied
+    // server-side after the terminal text: finalize sleeps past one PATCH
+    // round-trip before its own PATCH.
+    expect(finalizeStatusCommentStep).toContain('sleep 2');
+    const cleanupStep =
+      reviewAddressJob.match(
+        /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(cleanupStep).toContain(`HB_PID="${killTarget}"`);
+    expect(cleanupStep).toContain('kill -- -"${HB_PID}"');
+    expect(cleanupStep.indexOf('kill -- -"${HB_PID}"')).toBeLessThan(
+      cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
+    );
+    // Same-round killers also carry the bare-pid fallback; the gate uses
+    // the builtin form of the step's shadowing doctrine.
+    expect(gateStep).toContain('builtin kill "${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain('kill "${HB_PID}"');
+    expect(cleanupStep).toContain('kill "${HB_PID}"');
+    // Neither reset step carries a kill (a cross-run pid could only come
+    // from the untrusted file class; the comments may still explain why),
+    // and none of the kill sites EXECUTES the heartbeat script (the
+    // working-tree copy is fork code by the time any of them runs).
+    for (const step of resetAutofixWorkspaceSteps) {
+      expect(step).not.toContain('kill -- -');
+      expect(step).not.toContain('HB_PID');
+    }
+    for (const killer of [gateStep, finalizeStatusCommentStep, cleanupStep]) {
+      expect(killer).not.toContain('autofix-status-heartbeat.sh');
+    }
+
+    // The pulse is diagnosable after the fact: heartbeat.log rides the
+    // review lane's run-artifact echo list (and the whole-WORKDIR upload).
+    const reviewShowArtifactsStep =
+      reviewAddressJob.match(
+        /- name: 'Show run artifacts'[\s\S]*?(?=\n[ ]{6}- name: 'Upload run artifacts')/,
+      )?.[0] ?? '';
+    expect(reviewShowArtifactsStep).toContain('heartbeat.log');
+
+    // The behavioral suite below is the only real coverage for the script
+    // itself; pin its CI membership so deleting the HELPER_TESTS entry
+    // cannot silently disable it (precedent: resolve-sandbox-image).
+    expect(ciWorkflow).toContain(
+      '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
   });
 
