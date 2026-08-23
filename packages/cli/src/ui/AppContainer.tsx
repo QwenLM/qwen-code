@@ -252,6 +252,7 @@ import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
+import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -479,9 +480,15 @@ export function useQueuedSubmissionDrain({
                 ? {}
                 : { submittedPrompt: submission.submittedPrompt }),
               onAdmissionFailed: () => {
+                // Deferred until idle, the same recovery the direct /btw
+                // path uses: admission failed because a turn is active,
+                // and the mid-turn steer drain returns raw text only — an
+                // undeferred restore of a peer envelope would be steered
+                // into that turn with its projection lost.
                 restoreMessages(
                   [submission.modelText],
                   submission.submittedPrompt,
+                  true,
                 );
                 markAdmissionFailed();
               },
@@ -2426,9 +2433,14 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (!peerMessaging) return;
     peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
+      // Refuse once the queue's pending backlog reaches the cap: peer
+      // frames arrive at socket speed but drain at one per turn, and the
+      // queue must not grow unboundedly for a busy session.
+      if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
       addMessage(modelText, true, displayText);
+      return true;
     });
-  }, [addMessage, peerMessaging]);
+  }, [addMessage, getPendingSubmissionCount, peerMessaging]);
 
   // Surface parked messages. The model never sees a held message, so
   // without a notice the only symptom is a peer that seems to be ignored.

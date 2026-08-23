@@ -21,7 +21,7 @@ import {
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
-import { PeerMessaging } from './peer-messaging.js';
+import { MAX_ACCEPTED_BACKLOG, PeerMessaging } from './peer-messaging.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -72,9 +72,10 @@ async function start(
   });
   if (!started) throw new Error('peer messaging failed to start');
   messaging = started;
-  started.setSubmitFn((modelText, displayText) =>
-    submitted.push({ modelText, displayText }),
-  );
+  started.setSubmitFn((modelText, displayText) => {
+    submitted.push({ modelText, displayText });
+    return true;
+  });
   return { messaging: started, submitted };
 }
 
@@ -143,7 +144,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
 
     const submitted: string[] = [];
-    started.setSubmitFn((modelText) => submitted.push(modelText));
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toContain('early bird');
   });
@@ -237,7 +241,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
-    started.setSubmitFn((modelText) => submitted.push(modelText));
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
 
     await sendPeerFrame(
       started.socketPath!,
@@ -265,6 +272,90 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const seen: number[] = [];
     m.onHeldChange((held) => seen.push(held.length));
     expect(seen).toEqual([1]);
+  });
+
+  it('caps the accepted backlog and receipts the overflow as expired', async () => {
+    // Accepted frames drain at one per model turn but arrive at socket
+    // speed; once the backlog is full the gate must refuse with an honest
+    // receipt instead of growing the queue without bound.
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    let accepted = 0;
+    started.setSubmitFn(() => {
+      // Model a queue that already holds MAX_ACCEPTED_BACKLOG pending
+      // submissions, the way AppContainer's wiring reports it.
+      if (accepted >= MAX_ACCEPTED_BACKLOG) return false;
+      accepted += 1;
+      return true;
+    });
+
+    const overflow = 5;
+    for (let i = 0; i < MAX_ACCEPTED_BACKLOG + overflow; i++) {
+      await sendPeerFrame(
+        started.socketPath!,
+        buildUserFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    for (
+      let waits = 0;
+      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
+      waits++
+    ) {
+      await settle();
+    }
+
+    expect(accepted).toBe(MAX_ACCEPTED_BACKLOG);
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
+    ).toHaveLength(overflow);
+  });
+
+  it('bounds the pre-wiring buffer and flushes it in order once wired', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const overflow = 5;
+    for (let i = 0; i < MAX_ACCEPTED_BACKLOG + overflow; i++) {
+      await sendPeerFrame(
+        started.socketPath!,
+        buildUserFrame({ content: `early ${i}`, from: sender.socketPath }),
+      );
+    }
+    for (
+      let waits = 0;
+      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
+      waits++
+    ) {
+      await settle();
+    }
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+
+    expect(submitted).toHaveLength(MAX_ACCEPTED_BACKLOG);
+    expect(submitted[0]).toContain('early 0');
+    expect(submitted[MAX_ACCEPTED_BACKLOG - 1]).toContain(
+      `early ${MAX_ACCEPTED_BACKLOG - 1}`,
+    );
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
+    ).toHaveLength(overflow);
   });
 
   it('is safe to close twice', async () => {

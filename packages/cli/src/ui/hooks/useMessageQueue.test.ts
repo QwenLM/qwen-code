@@ -898,6 +898,60 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('keeps a deferred restore out of the mid-turn steer drain', () => {
+      // The queue-drain effect restores a popped batch when admission
+      // fails. A peer envelope in that batch must come back deferred:
+      // the steer drain returns raw text only, so steering it would push
+      // the raw envelope into the active turn and lose the projection.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        "<cross_session_message from='/tmp/peer.sock'>do the thing</cross_session_message>";
+
+      act(() => {
+        result.current.addMessage(envelope, true, 'peer projection');
+      });
+
+      let modelText = '';
+      let submittedPrompt: string | undefined;
+      act(() => {
+        const popped = result.current.popNextSubmission();
+        expect(popped).toMatchObject({ kind: 'user', modelText: envelope });
+        if (popped?.kind === 'user') {
+          modelText = popped.modelText;
+          submittedPrompt = popped.submittedPrompt;
+        }
+      });
+
+      act(() => {
+        result.current.restoreMessages([modelText], submittedPrompt, true);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual([]);
+
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+      expect(drained).toEqual([envelope]);
+    });
+
+    it('restores typed input steerable when no deferral is passed', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.restoreMessages(['steer now']);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual(['steer now']);
+    });
+
     it('reconstructs the projection from the restored texts when restoring multiple messages', () => {
       // The single original prompt cannot be attributed across several
       // restored messages, so it is dropped; the per-member fallback then

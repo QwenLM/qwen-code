@@ -74,6 +74,7 @@ import {
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
 import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -1759,7 +1760,14 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
-      expect(restoreMessages).toHaveBeenCalledOnce();
+      // Deferred: admission failed because a turn is active, and the
+      // mid-turn steer drain must not pull the restored batch (a peer
+      // envelope would leak into the turn raw, projection lost).
+      expect(restoreMessages).toHaveBeenCalledWith(
+        ['persistent failure batch'],
+        undefined,
+        true,
+      );
 
       rerender({
         pendingSubmissionCount: 1,
@@ -6807,6 +6815,7 @@ describe('AppContainer State Management', () => {
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
         popNextTurn: vi.fn().mockReturnValue(null),
+        getPendingSubmissionCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
 
@@ -6820,6 +6829,33 @@ describe('AppContainer State Management', () => {
         true,
         'one-liner',
       );
+    });
+
+    it('refuses peer frames once the pending backlog reaches the cap', () => {
+      // Frames arrive at socket speed but drain at one per turn; without
+      // the guard a busy session's queue grows without bound.
+      const addMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+        getPendingSubmissionCount: vi
+          .fn()
+          .mockReturnValue(MAX_ACCEPTED_BACKLOG),
+      });
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+      });
+
+      expect(addMessage).not.toHaveBeenCalled();
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

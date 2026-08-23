@@ -27,13 +27,26 @@
 const CROSS_SESSION_TAG = 'cross_session_message';
 
 /**
+ * Characters that render as nothing: control characters plus the invisible
+ * format set (zero-width spaces, bidi overrides, soft hyphen and kin).
+ * Shared by the delimiter match and {@link flattenPeerLabel} so the two
+ * cannot drift: what one strips from an attribute the other must also
+ * treat as a separator.
+ */
+const INVISIBLE_CHARACTERS =
+  '\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u206f\\ufeff';
+
+/**
  * Matches the opening/closing delimiter token, tolerating any run of
- * whitespace and slashes between the bracket and the tag name (`</tag>`,
- * `< /tag>`, `<//tag>`, `</ /tag>` all read as delimiters), while a
- * negative lookahead on identifier-continuation characters leaves
- * near-misses (`<cross_session_messages>`) intact. An allowlist of
- * followers cannot work here: the character after a peer-written token is
- * peer-chosen, so anything not explicitly allowed would slip through raw.
+ * whitespace, slashes and render-invisible characters between the bracket
+ * and the tag name (`</tag>`, `< /tag>`, `<//tag>`, `<\u200B/tag>` all
+ * read as delimiters), while a negative lookahead on
+ * identifier-continuation characters leaves near-misses
+ * (`<cross_session_messages>`) intact. An allowlist of followers cannot
+ * work here: the character after a peer-written token is peer-chosen, so
+ * anything not explicitly allowed would slip through raw. Invisible
+ * separators matter because they render as nothing — a forged closer with
+ * one wedged after the bracket reads exactly like the real delimiter.
  *
  * The separator is one character class, not adjacent unbounded groups: a
  * long whitespace run after `<` that never spells the tag would otherwise
@@ -42,7 +55,7 @@ const CROSS_SESSION_TAG = 'cross_session_message';
  * time, with no user interaction.
  */
 const CROSS_SESSION_TAG_RE = new RegExp(
-  `<([\\s/]*${CROSS_SESSION_TAG})(?![A-Za-z0-9_-])`,
+  `<([\\s/${INVISIBLE_CHARACTERS}]*${CROSS_SESSION_TAG})(?![A-Za-z0-9_-])`,
   'gi',
 );
 
@@ -92,11 +105,7 @@ const MAX_ATTRIBUTE_CHARS = 200;
  */
 export function flattenPeerLabel(value: string): string {
   const oneLine = value
-    .replace(
-      // eslint-disable-next-line no-control-regex
-      /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]+/g,
-      ' ',
-    )
+    .replace(new RegExp(`[${INVISIBLE_CHARACTERS}]+`, 'g'), ' ')
     .trim();
   return oneLine.length > MAX_ATTRIBUTE_CHARS
     ? `${oneLine.slice(0, MAX_ATTRIBUTE_CHARS - 1)}\u2026`

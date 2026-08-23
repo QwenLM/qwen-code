@@ -57,7 +57,11 @@ export interface UseMessageQueueReturn {
   popAllMessages: (
     onRemoved?: (turnKeys: string[]) => void,
   ) => QueuedUserSubmission | null;
-  restoreMessages: (messages: string[], submittedPrompt?: string) => void;
+  restoreMessages: (
+    messages: string[],
+    submittedPrompt?: string,
+    deferUntilIdle?: boolean,
+  ) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -248,7 +252,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const restoreMessages = useCallback(
-    (messages: string[], submittedPrompt?: string) => {
+    (messages: string[], submittedPrompt?: string, deferUntilIdle = false) => {
       const restored = messages
         .map((text) => text.trim())
         .filter(Boolean)
@@ -258,7 +262,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ...(messages.length === 1 && submittedPrompt !== undefined
             ? { submittedPrompt }
             : {}),
-          deferUntilIdle: false,
+          deferUntilIdle,
         }));
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];

@@ -24,6 +24,7 @@ import {
   formatPeerDisplay,
   formatPeerEnvelope,
   InboundGate,
+  MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
   type PeerFrame,
@@ -36,8 +37,22 @@ import {
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
-/** Submit an already-formatted message into the session's input queue. */
-export type PeerSubmitFn = (modelText: string, displayText: string) => void;
+/**
+ * Submit an already-formatted message into the session's input queue.
+ * Returns false when the queue is too full to take it — the frame is then
+ * refused with an honest receipt instead of accumulating unboundedly.
+ */
+export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
+
+/**
+ * Cap on accepted messages waiting to be consumed.
+ *
+ * Symmetric with the held cap: accepted frames drain at one per model
+ * turn while arriving at socket speed, so without a ceiling a chatty
+ * peer grows the input queue without bound during a long busy turn —
+ * the same leak the hold buffer's ceiling exists to prevent.
+ */
+export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
@@ -114,8 +129,13 @@ export class PeerMessaging {
    */
   setSubmitFn(fn: PeerSubmitFn): void {
     this.submitFn = fn;
-    const pending = this.buffered.splice(0, this.buffered.length);
-    for (const frame of pending) this.submit(frame);
+    // A refused frame means the queue is full; leave it and the rest
+    // buffered — `deliver` retries them, in order, on the next arrival.
+    while (this.buffered.length > 0) {
+      const head = this.buffered[0];
+      if (!head || !this.submit(head)) break;
+      this.buffered.shift();
+    }
   }
 
   getHeld(): readonly HeldMessage[] {
@@ -174,25 +194,39 @@ export class PeerMessaging {
 
   private deliver(frame: PeerUserFrame): void {
     if (!this.submitFn) {
+      if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
+        throw new Error('accepted-message backlog is full');
+      }
       this.buffered.push(frame);
       return;
     }
-    this.submit(frame);
+    while (this.buffered.length > 0) {
+      const head = this.buffered[0];
+      if (!head || !this.submit(head)) {
+        throw new Error('accepted-message backlog is full');
+      }
+      this.buffered.shift();
+    }
+    if (!this.submit(frame)) {
+      throw new Error('accepted-message backlog is full');
+    }
   }
 
-  private submit(frame: PeerUserFrame): void {
+  private submit(frame: PeerUserFrame): boolean {
     const from = frame.from ?? 'unknown session';
-    this.submitFn?.(
-      formatPeerEnvelope({
-        from,
-        ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-        content: frame.message.content,
-      }),
-      formatPeerDisplay({
-        from,
-        ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-        content: frame.message.content,
-      }),
+    return (
+      this.submitFn?.(
+        formatPeerEnvelope({
+          from,
+          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+          content: frame.message.content,
+        }),
+        formatPeerDisplay({
+          from,
+          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+          content: frame.message.content,
+        }),
+      ) ?? false
     );
   }
 
