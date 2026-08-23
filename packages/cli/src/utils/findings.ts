@@ -101,6 +101,22 @@ export interface Finding {
    */
   witness?: string;
   suggestedFix?: string;
+  /**
+   * The test that must go red if the fix is removed — the file and the
+   * behaviour it pins, or `N/A` when the fix adds no guard, branch or
+   * behaviour a test can pin.
+   *
+   * `witness` is the reviewer's evidence that the defect is real; this is the
+   * ACCEPTANCE CRITERION handed to whoever fixes it, and the two are not
+   * interchangeable. It exists because the fix round is the review loop's
+   * largest source of its own next round: measured across six multi-round
+   * pull requests, roughly a third of every post-first-round finding was
+   * introduced by the fix immediately preceding it, and the dominant shape
+   * was a guard or branch added with no test of its own. Carried as data for
+   * the same reason `witness` is — the report and the comment body quote one
+   * recorded string instead of transcribing it twice more.
+   */
+  fixWitness?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
   /** Every location, in report order. A standalone finding has exactly one. */
@@ -387,6 +403,11 @@ export function validateFindings(raw: unknown): Finding[] {
     // it back out of the artifact instead of transcribing the evidence again.
     const witness = asString(o, 'witness');
 
+    // And `fixWitness` round-trips beside it: the acceptance criterion is
+    // written once, at the finding, and read back by the comment body and by
+    // a later round comparing what it asked for against what landed.
+    const fixWitness = asString(o, 'fixWitness') ?? asString(o, 'fix_witness');
+
     return {
       id,
       severity,
@@ -398,6 +419,7 @@ export function validateFindings(raw: unknown): Finding[] {
         : compressSummary(summary),
       failureScenario,
       ...(witness ? { witness } : {}),
+      ...(fixWitness ? { fixWitness } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??

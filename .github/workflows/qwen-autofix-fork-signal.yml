@@ -68,25 +68,41 @@ jobs:
     # In-repo PRs keep their secrets and reach the review lane directly, so
     # signalling them would only dispatch a duplicate scan. The remaining
     # conjuncts MIRROR route's fork admission (qwen-autofix.yml's
-    # pull_request_review path): maintainer edits on, and the PR bot-authored
-    # or takeover-labeled — so an ordinary contributor's fork PR burns no
-    # signal/bridge/dispatched runs per review, and a takeover PR whose
-    # author turned maintainer edits off is never pushed into the credentialed
-    # lane. SKIP wins here as it wins everywhere: a skip-labeled PR's reviews
-    # would otherwise burn a signal + bridge run and a PR read before being
-    # discarded, repeating known-useless work on every review. The
-    # association list mirrors TRUSTED_ASSOC, the review-bot login mirrors
+    # pull_request_review path): the PR is bot-authored or takeover-labeled —
+    # so an ordinary contributor's fork PR burns no signal/bridge/dispatched
+    # runs per review. SKIP wins here as it wins everywhere: a skip-labeled
+    # PR's reviews would otherwise burn a signal + bridge run and a PR read
+    # before being discarded, repeating known-useless work on every review.
+    # The association list mirrors TRUSTED_ASSOC, the review-bot login mirrors
     # REVIEW_BOT, and the two labels mirror TAKEOVER_LABEL / SKIP_LABEL — all
     # pinned by the fork-bridge workflow test. The association is a WHEN
     # filter only: MEMBER/COLLABORATOR does not guarantee LIVE write
     # permission, so the bridge re-checks the reviewer live before
     # dispatching.
+    #
+    # MAINTAINER EDITS ARE NOT CHECKED HERE, deliberately, and this is the one
+    # conjunct that cannot live in this job. `pull_request_review` delivers
+    # the SIMPLE pull-request object, which carries no `maintainer_can_modify`
+    # — that field ships only on the full object the `pull_request` event
+    # sends. Reading it here yielded null on every delivery, `null == true` is
+    # false, and the gate could never open: across the 300 runs between this
+    # bridge shipping (#8676, 2026-08-07) and this fix, 290 skipped, 7
+    # cancelled, 1 action_required, and NOT ONE reached the signal step — so
+    # fork reviews silently fell back to the throttled cron backstop this
+    # bridge exists to get ahead of, and when that backstop stalled they fell
+    # through entirely. The consent check itself is not lost: the bridge
+    # re-reads it LIVE (`gh pr view --json maintainerCanModify` and a
+    # `select(… .maintainerCanModify == true)`), which is the only place it
+    # can be read at all — this job holds `permissions: {}`, no secrets and no
+    # checkout, so it has no way to ask the API. Nor is it weakened by moving:
+    # consent can be withdrawn between the review and the dispatch, so the
+    # live read was always the authoritative one and a payload copy could only
+    # ever have been a stale early-out.
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code'
       && github.event.pull_request.head.repo.full_name != github.repository
       && github.event.pull_request.base.ref == 'main'
       && github.event.pull_request.state == 'open'
-      && github.event.pull_request.maintainer_can_modify == true
       && (github.event.pull_request.user.login == (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')
       || contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/takeover"'))
       && !contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/skip"')
