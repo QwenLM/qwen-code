@@ -182,6 +182,22 @@ const runRemoveReviewTree = (workspace, ...args) =>
     { env: { ...process.env, GITHUB_WORKSPACE: workspace }, encoding: 'utf8' },
   );
 
+// The heal chain's contract is "never fail the job" even when a warning
+// echo itself fails — a stdout torn during job teardown. Close fd 1 for
+// the call so the echoes hit EBADF under the runner's errexit, exactly as
+// the bare leftover-loop call site runs.
+const runRemoveReviewTreeNoStdout = (workspace, path) =>
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail\n${removeReviewTreeFn}\nremove_review_tree "$@" >&-`,
+      'remove_review_tree',
+      path,
+    ],
+    { env: { ...process.env, GITHUB_WORKSPACE: workspace }, encoding: 'utf8' },
+  );
+
 // The skip-warning fixture executes the whole step body with `git`
 // stubbed to a function whose `worktree list --porcelain` returns
 // hostile registrations: the echoes under test sit in the loop, not in
@@ -328,6 +344,12 @@ describe('review worktree cleanup steps', () => {
       'sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true',
     );
     expect(reviewCleanCode).toContain('remove_review_tree "$leftover"');
+    // The registered-worktree call site is the ladder's other entry: git's
+    // own remove unlinks entries the same way rm does, so a foreign-owned
+    // tree defeats it too and must fall through to the same repair.
+    expect(reviewCleanCode).toMatch(
+      /worktree remove --force "\$worktree" \|\|\n\s*remove_review_tree "\$worktree"/,
+    );
     // The symlink-refusal guard must survive, including the direction of
     // its comparison and the deciding reason it now carries.
     expect(reviewCleanCode).toContain(
@@ -402,7 +424,7 @@ describe('review worktree cleanup steps', () => {
       /could not remove review worktree[^\n]*sudo: \$sudo_probe[^\n]*owner:/,
     );
     expect(reviewCleanCode).toMatch(
-      /could not remove review worktree[^\n]*\n\s*return 0/,
+      /could not remove review worktree[^\n]*\|\| true\n\s*return 0/,
     );
     // The probe must keep all three sudo states apart: the incident this
     // ladder exists for was a runner WITH sudo and no NOPASSWD entry, and
@@ -618,6 +640,85 @@ describe('review worktree cleanup steps', () => {
   );
 
   it.skipIf(!permissionFixturesAvailable || !realpathAvailable)(
+    'remove_review_tree refuses a leftover reached through a symlinked ancestor',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const targetTree = join(fixture, 'target/.qwen/tmp/review-pr-107');
+        mkdirSync(targetTree, { recursive: true });
+        writeFileSync(join(targetTree, 'keep.txt'), 'x');
+        mkdirSync(join(fixture, '.qwen'));
+        symlinkSync(
+          join(fixture, 'target/.qwen/tmp'),
+          join(fixture, '.qwen/tmp'),
+        );
+        // The final component is a real directory, so the -L arm stays
+        // silent and only the resolved-path comparison catches the
+        // redirect; lock the tree so the first rm fails and the ladder
+        // reaches the guard, leaving the redirect target untouched.
+        chmodSync(targetTree, 0o555);
+        const out = runRemoveReviewTree(fixture, '.qwen/tmp/review-pr-107');
+        expect(out.status).toBe(0);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(
+          'refusing to repair review worktree path (resolves through symlinks)',
+        );
+        expect(readFileSync(join(targetTree, 'keep.txt'), 'utf8')).toBe('x');
+      } finally {
+        chmodSync(join(fixture, 'target/.qwen/tmp/review-pr-107'), 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree refuses as unresolvable when realpath is absent',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      const leftover = join(fixture, '.qwen/tmp/review-pr-108');
+      try {
+        mkdirSync(leftover, { recursive: true });
+        writeFileSync(join(leftover, 'keep.txt'), 'x');
+        // Lock the tree itself so the first rm fails with the contents
+        // intact; a locked parent would still let rm unlink the writable
+        // children before failing.
+        chmodSync(leftover, 0o555);
+        // The merge_group macOS lane ships no realpath; stub the binary
+        // the way an empty PATH does and pin the refusal the ladder
+        // comment documents for that host.
+        const out = spawnSync(
+          'bash',
+          [
+            '-c',
+            `set -euo pipefail\nrealpath() { return 127; }\n${removeReviewTreeFn}\nremove_review_tree "$@"`,
+            'remove_review_tree',
+            '.qwen/tmp/review-pr-108',
+          ],
+          {
+            env: { ...process.env, GITHUB_WORKSPACE: fixture },
+            encoding: 'utf8',
+          },
+        );
+        expect(out.status).toBe(0);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(
+          'refusing to repair review worktree path (path could not be resolved)',
+        );
+        expect(readFileSync(join(leftover, 'keep.txt'), 'utf8')).toBe('x');
+      } finally {
+        chmodSync(leftover, 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable || !realpathAvailable)(
     'remove_review_tree repairs a permission-locked tree and then removes it',
     () => {
       const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
@@ -636,6 +737,58 @@ describe('review worktree cleanup steps', () => {
         expect(existsSync(leftover)).toBe(false);
       } finally {
         if (existsSync(leftover)) chmodSync(leftover, 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree keeps the step alive when the refusal echo fails',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const target = join(fixture, 'target');
+        mkdirSync(target);
+        const leftoverDir = join(fixture, '.qwen/tmp');
+        mkdirSync(leftoverDir, { recursive: true });
+        symlinkSync(target, join(leftoverDir, 'review-pr-109'));
+        chmodSync(leftoverDir, 0o555);
+        // fd 1 closed: the refusal echo fails with EBADF. The leftover-loop
+        // call site runs bare under the runner's errexit, so the echo's
+        // guard — not the trailing `return 0` — must keep the step alive.
+        const out = runRemoveReviewTreeNoStdout(
+          fixture,
+          '.qwen/tmp/review-pr-109',
+        );
+        expect(out.status).toBe(0);
+        expect(linkExists(join(leftoverDir, 'review-pr-109'))).toBe(true);
+      } finally {
+        chmodSync(join(fixture, '.qwen/tmp'), 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree keeps the step alive when the failure echo fails',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      const leftover = join(fixture, '.qwen/tmp/review-pr-110');
+      try {
+        mkdirSync(leftover, { recursive: true });
+        writeFileSync(join(leftover, 'locked.txt'), 'x');
+        chmodSync(join(fixture, '.qwen/tmp'), 0o555);
+        // The ladder exhausts its rungs against the locked parent, then the
+        // final warning echo hits EBADF on the closed stdout — the promise
+        // above `return 0` (never fail the job) must hold anyway.
+        const out = runRemoveReviewTreeNoStdout(
+          fixture,
+          '.qwen/tmp/review-pr-110',
+        );
+        expect(out.status).toBe(0);
+        expect(existsSync(leftover)).toBe(true);
+      } finally {
+        chmodSync(join(fixture, '.qwen/tmp'), 0o755);
         rmSync(fixture, { recursive: true, force: true });
       }
     },

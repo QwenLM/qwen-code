@@ -1909,7 +1909,7 @@ jobs:
               reason='resolves through symlinks'
             fi
             if [ -n "$reason" ]; then
-              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//[$'\r\n']/ }"
+              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//[$'\r\n']/ }" || true
               return 0
             fi
             chmod -R u+rwX "$abs" 2>/dev/null || true
@@ -1922,7 +1922,7 @@ jobs:
               sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true
             fi
             rm -rf "$abs" 2>/dev/null && return 0
-            echo "::warning::could not remove review worktree: ${abs//[$'\r\n']/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk 'NR==1 {print $3}'))"
+            echo "::warning::could not remove review worktree: ${abs//[$'\r\n']/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk 'NR==1 {print $3}'))" || true
             # return 0 even when the warning echo fails: the heal chain must
             # never fail the job.
             return 0
