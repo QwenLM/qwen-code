@@ -3313,6 +3313,38 @@ describe('DingtalkChannel chat records', () => {
     expect(text).not.toContain('[[');
   });
 
+  // R11-1: the R10-1 unpaired-bracket branch deleted the `[` without advancing
+  // `close`, so on a summary of N leading `[` with no `]` every later head `[`
+  // rescanned the entire remaining tail -- quadratic in the pass the function
+  // comment promises is linear. The other two stall tests pin the paired/nested
+  // and `[ ]`-chained shapes and cannot see this one: at the R10-1 commit this
+  // shape measured 90 ms at 10k, 343 ms at 20k and 1357 ms at 40k through
+  // `onMessage` -- ~9 s at this test's 100k -- against 10 ms for the paired
+  // control. The threshold keeps the shared posture: far under the quadratic
+  // cost at this size, far over the linear one, without pinning a machine speed.
+  it('deletes unpaired leading brackets without a quadratic stall', () => {
+    const channel = createChannel();
+    const started = Date.now();
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(
+      chatRecordDownstream(
+        {
+          summary: '['.repeat(100000),
+          chatRecord: [{ senderName: 'Ann', content: 'hi' }],
+        },
+        'chat-record-unpaired-stall',
+      ),
+    );
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // Still deleted to the last bracket -- the speed-up must not cost the
+    // R10-1 defence. The summary peels to nothing, so no rendered line is left
+    // that a later ` [truncated]` marker could close a bracket span on.
+    const text = inboundText(channel);
+    expect(text).toBe('[Chat record messages]\nAnn: hi');
+  });
+
   it('warns when a record renders a summary but no entry is readable', () => {
     const channel = createChannel();
     const stderr = vi

@@ -227,6 +227,11 @@ function startOfLineSafeChatRecordField(value: string): string {
       // start-of-line.
       deleted[open] = 1;
       open += 1;
+      // A failed scan proves no live `]` remains anywhere past this point,
+      // and later scans only start further right: latch the end so the next
+      // head `[` does not rescan the tail -- that made a run of unpaired `[`
+      // quadratic (R11-1) in the pass this function promises is linear.
+      close = next;
       continue;
     }
     deleted[open] = 1;
