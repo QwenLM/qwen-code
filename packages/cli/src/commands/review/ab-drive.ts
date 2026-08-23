@@ -44,9 +44,14 @@
 import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import {
+  accessSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -187,11 +192,6 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       );
     }
   }
-  if (exec('tmux', ['-V']).status !== 0) {
-    return fail(
-      'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
-    );
-  }
   // An EMPTY or whitespace-only path flag is not the cwd: `resolve('')` is
   // `process.cwd()`, so an unset `$BASE_TREE` would silently drive an arm in
   // the caller's working directory — in the review pipeline, the very
@@ -210,13 +210,28 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       );
     }
   }
+  // The one input the whole command exists to run: an empty --script wraps to
+  // a body that immediately fires its EXIT trap (rc=0), so both arms "complete"
+  // observing nothing — a vacuous observed:true verdict.
+  if (args.script.trim() === '') {
+    return fail(
+      '--script is empty — there is nothing to drive, and an empty script completes vacuously on both arms. Nothing was started.',
+    );
+  }
   // Directories, not merely existing paths: `tmux new-session -c <a file>`
   // succeeds with a silent cwd fallback to $HOME, and the arm then reports
   // `completed` for a script that never ran in its tree — an A/B verdict
   // about $HOME with nothing in the report contradicting it.
   const isDir = (p: string) => {
     try {
-      return statSync(resolve(p)).isDirectory();
+      const abs = resolve(p);
+      // Both bits: a directory `tmux new-session -c` can actually chdir into
+      // needs its search (X) bit. A mode-000 directory is a directory yet
+      // tmux silently falls back to another cwd, and the arm then reports
+      // `completed` for a tree it never entered.
+      return (
+        statSync(abs).isDirectory() && (accessSync(abs, constants.X_OK), true)
+      );
     } catch {
       return false;
     }
@@ -258,6 +273,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   if (realA !== null && realA === realB) {
     return fail(
       `--arm-a and --arm-b resolve to the same directory (${realA}) — an A/B needs two trees, and a self-comparison licenses "the PR changes nothing" from nothing.`,
+    );
+  }
+
+  // tmux availability is checked AFTER every pure-input guard above: a
+  // repairable invocation (bad flag, empty script, non-directory arm) must
+  // refuse with nothing started, whether or not tmux happens to be present.
+  if (exec('tmux', ['-V']).status !== 0) {
+    return fail(
+      'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
     );
   }
 
@@ -351,12 +375,27 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     }
   };
 
-  /** Read a file the driven code may be racing us on; absent reads as ''. */
+  /**
+   * Read a file the driven code may be racing us on; absent reads as ''.
+   *
+   * Opened O_NONBLOCK and required to be a regular file: the arm script knows
+   * its own log/rc paths (its wrapper's cmdline carries them) and, untrusted
+   * by this command's threat model, can rm one and mkfifo the same path. A
+   * blocking `readFileSync` of that FIFO waits forever in open(2) inside the
+   * single-threaded poll loop — `--timeout` defeated, kill-server never
+   * reached, no report. O_NONBLOCK returns instead of blocking, and the
+   * fstat guard reads nothing from a non-file.
+   */
   const readIfThere = (p: string): string => {
+    let fd: number | undefined;
     try {
-      return readFileSync(p, 'utf8');
+      fd = openSync(p, constants.O_RDONLY | constants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return '';
+      return readFileSync(fd, 'utf8');
     } catch {
       return '';
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
   };
 
@@ -464,8 +503,12 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       // back to $HOME — or swap it for a symlink. `checkRoot` is called
       // again immediately before `start(arm-…)`.
       const checkRoot = (): AbArmReport | null => {
-        if (realpathOf(root) !== expectedRoot) {
-          note = `arm ${arm}'s root ${JSON.stringify(root)} no longer resolves to the directory validated at start (${expectedRoot ?? 'gone'}) — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
+        // Identity AND searchability: the validate→use window is where the
+        // arm's own code could swap the root for a symlink (realpath moves)
+        // or revoke its search bit (tmux -c then falls back silently), so
+        // both are re-checked, not just existence.
+        if (realpathOf(root) !== expectedRoot || !isDir(root)) {
+          note = `arm ${arm}'s root ${JSON.stringify(root)} no longer resolves to the validated directory or is no longer searchable (${expectedRoot ?? 'gone'}) — it vanished, was replaced, or lost its search bit mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
           return bail('unavailable', null);
         }
         return null;

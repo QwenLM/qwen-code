@@ -88,9 +88,11 @@ export interface RevertHunkReport {
   conflict?: string;
   /**
    * True when `applied` is false because the HARNESS failed (git unrunnable
-   * in --tree, killed by the timeout), not because the hunk was refused.
-   * The handler maps it to exit 2 (repair the invocation), never exit 1 (a
-   * real refusal a calling script records as a coupling fact).
+   * in --tree, killed, or `fatal:`), or because the INVOCATION was
+   * repairable (a bad selector, a hunk that does not exist, an unsupported
+   * diff prefix) — neither is the genuine coupling refusal exit 1 is for.
+   * The handler maps it to exit 2 (repair the invocation / harness), never
+   * exit 1 (a refusal a calling script records as a coupling fact).
    */
   harnessFailure?: boolean;
   /** What happened, one line, rendered to the verifier verbatim. */
@@ -219,16 +221,29 @@ export function renameSectionHasUnsupportedPrefix(
   diffText: string,
   file: DiffFile,
 ): boolean {
-  if (file.renameFrom === undefined) return false;
   const lines = diffText.split('\n');
   const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  // A move OR a copy: parseDiff only records `renameFrom` for `rename from`
+  // lines, so a copy-with-edits section (git emits `copy from`/`copy to`
+  // under copy detection) would slip past a renameFrom-only gate and get its
+  // copy rewound.
+  const isMoveOrCopy =
+    file.renameFrom !== undefined ||
+    header.some(
+      (l) => l.startsWith('copy from ') || l.startsWith('rename from '),
+    );
+  if (!isMoveOrCopy) return false;
   const tok = (pfx: string) =>
     header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '';
+  // A quoted token is standard only when it quotes an a/ or b/ prefix — a
+  // C-quoted path under a CUSTOM prefix (`"x/café"`) starts with `"` too but
+  // the rewrite's `"a/`-assuming slice would mangle it.
   const standard = (t: string) =>
     t === '/dev/null' ||
     t.startsWith('a/') ||
     t.startsWith('b/') ||
-    t.startsWith('"');
+    t.startsWith('"a/') ||
+    t.startsWith('"b/');
   return !standard(tok('--- ')) || !standard(tok('+++ '));
 }
 
@@ -294,6 +309,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   if (!sel) {
     return {
       applied: false,
+      harnessFailure: true,
       note: `--hunk ${JSON.stringify(args.hunk)} is not a hunk id; expected <path>:<n> with n >= 1 — run with --list to see the ids this diff has.`,
     };
   }
@@ -305,6 +321,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       : 'no section in this diff';
     return {
       applied: false,
+      harnessFailure: true,
       note: `hunk ${args.hunk} does not exist: ${sel.path} has ${have} — run with --list to see the ids this diff has.`,
     };
   }
@@ -320,6 +337,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     return {
       applied: false,
       hunk: entry,
+      harnessFailure: true,
       note: `hunk ${args.hunk} sits in a rename section whose diff prefixes are not the standard a/ b/ — a reverse-apply would move the file rather than revert its content. Recapture the diff with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix); nothing was changed.`,
     };
   }
@@ -349,6 +367,17 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         note: `could not run git in ${tree}: ${check.error ?? `killed by ${check.signal}`} — a harness failure, not a fact about the hunk. Check --tree and that git is on PATH; the tree is unchanged (nothing ran).`,
       };
     }
+    if (check.status === 128) {
+      // `fatal:` — git never inspected the patch (a non-repo --tree, a pruned
+      // gitdir). Recording it as a coupling fact would feed the load-bearing
+      // decision a failure of the harness dressed as a fact about the diff.
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `git could not operate on ${tree}: ${check.stderr || 'fatal (no text)'} — a harness failure, not a fact about the hunk. Point --tree at the scratch worktree (a real git tree); nothing was changed.`,
+      };
+    }
     if (check.status !== 0) {
       return {
         applied: false,
@@ -371,13 +400,15 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       };
     }
     if (apply.status !== 0) {
-      // --check passed and the apply did not: something raced the tree
-      // between the two calls. Report it as the harness fact it is.
+      // --check passed and the apply did not: the tree raced us between the
+      // two calls. `--check` already proved independent revertibility, so
+      // this is a harness condition, not a coupling fact about the hunk —
+      // harnessFailure keeps it out of the exit-1 refusal class.
       return {
         applied: false,
         hunk: entry,
-        conflict: apply.stderr || 'git apply refused (no error text)',
-        note: `hunk ${args.hunk} passed --check but failed to apply — the tree changed between the two calls. Reset the scratch tree and retry.`,
+        harnessFailure: true,
+        note: `hunk ${args.hunk} passed --check but failed to apply — the tree changed between the two calls, so it may be PARTIALLY modified. Reset the scratch tree and retry.`,
       };
     }
     return {

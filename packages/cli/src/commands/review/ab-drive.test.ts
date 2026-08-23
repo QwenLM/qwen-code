@@ -18,6 +18,7 @@ import { describe, it, expect, vi, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -206,6 +207,14 @@ describe('runAbDrive, harnessed', () => {
     }
   });
 
+  it('refuses an empty --script — an empty body completes vacuously', () => {
+    const h = harness({ server: 'x' });
+    const r = runAbDrive(baseArgs({ script: '  ', exec: h.exec }));
+    expect(r.observed).toBe(false);
+    expect(r.note).toContain('--script is empty');
+    expect(h.log).toEqual([]);
+  });
+
   it('reports the environment gap when tmux is absent', () => {
     const h = harness({ server: 't', tmuxAvailable: false });
     const r = runAbDrive(baseArgs({ exec: h.exec }));
@@ -233,11 +242,29 @@ describe('runAbDrive, harnessed', () => {
     expect(r.observed).toBe(false);
     expect(r.note).toContain('--arm-a');
     expect(r.note).toContain('not an existing directory');
+    // A repairable typo starts nothing: no tmux side effects, no leaked
+    // keeper — the gate is global and pre-drive.
+    expect(h.log).toEqual([]);
+    expect(r.a).toBeNull();
+    expect(r.b).toBeNull();
     const h2 = harness({ server: 't' });
     const r2 = runAbDrive(
       baseArgs({ shared: 'daemon', sharedCwd: filePath, exec: h2.exec }),
     );
     expect(r2.note).toContain('--shared-cwd');
+  });
+
+  it('refuses a directory whose search bit is revoked — tmux -c would fall back', () => {
+    // A mode-000 dir passes isDirectory() but `tmux new-session -c` cannot
+    // chdir into it and silently starts elsewhere.
+    const locked = tempDir('ab-locked-');
+    chmodSync(locked, 0o000);
+    const h = harness({ server: 't' });
+    const r = runAbDrive(baseArgs({ armA: locked, exec: h.exec }));
+    chmodSync(locked, 0o755); // so afterAll can remove it
+    expect(r.observed).toBe(false);
+    expect(r.note).toContain('--arm-a');
+    expect(h.log).toEqual([]);
   });
 
   it('refuses the same directory passed as both arms — an A/B needs two trees', () => {
@@ -301,6 +328,27 @@ describe('runAbDrive, harnessed', () => {
     expect(r.a?.outcome).toBe('unavailable');
     expect(r.note).toContain('--shared-cwd');
     expect(r.note).toContain('no longer resolves');
+  });
+
+  it('re-validates against a symlink SWAP at the use site, not only deletion', () => {
+    // The mutant `realpathOf(root) === null` (deletion-only) would pass a
+    // swap; checkRoot compares the realpath, so a root replaced by a symlink
+    // to another tree mid-run is caught.
+    const args = baseArgs({});
+    const other = tempDir('ab-other-');
+    const h = harness({
+      server: args.server,
+      onSession: (name) => {
+        if (name === 'arm-a') {
+          rmSync(args.armB, { recursive: true, force: true });
+          symlinkSync(other, args.armB);
+        }
+      },
+    });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.b?.outcome).toBe('unavailable');
+    expect(r.observed).toBe(false);
+    expect(h.events()).not.toContain('new:arm-b');
   });
 
   it('reclaims a stale server FIRST — and reports that it did', () => {
@@ -454,6 +502,13 @@ describe('runAbDrive, harnessed', () => {
     expect(r.a?.outcome).toBe('overflowed');
     expect(r.a?.exitCode).toBeNull();
     expect(r.observed).toBe(false);
+    // The overflowed session is killed (its writer keeps growing the log
+    // otherwise) and arm b is still driven — the same early-stop teardown
+    // the timed-out path gets.
+    const ev = h.events();
+    expect(ev).toContain('kill:arm-a');
+    expect(ev).toContain('new:arm-b');
+    expect(r.b?.outcome).toBe('completed');
   });
 
   it('per-arm mode stands the shared process up fresh for EACH arm, interleaved, torn down in place', () => {
@@ -631,6 +686,40 @@ describe('runAbDrive, harnessed', () => {
     expect(probe).toContain(`cd '${sharedCwd}'`);
     expect(probe).toContain(`AB_ARM_ROOT='${args.armA}'`);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not hang when the arm log path is a FIFO — reads non-blocking',
+    () => {
+      // The untrusted arm swaps its log for a FIFO; a blocking read would wait
+      // forever. The read returns '' from a non-file, the arm times out, and
+      // cleanup still runs.
+      const args = baseArgs({ timeout: 1 });
+      const h = harness({
+        server: args.server,
+        hang: ['arm-a'],
+        onSession: (name) => {
+          if (name === 'arm-a') {
+            // Replace the (not-yet-written) log path with a FIFO.
+            const shell = h.log.find(
+              (l) => l[3] === 'new-session' && l[6] === 'arm-a',
+            );
+            const m = /bash '[^']+' > '([^']+)'/.exec(
+              shell?.[shell.length - 1] ?? '',
+            );
+            if (m) {
+              rmSync(m[1], { force: true });
+              spawnSync('mkfifo', [m[1]]);
+            }
+          }
+        },
+      });
+      const r = runAbDrive({ ...args, exec: h.exec });
+      expect(r.a?.outcome).toBe('timed-out');
+      expect(r.observed).toBe(false);
+      // The server was still torn down — a hung read would have leaked it.
+      expect(h.log.at(-1)).toEqual(['tmux', '-L', args.server, 'kill-server']);
+    },
+  );
 
   it('identicalOutput is true only for identical, untrimmed captures — and null when ANY head was cut', () => {
     // Equality of two tails whose heads are gone is not equality — and the

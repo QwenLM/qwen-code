@@ -278,6 +278,92 @@ describe('runRevertHunk', () => {
     expect(statSync(join(dir, 'run.sh')).mode & 0o111).not.toBe(0);
   });
 
+  it('refuses a copy section under a non-standard prefix instead of rewinding the copy', () => {
+    const dir = tempDir('rh-cpfx-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
+    writeFileSync(join(dir, 'orig.txt'), `top-old\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'copy.txt'), `top-new\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'copy+edit');
+    const diffText = git(
+      dir,
+      'diff',
+      '-C',
+      '-C',
+      '--src-prefix=x/',
+      '--dst-prefix=y/',
+      'HEAD~1',
+      'HEAD',
+    );
+    expect(diffText).toContain('copy from');
+    const diffPath = join(dir, 'cpfx.diff');
+    writeFileSync(diffPath, diffText);
+    const id = listHunks(diffText)[0].id;
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('standard a/ b/');
+    // The copy was NOT rewound.
+    expect(existsSync(join(dir, 'copy.txt'))).toBe(true);
+  });
+
+  it('refuses a C-quoted rename under a non-default prefix', () => {
+    const dir = tempDir('rh-qpfx-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
+    writeFileSync(join(dir, 'plain.txt'), `top-old\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    git(dir, 'mv', 'plain.txt', 'caf\u00e9.txt');
+    writeFileSync(join(dir, 'caf\u00e9.txt'), `top-new\n${body}\n`);
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'rename+edit');
+    const diffText = git(
+      dir,
+      'diff',
+      '-M',
+      '--src-prefix=x/',
+      '--dst-prefix=y/',
+      'HEAD~1',
+      'HEAD',
+    );
+    const diffPath = join(dir, 'qpfx.diff');
+    writeFileSync(diffPath, diffText);
+    const id = listHunks(diffText)[0].id;
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+  });
+
+  it('reports a git FATAL (status 128) as a harness fact, not a coupling refusal', () => {
+    // status 128 is git's `fatal:` — a pruned gitdir, a non-repo worktree —
+    // where git never inspected the patch; recording it as a coupling fact
+    // would feed the load-bearing decision a harness failure dressed as a
+    // fact about the diff. Driven through the seam because a real
+    // pruned-gitdir is not deterministically constructible here.
+    const { dir, diffPath } = twoHunkFixture();
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+      exec: () => ({
+        status: 128,
+        stderr: 'fatal: not a git repository',
+      }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+    expect(r.note).not.toContain('coupling');
+  });
+
   it('reports a spawn-level failure as a harness fact, never as hunk coupling', () => {
     // A mistyped --tree makes spawnSync return {status: null, error: ENOENT}
     // without throwing; folded into the refusal branch it would record a
@@ -681,6 +767,44 @@ describe('the command wiring', () => {
       expect.stringContaining('revert-hunk:'),
     );
     process.exitCode = 0;
+  });
+
+  it('maps a harness failure (bad --tree) to exit 2 through the handler', () => {
+    const { diffPath } = twoHunkFixture();
+    process.exitCode = 0;
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: diffPath,
+      hunk: 'f.txt:1',
+      tree: '/definitely/not/a/tree-xyz',
+    });
+    // Exit 2 (repairable), not 1 (a refusal a calling script records as a
+    // coupling fact).
+    expect(process.exitCode).toBe(2);
+    const printed = vi
+      .mocked(writeStdoutLineSafe)
+      .mock.calls.at(-1)?.[0] as string;
+    expect((JSON.parse(printed) as { applied: boolean }).applied).toBe(false);
+    process.exitCode = 0;
+  });
+
+  it('writes the report to --out on a REFUSAL too, not only on apply', () => {
+    // The consumer brief quotes the applied:false fact from --out; gating the
+    // write on `applied` leaves a stale or absent file after a refusal.
+    const { dir, diffPath } = twoHunkFixture();
+    runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' }); // mutate first
+    const out = join(tempDir('rh-refout-'), 'r.json');
+    process.exitCode = 0;
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: diffPath,
+      hunk: 'f.txt:1', // now refuses — its "+" side is gone
+      tree: dir,
+      out,
+    });
+    expect(process.exitCode).toBe(1);
+    const written = JSON.parse(readFileSync(out, 'utf8')) as {
+      applied: boolean;
+    };
+    expect(written.applied).toBe(false);
   });
 
   it('a mistyped --diff exits 2 with the reason named — never the refused-revert class', () => {
