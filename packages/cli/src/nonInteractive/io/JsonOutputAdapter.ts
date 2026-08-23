@@ -11,7 +11,7 @@ import {
   type JsonOutputAdapterInterface,
   type ResultOptions,
 } from './BaseJsonOutputAdapter.js';
-import { observeHeadlessJsonToolResultWire } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessJsonToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * JSON output adapter that collects all messages and emits them

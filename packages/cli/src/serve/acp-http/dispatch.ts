@@ -12,7 +12,6 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
-  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -22,6 +21,8 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
+  readSessionPrs,
+  upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
@@ -37,7 +38,6 @@ import {
   PermissionPolicyNotImplementedError,
   type RestoreInProgressError,
   SessionArchivingError,
-  SessionConflictError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -61,7 +61,7 @@ import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
@@ -86,6 +86,7 @@ import {
 } from '../../config/permission-settings.js';
 import { loadSettings } from '../../config/settings.js';
 import {
+  isValidSessionId,
   normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
 } from '../../config/session-id.js';
@@ -126,11 +127,12 @@ import {
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
-  assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   DaemonDrainingError,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -866,6 +868,16 @@ export function toRpcError(err: unknown): {
         data: {
           errorKind: 'session_archiving',
           sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
+    case 'InvalidSessionMetadataError':
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: {
+          httpStatus: 400,
+          errorKind: 'invalid_metadata',
+          field: (err as { field?: unknown }).field,
         },
       };
     case 'SessionNotFoundError':
@@ -1838,24 +1850,6 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            const guardSessionService = new SessionService(cwd, {
-              runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-            });
-            let persistedGuardId: string | undefined;
-            try {
-              persistedGuardId =
-                await guardSessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await guardSessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],
               async () => {
@@ -1863,30 +1857,20 @@ export class AcpDispatcher {
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
-                let storageSessionId = persistedGuardId ?? sessionId;
-                let persistedSessionId: string | undefined;
-                try {
-                  persistedSessionId =
-                    await sessionService.findSessionIdIgnoringCase(sessionId);
-                } catch (error) {
-                  if (
-                    error instanceof SessionIdCaseConflictError &&
-                    (await sessionService.getSessionLocation(
-                      error.candidateSessionId ?? sessionId,
-                    )) === 'conflict'
-                  ) {
-                    throw new SessionConflictError(sessionId);
-                  }
-                  throw error;
-                }
+                let storageSessionId = sessionId;
+                const persistedSessionId = await resolveSessionIdForRestore(
+                  sessionService,
+                  sessionId,
+                );
                 if (persistedSessionId) {
                   storageSessionId = persistedSessionId;
                 } else if (this.liveSessionIsolation) {
                   throw new SessionNotFoundError(sessionId);
                 }
-                await assertSessionLoadable(
+                await assertSessionRestorable(
                   cwd,
                   storageSessionId,
+                  sessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
@@ -2891,10 +2875,39 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/update_metadata`: {
           const sessionId = String(params['sessionId'] ?? '');
+          // Same gate as the REST metadata routes: the id becomes a sidecar
+          // path component (upsertSessionPr's mkdir + JSON write), so reject
+          // separator-bearing spellings before any sidecar I/O.
+          if (!isValidSessionId(sessionId)) {
+            throw new AcpParamError('`sessionId` must be a valid session id');
+          }
           await this.withMutableOwned(conn, sessionId, id, async () => {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
+            const service = new SessionService(this.boundWorkspace, {
+              runtimeBaseDir: this.sessionRuntimeBaseDir,
+            });
+            // Bridge entries are re-created without prs on daemon restart,
+            // close/reload, and archive/restore, and the bridge itself is
+            // storage-agnostic — so hydrate the persisted binding history
+            // before the mutation. Otherwise the reply AND the
+            // `session_metadata_updated` event echo only this daemon
+            // lifetime's bindings, silently dropping earlier ones. The read
+            // is best-effort: readSessionPrs rethrows non-ENOENT I/O errors
+            // (EISDIR/EACCES/EIO), and an unreadable sidecar must degrade the
+            // event's history, not block a pr-less rename.
+            let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+            try {
+              hydratedPrs = await readSessionPrs(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+              );
+            } catch {
+              hydratedPrs = null;
+            }
+            if (hydratedPrs && hydratedPrs.length > 0) {
+              this.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+            }
             let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
             try {
               result = this.bridge.updateSessionMetadata(
@@ -2904,6 +2917,34 @@ export class AcpDispatcher {
                 >[1],
                 this.sessionCtx(conn, sessionId, loopback),
               );
+              // The bridge keeps the binding in live memory only; persist it
+              // as a sidecar so it survives daemon restarts, matching the
+              // REST metadata routes. Gate on this call actually binding a
+              // PR — the bridge echoes `prs` whenever any binding exists, so
+              // a displayName-only rename must not re-upsert (it would
+              // refresh createdAt and could evict an older entry early).
+              const boundPr = metadata['pr'];
+              if (
+                isObject(boundPr) &&
+                typeof boundPr['number'] === 'number' &&
+                typeof boundPr['url'] === 'string'
+              ) {
+                const persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    {
+                      number: boundPr['number'],
+                      url: boundPr['url'],
+                    },
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                // Reply with the authoritative persisted list, mirroring the
+                // REST metadata routes.
+                result = { ...result, prs: persistedPrs };
+              }
             } finally {
               this.invalidateSessionLists(['active']);
             }

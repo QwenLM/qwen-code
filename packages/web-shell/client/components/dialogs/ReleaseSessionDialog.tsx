@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
 import {
   useConnection,
   type DaemonSessionSummary,
@@ -61,7 +62,8 @@ export function ReleaseSessionDialog({
         const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
-          s.sessionId.toLowerCase().includes(q)
+          s.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(s, q)
         );
       })
     : sessions;

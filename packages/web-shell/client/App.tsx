@@ -41,6 +41,7 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSkillToggleMutation,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -75,7 +76,10 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
-import { useSessionCatalogController } from './session-catalog/session-catalog-hooks';
+import {
+  useSessionCatalogController,
+  useSessionHasActivePrompt,
+} from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
@@ -219,7 +223,7 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import { useMessagesFromBlocks } from './hooks/useMessages';
@@ -489,6 +493,70 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+function availableSessionSkillInfos(
+  skills: readonly string[],
+  commands: readonly {
+    name: string;
+    description: string;
+    argumentHint?: string;
+  }[],
+): SkillInfo[] {
+  const commandsByName = new Map(
+    commands.map((command) => [command.name.toLowerCase(), command]),
+  );
+  return skills
+    .map((name) => {
+      const command = commandsByName.get(name.toLowerCase());
+      return {
+        name,
+        description: command?.description ?? '',
+        ...(command?.argumentHint
+          ? { argumentHint: command.argumentHint }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sessionSkillsReflectToggle(
+  sessionSkills: readonly string[] | undefined,
+  mutationSkills: ReadonlyArray<{ name: string; enabled: boolean }>,
+): boolean {
+  if (sessionSkills === undefined) {
+    return false;
+  }
+  const enabledNames = new Set(sessionSkills.map((name) => name.toLowerCase()));
+  return mutationSkills.every((skill) => {
+    const enabled = enabledNames.has(skill.name.toLowerCase());
+    return skill.enabled === enabled;
+  });
+}
+
+function skillMutationsForWorkspace(
+  lastSkillMutation: DaemonSkillToggleMutation | undefined,
+  skillMutationsByCwd: Record<string, DaemonSkillToggleMutation[]> | undefined,
+  workspaceCwd?: string,
+): readonly DaemonSkillToggleMutation[] {
+  if (skillMutationsByCwd) {
+    return workspaceCwd ? (skillMutationsByCwd[workspaceCwd] ?? []) : [];
+  }
+  return lastSkillMutation ? [lastSkillMutation] : [];
+}
+
+function mergeSkillToggles(
+  current: ReadonlyArray<{ name: string; enabled: boolean }>,
+  incoming: ReadonlyArray<{ name: string; enabled: boolean }>,
+): Array<{ name: string; enabled: boolean }> {
+  const byName = new Map(
+    current.map((skill) => [skill.name.toLowerCase(), skill] as const),
+  );
+  for (const skill of incoming) {
+    byName.set(skill.name.toLowerCase(), skill);
+  }
+  return [...byName.values()];
+}
+
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
@@ -1941,7 +2009,7 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useAnimationFrameTranscriptBlocks();
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const connection = useConnection();
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -1967,6 +2035,16 @@ export function App({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const sessionHasActivePrompt = useSessionHasActivePrompt(
+    workspace.client,
+    connection.workspaceCwd,
+    connection.sessionId,
+  );
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -2357,7 +2435,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessagesFromBlocks(t, blocks);
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
@@ -4096,9 +4174,7 @@ export function App({
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
+  streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -4435,9 +4511,21 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const [loadedSkillsFallback, setLoadedSkillsFallback] = useState<{
+    sessionId: string;
+    workspaceCwd: string | undefined;
+  }>();
+  const connectionSkillSnapshotRef = useRef({
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  });
+  connectionSkillSnapshotRef.current = {
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  };
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string) => {
+    async (workspaceCwd?: string, notifyOnError = false) => {
       const request = ++loadedSkillsRequestRef.current;
       try {
         const status =
@@ -4449,16 +4537,137 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-      } catch {
-        return;
+        return true;
+      } catch (error) {
+        if (notifyOnError) {
+          pushToast(
+            'error',
+            formatError(error, 'Failed to refresh composer skills'),
+          );
+        }
+        return false;
       }
     },
-    [workspace.client, workspaceActions],
+    [pushToast, workspace.client, workspaceActions],
   );
   useEffect(() => {
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+  const handledSkillMutationKeysRef = useRef(new Set<string>());
+  const pendingSkillTogglesByContextRef = useRef(
+    new Map<string, Array<{ name: string; enabled: boolean }>>(),
+  );
+  useEffect(() => {
+    if (!connected) {
+      handledSkillMutationKeysRef.current.clear();
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    const contextKey = `${workspaceCwd ?? ''}\n${sessionId ?? ''}`;
+    const mutations = skillMutationsForWorkspace(
+      workspaceEventSignals?.lastSkillMutation,
+      workspaceEventSignals?.skillMutationsByCwd,
+      workspaceCwd,
+    );
+    const mutationKeys = mutations.map(
+      (mutation) => `${contextKey}\n${mutation.id}`,
+    );
+    const unhandled = mutations.filter(
+      (_, index) =>
+        !handledSkillMutationKeysRef.current.has(mutationKeys[index]!),
+    );
+    if (unhandled.length === 0) return;
+    const markHandled = () => {
+      for (const mutationKey of mutationKeys) {
+        handledSkillMutationKeysRef.current.add(mutationKey);
+      }
+    };
+    const priorPending =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    const pendingToggles = mergeSkillToggles(
+      priorPending,
+      unhandled.flatMap((mutation) => mutation.skills),
+    );
+    const sessionSkills = connectionSkillSnapshotRef.current.skills;
+    if (
+      sessionId &&
+      sessionSkills !== undefined &&
+      priorPending.length === 0 &&
+      unhandled.every(
+        (mutation) =>
+          mutation.activation === 'applied' &&
+          mutation.sessionsFailed === 0 &&
+          mutation.sessionsRefreshed > 0,
+      )
+    ) {
+      markHandled();
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
+    let cancelled = false;
+    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded) return;
+      markHandled();
+      if (!sessionId) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        return;
+      }
+      const currentSnapshot = connectionSkillSnapshotRef.current;
+      if (
+        currentSnapshot.sessionId === sessionId &&
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+      ) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      setLoadedSkillsFallback({ sessionId, workspaceCwd });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connected,
+    connection.sessionId,
+    connection.workspaceCwd,
+    reloadLoadedSkills,
+    workspaceEventSignals?.lastSkillMutation,
+    workspaceEventSignals?.skillMutationsByCwd,
+  ]);
+  useEffect(() => {
+    if (!loadedSkillsFallback) return;
+    if (
+      connection.sessionId !== loadedSkillsFallback.sessionId ||
+      connection.workspaceCwd !== loadedSkillsFallback.workspaceCwd
+    ) {
+      const previousContextKey = `${loadedSkillsFallback.workspaceCwd ?? ''}\n${loadedSkillsFallback.sessionId}`;
+      for (const mutationKey of handledSkillMutationKeysRef.current) {
+        if (mutationKey.startsWith(`${previousContextKey}\n`)) {
+          handledSkillMutationKeysRef.current.delete(mutationKey);
+        }
+      }
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    const contextKey = `${connection.workspaceCwd ?? ''}\n${connection.sessionId ?? ''}`;
+    const pendingToggles =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    if (
+      pendingToggles.length > 0 &&
+      sessionSkillsReflectToggle(connection.skills, pendingToggles)
+    ) {
+      pendingSkillTogglesByContextRef.current.delete(contextKey);
+      setLoadedSkillsFallback(undefined);
+    }
+  }, [
+    connection.sessionId,
+    connection.skills,
+    connection.workspaceCwd,
+    loadedSkillsFallback,
+  ]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -5229,8 +5438,8 @@ export function App({
   /**
    * Whether a local action must be held back because a Goal owns the session.
    * Reads the latest connection through the ref so callers get the gate as of
-   * call time; the fail-closed hydration convention lives in the shared
-   * predicate, which every Goal gate in the client shares.
+   * call time. Commands and run guards fail closed during Goal hydration;
+   * ordinary chat submissions do not consult this gate.
    */
   const isGoalGateBlocked = useCallback(
     () => isGoalGateBlockedFor(connectionRef.current),
@@ -5985,7 +6194,8 @@ export function App({
     if (
       sessionWriteBlockedRef.current ||
       promptPreparationOwnerRef.current ||
-      isGoalGateBlocked()
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current
     ) {
       return;
     }
@@ -6125,7 +6335,6 @@ export function App({
     t,
     updateFailedPrompt,
     updateUnknownPromptAdmission,
-    isGoalGateBlocked,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -6157,10 +6366,7 @@ export function App({
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
     streamingState,
-    holdQueuedPromptsLocally:
-      connection.sessionId !== undefined &&
-      (connection.goalState === undefined ||
-        connection.goalState.goal?.status === 'active'),
+    sessionHasActivePrompt,
     sessionActions,
     store,
     editorRef,
@@ -6521,10 +6727,17 @@ export function App({
     [store, resumeChatBottomFollow],
   );
 
-  const blockLocalCommandDuringTurn = useCallback((): false => {
-    pushToast('error', t('queue.commandBlocked'));
+  const blockCommand = useCallback((): false => {
+    pushToast(
+      'error',
+      t(
+        isGoalGateBlocked()
+          ? 'queue.commandGoalBlocked'
+          : 'queue.commandBlocked',
+      ),
+    );
     return false;
-  }, [pushToast, t]);
+  }, [isGoalGateBlocked, pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -6942,9 +7155,13 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
         handleLanguageChange(previousLanguage);
-        blockLocalCommandDuringTurn();
+        blockCommand();
         return;
       }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
@@ -6956,7 +7173,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -8562,10 +8779,7 @@ export function App({
         });
         // The workspace-scoped control does not write `connection.goalState`
         // the way `sessionActions.controlGoal` does, so install the create
-        // response directly. Until it lands, `holdQueuedPromptsLocally` reads
-        // false and the sync effect re-derives the local snapshot to null — a
-        // prompt typed in that window would go straight to the daemon instead
-        // of the Goal queue, and no Goal strip would render.
+        // response directly to keep the Goal strip and controls authoritative.
         sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
         if (
           !connectionRef.current.sessionId ||
@@ -8778,8 +8992,22 @@ export function App({
         pushToast('warning', t('editor.connectionDisconnected'));
         return false;
       }
-      const promptBlocked =
-        streamingStateRef.current !== 'idle' || isGoalGateBlocked();
+      const goalBlocked = isGoalGateBlocked();
+      const sessionActive =
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current;
+      const commandBlocked = sessionActive || goalBlocked;
+      const enqueueBlockedCommand = (commandText: string) => {
+        if (goalBlocked) return blockCommand();
+        return enqueuePrompt(
+          commandText,
+          images,
+          files,
+          undefined,
+          commitComposerAccepted,
+          metadata?.inputAnnotations,
+        );
+      };
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
@@ -8902,15 +9130,8 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) {
-              return enqueuePrompt(
-                text,
-                images,
-                files,
-                undefined,
-                commitComposerAccepted,
-                metadata?.inputAnnotations,
-              );
+            if (commandBlocked) {
+              return enqueueBlockedCommand(text);
             }
             return submitPromptFromEditor(
               text,
@@ -9036,7 +9257,7 @@ export function App({
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               handleLanguageChange(nextLanguage);
               {
                 const deferComposerCommit =
@@ -9099,13 +9320,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             if (!requireActiveSessionForLocalCommand()) return false;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
@@ -9146,15 +9367,8 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  text,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
                 text,
@@ -9213,7 +9427,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const prompt = text.slice(match[0].length).trim();
             if (!connectionRef.current.sessionId) {
               setPendingMode('plan');
@@ -9304,15 +9518,8 @@ export function App({
               openPanel('skills');
             } else {
               const skillPrompt = `/${skillArg}`;
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  skillPrompt,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(skillPrompt);
               }
               return submitPromptFromEditor(
                 skillPrompt,
@@ -9423,7 +9630,7 @@ export function App({
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
               // do too); block it mid-turn so it can't split the active turn.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -9534,15 +9741,8 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  text,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
                 text,
@@ -9766,15 +9966,8 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) {
-          return enqueuePrompt(
-            text,
-            images,
-            files,
-            undefined,
-            commitComposerAccepted,
-            metadata?.inputAnnotations,
-          );
+        if (commandBlocked) {
+          return enqueueBlockedCommand(text);
         }
         return submitPromptFromEditor(
           text,
@@ -9847,7 +10040,7 @@ export function App({
           });
         return !needsSession;
       } else {
-        if (promptBlocked) {
+        if (sessionActive) {
           return enqueuePrompt(
             text,
             images,
@@ -9895,7 +10088,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
-      blockLocalCommandDuringTurn,
+      blockCommand,
       createSideTask,
       sideTasksAvailable,
       openEnvironmentTasksPanel,
@@ -10046,17 +10239,14 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
-    if (
-      sessionWriteBlockedRef.current ||
-      promptPreparationOwnerRef.current ||
-      isGoalGateBlocked()
-    ) {
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
       return;
     }
     if (
       showRetryHintRef.current &&
       connected &&
       streamingStateRef.current === 'idle' &&
+      !sessionHasActivePromptRef.current &&
       retryableTurnErrorIdRef.current &&
       retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
@@ -10249,7 +10439,6 @@ export function App({
     store,
     t,
     updateUnknownPromptAdmission,
-    isGoalGateBlocked,
   ]);
 
   useEffect(() => {
@@ -10301,6 +10490,7 @@ export function App({
   // through a ref so the listener stays put across re-renders.
   const escLiveRef = useRef({
     streamingState,
+    sessionHasActivePrompt,
     pendingApproval,
     interactionBlocked,
     activePanel,
@@ -10311,6 +10501,7 @@ export function App({
   });
   escLiveRef.current = {
     streamingState,
+    sessionHasActivePrompt,
     pendingApproval,
     interactionBlocked,
     activePanel,
@@ -10323,7 +10514,8 @@ export function App({
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
   // relevant action (cancel vs clear) changes with it, so a leftover arm is now
   // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
-  const escStreamingBoundary = streamingState !== 'idle';
+  const escStreamingBoundary =
+    streamingState !== 'idle' || sessionHasActivePrompt;
   useEffect(() => {
     resetEscapeState();
   }, [escStreamingBoundary, resetEscapeState]);
@@ -10396,7 +10588,8 @@ export function App({
       // and drain after the turn settles); see decideEscapeIntent for the rules.
       const intent = decideEscapeIntent({
         blocked: !!live.pendingApproval || live.interactionBlocked,
-        streaming: live.streamingState !== 'idle',
+        streaming:
+          live.streamingState !== 'idle' || live.sessionHasActivePrompt,
         hasInput: !!editorRef.current?.hasInput(),
         armed: escArmedActionRef.current,
       });
@@ -10438,6 +10631,7 @@ export function App({
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
       !isPreparingPrompt &&
+      !sessionHasActivePrompt &&
       retryableTurnErrorIdentity &&
       matchesTurnErrorIdentity(
         getRetryableTurnError(blocks),
@@ -10639,8 +10833,12 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle' || isGoalGateBlocked()) {
-        blockLocalCommandDuringTurn();
+      if (
+        streamingState !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
         return;
       }
       // Model IDs from the picker arrive as bare model IDs (baseModelId), not
@@ -10687,7 +10885,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       closePanel,
       sendPrompt,
       streamingState,
@@ -10752,18 +10950,39 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  const useWorkspaceSkillSnapshot =
+    loadedSkillsReady &&
+    (!connection.sessionId ||
+      connection.skills === undefined ||
+      (loadedSkillsFallback?.sessionId === connection.sessionId &&
+        loadedSkillsFallback.workspaceCwd === connection.workspaceCwd));
+  const composerSkills = useMemo(
+    () =>
+      useWorkspaceSkillSnapshot
+        ? loadedSkills
+        : availableSessionSkillInfos(
+            connection.skills ?? [],
+            connection.commands ?? [],
+          ),
+    [
+      connection.commands,
+      connection.skills,
+      loadedSkills,
+      useWorkspaceSkillSnapshot,
+    ],
+  );
   const commands = useMemo(() => {
     const previousSkillNames = new Set(
       (connection.skills ?? []).map((skill) => skill.toLowerCase()),
     );
-    const retainedCommands = loadedSkillsReady
+    const retainedCommands = useWorkspaceSkillSnapshot
       ? (connection.commands ?? []).filter(
           (command) =>
             command.source !== 'skill' &&
             !previousSkillNames.has(command.name.toLowerCase()),
         )
       : (connection.commands ?? []);
-    const refreshedSkillCommands = loadedSkillsReady
+    const refreshedSkillCommands = useWorkspaceSkillSnapshot
       ? loadedSkills.map((skill) => ({
           name: skill.name,
           description: skill.description,
@@ -10797,9 +11016,9 @@ export function App({
     connection.skills,
     hiddenCommands,
     loadedSkills,
-    loadedSkillsReady,
     sideTasksAvailable,
     t,
+    useWorkspaceSkillSnapshot,
   ]);
 
   const welcomeHeaderProps = useMemo(
@@ -12288,6 +12507,9 @@ export function App({
                                   streamingState !== 'idle' &&
                                   !suppressFailedPromptRetryStreaming
                                 }
+                                transcriptReloadPaused={
+                                  streamingState !== 'idle'
+                                }
                                 activeTurnStartedAt={
                                   suppressFailedPromptRetryStreaming
                                     ? undefined
@@ -12301,7 +12523,9 @@ export function App({
                                 showRetryHint={showCurrentRetryHint}
                                 onRetryClick={handleRetry}
                                 failedPromptMessageId={
-                                  isPreparingPrompt
+                                  isPreparingPrompt ||
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt
                                     ? undefined
                                     : visibleFailedPromptBlock?.id
                                 }
@@ -12513,13 +12737,15 @@ export function App({
                             : styles.composer
                         }
                       >
-                        {streamingState !== 'idle' ? (
+                        {streamingState !== 'idle' ||
+                        sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
                               startedAt={
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
                               }
+                              hasActivePrompt={sessionHasActivePrompt}
                             />
                           )
                         ) : newSessionSuggestion ? (
@@ -12619,7 +12845,10 @@ export function App({
                               prompts={queuedPrompts}
                               t={t}
                               canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={streamingState !== 'idle'}
+                              canInsertMidTurn={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
+                              }
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
                               onEdit={editQueuedPrompt}
@@ -12648,7 +12877,10 @@ export function App({
                                 isDisabled ||
                                 unknownPromptAdmission?.payloadAvailable === true
                               }
-                              isRunning={streamingState !== 'idle'}
+                              isRunning={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
+                              }
                               currentMode={currentMode}
                               currentModel={currentModel}
                               sessionName={sessionDisplayName}
@@ -12668,7 +12900,10 @@ export function App({
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
-                          isRunning={streamingState !== 'idle'}
+                          isRunning={
+                            streamingState !== 'idle' ||
+                            sessionHasActivePrompt
+                          }
                           isPreparing={
                             isPreparingPrompt || isStartingNewSessionSuggestion
                           }
@@ -12681,7 +12916,7 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
-                          skills={loadedSkills}
+                          skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
@@ -12787,7 +13022,10 @@ export function App({
                         {CustomComposerFooter && (
                           <CustomComposerFooter
                             disabled={isDisabled}
-                            isRunning={streamingState !== 'idle'}
+                            isRunning={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt
+                            }
                             currentMode={currentMode}
                             currentModel={currentModel}
                             sessionName={sessionDisplayName}
@@ -12819,7 +13057,7 @@ export function App({
                                   label: getModelDisplayName(m.label || m.id),
                                   contextWindow: m.contextWindow,
                                 }))}
-                              skills={loadedSkills}
+                              skills={composerSkills}
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
@@ -12847,7 +13085,7 @@ export function App({
                                 label: getModelDisplayName(m.label || m.id),
                                 contextWindow: m.contextWindow,
                               }))}
-                            skills={loadedSkills}
+                            skills={composerSkills}
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
                           />

@@ -5,6 +5,7 @@
  */
 
 import {
+  SessionIdCaseConflictError,
   SessionService,
   type SessionLocation,
 } from '@qwen-code/qwen-code-core';
@@ -333,13 +334,6 @@ async function deletePersistedSessionWithLease(
   if (initialLocation === undefined) {
     return { kind: 'notFound', mutationApplied: false };
   }
-  if (initialLocation === 'conflict') {
-    return {
-      kind: 'error',
-      error: sessionLocationError(sessionId),
-      mutationApplied: false,
-    };
-  }
 
   const mutation = await runWithDaemonWriterLease({
     action: 'delete',
@@ -352,9 +346,6 @@ async function deletePersistedSessionWithLease(
           value: 'notFound' as const,
           mutationApplied: false,
         };
-      }
-      if (lockedLocation === 'conflict') {
-        throw sessionLocationError(sessionId);
       }
       await assertOwnedAndUnchanged();
       const removed = await service.removeSession(sessionId);
@@ -541,6 +532,55 @@ export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
   runtimeBaseDir?: string,
+  options: { allowActiveConflict?: boolean } = {},
+): Promise<SessionLocation> {
+  const service = new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  });
+  const location = await service.getSessionLocation(sessionId);
+  if (location === 'archived') {
+    throw new SessionArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    if (options.allowActiveConflict) {
+      try {
+        await service.findSessionIdIgnoringCase(sessionId);
+      } catch (error) {
+        if (
+          error instanceof SessionIdCaseConflictError &&
+          error.reason === 'case_conflict' &&
+          error.candidateSessionId === sessionId
+        ) {
+          return 'active';
+        }
+        if (!(error instanceof SessionIdCaseConflictError)) throw error;
+      }
+    }
+    throw new SessionConflictError(sessionId);
+  }
+  return location;
+}
+
+export async function resolveSessionIdForRestore(
+  service: SessionService,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    return await service.findSessionIdIgnoringCase(sessionId);
+  } catch (error) {
+    if (error instanceof SessionIdCaseConflictError) {
+      if (error.candidateSessionId === sessionId) return sessionId;
+      throw new SessionConflictError(sessionId);
+    }
+    throw error;
+  }
+}
+
+export async function assertSessionRestorable(
+  workspaceCwd: string,
+  sessionId: string,
+  requestedSessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<SessionLocation> {
   const location = await new SessionService(workspaceCwd, {
     runtimeBaseDir,
@@ -549,7 +589,10 @@ export async function assertSessionLoadable(
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
-    throw new SessionConflictError(sessionId);
+    if (sessionId !== requestedSessionId) {
+      throw new SessionConflictError(requestedSessionId);
+    }
+    return 'active';
   }
   return location;
 }

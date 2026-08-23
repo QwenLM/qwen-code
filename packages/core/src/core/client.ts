@@ -56,7 +56,8 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, type RepairOrphanedToolUseOptions } from './geminiChat.js';
+import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -745,11 +746,14 @@ export class GeminiClient {
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
    */
-  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+  repairOrphanedToolUseTurnsInHistory(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    const result = this.getChat().repairOrphanedToolUseTurns(reason, options);
     if (result.injected.length > 0) {
       debugLogger.warn(
         `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
@@ -1811,7 +1815,15 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        this.repairOrphanedToolUseTurnsInHistory();
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
+        this.repairOrphanedToolUseTurnsInHistory(
+          undefined,
+          preserveCallIds ? { preserveCallIds } : undefined,
+        );
       });
 
       const sessionStartAdditionalContext = await profiler.time(
