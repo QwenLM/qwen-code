@@ -766,6 +766,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未设置',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (follow user input)': '自动（跟随用户输入）',
