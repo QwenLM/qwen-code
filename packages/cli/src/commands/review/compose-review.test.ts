@@ -7598,7 +7598,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // `contextUnavailableClause` is `keep: 1` so the rung-3 cut spends
     // blockers before the diff-only trust warning; no truncation fixture
     // carried the clause, so deleting the tag shipped green — the untagged
-    // clause sorted to rank 3 and the cut spent the warning first.
+    // clause sorted to `keep` 3 (the cut's axis, not a `trim` rank) and the
+    // cut spent the warning first.
     const r = composeReview(
       base({
         criticalsInline: 1,
@@ -9425,9 +9426,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // against a 56,830-character budget. Shed early it could pay for at
     // most 4% of an overflow, so any overflow bigger than itself spent it
     // AND went on to spend the disclosures — and the rounds this fires on
-    // are the high-volume ones where that is the normal case. It is rank 3
-    // now: the last rank to go, because it is the cheapest to keep and the
-    // only one whose reader is the PR author alone.
+    // are the high-volume ones where that is the normal case. It is trim
+    // rank 3 now: the last rank to go, because it is the cheapest to keep
+    // and the only one whose reader is the PR author alone.
     //
     // The blocker is sized to land in the window where the ladder sheds
     // rank 2 and stops. To retune after a body-copy change: raise it until
@@ -9465,9 +9466,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // notice say so instead of the paragraph vanishing silently.
     //
     // Sized one rung past the test above: the ladder sheds rank 2, still
-    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
-    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
-    // appears.
+    // does not fit, sheds trim rank 3, and stops before the hard cut. To
+    // retune: raise it until `Convergence:` disappears, and stop before
+    // `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
