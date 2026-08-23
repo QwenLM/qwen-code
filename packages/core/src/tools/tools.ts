@@ -693,6 +693,46 @@ export interface McpToolProgressData {
   message?: string;
 }
 
+export interface McpAppResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
+}
+
+export interface McpAppResourcePermissions {
+  camera?: Record<string, never>;
+  microphone?: Record<string, never>;
+  geolocation?: Record<string, never>;
+  clipboardWrite?: Record<string, never>;
+}
+
+export interface McpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
+}
+
+/** A completed MCP tool call with an interactive MCP Apps resource. */
+export interface McpAppResultDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: McpAppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
+}
+
 /**
  * Structured heartbeat for silent foreground shell commands, emitted through
  * the updateOutput channel while no display update has fired for
@@ -760,6 +800,7 @@ export type ToolResultDisplay =
   | FindingsResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
+  | McpAppResultDisplay
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;

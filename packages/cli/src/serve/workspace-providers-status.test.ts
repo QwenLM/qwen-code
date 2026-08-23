@@ -273,6 +273,80 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(modelIds).not.toContain('voice-model(openai)');
   });
 
+  it('projects reasoning preview only for the exact stable qwen3.8-max model', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
+          { id: 'qwen3.8-max-preview', name: 'Qwen 3.8 Max Preview' },
+          { id: 'qwen3.8-max-latest', name: 'Qwen 3.8 Max Alias' },
+          { id: 'qwen-plus', name: 'Qwen Plus' },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const stable = models.find((model) => model.baseModelId === 'qwen3.8-max');
+
+    expect(stable?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      },
+    ]);
+    expect(
+      models
+        .filter((model) => model !== stable)
+        .every((model) => model.configOptions === undefined),
+    ).toBe(true);
+  });
+
+  it('does not project reasoning preview onto opaque route models', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'qwen3.8-max',
+        baseUrl: 'https://one.example/v1',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max One',
+            baseUrl: 'https://one.example/v1',
+          },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max Two',
+            baseUrl: 'https://two.example/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const routeModels = models.filter((model) =>
+      model.modelId.startsWith('qwen-route:v1:'),
+    );
+
+    expect(routeModels).toHaveLength(2);
+    expect(
+      routeModels.every((model) => model.configOptions === undefined),
+    ).toBe(true);
+  });
+
   it('reports custom providerProtocol models under their resolved auth type', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
