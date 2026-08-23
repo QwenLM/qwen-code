@@ -535,6 +535,86 @@ describe('saveReviewArtifact', () => {
     ).toThrow(/health\.zh/);
   });
 
+  it('carries the residual-risk advisory into the artifact (#9526)', () => {
+    // For the reason its sibling paragraph above is carried: rank 2 sheds
+    // before the not-reviewed disclosures, so the rounds that fire the
+    // advisory are exactly the long rounds whose body is most likely to drop
+    // it — and a maintainer reading `.qwen/reviews` to make the
+    // `land-with-residual-risk` call would otherwise find a "did not fit"
+    // breadcrumb and none of the facts behind it.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      residualRisk: {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 2,
+        fresh: 3,
+        prevFresh: 3,
+      },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.residualRisk).toEqual({
+      shape: 'persistently-critical',
+      recommendation: 'land-with-residual-risk',
+      criticals: 2,
+      fresh: 3,
+      prevFresh: 3,
+      // Absent in the composed JSON reads as "not disclosed", never as a
+      // refusal — an artifact written before the caveat existed still saves.
+      prevTruncated: false,
+    });
+  });
+
+  it('refuses a residual-risk advisory of the wrong shape (#9526)', () => {
+    // Shape-checked rather than passed through, like every other field on
+    // this boundary: the composed JSON is a file on disk between two
+    // processes, and a consumer reading `criticals` off a hand-edited
+    // artifact must not read a string. Absence stays absence — a round that
+    // did not fire the signal is not a malformed round.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'residualRisk' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    for (const bad of [
+      {
+        shape: 'something-else',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'merge-it',
+        criticals: 1,
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: '1',
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: -1,
+        prevPosted: 1,
+      },
+    ]) {
+      writeJson(paths.composed, { ...verdict, residualRisk: bad });
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/residualRisk/);
+    }
+  });
+
   it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
     // Same distinction as its sibling: a round that recorded no fresh count
     // is not a round that produced none.

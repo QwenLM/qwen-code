@@ -460,8 +460,12 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('rejected by the API **whole**');
     expect(body).toContain('**the Chinese fold first**');
+    // All four ranks, in the order the ladder actually drops them. The
+    // enumeration named two of them while the code had four, so a reader
+    // taking the skill at its word placed the advisory and the observation
+    // wherever seemed reasonable — and the ranks are the policy.
     expect(body).toContain(
-      'then the deferral display, then the not-reviewed disclosures',
+      'then the mechanism-health note, then the residual-risk advisory, then the deferral display, then the not-reviewed disclosures, then the convergence observation',
     );
     // The other half of the policy. A "simplify the prose" edit turning
     // `never` into `last` would leave every prefix pin matching while the
@@ -491,6 +495,13 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain(
       '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    // ...and the exception, so the terminal-summary duty above is asked for
+    // where it is actually owed. Both convergence paragraphs keep a copy on
+    // the composed verdict and on stderr, which is why the trim line names
+    // WHICH of the dropped kinds the summary is the only copy of.
+    expect(body).toContain(
+      'the mechanism-health note, the observation and the residual-risk advisory all ride the composed verdict',
     );
     expect(body).toContain(
       '**say in your Step 6 terminal summary what was trimmed and what it said.**',
@@ -764,6 +775,25 @@ describe('bundled review skill', () => {
     expect(body).toContain('Count the second in `fresh` but not `induced`');
   });
 
+  it('pins the fix-induced comment marking and why it is not decoration', () => {
+    // Issue #9674. The marking is what parts a fix-induced re-report from a
+    // still-stands re-post for the volume trend's first-time count; without
+    // the instruction the module's reader finds nothing to read and the
+    // trend silently understates new work on churning pull requests again.
+    // Both halves pinned: the FORMAT (what to write) and the RESTRICTION
+    // (never on a still-stands, where the claim really is the old one).
+    const body = skillBody();
+    expect(body).toContain(
+      "mark it `(fix-induced)` right after the id's colon",
+    );
+    expect(body).toContain(
+      '**[Critical]** R1-2: (fix-induced) <the new claim>',
+    );
+    expect(body).toContain(
+      'Write the marking only on a re-report that IS fix-induced — never on a `still stands`',
+    );
+  });
+
   it('pins the census contract and the module-owns-the-verdict split', () => {
     // The census is the numerator/denominator the non-convergence finding is
     // computed from, and three clauses have to survive together: what to
@@ -806,18 +836,26 @@ describe('bundled review skill', () => {
     );
   });
 
-  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
-    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
-    // the skill carried the "self-PR detection has no Aone backing" caveat —
-    // a review of the user's own MR silently got no downgrade. The command
-    // is now backed for self-PR detection and head drift; restoring either
-    // the skip or the caveat must fail here, not slip through.
+  it('runs comment-status and presubmit on Aone targets — backed, not skipped', () => {
+    // Revert guard (#9616, #9627): comment-status and presubmit used to sit
+    // on the Aone skip list and the skill carried the "no dedup backing" /
+    // "self-PR detection has no Aone backing" caveats — repeat rounds
+    // re-posted every finding and a review of the user's own MR got no
+    // downgrade. Both subcommands are now a1-backed with the full semantics;
+    // restoring either the skip or a caveat must fail here, not slip
+    // through.
     const body = skillBody();
-    expect(body).toContain('`presubmit` **runs on Aone targets too**');
-    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
-    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).toContain('`comment-status`, `presubmit`) work unchanged');
+    expect(body).toContain('(`comment-status` and `presubmit` ARE a1-backed');
+    expect(body).toContain('the MR author is matched against `a1 auth whoami`');
     expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('no dedup backing yet');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+    expect(body).not.toContain('come back neutral');
+    expect(body).not.toContain('`--new-findings` is unused');
+    expect(body).not.toContain(
+      '`pr-context` and `comment-status` have no Aone backing',
+    );
   });
 
   it('keeps the corrected Aone --comment contract, not merge residue', () => {

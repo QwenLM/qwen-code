@@ -51,6 +51,7 @@ import {
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
+  withoutGateReposts,
   testPlanGate,
   composeReviewCommand,
   describeChunkGap,
@@ -2837,6 +2838,1312 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it('surfaces the persistently-critical advisory when the loop will not converge (#9410)', async () => {
+    // The carried telemetry shows the shape: a Critical stood in the
+    // previous round's work-list, one stands again this round, and the
+    // two-round posting window is present and not shrinking. The advisory
+    // must surface on all three surfaces — the composed JSON field, the body
+    // disclosure, and the terminal RESIDUAL-RISK line — and it must be
+    // advisory-only: it never moves the event, never caps.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // The operator's `auto` floor is engaged at round 7 — without an
+    // engaged floor the advisory's floor-futility claim is unprovable and
+    // the signal degrades open to silence (#9410).
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    // One Critical this round.
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        event?: string;
+        cappedBy?: string[];
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 1; this round posts 1
+      // (flat, not shrinking) — the persistently-critical conjunction.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          fresh: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // Terminal RESIDUAL-RISK line, advisory-only and self-disclaiming.
+      const conv = stderr().filter((l) => l.startsWith('RESIDUAL-RISK: '));
+      expect(conv).toHaveLength(1);
+      expect(conv[0]).toContain('land-with-residual-risk');
+      expect(conv[0]).toContain('does not block');
+      // ONE record on a line-oriented channel, like the VOLUME line above
+      // it. The advisory carries a markdown table for the body, so printed
+      // verbatim this was one labelled line followed by six unlabelled
+      // ones (#9526).
+      expect(conv[0]).not.toContain('\n');
+      // Collapsed, not dropped: the inventory's three columns still reach
+      // the operator on the round where the body budget sheds the table.
+      for (const column of [
+        'attack surface',
+        'attacker-dependency',
+        'blast radius',
+      ]) {
+        expect(conv[0]).toContain(column);
+      }
+      // The claim the whole conjunction exists to license, stated
+      // POSITIVELY — every other fixture only pins its absence, so a
+      // template that stopped emitting it shipped green.
+      expect(conv[0]).toContain('The severity floor will not converge it');
+      // Structured field on the composed JSON.
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        fresh: 1,
+        prevFresh: 1,
+      });
+      // Body disclosure rides too, carrying the same recommendation code.
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(composed.body).toContain(
+        'The severity floor will not converge it',
+      );
+      // ADVISORY ONLY — the guarantee the feature rests on, and the one
+      // nothing pinned. A fired advisory must leave the event exactly where
+      // the findings put it and must add nothing to `cappedBy`: this round
+      // stands behind an unverified Critical, so the event is the COMMENT
+      // the verification cap produces and the cap list names that cap and
+      // nothing about convergence.
+      expect(composed.event).toBe('COMMENT');
+      expect(composed.cappedBy ?? []).not.toContain('convergence');
+      expect((composed.cappedBy ?? []).join('\n')).not.toContain(
+        'residual-risk',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the persistently-critical advisory when the loop IS converging (#9410)', async () => {
+    // Same shape as above except the volume is SHRINKING — the loop is
+    // working its Criticals down, so no advisory fires. Every degraded arm
+    // (shrinking volume, no prior Critical, missing window) is fail-open to
+    // silence; this pins the shrinking arm end to end.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-no-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      // The predecessor carried a Critical but posted MORE (3) than this
+      // round (1): the volume is shrinking, the loop is converging. The
+      // floor is engaged (round 7 of `auto`), so the silence is pinned on
+      // the volume arm alone, not on a missing engagement.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 3,
+          fresh: 3,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // A POSITIVE sentinel beside the absences: `prevLedgerFacts` swallows
+      // every recovery failure into round 0 with no volume, which would let
+      // three other arms produce this same silence and leave the volume arm
+      // pinned by nothing. The VOLUME line quoting the predecessor proves
+      // the ledger really was recovered, so the silence is the shrinking
+      // window and not a fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 3)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces the advisory on a REQUEST_CHANGES round — the motivating shape (#9410)', async () => {
+    // The motivating shape (PR 9226): verified Criticals standing every
+    // round compose REQUEST_CHANGES every round. A deterministic [build]
+    // body Critical earns its Request changes without a verifier, so the
+    // event is REQUEST_CHANGES — the branch the wiring must not leave
+    // silent. The only Critical arrives via bodyCriticals (criticalsInline
+    // is 0), so the body-only term of thisCriticals is load-bearing here:
+    // dropping it from the sum silently un-fires the advisory.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-rc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: MODEL,
+        planPath,
+        severityFloor: 'auto',
+        bodyCriticals: ['[build] tsc fails on the merge commit'],
+      }),
+      'utf8',
+    );
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the blocker rides the body) — flat, not shrinking. Round 7
+      // of `auto`: the floor is engaged, so the advisory's floor claim is
+      // provable and all three surfaces must carry it.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+          fresh: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        fresh: 0,
+        prevFresh: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the advisory before the severity floor engages (#9410)', async () => {
+    // Round 2 under the default `auto` floor: the persistence and volume
+    // halves BOTH hold (a carried Critical stands again, the window is flat
+    // at 2/2), but the floor does not engage until round 6 — before
+    // engagement the advisory's "the floor will not converge it" claim is
+    // unprovable, so the signal degrades open to silence exactly like a
+    // missing volume.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-pre-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // A KNOWN `auto` floor: the silence must come from the round-2 floor
+    // not being engaged yet, not from the floor being absent.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** also posted' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 1,
+          findings: [{ id: 'R1-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 2,
+          fresh: 2,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // The same positive sentinel: this silence must be the round-2 floor,
+      // not a predecessor that failed to load.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 2)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      // The floor-futility claim must not publish before the floor ran.
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent when the previous work-list held no Critical (#9526)', async () => {
+    // Every OTHER conjunct holds — the floor is engaged (round 7 of `auto`),
+    // this round stands behind a Critical, the window is flat at 1/1 — and
+    // the predecessor's work-list carries Suggestions only. "Persistently"
+    // critical means the Critical STOOD before; a round introducing its
+    // first one is a loop that has not yet had a chance to converge, and
+    // telling its operator to land with residual risk is the false fire the
+    // module's header forbids. Pins the persistence conjunct end to end:
+    // every earlier fixture carries sev `C` in the prev ledger, so replacing
+    // the derivation with a bare `true` shipped the whole suite green.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-nosev-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** first blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'S', file: 'x.ts', title: 'nit' }],
+          posted: 1,
+          fresh: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // The positive sentinel: the predecessor WAS recovered, so the silence
+      // is its Critical-free work-list and not a fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent when the floor is ABSENT rather than resolved (#9526)', async () => {
+    // The one input where the two floor readings disagree. The state names
+    // no floor at all: the REPORTING reading folds absence into `auto` (so
+    // the round would describe itself as running a resolved critical floor
+    // from round 6), while ENFORCEMENT is strict and moves nothing — and the
+    // advisory's "The severity floor will not converge it" is a claim about
+    // Suggestions having actually left the posting set. Wiring the reporting
+    // reading here publishes that claim over a round whose enforcement
+    // backstop never ran, so this fixture is what holds the two apart: every
+    // other advisory fixture passes `severityFloor: 'auto'` explicitly and
+    // the swap ships green against all of them.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-nofloor-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // No `severityFloor` key AT ALL — genuine absence, not a spelling drift.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          fresh: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      // And the unprovable claim itself never reaches the body.
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent on the round the floor ENGAGES on (#9526)', async () => {
+    // The posture-change arm, end to end. The predecessor recorded floor
+    // `o` — it was still posting Suggestions — and this round runs under
+    // the engaged floor, so the two volumes are not two points on one
+    // loop's trend: the drop between them is the Suggestions leaving the
+    // posting set. Firing here publishes "the severity floor will not
+    // converge it" after the floor has run for exactly one round.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-posture-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          fresh: 1,
+          // Every other conjunct holds; ONLY the recorded posture differs.
+          floor: 'o',
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // The predecessor WAS recovered — the silence is its posture, not a
+      // fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent while the FRESH rate is falling under re-posts (#9526)', async () => {
+    // Step 6 re-posts every still-standing ledger Critical under its
+    // ORIGINAL id, so the posting TOTAL only ever rises. Round 6 posted 5
+    // first-time Criticals; the author fixed 3, and round 7 re-posts the 2
+    // that stand and drafts 4 new ones. Fresh 5 -> 4 is a loop converging,
+    // but the total went 5 -> 6, and a window measured on totals fired
+    // `land-with-residual-risk` over it.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-fresh-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        // Re-posts: the carried id is what marks them as not-new.
+        { path: 'f1.ts', line: 1, body: '**[Critical]** R6-1: still standing' },
+        { path: 'f2.ts', line: 1, body: '**[Critical]** R6-2: still standing' },
+        ...[1, 2, 3, 4].map((n) => ({
+          path: `n${n}.ts`,
+          line: 1,
+          body: `**[Critical]** brand new ${n}`,
+        })),
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 5,
+          fresh: 5,
+          floor: 'c',
+          findings: [1, 2, 3, 4, 5].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // The total ROSE — this is exactly the input the old window fired on.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent while the standing BACKLOG is clearing (#9526)', async () => {
+    // The blind spot a fresh-only window leaves, and the regression that
+    // moving to fresh counts would otherwise introduce. The reviewer found
+    // nothing new in either round — fresh 0 against fresh 0, which "not
+    // falling" reads as stuck — while the author cleared 2 of 5 standing
+    // Criticals. The posting total (5 -> 3) used to catch this; only the
+    // Critical count coming down catches it now.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-backlog-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3].map((n) => ({
+          path: `f${n}.ts`,
+          line: 1,
+          body: `**[Critical]** R6-${n}: still standing`,
+        })),
+      ),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 5,
+          // Nothing new last round either — so the fresh window is flat at
+          // zero and cannot tell this loop from a stuck one.
+          fresh: 0,
+          floor: 'c',
+          findings: [1, 2, 3, 4, 5].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fires at zero fresh when the backlog HOLDS — the purest shape (#9526)', async () => {
+    // The other side of the backlog veto, and the shape this whole feature
+    // exists to name: the same Criticals re-posted round after round, the
+    // reviewer finding nothing new, nothing clearing. Fresh 0 against
+    // fresh 0 and the backlog flat at 3 — a loop the floor cannot converge.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-stuck-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3].map((n) => ({
+          path: `f${n}.ts`,
+          line: 1,
+          body: `**[Critical]** R6-${n}: still standing`,
+        })),
+      ),
+      'utf8',
+    );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        body?: string;
+      };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 3,
+          fresh: 0,
+          floor: 'c',
+          findings: [1, 2, 3].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 3,
+        fresh: 0,
+        prevFresh: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent when the predecessor's `c` stamp was a fold, not enforcement (#9526)", async () => {
+    // The stamp and the engagement test are two different readings. A round
+    // >= 6 whose state named no floor at all is stamped `c` by the REPORTING
+    // fold, while the strict enforcement backstop moved nothing and
+    // Suggestions posted normally. Paired against this round's enforcement
+    // reading, that stamp let an un-enforced predecessor pass as an engaged
+    // one and the advisory published "the severity floor will not converge
+    // it" against a window whose far end still included Suggestions.
+    //
+    // The Suggestion left standing in that round's work-list is the fact the
+    // stamp cannot carry, and it is what makes this fixture silent.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-foldstamp-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // THIS round names the floor, so enforcement really is engaged here.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'critical' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3, 4].map((n) => ({
+          path: `n${n}.ts`,
+          line: 1,
+          body: `**[Critical]** new blocker ${n}`,
+        })),
+      ),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 4,
+          fresh: 4,
+          // The stamp the reporting fold writes for a round that named no
+          // floor — every other conjunct is arranged to hold, so this
+          // fixture is silent on the work-list evidence alone.
+          floor: 'c',
+          findings: [
+            { id: 'R6-1', sev: 'C', file: 'a.ts', title: 'b1' },
+            { id: 'R6-2', sev: 'C', file: 'b.ts', title: 'b2' },
+            { id: 'R6-3', sev: 'C', file: 'c.ts', title: 'b3' },
+            // Enforcement never ran, so this posted and is in the list.
+            { id: 'R6-4', sev: 'S', file: 'd.ts', title: 'nit' },
+          ],
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // The predecessor WAS recovered — the silence is its Suggestion, not a
+      // fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 4)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("will not read a PURE-FOREIGN work-list as this account's history (#9526)", async () => {
+    // Recovery adopts the highest-round marker whoever posted it. Where that
+    // marker was not merged over this account's own findings, this account's
+    // entries are in no work list at all — the state `openCriticals` already
+    // refuses to infer across. Every prev-round fact this signal reads comes
+    // off that list, so an own round-6 marker that was a clean LGTM, plus a
+    // foreign same-round marker carrying Criticals and no Suggestions, was
+    // enough to publish `land-with-residual-risk` over this account's own
+    // LGTM. The two control arms are the point: the fix must withhold the
+    // stranger's list WITHOUT silencing a list this account can claim.
+    const arms = [
+      {
+        label: 'pure-foreign',
+        flags: { foreign: true, merged: false },
+        fires: false,
+      },
+      {
+        label: 'own list',
+        flags: { foreign: false, merged: false },
+        fires: true,
+      },
+      // A merged foreign list keeps this account's own certified entries
+      // under their own ids, which is what makes it speak for this account.
+      {
+        label: 'merged foreign',
+        flags: { foreign: true, merged: true },
+        fires: true,
+      },
+    ];
+    const observed: Array<{
+      arm: string;
+      recommendation: string | undefined;
+      terminalLines: number;
+    }> = [];
+    for (const arm of arms) {
+      const dir = mkdtempSync(join(tmpdir(), 'compose-converge-foreign-'));
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      const planPath = join(dir, 'plan.json');
+      writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+        'utf8',
+      );
+      writeFileSync(
+        commentsPath,
+        JSON.stringify([
+          { path: 'a.ts', line: 1, body: '**[Critical]** our own new blocker' },
+        ]),
+        'utf8',
+      );
+      const stdoutJson = () =>
+        JSON.parse(
+          (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+            .map((c) => String(c[0]))
+            .join('\n'),
+        ) as { residualRisk?: unknown };
+      try {
+        (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+        writeFileSync(
+          join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+          JSON.stringify({
+            v: 1,
+            round: 6,
+            // This account's own round posted nothing — a clean LGTM.
+            posted: 0,
+            fresh: 0,
+            floor: 'c',
+            // ...while the list that won recovery holds a stranger's
+            // Critical and, notably, no Suggestion to give the posture away.
+            findings: [
+              { id: 'R6-1', sev: 'C', file: 'x.ts', title: 'their blocker' },
+            ],
+            ...arm.flags,
+          }),
+          'utf8',
+        );
+        await runComposeReviewCommand({
+          input: inputPath,
+          comments: commentsPath,
+        });
+        const composed = stdoutJson();
+        const rr = composed.residualRisk as
+          | { recommendation?: string }
+          | undefined;
+        // The arm label rides IN the assertion, so a failure names which arm
+        // moved rather than pointing at a line inside the loop.
+        observed.push({
+          arm: arm.label,
+          recommendation: rr?.recommendation,
+          terminalLines: (
+            writeStderrLine as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.startsWith('RESIDUAL-RISK: ')).length,
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    expect(observed).toEqual([
+      { arm: 'pure-foreign', recommendation: undefined, terminalLines: 0 },
+      {
+        arm: 'own list',
+        recommendation: 'land-with-residual-risk',
+        terminalLines: 1,
+      },
+      {
+        arm: 'merged foreign',
+        recommendation: 'land-with-residual-risk',
+        terminalLines: 1,
+      },
+    ]);
+  });
+
+  it('discloses that a fired reading came off a TRUNCATED work-list (#9526)', async () => {
+    // `prevLedgerFacts` carries shortened lists on purpose — the marker's
+    // byte budget sheds findings on exactly the deep-work-list rounds this
+    // advisory exists for. It still fires there, and the paragraph says
+    // which of its readings came off an incomplete list: "no Suggestion, so
+    // the floor was enforcing" and "the backlog is not shrinking" are read
+    // off ABSENCE, and a shortened list can only lose entries.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-trunc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: { prevTruncated?: boolean }; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          // What the serializer records when the byte budget shed entries —
+          // the list that came back is known-incomplete.
+          dropped: 4,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // It STILL fires: the gate is not restored, because a whole-list
+      // requirement would silence exactly these rounds.
+      const composed = stdoutJson();
+      expect(composed.residualRisk?.prevTruncated).toBe(true);
+      // ...and both the body and the terminal record say what it rests on.
+      expect(composed.body).toContain('truncated to fit the marker');
+      expect(composed.body).toContain('read off a list known to be incomplete');
+      const line = stderr().find((l) => l.startsWith('RESIDUAL-RISK: ')) ?? '';
+      expect(line).toContain('truncated to fit the marker');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('counts a relocated Critical toward the advisory (#9410)', async () => {
+    // This round's only Critical arrives through the deferral channel's
+    // RELOCATED arm — a deferred entry with severity Critical is relocated
+    // back into the posting set. The relocated term of `thisCriticals` is
+    // load-bearing here: deleting `+ relocatedCriticals.length` from the
+    // sum un-fires the advisory, and every earlier firing fixture composed
+    // rounds with `relocatedCriticals === 0`, so the mutant shipped green.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-reloc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: MODEL,
+        planPath,
+        severityFloor: 'auto',
+        deferredSuggestions: [
+          {
+            file: 'src/auth.ts',
+            line: 88,
+            // Deterministic source: the relocated Critical blocks without a
+            // verifier record, keeping the round REQUEST_CHANGES like the
+            // sibling [build] fixture.
+            source: 'test',
+            severity: 'Critical',
+            title: 'red on the merge',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the relocated blocker rides the body) — flat, not
+      // shrinking. Round 7 of `auto`: the floor is engaged.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+          fresh: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        fresh: 0,
+        prevFresh: 0,
+      });
+      // The relocated blocker and the advisory both ride the body; the
+      // terminal carries the advisory line.
+      expect(composed.body).toContain('relocated from the deferral channel');
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("counts the script-lint gate's standing Critical — advisory and work-list (#9526)", async () => {
+    // The deterministic gate posts a body-only [lint] Critical every round
+    // while the model drafts nothing — the standing-blocker loop the signal
+    // exists to name. The count must see the gate's Critical exactly like
+    // the verdict's own `c` does, and the carried work-list must record
+    // sev 'C' for it, or the whole conjunction holds semantically while the
+    // advisory stays silent and the next round's persistence half is blind.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-gate-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    // A worktree arms the gate (pr-worktree, not diff-only); the report
+    // binds to the plan diff's hash so the gate reads it as fresh.
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(
+      diffPath,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
+      'utf8',
+    );
+    const diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        worktreePath: '.qwen/tmp/review-pr-8255',
+        diffPathAbsolute: diffPath,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 1,
+                code: 'SC2086',
+                level: 'info',
+                message: 'quote the variable',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        deferred: [],
+        ok: false,
+        note: '',
+        diffHash,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    // The model drafts nothing: the gate's [lint] blocker is the round's
+    // only Critical and posts body-only, so the inline volume is 0.
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        event?: string;
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        body?: string;
+      };
+    try {
+      // The predecessor carried a Critical and posted 0; this round posts 0
+      // inline (the gate blocker rides the body) — flat, not shrinking.
+      // Round 7 of `auto`: the floor is engaged.
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 0,
+          fresh: 0,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.event).toBe('REQUEST_CHANGES');
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        fresh: 0,
+        prevFresh: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(1);
+      // The marker records the gate Critical as sev 'C' in the work-list,
+      // so a second gate-only round recovers the persistence half instead
+      // of reading "no prior Critical" over a round that posted one.
+      const ledger = parseLedger(composed.body ?? '');
+      expect(ledger?.findings.some((f) => f.sev === 'C')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -4789,6 +6096,169 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
   });
 });
 
+describe('a standing gate Critical enters the posting set exactly once (#9526)', () => {
+  // Putting the gate's Criticals into the carried work-list is what created
+  // this: from that round on, SKILL Step 6's still-standing rule tells the
+  // model to re-post the entry under its original id while `composeReview`
+  // re-derives the same Critical from the report. `buildLedger` keys by
+  // claimed id and the regenerated copy claims none, so it minted a second
+  // id beside the carried one and the pair compounded every round.
+  function gateFixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-gate-once-'));
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(
+      diffPath,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
+      'utf8',
+    );
+    const diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        worktreePath: '.qwen/tmp/review-pr-8255',
+        diffPathAbsolute: diffPath,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 1,
+                code: 'SC2086',
+                level: 'info',
+                message: 'quote the variable',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        deferred: [],
+        ok: false,
+        note: '',
+        diffHash,
+      }),
+      'utf8',
+    );
+    return { dir, planPath };
+  }
+
+  it('does not compound the work-list or the body across rounds', () => {
+    const { dir, planPath } = gateFixture();
+    try {
+      const gateLine = scriptLintGate(planPath).criticals[0]!;
+      const renders = (body: string) => (body.match(/SC2086/g) ?? []).length;
+      const seen: Array<{ round: number; ids: string[]; renders: number }> = [];
+      let carried: string[] = [];
+      for (let round = 1; round <= 3; round++) {
+        const r = composeReview({
+          planPath,
+          env: ENV,
+          modelId: MODEL,
+          criticalsInline: 0,
+          suggestionsInline: 0,
+          // A SKILL-compliant run re-posts every still-standing work-list
+          // entry under its original id. That is the input under test.
+          bodyCriticals: carried.map((id) => `${id}: ${gateLine}`),
+        });
+        const led = parseLedger(r.body)!;
+        seen.push({
+          round,
+          ids: led.findings.map((f) => `${f.id}:${f.sev}`),
+          renders: renders(r.body),
+        });
+        carried = led.findings.map((f) => f.id);
+        writeFileSync(
+          join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+          JSON.stringify({
+            v: 1,
+            round: led.round,
+            posted: 0,
+            fresh: 0,
+            floor: 'o',
+            findings: led.findings,
+          }),
+          'utf8',
+        );
+      }
+      // ONE entry and one rendering per round, for one lint finding. Before
+      // the dedup this read [R1-1] / [R1-1,R2-1] / [R1-1,R2-1,R3-1] with the
+      // body rendering 1, 2 and 3 copies of the same blocker.
+      expect(seen).toEqual([
+        { round: 1, ids: ['R1-1:C'], renders: 2 },
+        { round: 2, ids: ['R2-1:C'], renders: 2 },
+        { round: 3, ids: ['R3-1:C'], renders: 2 },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the deterministic copy, so a proven blocker pulls no verify cap', () => {
+    // `[lint]` is not in `DETERMINISTIC_TAG_RE` (`[build]`/`[test]`/
+    // `[probe]` only), so the model's re-post counts toward
+    // `criticalsNeedingVerify`. Dropping it only from the BODY while
+    // provenance still saw it left a linter-proven blocker pulling the
+    // unverified-blocker cap on every re-post round.
+    const { dir, planPath } = gateFixture();
+    try {
+      const gateLine = scriptLintGate(planPath).criticals[0]!;
+      const r = composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        bodyCriticals: [`R1-1: ${gateLine}`],
+      });
+      expect(r.cappedBy).not.toContain('criticals-unverified');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("matches the locator, not the model's wording", () => {
+    // A re-post is model prose: it carries the entry forward without being
+    // required to reproduce the message, or the gate's `mdField` backticks,
+    // byte for byte. An exact-match rule stopped deduping the moment the
+    // wording drifted — which is the common case, not the edge.
+    const { dir, planPath } = gateFixture();
+    try {
+      const gate = scriptLintGate(planPath).criticals;
+      expect(
+        withoutGateReposts(
+          [
+            'R1-1: `deploy.sh`:1 SC2086 — reworded by the model [lint]',
+            'R1-2: deploy.sh:1 SC2086 — and without the backticks [lint]',
+          ],
+          gate,
+        ),
+      ).toEqual([]);
+      // A DIFFERENT finding in the same file is not the same finding.
+      expect(
+        withoutGateReposts(['R1-3: `deploy.sh`:9 SC2115 — other [lint]'], gate),
+      ).toEqual(['R1-3: `deploy.sh`:9 SC2115 — other [lint]']);
+      // No gate findings: nothing is dropped.
+      expect(withoutGateReposts(['R1-1: anything'], [])).toEqual([
+        'R1-1: anything',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('scriptLintGate — the deterministic gate reads the report', () => {
   // Unit-level: the gate turns the orchestrator's report into verdict inputs
   // (compose-review's coverage machinery is exercised elsewhere). A same-repo plan
@@ -5587,6 +7057,47 @@ describe('buildLedger', () => {
     );
     expect(l.findings.map((f) => f.id)).toEqual(['R1-2', 'R1-3']);
     expect(l.findings[0]?.title).toBe('still leaking');
+  });
+
+  it('keeps the fix-induced marking out of the carried entry title', () => {
+    // The marking is machine vocabulary about how to COUNT the comment, not
+    // part of the claim. Left in, it rides the work list into the next round,
+    // where "R1-2 (fix-induced) the retry guard drops a valid case" is the
+    // text Step 6 re-locates the claim by and the text the status table
+    // prints — the token outliving the round it described, on every carried
+    // entry, forever.
+    const l = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** R1-2: (fix-induced) the guard drops a valid case',
+        },
+      ],
+      [],
+    );
+    expect(l.findings[0].id).toBe('R1-2');
+    expect(l.findings[0].title).toBe('the guard drops a valid case');
+    expect(l.findings[0].title).not.toContain('fix-induced');
+
+    // ...and the stripping happens ONLY beside an id. With no id there is no
+    // entry for the token to qualify, so it is ordinary claim text and must
+    // survive into the title — stripping it there would edit a finding's own
+    // words on the strength of a word it happened to open with.
+    const idless = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** (fix-induced) a brand new hole',
+        },
+      ],
+      [],
+    );
+    expect(idless.findings[0].id).toBe('R4-1');
+    expect(idless.findings[0].title).toBe('(fix-induced) a brand new hole');
   });
 });
 
@@ -6994,9 +8505,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   it('trims the deferral display ALONE when that is enough — the order is observable', () => {
     // Without this shape the ordering policy has no guard: a mutant that
     // makes the not-reviewed disclosures yield WITH the deferral display
-    // (trim 2 → 1) leaves a byte-identical body whenever both must go, so
+    // (trim 3 → 1) leaves a byte-identical body whenever both must go, so
     // the whole suite passed under it. Here dropping rank 1 alone fits, so
-    // rank 2 must survive.
+    // rank 3 must survive.
     const blocker = 'B'.repeat(64_200);
     const r = composeReview(
       base({
@@ -7476,7 +8987,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   });
 
   it('points at the findings artifact only when the deferral list is what went', () => {
-    // Rank 2 drops alone on any run with disclosures and no posture
+    // Rank 3 drops alone on any run with disclosures and no posture
     // deferrals. The unconditional pointer then told the author to read
     // "deferred findings in this run's findings artifact" — of which there
     // are none. The sibling stderr line had the condition all along.
@@ -7500,6 +9011,178 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // operator sent to a list that does not exist is the same false record
     // in the channel the operator actually reads.
     expect(r.remediation.join('\n')).not.toContain('findings artifact');
+    // The rank-3-only tail clause: a trimmed disclosure section survives
+    // nowhere but the terminal summary, and the line must say exactly
+    // that — naming an advisory copy for an advisory that was never
+    // trimmed is the same false record in the other direction.
+    expect(
+      r.remediation.some(
+        (l) =>
+          l.startsWith('body budget:') && l.includes('their only other copy'),
+      ),
+    ).toBe(true);
+  });
+
+  it('names the trimmed advisory for itself — never a deferral list that does not exist (#9410)', () => {
+    // The fired advisory shape with ZERO deferrals: the advisory is the
+    // only trimmable section, so the posted notice must name IT. Sharing
+    // the deferral display's rank posted "the deferred-findings list did
+    // not fit ... and deferred findings in this run's findings artifact" —
+    // asserting a list that never existed while the dropped advisory went
+    // unnamed (R1-3) — and the advisory's body-budget yield at rung 2 had
+    // no oracle at all (R1-9).
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 6,
+        findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+        posted: 0,
+        fresh: 0,
+        // An ANCHORED predecessor, so the mechanism-health note (rank -1)
+        // stays silent and the advisory is the only trimmable section —
+        // which is the whole point of this test. Without it the chain reads
+        // as two consecutive withholds and a second section drops beside
+        // the one under examination.
+        sha: 'deadbeef00112233445566778899aabbccddeeff',
+      }),
+    );
+    // Sized against the PR-named budget (65,536 − margin − marker
+    // reserve): the body overflows WITH the advisory and fits once the
+    // advisory yields — the rung-2 exit under test.
+    const blocker = 'B'.repeat(56_200);
+    // Direct input, not `base()`: its default `planPath: coveredPlan()`
+    // re-writes this very plan file and erases the prNumber the side file
+    // hangs off.
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      bodyCriticals: [blocker],
+      unreviewedDimensions: ['security'],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    // The shape fired — round 7 of `auto`, a carried Critical stands
+    // again, the window is flat at 0/0.
+    expect(r.residualRisk).toMatchObject({
+      shape: 'persistently-critical',
+      recommendation: 'land-with-residual-risk',
+      criticals: 1,
+      fresh: 0,
+      prevFresh: 0,
+    });
+    // The advisory yielded to the budget, and the notice names what
+    // actually went — the advisory, by its own name.
+    expect(r.body).not.toContain('land-with-residual-risk');
+    expect(r.body).toContain(
+      'the persistently-critical convergence advisory did not fit',
+    );
+    expect(r.body).toContain('(1 section(s))');
+    expect(r.body).toContain('Nothing blocking was trimmed.');
+    // No false record: no deferral-list name, no artifact pointer, no
+    // deferralList flag — the body this notice describes held no
+    // deferrals at all.
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.body).not.toContain('findings artifact');
+    expect(r.remediation.join('\n')).not.toContain('findings artifact');
+    expect(r.bodyTrim).toEqual({
+      sections: 1,
+      deferralList: false,
+      fold: false,
+      truncated: false,
+    });
+    // The advisory yields BEFORE the not-reviewed disclosures, which keep
+    // their place in the body — the ranks are distinct, in this order.
+    expect(r.body).toContain('Not reviewed: security');
+    // The operator's copy names the loss too, on the same channel the
+    // other budget lines ride.
+    expect(
+      r.remediation.some(
+        (l) =>
+          l.startsWith('body budget:') &&
+          l.includes('persistently-critical convergence advisory') &&
+          // The tail clause is the branch under test. Rank 3 did NOT go
+          // here — the disclosures keep their place in the body — so every
+          // section that went (the advisory) does have a durable copy, and
+          // "their only other copy" would be a false record. The artifact
+          // is deliberately not named: this run holds no deferral list.
+          l.includes(
+            'though every section that went also has a durable copy elsewhere',
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it('warns for the disclosures when the advisory went with them (#9526)', () => {
+    // The COMBINED drop the rank-2 keying got wrong. With ranks 2 and 3
+    // both gone, a tail keyed on the advisory said "another copy — the
+    // advisory also rides the composed JSON": true of the advisory, false
+    // of the disclosures beside it, and the disclosures are the half that
+    // survives nowhere but the terminal summary. The sentence exists to
+    // tell the operator what they must repeat, so under-warning about
+    // exactly that half is the false-record class it is meant to refuse.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 6,
+        findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+        posted: 0,
+        fresh: 0,
+      }),
+    );
+    // A rank-3 section wide enough that shedding the advisory alone does
+    // not bring the body back under budget — so rung 2 goes on to rank 3
+    // and both are in `droppedRanks`. Sized off the disclosure block rather
+    // than off the advisory: a one-section window would make the fixture
+    // turn on a few characters of prose.
+    const dimensions = Array.from(
+      { length: 30 },
+      (_, i) => `dimension-number-${i}-with-a-long-name`,
+    );
+    const blocker = 'B'.repeat(56_200);
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      bodyCriticals: [blocker],
+      unreviewedDimensions: dimensions,
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    // Both ranks went, and nothing was cut — the tail cut has a notice of
+    // its own and would change the subject of the line under test.
+    expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.body).not.toContain('land-with-residual-risk');
+    const line = r.remediation.find((l) => l.startsWith('body budget:')) ?? '';
+    expect(line).toContain('the persistently-critical convergence advisory');
+    expect(line).toContain('the not-reviewed and non-blocking disclosures');
+    // The branch under test: rank 3 is among the dropped, so the terminal
+    // summary IS the only other copy of that half, and the line must say
+    // so rather than reporting the advisory's spare copies for both.
+    expect(line).toContain(
+      'which is the only other copy of the disclosures among them',
+    );
+    expect(line).not.toContain(
+      'though every section that went also has a durable copy elsewhere',
+    );
+    // Still no deferral list on this run, so still no artifact pointer.
+    expect(line).not.toContain('findings artifact');
   });
 
   it('keeps the verdict-qualifying opener through a truncation', () => {
@@ -7568,7 +9251,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // `contextUnavailableClause` is `keep: 1` so the rung-3 cut spends
     // blockers before the diff-only trust warning; no truncation fixture
     // carried the clause, so deleting the tag shipped green — the untagged
-    // clause sorted to rank 3 and the cut spent the warning first.
+    // clause sorted to `keep` 3 (the cut's axis, not a `trim` rank) and the
+    // cut spent the warning first.
     const r = composeReview(
       base({
         criticalsInline: 1,
@@ -7598,8 +9282,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
 
   it('ranks the plan-gate disclosures with the not-reviewed ones, not with the deferral list', () => {
     // `deferredBlock`, `testPlanBlock` and `repositoryContextBlock` all
-    // carry `trim: 2`, and no overflow fixture carried any of them — so
-    // both mutations shipped green: `2 → 1` drops the disclosure WITH the
+    // carry `trim: 3`, and no overflow fixture carried any of them — so
+    // both mutations shipped green: `3 → 1` drops the disclosure WITH the
     // deferral display (inverting the documented order), and deleting the
     // tag makes it un-trimmable, sending a borderline body to the cut.
     const withContext = (blocker: string) =>
@@ -7628,7 +9312,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       });
 
     // Self-calibrating rather than pinned to a byte size: scan a range and
-    // require BOTH shapes to exist. `trim: 2 → 1` removes the first (the
+    // require BOTH shapes to exist. `trim: 3 → 1` removes the first (the
     // block would go with the deferral display); deleting the tag removes
     // the second (the block would never yield).
     // Fine-grained on purpose: the rank-1-only window is as wide as the
@@ -7643,7 +9327,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
         !r.bodyTrim.truncated &&
         r.body.includes('Repository proof boundary'),
     );
-    const goesWithRank2 = runs.find(
+    const goesWithRank3 = runs.find(
       (r) =>
         r.bodyTrim.deferralList &&
         !r.body.includes('Repository proof boundary'),
@@ -7652,8 +9336,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(runs[0].bodyTrim.sections).toBe(0);
     expect(runs[0].body).toContain('Repository proof boundary');
     expect(survivesRank1).toBeDefined();
-    expect(goesWithRank2).toBeDefined();
-    expect(goesWithRank2!.bodyTrim.sections).toBeGreaterThan(
+    expect(goesWithRank3).toBeDefined();
+    expect(goesWithRank3!.bodyTrim.sections).toBeGreaterThan(
       survivesRank1!.bodyTrim.sections,
     );
   });
@@ -9910,9 +11594,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // against a 56,830-character budget. Shed early it could pay for at
     // most 4% of an overflow, so any overflow bigger than itself spent it
     // AND went on to spend the disclosures — and the rounds this fires on
-    // are the high-volume ones where that is the normal case. It is rank 3
-    // now: the last rank to go, because it is the cheapest to keep and the
-    // only one whose reader is the PR author alone.
+    // are the high-volume ones where that is the normal case. It is trim
+    // rank 3 now: the last rank to go, because it is the cheapest to keep
+    // and the only one whose reader is the PR author alone.
     //
     // The blocker is sized to land in the window where the ladder sheds
     // rank 2 and stops. To retune after a body-copy change: raise it until
@@ -9950,9 +11634,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // notice say so instead of the paragraph vanishing silently.
     //
     // Sized one rung past the test above: the ladder sheds rank 2, still
-    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
-    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
-    // appears.
+    // does not fit, sheds trim rank 3, and stops before the hard cut. To
+    // retune: raise it until `Convergence:` disappears, and stop before
+    // `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -10254,6 +11938,48 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.findings.map((x) => x.id)).toEqual(['R2-1', 'R4-1']);
     expect(marker.fresh).toBe(1);
     expect(r.postedFresh).toBe(1);
+  });
+
+  it('counts a fix-induced re-report as first-time work', () => {
+    // Issue #9674. A carried id means two different things since the
+    // fix-induced disposition shipped: a claim re-asserted, and a NEW defect
+    // wearing the id of the entry whose fix produced it. Reading the id alone
+    // called both re-posts, so the trend's baseline fell on exactly the
+    // churning pull requests where new work was not falling.
+    //
+    // Both arms over ONE fixture: same id, same work list, same everything
+    // but the marking. Without the differential the assertion would pass on
+    // a count that simply never moves.
+    const round = (body: string) => {
+      sideFile({
+        round: 3,
+        posted: 1,
+        fresh: 1,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'src/p.ts', title: 'x' }],
+      });
+      return composeReview({
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        draftedComments: [{ path: 'src/p.ts', line: 1, body }],
+      });
+    };
+    const stillStands = round('**[Critical]** R2-1: still open');
+    expect(parseLedger(stillStands.body)!.fresh).toBe(0);
+    expect(stillStands.postedFresh).toBe(0);
+
+    const fixInduced = round(
+      '**[Critical]** R2-1: (fix-induced) the fix opened a new hole',
+    );
+    expect(parseLedger(fixInduced.body)!.fresh).toBe(1);
+    expect(fixInduced.postedFresh).toBe(1);
+    // ...and the id still carries, so the author still reads one thread for
+    // the site. Counting it first-time is a change to the COUNT, never to
+    // which finding the comment is.
+    const marker = parseLedger(fixInduced.body)!;
+    expect(marker.findings.map((x) => x.id)).toEqual(['R2-1']);
+    expect(marker.findings[0].title).toBe('the fix opened a new hole');
   });
 
   it('re-mints a stray id, and keeps one a shortened list may have shed', () => {
@@ -11287,9 +13013,13 @@ describe('the convergence census and the non-convergence finding', () => {
   it("never borrows the posting trend's words for its own count", () => {
     // The two counts in one body: this blocker counts DEFECTS newly
     // identified, the convergence diagnosis counts inline comments POSTED
-    // for the first time, and they legitimately differ — a fix-induced
-    // defect re-reported under a carried id is new here and a re-post
-    // there. They collided in VOCABULARY, not arithmetic: "findings first
+    // for the first time, and they legitimately differ — this one takes
+    // every finding the round newly identified, the trend only those that
+    // reached the pull request as a first-time comment. (A fix-induced
+    // re-report used to be the sharpest case of the two diverging; since
+    // #9674 the trend counts a MARKED one as first-time too, and an
+    // unmarked carried id is still a re-post there.) They collided in
+    // VOCABULARY, not arithmetic: "findings first
     // filed in round 4" sat beside "2 of them reported for the first time"
     // over the same round, so one body published two numbers under one
     // phrase and neither could be trusted. Pin the separation from both
@@ -11604,5 +13334,100 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
         critical({ path: 42 }),
       ]),
     ).toEqual([{ file: '' }, { file: '' }]);
+  });
+
+  it('reads the fix-induced marking beside the id it qualifies', () => {
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: (fix-induced) the new hole' }),
+    ]);
+    expect(d.carriedId).toBe('R1-2');
+    expect(d.fixInduced).toBe(true);
+    // A still-stands re-post is the SAME id shape without the marking, and
+    // must stay a re-post: the whole point of the token is that a carried id
+    // no longer answers the first-time question on its own.
+    const [plain] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: the same old claim' }),
+    ]);
+    expect(plain.carriedId).toBe('R1-2');
+    expect(plain.fixInduced).toBeUndefined();
+  });
+
+  it('tolerates case and inner spacing in the marking', () => {
+    // It governs a COUNT, never which finding a comment is, so the reading is
+    // deliberately lenient. A spelling it still misses costs the count and
+    // nothing else — the id is already in hand by then.
+    for (const marked of [
+      '**[Critical]** R1-2: (Fix-Induced) x',
+      '**[Critical]** R1-2: ( fix-induced ) x',
+      '**[Critical]** R1-2: (FIX-INDUCED)- x',
+    ]) {
+      const [d] = draftedFindingsOf([critical({ body: marked })]);
+      expect(d.carriedId).toBe('R1-2');
+      expect(d.fixInduced).toBe(true);
+    }
+  });
+
+  it('ignores the marking where there is no id to qualify', () => {
+    // Nothing induced a defect that names no previous entry, and the comment
+    // is already counted first-time by the absent id. Honouring the token
+    // there would let a stray parenthetical speak about an entry the comment
+    // does not name.
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** (fix-induced) a brand new hole' }),
+    ]);
+    expect(d.carriedId).toBeUndefined();
+    expect(d.fixInduced).toBeUndefined();
+  });
+
+  it('never emits the marking without the id it qualifies', () => {
+    // The shape invariant, pinned where it is actually reachable: a SECOND
+    // draft under an id this round already spent has its `carriedId` dropped
+    // (the ledger mints it a fresh one), and the marking must go with it.
+    // Kept, the finding would claim to have been induced by an entry it no
+    // longer names — a shape this field's own contract forbids.
+    //
+    // This case is why the assertion above could not carry the whole rule:
+    // there the id is absent because the body has none, and the two gates
+    // that enforce this — the readback's and the projection's — masked each
+    // other, so neither could be reddened alone.
+    const both = draftedFindingsOf([
+      critical({ body: '**[Critical]** R2-1: (fix-induced) first' }),
+      critical({ body: '**[Critical]** R2-1: (fix-induced) second' }),
+    ]);
+    expect(both[0].carriedId).toBe('R2-1');
+    expect(both[0].fixInduced).toBe(true);
+    expect(both[1].carriedId).toBeUndefined();
+    expect(both[1].fixInduced).toBeUndefined();
+  });
+
+  it('never lets the marking cost the id', () => {
+    // The reason the token sits AFTER the separator instead of inside the id
+    // grammar. `LEDGER_ID_READBACK` is shared with `idFor`, so widening it to
+    // swallow a parenthetical would put the ledger's carry on the same regex
+    // as a model-written adjective: a spacing the wider grammar failed to
+    // anticipate would stop matching the id and the finding would be silently
+    // renumbered.
+    //
+    // Written as a DIFFERENTIAL rather than as a list of ids to expect. The
+    // first cut asserted `R1-2:(fix-induced) x` carries its id and reddened —
+    // correctly: `R1-2:claim` loses the id with no marking anywhere near it,
+    // because the shared grammar wants whitespace after the separator. That
+    // is pre-existing and not this token's business. What IS this token's
+    // business is that it changes nothing: every shape reads exactly the id
+    // it would have read with the marking deleted.
+    const idOf = (body: string) =>
+      draftedFindingsOf([critical({ body })])[0]?.carriedId;
+    for (const [marked, bare] of [
+      ['**[Critical]** R1-2: (fix-induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2 (fix-induced) x', '**[Critical]** R1-2 x'],
+      ['**[Critical]** R1-2: (fix induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2: (fix-induced x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2:(fix-induced) x', '**[Critical]** R1-2:x'],
+    ]) {
+      expect(idOf(marked)).toBe(idOf(bare));
+    }
+    // ...and the differential is not vacuously true because every arm is
+    // undefined: the prescribed shape does carry its id.
+    expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
   });
 });
