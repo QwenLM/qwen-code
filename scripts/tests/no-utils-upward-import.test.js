@@ -92,6 +92,9 @@ describe('no-utils-upward-import', () => {
 
   it('allows imports that stay within utils', () => {
     expect(
+      runRule('import(`./sibling.js`);', 'packages/cli/src/utils/foo.ts'),
+    ).toHaveLength(0);
+    expect(
       runRule(
         "import value from './sibling.js';",
         'packages/cli/src/utils/foo.ts',
@@ -120,6 +123,12 @@ describe('no-utils-upward-import', () => {
     expect(
       runRule(
         "import value from './sibling.js';",
+        '/tmp/packages/cli/src/utils/nested/packages/cli/src/utils/foo.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import value from 'src/utils/sibling.js';",
         '/tmp/packages/cli/src/utils/nested/packages/cli/src/utils/foo.ts',
       ),
     ).toHaveLength(0);
