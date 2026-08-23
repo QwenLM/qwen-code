@@ -49,6 +49,7 @@ import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
 import { useImagePaste } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
+import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
 import {
   SKILL_ITEM_ID_PREFIX,
   isSkillsSecondaryQuery,
@@ -793,6 +794,31 @@ export const App: React.FC = () => {
     (message) => message.localOnly,
   );
 
+  // The WebShell transcript has no file-open callback; intercept file-like
+  // anchor clicks at the container level and route them through the
+  // existing `openFile` message (handled by FileMessageHandler), restoring
+  // the pre-PR behavior where file references opened in the editor.
+  const handleTranscriptClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement | null;
+      const anchor = target?.closest?.('a') as HTMLAnchorElement | null;
+      if (!anchor) {
+        return;
+      }
+      const filePath = resolveFileLinkFromAnchor(anchor);
+      if (!filePath) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      vscode.postMessage({
+        type: 'openFile',
+        data: { path: filePath },
+      });
+    },
+    [vscode],
+  );
+
   const webShellTheme = useMemo<'dark' | 'light'>(() => {
     const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
     return kind.includes('light') ? 'light' : 'dark';
@@ -841,7 +867,7 @@ export const App: React.FC = () => {
         }
       />
 
-      <div className="flex-1 min-h-0 relative">
+      <div className="flex-1 min-h-0 relative" onClick={handleTranscriptClick}>
         {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
             <Onboarding />

@@ -634,6 +634,83 @@ describe('App /skills secondary picker', () => {
     ).not.toContain('ordinary history');
   });
 
+  it('posts openFile when a file link inside the transcript area is clicked', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'see the report',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    expect(area).not.toBeNull();
+
+    const link = document.createElement('a');
+    link.setAttribute('href', '/tmp/insight-report.md');
+    link.textContent = '/tmp/insight-report.md';
+    area.appendChild(link);
+
+    act(() => {
+      link.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'openFile',
+      data: { path: '/tmp/insight-report.md' },
+    });
+  });
+
+  it('leaves external links alone when clicked in the transcript area', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'docs',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    const link = document.createElement('a');
+    link.setAttribute('href', 'https://example.com/docs');
+    link.textContent = 'docs';
+    area.appendChild(link);
+
+    // VS Code webviews never navigate on external links; cancel the jsdom
+    // navigation without interfering with the handler under test.
+    const preventNavigation = (event: Event) => event.preventDefault();
+    document.addEventListener('click', preventNavigation);
+    try {
+      act(() => {
+        link.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, cancelable: true }),
+        );
+      });
+    } finally {
+      document.removeEventListener('click', preventNavigation);
+    }
+
+    expect(mockPostMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'openFile' }),
+    );
+  });
+
   it('disables WebShell transcript turn auto-collapse while a response is in flight', async () => {
     mockMessageState.isStreaming = true;
     resetWebShellTranscriptProps();
