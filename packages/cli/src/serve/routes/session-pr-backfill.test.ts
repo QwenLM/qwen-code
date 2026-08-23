@@ -678,6 +678,125 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('binds a fork-layout convention number to the parent URL gh attributes', async () => {
+    // Fork layout: the repo gate rejects the whole (parent) page, but gh's
+    // own attribution still names the convention PR authoritatively — the
+    // session must bind the parent URL, not a synthesized fork URL that
+    // would 404 (forks host no PRs).
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(123, 'worktree-pr-123'),
+          url: 'https://github.com/parent/repo/pull/123',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1, unresolved: 0 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({
+      number: 123,
+      url: 'https://github.com/parent/repo/pull/123',
+    });
+  });
+
+  it('repairs a pre-existing live binding evicted by weaker branch numbers', async () => {
+    // A live gh-backed binding (#5, strongest signal) already sits in the
+    // sidecar. A run that binds 11 weaker branch-mapped numbers pushes #5
+    // past the tail-10 cap; the eviction repair must restore it — no other
+    // path recovers a dropped pre-existing binding.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 5,
+            url: 'https://github.com/o/r/pull/5',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            state: 'open',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const branchRecords = Array.from({ length: 11 }, (_, i) =>
+      JSON.stringify({
+        uuid: `${SESSION_A}-branch-${i}`,
+        parentUuid: `${SESSION_A}-user-1`,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: `on b${i}` }] },
+        cwd: workspaceCwd,
+        gitBranch: `fix/b${i}`,
+      }),
+    ).join('\n');
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${branchRecords}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: Array.from({ length: 11 }, (_, i) =>
+        pr(101 + i, `fix/b${i}`),
+      ),
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 11, alreadyBound: 0 });
+    const prs = await readSessionPrs(prPath);
+    expect(prs).toHaveLength(10);
+    expect(prs?.map((p) => p.number)).toContain(5);
+  });
+
+  it('isolates a failing sidecar write and continues with other candidates', async () => {
+    // One candidate's sidecar is unwritable (a directory sits where the
+    // file belongs); the run must record it and keep going, not abort and
+    // drop every later candidate.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    await seedSession(SESSION_A, 'fix/a');
+    await seedSession(SESSION_B);
+    await seedWorktreeSidecar(SESSION_B, 'pr-7', 'worktree-pr-7');
+    const badPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await fsp.mkdir(badPath, { recursive: true });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/a'), pr(7, 'worktree-pr-7')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, failed: 1 });
+    const prsA = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prsA?.[0]).toMatchObject({ number: 42 });
+  });
+
   it('resolves the git remote at most once per backfill run', async () => {
     fetchRemoteWebUrlMock.mockResolvedValue(undefined);
     await seedSession(SESSION_A);
@@ -749,6 +868,12 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
     expect(path.relative(chatsDir, escapedSidecar).startsWith('..')).toBe(true);
     await expect(fsp.access(escapedSidecar)).rejects.toThrow();
+    // The planted escape transcript lands outside the per-test runtime dir
+    // (that is what makes it an escape) — remove it explicitly so a
+    // fixed-name file does not linger in the OS tmpdir across runs.
+    await fsp.rm(path.join(escapedDir, `${traversalId}.jsonl`), {
+      force: true,
+    });
   });
 
   it('keeps sidecar order and createdAt when a run binds nothing new', async () => {

@@ -13,7 +13,6 @@
 // static barrel importer (ACP agent included).
 import {
   fetchGitHubPullRequests,
-  fetchRemoteWebUrl,
   readSessionPrs,
   repoKeyFromWebUrl,
   updateSessionPrStates,
@@ -63,8 +62,6 @@ export interface SessionPrRefreshResult {
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
-  resolveRemoteWebUrl: (cwd: string) => Promise<string | undefined> = (cwd) =>
-    fetchRemoteWebUrl(cwd, runtime.env.effectiveEnv),
 ): Promise<SessionPrRefreshResult> {
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   const pendingBindings: Array<{
@@ -112,38 +109,31 @@ export async function refreshWorkspaceSessionPrStates(
   }
   if (pendingBindings.length === 0) return { scanned, updated: 0 };
 
-  // PR numbers are dense small integers — stamping states by bare number
-  // would hit a same-numbered PR of another repository whenever a
-  // binding's URL points elsewhere. Each binding's own URL names its
-  // repository, so only bindings belonging to a repository this run
-  // actually queried are updated.
-  const remoteWebUrl = await resolveRemoteWebUrl(runtime.workspaceCwd);
-  const workspaceRepoKey = remoteWebUrl
-    ? repoKeyFromWebUrl(remoteWebUrl)
-    : undefined;
-
   const result = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
     { state: 'all', limit: 500, slim: true },
   );
   if (result.kind !== 'ok') return { scanned, updated: 0 };
-  const numberToState = new Map<number, SessionPrState>();
-  for (const pr of result.pullRequests) {
-    // The sidecar snapshot has no 'draft' variant — a draft is still open.
-    numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-  }
-
-  // Stamping authority is the repository this run actually queried, and the
-  // page's own URLs name it. In the fork layout origin is the fork while
-  // gh lists the PARENT repo's PRs — the same repo the writers bind — so
-  // gating on the origin key alone would freeze every fork-layout binding.
-  // Accept both identities; bindings matching neither stay skipped.
-  const acceptedRepoKeys = new Set<string>();
-  if (workspaceRepoKey) acceptedRepoKeys.add(workspaceRepoKey);
+  // Stamping authority is the repository gh actually listed, and the page's
+  // own URLs name it. Key states by THAT repo key and look each binding up
+  // under its own URL's key: PR numbers are dense small integers, so
+  // stamping by bare number would hit a same-numbered PR of another
+  // repository (a fork and its parent collide routinely). The fork layout
+  // stays covered — origin is the fork while gh lists the PARENT repo's
+  // PRs, the same repo the writers bind, so parent-URL bindings find their
+  // states under the page's key; bindings of any other repo stay skipped.
+  const stateByRepoKey = new Map<string, Map<number, SessionPrState>>();
   for (const pr of result.pullRequests) {
     const key = repoKeyFromWebUrl(pr.url);
-    if (key) acceptedRepoKeys.add(key);
+    if (!key) continue;
+    let states = stateByRepoKey.get(key);
+    if (!states) {
+      states = new Map<number, SessionPrState>();
+      stateByRepoKey.set(key, states);
+    }
+    // The sidecar snapshot has no 'draft' variant — a draft is still open.
+    states.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
   }
 
   let updated = 0;
@@ -151,8 +141,9 @@ export async function refreshWorkspaceSessionPrStates(
     const states = new Map<number, SessionPrState>();
     for (const binding of target.bindings) {
       const bindingRepoKey = repoKeyFromWebUrl(binding.url);
-      if (!bindingRepoKey || !acceptedRepoKeys.has(bindingRepoKey)) continue;
-      const state = numberToState.get(binding.number);
+      const state = bindingRepoKey
+        ? stateByRepoKey.get(bindingRepoKey)?.get(binding.number)
+        : undefined;
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
       // supersedes a stale 'closed' after a reopen.
@@ -184,7 +175,12 @@ export function startSessionPrRefreshTimer(deps: {
       for (const runtime of deps.workspaceRegistry.listAll()) {
         if (!runtime.trusted) continue;
         try {
-          await refreshWorkspaceSessionPrStates(runtime);
+          const result = await refreshWorkspaceSessionPrStates(runtime);
+          // State transitions rewrite sidecars the daemon never sees; bump
+          // the catalog revision so live-state clients refetch the badge,
+          // the way every other daemon-side writer of persisted session
+          // state does.
+          if (result.updated > 0) runtime.bridge.markSessionCatalogChanged();
         } catch {
           // A single workspace's failure must not starve the rest.
         }

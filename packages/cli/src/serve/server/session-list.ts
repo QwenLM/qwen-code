@@ -501,27 +501,34 @@ function mergeLiveSessionSummary(
     isArchived: false,
   };
   // The live entry only knows PR bindings from this daemon lifetime while the
-  // sidecar-enriched persisted summary holds the full history — merge by PR
-  // number (live url wins, live-only bindings sort latest) instead of letting
-  // the spread overwrite the history. For `state` the sidecar wins: the
-  // refresh timer rewrites it there, while the live entry is frozen at
-  // bind-time.
+  // sidecar-enriched persisted summary holds the full history. The sidecar is
+  // the append-only binding-time record (last = latest — the order the badge
+  // renders by), so it supplies the merged order; the live entry overlays
+  // fresher volatile data onto it. Positional concatenation (persisted-only
+  // before live) breaks that order whenever a persisted-only binding is
+  // NEWER than a live one — exactly what a shell-hook write lands after a
+  // GitDialog bind. For `state` the sidecar wins: the refresh timer rewrites
+  // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
     const livePrs = live.prs ?? [];
-    const persistedByNumber = new Map(
-      (existing.prs ?? []).map((p) => [p.number, p]),
-    );
-    merged.prs = [
-      ...(existing.prs ?? []).filter(
-        (p) => !livePrs.some((l) => l.number === p.number),
-      ),
-      ...livePrs.map((l) => {
-        const persisted = persistedByNumber.get(l.number);
-        return persisted?.state !== undefined && persisted.state !== l.state
-          ? { ...l, state: persisted.state }
-          : l;
-      }),
-    ];
+    const liveByNumber = new Map(livePrs.map((l) => [l.number, l]));
+    const persistedPrs = existing.prs ?? [];
+    const persistedNumbers = new Set(persistedPrs.map((p) => p.number));
+    const ordered = persistedPrs.map((p) => {
+      const liveEntry = liveByNumber.get(p.number);
+      return liveEntry
+        ? {
+            ...liveEntry,
+            ...(p.state !== undefined ? { state: p.state } : {}),
+          }
+        : p;
+    });
+    // A binding present only in the live entry was bound this daemon
+    // lifetime and has not landed in the sidecar yet — the newest binding.
+    for (const liveEntry of livePrs) {
+      if (!persistedNumbers.has(liveEntry.number)) ordered.push(liveEntry);
+    }
+    merged.prs = ordered;
   }
   return merged;
 }

@@ -61,13 +61,13 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），候选分支 = worktree sidecar branch ∪ transcript 各记录的 `gitBranch`（正则提取，distinct 上限 64），解析三源：
   1. **约定**：slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
   2. **gh 批量**：每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})`，把候选分支与 headRefName 交集映射到 number + url。实测存量里 `pr-<N>` slug 与 worktree branch 几乎零命中（PR 基本不从 worktree 分支提交），`gitBranch` 是主力来源（主 workspace 342 会话命中 272）；
-  3. **transcript `gh pr create` 痕迹不再作为绑定源**：打印出的 URL 无法归因到会话自身的创建（伪造/复合命令会追溯固化错误绑定），gh 无法为之背书的 URL 一律不绑；历史创建由分支映射（上述第 2 源）尽力恢复。URL 兜底链相应缩短为：gh 映射 → remote 推导（仅约定号）。
+  3. **transcript `gh pr create` 痕迹不再作为绑定源**：打印出的 URL 无法归因到会话自身的创建（伪造/复合命令会追溯固化错误绑定），gh 无法为之背书的 URL 一律不绑；历史创建由分支映射（上述第 2 源）尽力恢复。URL 兜底链相应缩短为：gh 映射 → gh 页按号归属（仅约定号）→ remote 推导（仅约定号）。
 - `slim` 只取 number/url/headRefName：带 CI rollup 的全字段查询在 `--state all --limit 500` 下触发 GitHub GraphQL 504；slim 约 4s/60KB。
-- **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**（gh 2.95.0 实测），页内 PR 全部属于另一仓库——与 workspace origin key 不一致的条目一律跳过，裸分支名碰撞不会把陌生人的 PR 绑进本工作区（该场景分支映射整体失效，fail-closed）。
-- URL 优先取 gh 映射；gh 不可用时由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host，仅约定号）；解析不到号的会话原样跳过。
+- **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**（gh 2.95.0 实测），页内 PR 全部属于另一仓库——与 workspace origin key 不一致的条目一律跳过，裸分支名碰撞不会把陌生人的 PR 绑进本工作区（该场景分支映射整体失效，fail-closed）。约定号不受影响：页已把该号归属时取 gh 自己的权威 URL（父仓库），不与 origin 推导混用。
+- URL 优先取 gh 映射；约定号在 gh 页未收录该号时（gh 不可用或超出列表窗口）由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host）；解析不到号的会话原样跳过。
 - 已知副作用：曾 checkout/review 他人 PR 分支的会话也会被绑定（多 PR 列表可容纳，搜索语义上属于"相关会话"）。
-- 已绑定同一 number 的分支映射结果跳过（不刷新 createdAt）；**约定号例外**——已绑定的约定号仍会重新 upsert（移到末位、刷新 createdAt），否则后续运行新绑定的更弱数字会把它挤过 tail-10 上限；重复调用幂等；写入复用 `upsertSessionPr`。
-- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`；untrusted workspace 跳过。
+- 已绑定的号码一律跳过（不刷新 createdAt、不改变顺序——不绑定新内容的运行保持 sidecar 原样，重复调用幂等）；**挤出修复**：本轮新绑定的更弱数字若把既有条目挤过 tail-10 上限，循环结束后按运行前快照把被挤掉的号码重新 upsert（url/state 取自快照），最强信号（live gh-backed 绑定与约定号）不会被永久丢失；写入复用 `upsertSessionPr`，按候选隔离——单个 sidecar 写失败（如路径不可写）计入 `failed` 并继续，不中止整个 workspace 运行。
+- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved/failed`；untrusted workspace 跳过。
 
 ### 合入状态快照 + 定时刷新
 

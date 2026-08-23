@@ -59,6 +59,8 @@ export interface SessionPrBackfillWorkspaceResult {
   alreadyBound: number;
   /** Convention numbers whose URL could not be resolved. */
   unresolved: number;
+  /** Candidates whose sidecar write failed; the run continues past them. */
+  failed: number;
   error?: string;
 }
 
@@ -109,6 +111,7 @@ export async function backfillWorkspaceSessionPrs(
     bound: 0,
     alreadyBound: 0,
     unresolved: 0,
+    failed: 0,
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   const candidates: BackfillCandidate[] = [];
@@ -180,9 +183,16 @@ export async function backfillWorkspaceSessionPrs(
   );
   const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
 
+  // gh's page is authoritative for everything it lists: `pageUrlByNumber`
+  // records every entry BEFORE the repo gate so a fork layout — where gh
+  // resolves the PARENT repo for list queries — still attributes a
+  // convention number to the parent PR the session exists for. The gated
+  // maps hold only same-repo entries: branch-mapping a foreign head branch
+  // would bind a stranger's PR on a bare name collision.
   const numberToUrl = new Map<number, string>();
-  const numberToState = new Map<number, 'open' | 'merged' | 'closed'>();
   const branchToNumber = new Map<string, number>();
+  const pageUrlByNumber = new Map<number, string>();
+  const pageStateByNumber = new Map<number, 'open' | 'merged' | 'closed'>();
   const prs = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -190,6 +200,10 @@ export async function backfillWorkspaceSessionPrs(
   );
   if (prs.kind === 'ok') {
     for (const pr of prs.pullRequests) {
+      // The sidecar snapshot has no 'draft' variant — a draft is still open.
+      const state = pr.state === 'draft' ? 'open' : pr.state;
+      pageUrlByNumber.set(pr.number, pr.url);
+      pageStateByNumber.set(pr.number, state);
       // Fork layout: gh resolves the PARENT repo for list queries when the
       // origin is a fork, so the page can hold another repository's PRs. A
       // bare head-branch collision with one of them would bind a stranger's
@@ -204,8 +218,6 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       numberToUrl.set(pr.number, pr.url);
-      // The sidecar snapshot has no 'draft' variant — a draft is still open.
-      numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
       // First wins: the list is newest-updatedAt-first, so a head branch
       // shared by two PRs maps to the newer one (a last-write `.set()` would
       // resolve to the oldest, making the current PR unreachable).
@@ -235,68 +247,102 @@ export async function backfillWorkspaceSessionPrs(
       numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
-    const prPath = sessionService.getPrSessionPathForArchiveState(
-      candidate.sessionId,
-      candidate.archiveState,
-    );
-    let existing: Awaited<ReturnType<typeof readSessionPrs>>;
+    // One unwritable sidecar (EISDIR/EACCES/EIO) must not abort the whole
+    // workspace run and drop every later candidate; record and continue.
     try {
-      existing = await readSessionPrs(prPath);
+      await bindCandidateNumbers(
+        sessionService,
+        candidate,
+        numbers,
+        {
+          numberToUrl,
+          pageUrlByNumber,
+          pageStateByNumber,
+          remote,
+        },
+        result,
+      );
     } catch {
-      existing = null;
-    }
-    const initialNumbers = new Set(existing?.map((pr) => pr.number));
-    let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
-    for (const number of numbers) {
-      const isConvention = number === candidate.conventionNumber;
-      if (initialNumbers.has(number)) {
-        result.alreadyBound += 1;
-        // Plain skip for EVERY already-bound number: a re-upsert would move
-        // the entry to the end with a fresh createdAt, violating the
-        // binding-time order the badge and tooltip render by.
-        continue;
-      }
-      let url = numberToUrl.get(number);
-      if (url === undefined && isConvention && remote !== undefined) {
-        url = `${remote}/pull/${number}`;
-      }
-      if (url === undefined) {
-        result.unresolved += 1;
-        continue;
-      }
-      const state = numberToState.get(number);
-      persisted = await upsertSessionPr(prPath, {
-        number,
-        url,
-        ...(state ? { state } : {}),
-      });
-      result.bound += 1;
-    }
-    // Eviction repair: when this run's NEW bindings pushed an already-bound
-    // convention number past the tail cap, restore it — the session exists
-    // for that PR. Runs that bind nothing new leave the sidecar untouched.
-    const conventionNumber = candidate.conventionNumber;
-    if (
-      conventionNumber !== undefined &&
-      initialNumbers.has(conventionNumber) &&
-      persisted !== undefined &&
-      !persisted.some((pr) => pr.number === conventionNumber)
-    ) {
-      let url = numberToUrl.get(conventionNumber);
-      if (url === undefined && remote !== undefined) {
-        url = `${remote}/pull/${conventionNumber}`;
-      }
-      if (url !== undefined) {
-        const state = numberToState.get(conventionNumber);
-        await upsertSessionPr(prPath, {
-          number: conventionNumber,
-          url,
-          ...(state ? { state } : {}),
-        });
-      }
+      result.failed += 1;
     }
   }
   return result;
+}
+
+async function bindCandidateNumbers(
+  sessionService: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+  candidate: BackfillCandidate,
+  numbers: readonly number[],
+  sources: {
+    numberToUrl: ReadonlyMap<number, string>;
+    pageUrlByNumber: ReadonlyMap<number, string>;
+    pageStateByNumber: ReadonlyMap<number, 'open' | 'merged' | 'closed'>;
+    remote: string | undefined;
+  },
+  result: SessionPrBackfillWorkspaceResult,
+): Promise<void> {
+  const prPath = sessionService.getPrSessionPathForArchiveState(
+    candidate.sessionId,
+    candidate.archiveState,
+  );
+  let existing: Awaited<ReturnType<typeof readSessionPrs>>;
+  try {
+    existing = await readSessionPrs(prPath);
+  } catch {
+    existing = null;
+  }
+  const initialNumbers = new Set(existing?.map((pr) => pr.number));
+  let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
+  for (const number of numbers) {
+    const isConvention = number === candidate.conventionNumber;
+    if (initialNumbers.has(number)) {
+      result.alreadyBound += 1;
+      // Plain skip for EVERY already-bound number: a re-upsert would move
+      // the entry to the end with a fresh createdAt, violating the
+      // binding-time order the badge and tooltip render by.
+      continue;
+    }
+    let url = sources.numberToUrl.get(number);
+    if (url === undefined && isConvention) {
+      // Fork layout: the repo gate above rejects the parent-repo page, but
+      // gh's own attribution still names the PR authoritatively — prefer it
+      // over a synthesized fork URL (forks host no PRs, the link would
+      // 404). Only a number gh's page lacks entirely falls back to the
+      // workspace remote (gh unavailable or outside the list window).
+      url = sources.pageUrlByNumber.get(number);
+      if (url === undefined && sources.remote !== undefined) {
+        url = `${sources.remote}/pull/${number}`;
+      }
+    }
+    if (url === undefined) {
+      result.unresolved += 1;
+      continue;
+    }
+    const state = sources.pageStateByNumber.get(number);
+    persisted = await upsertSessionPr(prPath, {
+      number,
+      url,
+      ...(state ? { state } : {}),
+    });
+    result.bound += 1;
+  }
+  // Eviction repair: this run's NEW bindings can push pre-existing entries
+  // past the tail cap — including live gh-backed bindings, the strongest
+  // signal class, which no other path restores. Re-upsert every initially
+  // bound number the run evicted (URL/state from the pre-run snapshot).
+  // Runs that bind nothing new leave the sidecar untouched.
+  if (persisted !== undefined && existing) {
+    let survivors = new Set(persisted.map((pr) => pr.number));
+    for (const entry of existing) {
+      if (survivors.has(entry.number)) continue;
+      persisted = await upsertSessionPr(prPath, {
+        number: entry.number,
+        url: entry.url,
+        ...(entry.state ? { state: entry.state } : {}),
+      });
+      survivors = new Set(persisted.map((pr) => pr.number));
+    }
+  }
 }
 
 export function registerSessionPrBackfillRoutes(
@@ -319,6 +365,7 @@ export function registerSessionPrBackfillRoutes(
             bound: 0,
             alreadyBound: 0,
             unresolved: 0,
+            failed: 0,
             error: 'untrusted workspace skipped',
           });
           continue;
@@ -337,6 +384,7 @@ export function registerSessionPrBackfillRoutes(
             bound: 0,
             alreadyBound: 0,
             unresolved: 0,
+            failed: 0,
             error: error instanceof Error ? error.message : String(error),
           });
         }
