@@ -462,16 +462,19 @@ describe('AgentCore approval response deduplication', () => {
     return { core, errorSpy };
   }
 
-  it('automatically retries an approval after transient delivery failure', async () => {
+  it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();
     const deliveryError = new Error('approval listener failed');
     let shouldThrow = true;
-    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+    const transientListener = vi.fn(() => {
       if (shouldThrow) {
         shouldThrow = false;
         throw deliveryError;
       }
     });
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_WAITING_APPROVAL, transientListener);
     const approvalEvents: AgentApprovalRequestEvent[] = [];
     core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
       approvalEvents.push(event);
@@ -513,7 +516,11 @@ describe('AgentCore approval response deduplication', () => {
       [{ name: request.name } as FunctionDeclaration],
     );
     try {
-      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      await vi.waitFor(() =>
+        expect(transientListener).toHaveBeenCalledTimes(2),
+      );
+      expect(approvalEvents).toHaveLength(1);
+      expect(transientListener).toHaveBeenCalledTimes(2);
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining(
           'Approval event delivery failed for call-retry',
@@ -527,15 +534,74 @@ describe('AgentCore approval response deduplication', () => {
     }
   });
 
-  it('bounds automatic approval delivery retries', async () => {
-    vi.useFakeTimers();
+  it('continues past a thrower before a healthy listener', async () => {
     const { core } = buildApprovalCore();
     const deliveryError = new Error('approval listener always fails');
-    let attempts = 0;
-    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
-      attempts++;
+    const thrower = vi.fn(() => {
       throw deliveryError;
     });
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, thrower);
+    const healthyListener = vi.fn();
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_WAITING_APPROVAL, healthyListener);
+
+    const request = {
+      callId: 'call-bounded-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-bounded-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      expect(thrower).toHaveBeenCalledOnce();
+      expect(healthyListener).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('bounds persistent listener retries and reports exhaustion', async () => {
+    vi.useFakeTimers();
+    const { core, errorSpy } = buildApprovalCore();
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const deliveryError = new Error('approval listener always fails');
+    const thrower = vi.fn(() => {
+      throw deliveryError;
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, thrower);
 
     const request = {
       callId: 'call-bounded-retry',
@@ -574,7 +640,14 @@ describe('AgentCore approval response deduplication', () => {
     );
     try {
       await vi.runAllTimersAsync();
-      expect(attempts).toBe(3);
+      expect(thrower).toHaveBeenCalledTimes(3);
+      expect(errorSpy).toHaveBeenCalledTimes(3);
+      expect(consoleErrorSpy).toHaveBeenCalledOnce();
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Approval event delivery for call-bounded-retry exhausted 3 attempts for 1 listener',
+        ),
+      );
       const scheduler = scheduleSpy.mock.instances[0] as unknown as {
         onToolCallsUpdate?: (calls: ToolCall[]) => void;
       };
@@ -599,11 +672,12 @@ describe('AgentCore approval response deduplication', () => {
           request: siblingRequest,
         } as unknown as ToolCall,
       ]);
-      expect(attempts).toBe(3);
+      expect(thrower).toHaveBeenCalledTimes(3);
     } finally {
       abortController.abort();
       await processing;
       scheduleSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -664,19 +738,22 @@ describe('AgentCore approval response deduplication', () => {
     }
   });
 
-  it('shares one response latch across partial delivery retries', async () => {
+  it('does not duplicate a healthy listener before a failed listener', async () => {
     const { core } = buildApprovalCore();
     const retainedEvents: AgentApprovalRequestEvent[] = [];
     core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
       retainedEvents.push(event);
     });
     let shouldThrow = true;
-    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+    const transientListener = vi.fn(() => {
       if (shouldThrow) {
         shouldThrow = false;
         throw new Error('later listener failed');
       }
     });
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_WAITING_APPROVAL, transientListener);
     let retryEvent: AgentApprovalRequestEvent | undefined;
     core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
       retryEvent = event;
@@ -719,8 +796,12 @@ describe('AgentCore approval response deduplication', () => {
       [{ name: request.name } as FunctionDeclaration],
     );
     try {
-      await vi.waitFor(() => expect(retryEvent).toBeDefined());
-      expect(retainedEvents).toHaveLength(2);
+      await vi.waitFor(() =>
+        expect(transientListener).toHaveBeenCalledTimes(2),
+      );
+      expect(retryEvent).toBeDefined();
+      expect(retainedEvents).toHaveLength(1);
+      expect(transientListener).toHaveBeenCalledTimes(2);
       await Promise.all([
         retainedEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
         retryEvent!.respond(ToolConfirmationOutcome.ProceedOnce),
@@ -730,6 +811,123 @@ describe('AgentCore approval response deduplication', () => {
       abortController.abort();
       await processing;
       scheduleSpy.mockRestore();
+    }
+  });
+
+  it('cancels a pending delivery retry on abort', async () => {
+    vi.useFakeTimers();
+    const { core } = buildApprovalCore();
+    const thrower = vi.fn(() => {
+      throw new Error('approval listener failed');
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, thrower);
+
+    const request = {
+      callId: 'call-aborted-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-aborted-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      expect(thrower).toHaveBeenCalledOnce();
+      abortController.abort();
+      await processing;
+      await vi.runAllTimersAsync();
+      expect(thrower).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending delivery retry when all tool calls complete', async () => {
+    vi.useFakeTimers();
+    const { core } = buildApprovalCore();
+    const thrower = vi.fn(() => {
+      throw new Error('approval listener failed');
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, thrower);
+
+    const request = {
+      callId: 'call-completed-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-completed-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      expect(thrower).toHaveBeenCalledOnce();
+      const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+        onAllToolCallsComplete?: (calls: ToolCall[]) => Promise<void>;
+      };
+      await scheduler.onAllToolCallsComplete?.([]);
+      await processing;
+      await vi.runAllTimersAsync();
+      expect(thrower).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

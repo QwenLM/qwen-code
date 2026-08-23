@@ -102,6 +102,7 @@ import type {
   AgentHooks,
   AgentExternalMessageEvent,
   AgentApprovalRequestEvent,
+  AgentEventListener,
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
@@ -138,6 +139,9 @@ interface ApprovalDeliveryState {
   delivered: boolean;
   responded: boolean;
   active: boolean;
+  failedListeners?: Array<
+    AgentEventListener<AgentEventType.TOOL_WAITING_APPROVAL>
+  >;
   retryTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -1770,33 +1774,44 @@ export class AgentCore {
         return;
       }
       state.attempts++;
-      try {
-        this.eventEmitter.emit(
-          AgentEventType.TOOL_WAITING_APPROVAL,
-          state.event,
-        );
-        state.delivered = true;
-      } catch (error) {
-        const canRetry =
-          state.active &&
-          !state.responded &&
-          state.attempts < APPROVAL_DELIVERY_MAX_ATTEMPTS;
-        this.runtimeContext
-          .getDebugLogger()
-          ?.error(
-            `Approval event delivery failed for ${state.callId}; ${
-              canRetry
-                ? 'retrying automatically'
-                : 'automatic retries exhausted'
-            }`,
-            error,
-          );
-        if (canRetry) {
-          state.retryTimer = setTimeout(() => {
-            state.retryTimer = undefined;
-            deliverApproval(state);
-          }, 0);
+      const listeners =
+        state.failedListeners ??
+        this.eventEmitter.rawListeners(AgentEventType.TOOL_WAITING_APPROVAL);
+      const failedListeners: typeof listeners = [];
+      for (const listener of listeners) {
+        try {
+          listener(state.event);
+        } catch (error) {
+          failedListeners.push(listener);
+          this.runtimeContext
+            .getDebugLogger()
+            ?.error(
+              `Approval event delivery failed for ${state.callId}; ${
+                state.attempts < APPROVAL_DELIVERY_MAX_ATTEMPTS
+                  ? 'retrying automatically'
+                  : 'automatic retries exhausted'
+              }`,
+              error,
+            );
         }
+      }
+      state.failedListeners = failedListeners;
+      if (failedListeners.length === 0) {
+        state.delivered = true;
+        return;
+      }
+      if (state.attempts < APPROVAL_DELIVERY_MAX_ATTEMPTS) {
+        state.retryTimer = setTimeout(() => {
+          state.retryTimer = undefined;
+          deliverApproval(state);
+        }, 0);
+      } else {
+        // eslint-disable-next-line no-console -- retry exhaustion must be visible outside debug sessions
+        console.error(
+          `Approval event delivery for ${state.callId} exhausted ` +
+            `${APPROVAL_DELIVERY_MAX_ATTEMPTS} attempts for ` +
+            `${failedListeners.length} listener${failedListeners.length === 1 ? '' : 's'}`,
+        );
       }
     };
     const scheduler = new CoreToolScheduler({
@@ -1984,9 +1999,7 @@ export class AgentCore {
                   if (
                     newDeliveryState.responded ||
                     !newDeliveryState.active ||
-                    currentApprovalDeliveries.get(callId) !==
-                      newDeliveryState ||
-                    awaitingByCallId.get(callId) !== confirmationDetails
+                    currentApprovalDeliveries.get(callId) !== newDeliveryState
                   ) {
                     return;
                   }
