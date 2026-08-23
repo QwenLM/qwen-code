@@ -34,6 +34,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 import { isContainerPathWithinWorkdir } from '../utils/sandbox-path.js';
 import {
+  BUILTIN_SEATBELT_PROFILES,
   getSandboxPassthroughEnvArgs,
   resolveSeatbeltProfileFile,
   start_sandbox,
@@ -177,16 +178,12 @@ describe('resolveSeatbeltProfileFile', () => {
   it('keeps every builtin seatbelt profile colocated with the real module', () => {
     // Uses the default `import.meta.url` (the real module location), so this
     // fails loudly if sandbox.ts or the .sb profiles move without the other.
-    const builtinProfiles = [
-      'permissive-open',
-      'permissive-closed',
-      'permissive-proxied',
-      'restrictive-open',
-      'restrictive-closed',
-      'restrictive-proxied',
-    ];
-
-    for (const profile of builtinProfiles) {
+    // Iterate the module's own list rather than a hand-copied snapshot, so a
+    // profile added to `BUILTIN_SEATBELT_PROFILES` without its `.sb` file
+    // fails here instead of on a `sandbox-exec` ENOENT at launch. The length
+    // guard keeps an emptied list from passing the loop vacuously.
+    expect(BUILTIN_SEATBELT_PROFILES.length).toBeGreaterThan(0);
+    for (const profile of BUILTIN_SEATBELT_PROFILES) {
       const profileFile = resolveSeatbeltProfileFile(profile);
       expect(fs.existsSync(profileFile), `missing ${profileFile}`).toBe(true);
     }

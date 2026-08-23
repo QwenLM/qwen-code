@@ -61,7 +61,12 @@ function ensureDirectoryAndGetRealPath(dir: string): string {
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
 const SANDBOX_NETWORK_NAME = 'qwen-code-sandbox';
 const SANDBOX_PROXY_NAME = 'qwen-code-sandbox-proxy';
-const BUILTIN_SEATBELT_PROFILES = [
+/**
+ * Exported so the colocation tripwire in `sandbox.test.ts` can iterate every
+ * builtin profile by construction instead of pinning a hand-copied snapshot
+ * that silently stops at the list as written.
+ */
+export const BUILTIN_SEATBELT_PROFILES = [
   'permissive-open',
   'permissive-closed',
   'permissive-proxied',
