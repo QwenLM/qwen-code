@@ -10844,9 +10844,13 @@ describe('the convergence census and the non-convergence finding', () => {
   it("never borrows the posting trend's words for its own count", () => {
     // The two counts in one body: this blocker counts DEFECTS newly
     // identified, the convergence diagnosis counts inline comments POSTED
-    // for the first time, and they legitimately differ — a fix-induced
-    // defect re-reported under a carried id is new here and a re-post
-    // there. They collided in VOCABULARY, not arithmetic: "findings first
+    // for the first time, and they legitimately differ — this one takes
+    // every finding the round newly identified, the trend only those that
+    // reached the pull request as a first-time comment. (A fix-induced
+    // re-report used to be the sharpest case of the two diverging; since
+    // #9674 the trend counts a MARKED one as first-time too, and an
+    // unmarked carried id is still a re-post there.) They collided in
+    // VOCABULARY, not arithmetic: "findings first
     // filed in round 4" sat beside "2 of them reported for the first time"
     // over the same round, so one body published two numbers under one
     // phrase and neither could be trusted. Pin the separation from both

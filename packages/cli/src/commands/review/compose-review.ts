@@ -1638,19 +1638,29 @@ export function aboveChurnBar(
  * **It counts DEFECTS, and it must not borrow the posting trend's words.**
  * The same body carries the convergence diagnosis, which counts inline
  * comments POSTED for the first time — and the two numbers legitimately
- * differ: a fix-induced defect re-reported under the id it came from is
- * newly identified here and a re-post there, so a round can newly identify
- * six defects while posting two first-time comments. Both readings are
- * right; what broke was the vocabulary, when this sentence said "findings
- * first filed" beside the diagnosis's "reported for the first time" and one
- * body published two numbers under one phrase. Hence "defects … newly
- * identified" — distinct words for a distinct quantity.
+ * differ: this count takes every finding the round newly identified, the
+ * trend only those that reached the pull request as a first-time comment, so
+ * a round can newly identify six defects while posting fewer than six
+ * first-time comments (some ride body Criticals, some deferrals). Both
+ * readings are right; what broke was the vocabulary, when this sentence said
+ * "findings first filed" beside the diagnosis's "reported for the first
+ * time" and one body published two numbers under one phrase. Hence "defects
+ * … newly identified" — distinct words for a distinct quantity.
  *
- * Do NOT "reconcile" the two by changing either count. Excluding carried-id
- * re-reports from `fresh` would put `induced` outside it and every such
- * census would be refused as impossible; counting them as first-time POSTS
- * would tell the volume trend a re-post is new work, which is the reading
- * `isFreshDraft` exists to refuse. The divergence is the design.
+ * Do NOT "reconcile" the two by changing either count WHOLESALE. Excluding
+ * carried-id re-reports from `fresh` would put `induced` outside it and
+ * every such census would be refused as impossible; and reading a carried id
+ * as first-time work by inference would tell the volume trend that every
+ * re-assertion of a standing finding is new work, which is the reading
+ * `isFreshDraft` exists to refuse.
+ *
+ * What DID change (#9674) is narrower than either, and is not an inference:
+ * a fix-induced re-report is MARKED as such in the comment body, and the
+ * trend counts a marked one as first-time. That is a distinction the round
+ * asserts, not one the id implies — an unmarked carried id is still a
+ * re-post to the trend, exactly as before. The divergence between the two
+ * counts is still the design; only the false premise that a carried id can
+ * mean just one thing is gone.
  */
 export function nonConvergenceCritical(
   census: { fresh: number; induced: number },
