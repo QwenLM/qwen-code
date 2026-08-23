@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
+  boxedRunLeftContainer,
   CONTAINER_HOME,
   containerEnv,
   containerName,
@@ -420,6 +421,21 @@ describe('handOffRefused', () => {
     // ...and a real run is never converted.
     expect(handOffRefused('npm', 'required')).toBe(false);
     expect(handOffRefused('refused', 'required')).toBe(false);
+  });
+});
+
+describe('boxedRunLeftContainer', () => {
+  it('reaps for every abnormal exit, not just the timeout', () => {
+    // The first cut reaped on `spawnTimedOut` alone. A `maxBuffer` overflow —
+    // a reviewed command writing 64 MB to one stream, which a postinstall can
+    // do — kills the client with ENOBUFS and no timeout, so the container kept
+    // the review temp dir mounted read-write past the end of the review. The
+    // two call sites had also drifted to different conditions, which is how one
+    // came to miss a case the other caught.
+    expect(boxedRunLeftContainer(null)).toBe(true); // ETIMEDOUT, ENOBUFS, signal
+    // A normal exit needs no reaping — `--rm` has already fired.
+    expect(boxedRunLeftContainer(0)).toBe(false);
+    expect(boxedRunLeftContainer(1)).toBe(false);
   });
 });
 

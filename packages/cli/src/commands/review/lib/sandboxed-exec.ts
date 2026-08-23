@@ -439,6 +439,23 @@ export function containerName(): string {
 }
 
 /**
+ * Whether a boxed spawn left its container behind.
+ *
+ * `status === null` is exactly "the client did not exit normally", and it is
+ * one condition rather than a list of causes on purpose: the first cut reaped
+ * on `spawnTimedOut` alone, which is true for ETIMEDOUT and false for a
+ * `maxBuffer` overflow — and a reviewed command writing 64 MB to stdout is a
+ * postinstall away. The two call sites had drifted to different conditions,
+ * which is how one of them came to miss a case the other caught.
+ *
+ * A normal exit needs no reaping: `--rm` has already fired. A client that
+ * never spawned has no container, and the reap is a silent no-op.
+ */
+export function boxedRunLeftContainer(status: number | null): boolean {
+  return status === null;
+}
+
+/**
  * Kill a container the deadline could not.
  *
  * Best-effort by construction: this runs after a timeout has already cost the

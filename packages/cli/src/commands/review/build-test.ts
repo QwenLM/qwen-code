@@ -43,6 +43,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  boxedRunLeftContainer,
   containerCommand,
   containerName,
   containerPathFor,
@@ -430,7 +431,7 @@ export function run(
         stdio: ['ignore', 'pipe', 'pipe'],
         env: buildRunEnv(),
       });
-  if (boxed && spawnTimedOut(r)) {
+  if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — see the
     // `--name` comment in `containerCommand`. Reach the daemon instead, then
     // report the timeout exactly as before.

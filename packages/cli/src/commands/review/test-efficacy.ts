@@ -68,6 +68,7 @@ import { probeWorktreePath } from './lib/paths.js';
 // dependency farm for the verifier's own probe tree.
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  boxedRunLeftContainer,
   containerCommand,
   containerName,
   containerPathFor,
@@ -1813,7 +1814,7 @@ function runProbeSuite(
   // SIGTERM", which is a less useful sentence about the same event. The reason
   // tag is derived from the whole result either way, so it does not depend on
   // which message wins.
-  if (boxed && (r.error || r.signal)) {
+  if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — `--rm` fires
     // only on a self-exit. Reach the daemon before reporting, or a
     // TERM-ignoring suite keeps this mount writable past the end of the review.
