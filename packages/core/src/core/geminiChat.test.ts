@@ -2787,6 +2787,67 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('keeps unspecified quiet tool result completions fatal after retry exhaustion (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse({
+            candidates: [
+              {
+                content: { parts: [] },
+                finishReason: 'FINISH_REASON_UNSPECIFIED',
+              },
+            ],
+          } as unknown as GenerateContentResponse),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-unspecified-fatal',
+        );
+
+        await expectStreamExhaustion(stream, {
+          type: 'NO_TOOL_RESULT_PROGRESS',
+        });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(recordAssistantTurn).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should keep MAX_TOKENS quiet tool result completions fatal after retry exhaustion (#9026)', async () => {
       vi.useFakeTimers();
       try {

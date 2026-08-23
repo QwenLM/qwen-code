@@ -493,23 +493,6 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
-// Finish reasons that represent a provider content-filtering decision.
-// Mirrors the 'content_filter' family in mapGeminiFinishReasonToOpenAI
-// (openaiContentGenerator/converter.ts). Quiet continuations ending with
-// any of these must stay fatal — accepting them would mask the provider's
-// decision with an "(empty content)" turn.
-const CONTENT_FILTER_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
-  FinishReason.SAFETY,
-  FinishReason.RECITATION,
-  FinishReason.BLOCKLIST,
-  FinishReason.PROHIBITED_CONTENT,
-  FinishReason.SPII,
-  FinishReason.IMAGE_SAFETY,
-  FinishReason.IMAGE_RECITATION,
-  FinishReason.IMAGE_PROHIBITED_CONTENT,
-  FinishReason.IMAGE_OTHER,
-]);
-
 const TRANSPORT_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
@@ -1914,8 +1897,7 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-    | null = null;
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -5114,18 +5096,15 @@ export class GeminiChat {
       if (lacksVisibleToolResultProgress) {
         const truncatedAtMaxTokens =
           deferredFinishReason === FinishReason.MAX_TOKENS;
-        // Content-filter-blocked continuations carry no user-visible
-        // output by definition; accepting them silently would end the turn
-        // with no signal at all and mask the provider's filtering
-        // decision. Keep the whole content-filter family fatal like
-        // MAX_TOKENS (OpenAI/Anthropic routes already map content_filter
-        // to SAFETY, which is in the family).
-        const blockedByContentFilter =
-          deferredFinishReason !== undefined &&
-          CONTENT_FILTER_FINISH_REASONS.has(deferredFinishReason);
+        // Only STOP is a complete, non-truncated, non-blocked quiet turn end.
+        // Unknown converter fall-through values such as
+        // FINISH_REASON_UNSPECIFIED must fail closed instead of being accepted
+        // as an empty model turn.
+        const unsupportedQuietFinishReason =
+          deferredFinishReason !== FinishReason.STOP;
         if (
           truncatedAtMaxTokens ||
-          blockedByContentFilter ||
+          unsupportedQuietFinishReason ||
           !acceptQuietToolResultCompletion
         ) {
           throw new InvalidStreamError(
