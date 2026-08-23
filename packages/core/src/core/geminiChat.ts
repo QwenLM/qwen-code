@@ -1739,6 +1739,10 @@ function applyRepair(
   return { insertedBefore: 1 };
 }
 
+export interface RepairOrphanedToolUseOptions {
+  preserveCallIds?: ReadonlySet<string>;
+}
+
 /**
  * Forward-walk `history`, planning and applying the repair for each
  * `model[functionCall]` turn in turn. Iteration is index-based and the
@@ -1752,12 +1756,14 @@ function applyRepair(
 export function repairOrphanedToolUseTurns(
   history: Content[],
   reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
+  options?: RepairOrphanedToolUseOptions,
 ): {
   injected: Array<{ callId: string; name: string }>;
   droppedDuplicates: Array<{ callId: string; name: string }>;
 } {
   const injected: Array<{ callId: string; name: string }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+  const preserveCallIds = options?.preserveCallIds;
 
   for (let i = 0; i < history.length; i++) {
     if (history[i].role !== 'model') continue;
@@ -1766,6 +1772,11 @@ export function repairOrphanedToolUseTurns(
     if (scan.expected.size === 0) continue;
 
     const plan = planRepair(scan);
+    if (preserveCallIds && preserveCallIds.size > 0) {
+      plan.synthesizeIds = plan.synthesizeIds.filter(
+        ([id]) => !preserveCallIds.has(id),
+      );
+    }
     if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
       continue;
     }
@@ -2608,11 +2619,14 @@ export class GeminiChat {
       // Per-send orphan repair (belt-and-suspenders alongside the
       // startChat load-time pass). Runs AFTER user content lands so a
       // user-supplied tool_result closes the pair before we synthesize
-      // anything. Logs are tagged so investigators can distinguish this
-      // pass from the session-load pass and from the React scheduler's
-      // dedup-drop. See the canonical note above
-      // `ORPHAN_TOOL_USE_REPAIR_REASON`.
-      const inlineRepair = repairOrphanedToolUseTurns(this.history);
+      // anything. An ordinary prompt that races a restore re-hang must
+      // still close the pair — `model[functionCall] → user[text]` is
+      // rejected by Anthropic-compatible providers. Restore itself sends
+      // the real functionResponse, so this pass is a no-op on that path.
+      const inlineRepair = repairOrphanedToolUseTurns(
+        this.history,
+        ORPHAN_TOOL_USE_REPAIR_REASON,
+      );
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
           `[REPAIR] sendMessageStream inline pass synthesized ` +
@@ -4540,11 +4554,14 @@ export class GeminiChat {
    * Instance wrapper around the free-function {@link repairOrphanedToolUseTurns}.
    * See the canonical note above `ORPHAN_TOOL_USE_REPAIR_REASON`.
    */
-  repairOrphanedToolUseTurns(reason?: string): {
+  repairOrphanedToolUseTurns(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    return repairOrphanedToolUseTurns(this.history, reason);
+    return repairOrphanedToolUseTurns(this.history, reason, options);
   }
 
   setTools(tools: Tool[]): void {

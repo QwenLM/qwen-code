@@ -58,6 +58,7 @@ import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  RUNTIME_SNAPSHOT_PREFIX,
   detectLoopSentinel,
   detectAutonomousSentinel,
   LoopTickResolver,
@@ -66,6 +67,8 @@ import {
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
+  findRestorableAskUserQuestion,
+  restorableAskUserQuestionCallIds,
   markDuplicateProviderToolCallResponseSent,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
@@ -208,13 +211,15 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
-  DAEMON_MEDIA_REFERENCES_META_KEY,
+  DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { SessionMediaReference } from '@qwen-code/acp-bridge/sessionMedia';
+import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -223,19 +228,19 @@ import { normalizeChannelDeliveryText } from '../../runtime/channel-delivery.js'
 import {
   CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
   CaptureScreenContextTool,
-} from '../../serve/live/capture-screen-context.js';
+} from '../live/capture-screen-context.js';
 import {
   createLiveTaskTools,
   type LiveTaskTool,
-} from '../../serve/live/live-task-tools.js';
+} from '../live/live-task-tools.js';
 import {
   SPEAK_TO_USER_TOOL_NAME,
   SpeakToUserTool,
-} from '../../serve/live/live-speak-to-user.js';
+} from '../live/live-speak-to-user.js';
 import {
   LIVE_BACKEND_END_INSTRUCTIONS,
   LIVE_BACKEND_START_INSTRUCTIONS,
-} from '../../serve/live/live-backend-instructions.js';
+} from '../live/live-backend-instructions.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -265,10 +270,8 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import {
-  insertAfterFunctionResponses,
-  normalizePartList,
-} from '../../utils/nonInteractiveHelpers.js';
+import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -294,6 +297,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -316,7 +320,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -364,41 +368,41 @@ const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-const MAX_DAEMON_MEDIA_REFERENCES = 256;
-
-function readDaemonMediaReferences(
+const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
+function readDaemonAttachmentReferences(
   value: unknown,
-): SessionMediaReference[] | undefined {
+): SessionAttachmentReference[] | undefined {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
-    value.length > MAX_DAEMON_MEDIA_REFERENCES
+    value.length > MAX_DAEMON_ATTACHMENT_REFERENCES
   ) {
     return undefined;
   }
-  const references: SessionMediaReference[] = [];
+  const references: SessionAttachmentReference[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       return undefined;
     }
     const reference = item as Record<string, unknown>;
     if (
-      reference['type'] !== 'image' ||
-      typeof reference['mediaId'] !== 'string' ||
-      reference['mediaId'].length === 0 ||
-      reference['mediaId'].length > 128 ||
+      (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+      typeof reference['attachmentId'] !== 'string' ||
+      reference['attachmentId'].length === 0 ||
+      reference['attachmentId'].length > 255 ||
       typeof reference['mimeType'] !== 'string' ||
       reference['mimeType'].length === 0 ||
       reference['mimeType'].length > 128 ||
       typeof reference['size'] !== 'number' ||
       !Number.isSafeInteger(reference['size']) ||
-      reference['size'] <= 0
+      reference['size'] < 0 ||
+      (reference['type'] === 'image' && reference['size'] === 0)
     ) {
       return undefined;
     }
     references.push({
       type: reference['type'],
-      mediaId: reference['mediaId'],
+      attachmentId: reference['attachmentId'],
       mimeType: reference['mimeType'],
       size: reference['size'],
     });
@@ -477,6 +481,10 @@ function getAbortAwareEndTurnStopReason(
 ): PromptResponse['stopReason'] {
   // Parent cancellation wins over a simultaneous terminal path.
   return signal.aborted ? 'cancelled' : 'end_turn';
+}
+
+function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
+  return reason === 'timeout' || reason === 'session_closed';
 }
 
 type RunToolResult = {
@@ -625,6 +633,8 @@ type PendingToolResultRecord = {
   toolType?: 'native' | 'mcp';
   executionErrorType?: ToolErrorType;
   providerDuplicate?: boolean;
+  /** Skip the durable JSONL write; the in-memory result is still produced. */
+  skipPersistence?: boolean;
   metadata: Omit<Partial<ToolCallResponseInfo>, 'executionStatus'> & {
     status: 'success' | 'error' | 'cancelled';
     executionStatus: ToolExecutionStatus;
@@ -956,7 +966,7 @@ type DrainedMidTurnMessage =
       kind: 'structured';
       content: ContentBlock[];
       displayText: string;
-      mediaReferences?: SessionMediaReference[];
+      attachmentReferences?: SessionAttachmentReference[];
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1063,8 +1073,13 @@ function isEmbeddedResourceResource(
   return typeof value['blob'] === 'string';
 }
 
-function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
-  return content.some((part) => part.type === 'image' || part.type === 'audio');
+function hasInlineAttachmentContentBlock(content: ContentBlock[]): boolean {
+  return content.some(
+    (part) =>
+      part.type === 'image' ||
+      part.type === 'audio' ||
+      part.type === 'resource',
+  );
 }
 
 function extractTurnPromptText(content: ContentBlock[]): string {
@@ -1103,27 +1118,45 @@ function truncateTurnText(text: string): {
   return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
 }
 
-function stripReferencedInlineDataParts(
+function stripReferencedAttachmentDataParts(
   parts: Part[],
   content: ContentBlock[],
 ): Part[] {
-  const coveredByKey = new Map<string, number>();
+  const inlineDataCounts = new Map<string, number>();
+  const textCounts = new Map<string, number>();
   for (const block of content) {
-    if (block.type !== 'image') continue;
-    const key = `${block.mimeType}\u0000${block.data}`;
-    coveredByKey.set(key, (coveredByKey.get(key) ?? 0) + 1);
-  }
-  if (coveredByKey.size === 0) return parts;
-  return parts.filter((part) => {
-    const inlineData = part.inlineData;
-    if (inlineData === undefined || typeof inlineData.data !== 'string') {
-      return true;
+    if (block.type === 'image') {
+      const key = `${block.mimeType}\u0000${block.data}`;
+      inlineDataCounts.set(key, (inlineDataCounts.get(key) ?? 0) + 1);
+      continue;
     }
-    const key = `${inlineData.mimeType ?? ''}\u0000${inlineData.data}`;
-    const remaining = coveredByKey.get(key) ?? 0;
-    if (remaining === 0) return true;
-    coveredByKey.set(key, remaining - 1);
-    return false;
+    if (block.type !== 'resource') continue;
+    const resource = block.resource;
+    if ('blob' in resource) {
+      const key = `${resource.mimeType ?? 'application/octet-stream'}\u0000${resource.blob}`;
+      inlineDataCounts.set(key, (inlineDataCounts.get(key) ?? 0) + 1);
+    } else if (resource.text) {
+      const text = `File: ${resource.uri}\n${resource.text}`;
+      textCounts.set(text, (textCounts.get(text) ?? 0) + 1);
+    }
+  }
+  return parts.filter((part) => {
+    if (part.inlineData && typeof part.inlineData.data === 'string') {
+      const key = `${part.inlineData.mimeType ?? ''}\u0000${part.inlineData.data}`;
+      const remaining = inlineDataCounts.get(key) ?? 0;
+      if (remaining > 0) {
+        inlineDataCounts.set(key, remaining - 1);
+        return false;
+      }
+    }
+    if (typeof part.text === 'string') {
+      const remaining = textCounts.get(part.text) ?? 0;
+      if (remaining > 0) {
+        textCounts.set(part.text, remaining - 1);
+        return false;
+      }
+    }
+    return true;
   });
 }
 
@@ -1189,13 +1222,13 @@ function getStructuredMidTurnDisplayText(
 
   if (text) return text;
 
-  // Only records that WILL persist media references keep '' (replay then
-  // projects the media ids). The gate must match #buildMidTurnParts'
+  // Only records that WILL persist attachment references keep '' (replay then
+  // projects the attachment ids). The gate must match #buildMidTurnParts'
   // persistence condition exactly; a record that will not carry references
   // needs the visible placeholder, because resume and replay fall back to the
   // recorded parts — which start with the raw internal prefix — when
   // displayText is empty.
-  if (!willPersistReferences && hasInlineMediaContentBlock(content)) {
+  if (!willPersistReferences && hasInlineAttachmentContentBlock(content)) {
     return '[User message with attachments]';
   }
 
@@ -1216,17 +1249,19 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
           item['displayText'],
         );
         if (content.length === 0) return [];
-        const mediaReferences = readDaemonMediaReferences(
-          item['mediaReferences'],
+        const attachmentReferences = readDaemonAttachmentReferences(
+          item['attachmentReferences'],
         );
         // Same gate #buildMidTurnParts uses to decide whether references are
         // persisted; display text must agree or a mixed inline+reference
         // message records displayText:'' with NO references — a shape replay
         // and resume cannot project.
         const willPersistReferences =
-          mediaReferences !== undefined &&
-          mediaReferences.length ===
-            content.filter((block) => block.type === 'image').length;
+          attachmentReferences !== undefined &&
+          attachmentReferences.length ===
+            content.filter(
+              (block) => block.type === 'image' || block.type === 'resource',
+            ).length;
         return [
           {
             kind: 'structured',
@@ -1236,7 +1271,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
-            ...(mediaReferences ? { mediaReferences } : {}),
+            ...(attachmentReferences ? { attachmentReferences } : {}),
           },
         ];
       },
@@ -1279,8 +1314,9 @@ function isValidMidTurnDrainResponse(
         Array.isArray(item['content']) &&
         item['content'].length > 0 &&
         item['content'].every(isContentBlock) &&
-        (item['mediaReferences'] === undefined ||
-          readDaemonMediaReferences(item['mediaReferences']) !== undefined),
+        (item['attachmentReferences'] === undefined ||
+          readDaemonAttachmentReferences(item['attachmentReferences']) !==
+            undefined),
     );
   }
 
@@ -1878,6 +1914,17 @@ export class Session implements SessionContext {
   /** One-shot model notice for background agents restored with the session. */
   pendingRecoveredAgentsNotice: string | null = null;
 
+  /**
+   * Call ids of the ask_user_question being re-hung by the current restore
+   * turn, if any. While set, a permission cancel that the bridge resolved as
+   * an unattended timeout / session close, or an abort of the restore wait,
+   * does NOT persist the fabricated decline — the transcript keeps the
+   * dangling call so a later load can re-hang it again.
+   */
+  private restoringAskUserQuestionCallIds: Set<string> | undefined;
+  /** Once any restored call is unattended-terminated, remaining batch skips follow. */
+  private restoredAskUserQuestionSkipPersistence = false;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -2182,8 +2229,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
+    let result: PromptResponse | undefined;
+    await this.#emitGoalStartTurn();
     try {
-      await this.prompt(
+      result = await this.prompt(
         {
           sessionId: this.sessionId,
           prompt: parts.map((part) => ({
@@ -2213,6 +2262,7 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
+      await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       void this.#drainCronQueue();
@@ -2491,7 +2541,9 @@ export class Session implements SessionContext {
       (params as { retry?: boolean }).retry === true ||
       metadata?.[DAEMON_RETRY_META_KEY] === true;
     const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
-    if (isRetry || isContinue) {
+    const isRestoreAskUserQuestion =
+      metadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+    if (isRetry || isContinue || isRestoreAskUserQuestion) {
       this.#clearTodoStopGuardQueuedPromptWait();
       if (this.todoStopGuard.hasTrustedUnfinishedState) {
         this.todoStopGuard.resumeTrustedPrompt();
@@ -3083,6 +3135,16 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  shouldHintAskUserQuestionRestore(): boolean {
+    if (this.config.getRestoreAskUserQuestion?.() !== true) return false;
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) return false;
+    return (
+      findRestorableAskUserQuestion(
+        this.#getCurrentChat().peekLastHistoryEntry(),
+      ) !== undefined
+    );
+  }
+
   async assertCanStartTurn(): Promise<void> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -3410,8 +3472,20 @@ export class Session implements SessionContext {
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
+    const skipFinalizeCallIds =
+      this.config.getRestoreAskUserQuestion?.() === true
+        ? restorableAskUserQuestionCallIds(
+            this.#getCurrentChat().peekLastHistoryEntry(),
+          )
+        : undefined;
     try {
-      await this.historyReplayer.replay(records, gaps, options);
+      await this.historyReplayer.replay(records, gaps, {
+        ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+        // Explicit caller options win: the daemon passes
+        // `skipFinalizeCallIds: undefined` when it declined the re-hang, so
+        // the replay finalizes the trailing question instead of skipping it.
+        ...options,
+      });
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
       // belong to finished cycles; only live updates may bind the next
@@ -4122,6 +4196,15 @@ export class Session implements SessionContext {
     // not need to structuredClone the whole history. The authoritative
     // re-detection inside the fired prompt() reads full history for the strip.
     const chat = this.#getCurrentChat();
+    // A trailing restorable ask_user_question is awaiting its restore
+    // prompt, not an interruption to close: `interrupted_turn` would answer
+    // the re-hung question with a synthesized failure functionResponse.
+    if (
+      this.config.getRestoreAskUserQuestion?.() === true &&
+      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
+    ) {
+      return { accepted: false, interruption: 'none' };
+    }
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory:
@@ -4326,7 +4409,8 @@ export class Session implements SessionContext {
         const continuesCurrentWorkChain =
           (params as { retry?: boolean }).retry === true ||
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
-          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
+          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
+          promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -4397,7 +4481,31 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
-            if (!isRetry && !isContinue && goalTurn?.origin !== 'runtime') {
+            const isRestoreAskUserQuestion =
+              this.config.getRestoreAskUserQuestion?.() === true &&
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
+              ] === true;
+            if (
+              isRestoreAskUserQuestion &&
+              !findRestorableAskUserQuestion(
+                this.#getCurrentChat().peekLastHistoryEntry(),
+              )
+            ) {
+              // The restore prompt is fire-and-forget and races the state it
+              // re-checks: the trailing question may already be answered (or
+              // the meta key spoofed by a direct ACP client). Bail before any
+              // per-turn bookkeeping — todo work chains, file-history
+              // snapshots, `conversation_finished` — so each such no-op
+              // restore doesn't persist phantom records.
+              return { stopReason: 'end_turn' };
+            }
+            if (
+              !isRetry &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              goalTurn?.origin !== 'runtime'
+            ) {
               const interactionSpan = getActiveInteractionSpan();
               if (interactionSpan) {
                 addAgentInputMessageAttributes(
@@ -4411,7 +4519,10 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
-            const isSlashInput = !isContinue && isSlashCommand(inputText);
+            const isSlashInput =
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
@@ -4466,7 +4577,7 @@ export class Session implements SessionContext {
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
-            } else if (isContinue) {
+            } else if (isContinue || isRestoreAskUserQuestion) {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
@@ -4478,15 +4589,15 @@ export class Session implements SessionContext {
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
               // inside its action, so its record must land first (R20-9).
-              const mediaReferences = readDaemonMediaReferences(
-                promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+              const attachmentReferences = readDaemonAttachmentReferences(
+                promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined || mediaReferences) {
+              if (promptDisplayText !== undefined || attachmentReferences) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
                   displayText: promptDisplayText ?? promptText,
                   hookContext: '',
-                  ...(mediaReferences ? { mediaReferences } : {}),
+                  ...(attachmentReferences ? { attachmentReferences } : {}),
                 });
               } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
@@ -4495,7 +4606,12 @@ export class Session implements SessionContext {
               }
             }
 
-            if (!isSlashInput && !isContinue && !isRetry) {
+            if (
+              !isSlashInput &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRetry
+            ) {
               this.refreshContextFilesOnWrite = false;
             }
 
@@ -4512,7 +4628,9 @@ export class Session implements SessionContext {
               return true;
             };
 
-            if (isContinue) {
+            if (isRestoreAskUserQuestion) {
+              parts = [];
+            } else if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
               // interruption branches assign a concrete part list.
               parts = continuationParts!;
@@ -4632,6 +4750,7 @@ export class Session implements SessionContext {
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             if (
               !isContinue &&
+              !isRestoreAskUserQuestion &&
               !isRuntimeContinuation &&
               hooksEnabled &&
               messageBus &&
@@ -4695,21 +4814,27 @@ export class Session implements SessionContext {
             // block in GeminiClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            try {
-              const fileHistoryService = this.config.getFileHistoryService();
-              await fileHistoryService.makeSnapshot(promptId);
+            // Restore continuations record no user message; rewindToTurn()
+            // indexes snapshots by user-turn position, so skip them.
+            if (!isRestoreAskUserQuestion) {
               try {
-                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-                if (latestSnapshot) {
-                  this.config
-                    .getChatRecordingService()
-                    ?.recordFileHistorySnapshot(latestSnapshot);
+                const fileHistoryService = this.config.getFileHistoryService();
+                await fileHistoryService.makeSnapshot(promptId);
+                try {
+                  const latestSnapshot = fileHistoryService
+                    .getSnapshots()
+                    .at(-1);
+                  if (latestSnapshot) {
+                    this.config
+                      .getChatRecordingService()
+                      ?.recordFileHistorySnapshot(latestSnapshot);
+                  }
+                } catch (e) {
+                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
                 }
               } catch (e) {
-                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+                debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
               }
-            } catch (e) {
-              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -4718,7 +4843,7 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            if (systemReminders.length > 0) {
+            if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
               // the original send. Re-inserting would show the model duplicate
@@ -4749,7 +4874,10 @@ export class Session implements SessionContext {
             // are inserted first, the resulting order on such a continuation is
             // `[...functionResponses, worktreeNotice, ...systemReminders, ...]`;
             // Session.worktree.test.ts locks this ordering.
-            if (this.pendingWorktreeNotice) {
+            // Restore of ask_user_question never sends these `parts` (it
+            // replaces nextMessage with the functionResponse), so leave the
+            // notice pending until that post-answer message is built.
+            if (this.pendingWorktreeNotice && !isRestoreAskUserQuestion) {
               const noticePart = {
                 text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
               };
@@ -4760,6 +4888,7 @@ export class Session implements SessionContext {
             if (
               this.pendingRecoveredAgentsNotice &&
               !isContinue &&
+              !isRestoreAskUserQuestion &&
               !isSlashInput
             ) {
               const noticePart = {
@@ -4769,10 +4898,14 @@ export class Session implements SessionContext {
               this.pendingRecoveredAgentsNotice = null;
             }
 
-            const activeTodoReminder = this.config.takeActiveTodoReminder(
-              promptId,
-              true,
-            );
+            // A restore turn must not TAKE the reminder: `take` burns it and
+            // resets its refresh counter, and the restore branch discards
+            // `parts` — the reminder would vanish and then stay suppressed
+            // for ACTIVE_TODO_REMINDER_REFRESH_TURNS on the post-answer
+            // continuation that actually needs it.
+            const activeTodoReminder = isRestoreAskUserQuestion
+              ? undefined
+              : this.config.takeActiveTodoReminder(promptId, true);
             if (
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
@@ -4784,24 +4917,150 @@ export class Session implements SessionContext {
 
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
+            let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
 
             // conversation_finished must fire on every terminal path of the
-            // turn — the loop below has cancel/abort/no-stream early-returns
-            // and API-error throws — so the emission lives in a finally that
-            // wraps the whole turn, not just the stop-hook loop. Daemon turns
-            // run autonomously in all approval modes (approvals are mediated by
-            // the ACP client rather than by gating this loop), so unlike the
-            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
-            // is intentionally emitted for every mode.
+            // turn — restore of ask_user_question, the loop below's
+            // cancel/abort/no-stream early-returns, and API-error throws —
+            // so the emission lives in a finally that wraps the whole turn,
+            // not just the stop-hook loop. Daemon turns run autonomously in
+            // all approval modes (approvals are mediated by the ACP client
+            // rather than by gating this loop), so unlike the CLI reference
+            // (useGeminiStream.ts, which only emits in YOLO) this is
+            // intentionally emitted for every mode.
             try {
+              if (isRestoreAskUserQuestion) {
+                const restorable = findRestorableAskUserQuestion(
+                  this.#getCurrentChat().peekLastHistoryEntry(),
+                );
+                if (!restorable) {
+                  return { stopReason: 'end_turn' };
+                }
+                this.restoringAskUserQuestionCallIds = new Set(
+                  restorable.functionCalls
+                    .map((call) => call.id)
+                    .filter((id): id is string => typeof id === 'string'),
+                );
+                this.restoredAskUserQuestionSkipPersistence = false;
+                // The permission-timeout persistence skip only needs to
+                // cover the run itself — the durable record is written on
+                // runToolCalls' return path.
+                let toolRun: RunToolResult;
+                try {
+                  toolRun = await this.#runWithFullTurnModel(
+                    fullTurnModelOverride,
+                    () =>
+                      this.runToolCalls(
+                        pendingSend.signal,
+                        promptId,
+                        restorable.functionCalls,
+                        toolLoopState,
+                        onFullTurnModel,
+                      ),
+                  );
+                } finally {
+                  this.restoringAskUserQuestionCallIds = undefined;
+                  this.restoredAskUserQuestionSkipPersistence = false;
+                }
+                if (
+                  toolRun.stopAfterPermissionCancel ||
+                  pendingSend.signal.aborted
+                ) {
+                  this.todoStopGuard.suspend();
+                  await this.#preserveStoppedToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
+                  return {
+                    stopReason: getAbortAwareEndTurnStopReason(
+                      pendingSend.signal,
+                    ),
+                  };
+                }
+                const nextAfterTools = await this.#buildNextMessageAfterToolRun(
+                  toolRun,
+                  pendingSend.signal,
+                  promptId,
+                  toolLoopState,
+                  onFullTurnModel,
+                  rejectOnLoopDetected,
+                );
+                nextMessage = nextAfterTools.message;
+                if (nextAfterTools.stoppedByRepeatedToolFailure) {
+                  return {
+                    stopReason: rejectOnLoopDetected
+                      ? cancelledOrThrowLoopDetected(
+                          pendingSend.signal,
+                          toolLoopState,
+                        )
+                      : getAbortAwareEndTurnStopReason(pendingSend.signal),
+                  };
+                }
+                if (toolRun.loopDetected) {
+                  this.todoStopGuard.suspend();
+                  await this.#preserveStoppedToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
+                  return {
+                    stopReason: rejectOnLoopDetected
+                      ? cancelledOrThrowLoopDetected(
+                          pendingSend.signal,
+                          toolLoopState,
+                        )
+                      : getAbortAwareEndTurnStopReason(pendingSend.signal),
+                  };
+                }
+                if (nextMessage?.parts && systemReminders.length > 0) {
+                  // Mirror the normal send path: the restore turn replaces
+                  // `parts` with the tool responses, so plan-mode / arena
+                  // reminders built above would otherwise never reach the
+                  // model on the post-answer continuation.
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(
+                      nextMessage.parts,
+                      systemReminders,
+                    ),
+                  };
+                }
+                if (nextMessage?.parts && this.pendingWorktreeNotice) {
+                  const noticePart = {
+                    text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                  };
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(nextMessage.parts, [
+                      noticePart,
+                    ]),
+                  };
+                  restorePostAnswerNoticesAttached = true;
+                }
+                if (nextMessage?.parts && this.pendingRecoveredAgentsNotice) {
+                  const noticePart = {
+                    text: `<system-reminder>\n${this.pendingRecoveredAgentsNotice}\n</system-reminder>\n\n`,
+                  };
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(nextMessage.parts, [
+                      noticePart,
+                    ]),
+                  };
+                  restorePostAnswerNoticesAttached = true;
+                }
+              }
+
               while (nextMessage !== null) {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   this.#getCurrentChat().addHistory(nextMessage);
+                  if (restorePostAnswerNoticesAttached) {
+                    this.#clearPendingRestoreNotices();
+                  }
                   return { stopReason: 'cancelled' };
                 }
 
@@ -4847,11 +5106,22 @@ export class Session implements SessionContext {
                     // history before the send, so dropping it here on a
                     // non-cancelled failure would lose the orphaned turn the
                     // user never got an answer to.
+                    const preserveFullMessage =
+                      isContinue || sendResult.stopReason === 'cancelled';
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
-                      isContinue || sendResult.stopReason === 'cancelled',
+                      preserveFullMessage,
                     );
+                    if (
+                      preserveFullMessage &&
+                      restorePostAnswerNoticesAttached
+                    ) {
+                      this.#clearPendingRestoreNotices();
+                    }
                     return { stopReason: sendResult.stopReason };
+                  }
+                  if (restorePostAnswerNoticesAttached) {
+                    this.#clearPendingRestoreNotices();
                   }
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
@@ -6541,6 +6811,25 @@ export class Session implements SessionContext {
     return { responseStream };
   }
 
+  #clearPendingRestoreNotices(): void {
+    this.pendingWorktreeNotice = null;
+    this.pendingRecoveredAgentsNotice = null;
+  }
+
+  #markUnattendedRestoredAskUserQuestion(): void {
+    this.restoredAskUserQuestionSkipPersistence = true;
+  }
+
+  #shouldSkipRestoredAskUserQuestionPersistence(
+    callId: string | undefined,
+  ): boolean {
+    return (
+      typeof callId === 'string' &&
+      this.restoringAskUserQuestionCallIds?.has(callId) === true &&
+      this.restoredAskUserQuestionSkipPersistence
+    );
+  }
+
   #preserveUnsentMessageHistory(
     message: Content | null,
     preserveFullMessage: boolean,
@@ -7046,23 +7335,25 @@ export class Session implements SessionContext {
         rawParts = [{ text: displayText }];
         if (
           message.kind === 'structured' &&
-          hasInlineMediaContentBlock(message.content)
+          hasInlineAttachmentContentBlock(message.content)
         ) {
           rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
       const recorder = this.config.getChatRecordingService();
-      if (message.kind === 'structured' && message.mediaReferences) {
-        const everyMediaBlockHasAReference =
-          message.mediaReferences.length ===
-          message.content.filter((block) => block.type === 'image').length;
-        if (everyMediaBlockHasAReference) {
+      if (message.kind === 'structured' && message.attachmentReferences) {
+        const everyAttachmentBlockHasAReference =
+          message.attachmentReferences.length ===
+          message.content.filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          ).length;
+        if (everyAttachmentBlockHasAReference) {
           recorder?.recordMidTurnUserMessage(
-            stripReferencedInlineDataParts(built, message.content),
+            stripReferencedAttachmentDataParts(built, message.content),
             displayText,
             undefined,
-            message.mediaReferences,
+            message.attachmentReferences,
           );
         } else {
           recorder?.recordMidTurnUserMessage(built, displayText);
@@ -8461,6 +8752,40 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Goal turns run inside this child via `prompt()` directly, so the daemon
+   * bridge never observes a `session/prompt` RPC boundary for them and would
+   * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
+   * SDK) with a streaming state that never settles.
+   */
+  async #emitGoalStartTurn(): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/start_turn', {
+        sessionId: this.sessionId,
+        source: 'goal',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal start-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
+  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason: result?.stopReason ?? 'cancelled',
+        source: 'goal',
+        promptId: this.config.getSessionId() + '########' + String(this.turn),
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       await this.sendAvailableCommandsUpdateOrThrow();
@@ -8685,6 +9010,19 @@ export class Session implements SessionContext {
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
+    const isRuntime =
+      resolvedRoute?.isRuntime ??
+      rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
+    void recordDaemonSessionModel(this.config, {
+      modelId: isRuntime
+        ? (resolvedRoute?.modelId ?? parsed.modelId)
+        : effectiveModelId,
+      authType: effectiveAuthType,
+      ...(resolvedRoute && !isRuntime && resolvedRoute.baseUrl !== undefined
+        ? { baseUrl: resolvedRoute.baseUrl ?? '' }
+        : {}),
+      ...(isRuntime ? { isRuntime: true } : {}),
+    });
     const activeRuntimeSnapshot = this.config.getActiveRuntimeModelSnapshot?.();
     const currentAcpModelId = getCurrentAcpModelId(
       buildAcpModelOptions(this.config.getAllConfiguredModels()),
@@ -8747,7 +9085,8 @@ export class Session implements SessionContext {
           baseUrl: after?.baseUrl ?? '(default)',
           apiKey: maskApiKeyForDisplay(after?.apiKey),
           isRuntime:
-            resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|'),
+            resolvedRoute?.isRuntime ??
+            rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX),
         },
       },
     };
@@ -8877,6 +9216,18 @@ export class Session implements SessionContext {
         new Map(orderedRecords.map((record) => [record.callId, promptId])),
       );
       orderedRecords.forEach((record, index) => {
+        // A restored ask_user_question whose permission wait timed out stays
+        // dangling on disk so a later load can re-hang it; only the
+        // in-memory result is produced. The flag check is retroactive on
+        // purpose: an answered sibling queued before the batch ended
+        // unattended must stay dangling too, or the persisted user turn
+        // would make the trailing model turn unrestorable.
+        if (
+          record.skipPersistence === true ||
+          this.#shouldSkipRestoredAskUserQuestionPersistence(record.callId)
+        ) {
+          return;
+        }
         this.config
           .getChatRecordingService()
           ?.recordToolResult(finalized[index].responseParts, {
@@ -8913,6 +9264,9 @@ export class Session implements SessionContext {
           callId,
           toolName,
           responseParts: [part],
+          ...(this.#shouldSkipRestoredAskUserQuestionPersistence(callId)
+            ? { skipPersistence: true }
+            : {}),
           metadata: {
             callId,
             status: 'error',
@@ -8990,11 +9344,22 @@ export class Session implements SessionContext {
       } else {
         debugLogger.warn(message);
       }
-      return await finalizeRunToolResult({
+      await Promise.all(
+        dedupedFunctionCalls.map((fc) =>
+          recordSkippedToolCall(
+            fc,
+            LOOP_DETECTED_SKIP_MESSAGE,
+            false,
+            ToolErrorType.UNKNOWN,
+          ),
+        ),
+      );
+      const result = await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
         loopDetected: true,
       });
+      return { ...result, parts: [] };
     }
 
     const pushDuplicateBatch = (
@@ -9595,6 +9960,7 @@ export class Session implements SessionContext {
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
         stopAfterPermissionCancel?: boolean;
+        skipPersistence?: boolean;
         settledMetadata?: {
           artifacts?: ToolArtifact[];
           persistedOutputFiles?: string[];
@@ -9664,6 +10030,7 @@ export class Session implements SessionContext {
           executionStatus === 'error'
             ? (executionErrorType ?? opts.errorType)
             : undefined,
+        ...(opts.skipPersistence === true ? { skipPersistence: true } : {}),
         metadata: {
           callId,
           status: opts.status,
@@ -9696,18 +10063,24 @@ export class Session implements SessionContext {
 
     const cancelBeforeExecutionIfAborted = (
       toolName = fc.name ?? 'unknown_tool',
-    ) =>
-      activeToolAbortSignal.aborted
-        ? earlyErrorResponse(
-            new Error('Tool call was cancelled before execution.'),
-            toolName,
-            {
-              status: 'cancelled',
-              errorType: undefined,
-              executionStatus: 'not_started',
-            },
-          )
-        : undefined;
+    ) => {
+      if (!activeToolAbortSignal.aborted) return undefined;
+      if (this.restoringAskUserQuestionCallIds?.has(callId) === true) {
+        this.#markUnattendedRestoredAskUserQuestion();
+      }
+      return earlyErrorResponse(
+        new Error('Tool call was cancelled before execution.'),
+        toolName,
+        {
+          status: 'cancelled',
+          errorType: undefined,
+          executionStatus: 'not_started',
+          ...(this.#shouldSkipRestoredAskUserQuestionPersistence(callId)
+            ? { skipPersistence: true }
+            : {}),
+        },
+      );
+    };
 
     const initialCancellation = cancelBeforeExecutionIfAborted();
     if (initialCancellation) return initialCancellation;
@@ -10477,7 +10850,10 @@ export class Session implements SessionContext {
                   },
                 },
               };
-              const stopAfterPermissionCancel = (message?: string) => {
+              const stopAfterPermissionCancel = (
+                message?: string,
+                opts?: { skipPersistence?: boolean },
+              ) => {
                 onStopAfterPermissionCancel?.();
                 return earlyErrorResponse(
                   new Error(
@@ -10489,6 +10865,9 @@ export class Session implements SessionContext {
                     errorType: undefined,
                     executionStatus: 'not_started',
                     stopAfterPermissionCancel: true,
+                    ...(opts?.skipPersistence === true
+                      ? { skipPersistence: true }
+                      : {}),
                   },
                 );
               };
@@ -10532,6 +10911,12 @@ export class Session implements SessionContext {
                 if (!wasAborted) {
                   onStopAfterPermissionCancel?.();
                 }
+                if (
+                  wasAborted &&
+                  this.restoringAskUserQuestionCallIds?.has(callId) === true
+                ) {
+                  this.#markUnattendedRestoredAskUserQuestion();
+                }
                 const permissionFailureMessage = isExitPlanModeTool
                   ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
                   : planShellDecision.classification === 'unknown'
@@ -10555,6 +10940,11 @@ export class Session implements SessionContext {
                       : ToolErrorType.UNHANDLED_EXCEPTION,
                     executionStatus: 'not_started',
                     stopAfterPermissionCancel: !wasAborted,
+                    ...(this.#shouldSkipRestoredAskUserQuestionPersistence(
+                      callId,
+                    )
+                      ? { skipPersistence: true }
+                      : {}),
                   },
                 );
               }
@@ -10661,13 +11051,32 @@ export class Session implements SessionContext {
                   throw new Error(
                     'Switch-to-Default outcome must be normalized before execution.',
                   );
-                case ToolConfirmationOutcome.Cancel:
+                case ToolConfirmationOutcome.Cancel: {
+                  // A restored ask_user_question whose permission wait ended
+                  // unattended (timeout, session closed) must not persist the
+                  // fabricated decline — leave the transcript dangling so a
+                  // later load can re-hang the question. A deliberate user
+                  // cancel persists, matching live decline handling.
+                  const cancelReason = (
+                    output as { _meta?: Record<string, unknown> | null }
+                  )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+                  const unattendedRestore =
+                    isUnattendedRestorePermissionCancel(cancelReason) &&
+                    this.restoringAskUserQuestionCallIds?.has(callId) === true;
+                  if (unattendedRestore) {
+                    this.#markUnattendedRestoredAskUserQuestion();
+                  }
+                  const skipPersistence =
+                    unattendedRestore ||
+                    this.#shouldSkipRestoredAskUserQuestionPersistence(callId);
                   // Route through the terminal helper so the declined call is
                   // emitted and recorded consistently without marking its span
                   // as an error.
                   return stopAfterPermissionCancel(
                     confirmationPayload?.cancelMessage,
+                    skipPersistence ? { skipPersistence: true } : undefined,
                   );
+                }
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:
@@ -11820,7 +12229,11 @@ export class Session implements SessionContext {
     // with its content block by the "@path" token left in the prompt text and
     // the "--- Content from ... ---" delimiter labels, not by position, so
     // leading with the content is safe.
-    const referenceParts: Part[] = [...extensionParts, ...mcpServerParts];
+    const referenceParts: Part[] = [
+      ...partsToSend.filter((part) => 'inlineData' in part),
+      ...extensionParts,
+      ...mcpServerParts,
+    ];
 
     // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
