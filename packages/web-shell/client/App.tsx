@@ -10292,11 +10292,20 @@ export function App({
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
       const owner = sessionOwnerGuard.capture();
-      sessionActions
+      // Return the submission promise (and rethrow a rejection) so the
+      // ToolApproval re-arm contract engages: its confirm() resets the
+      // double-submit guard only when the returned promise rejects.
+      // Swallowing the rejection here would leave submittedRef latched on a
+      // transient daemon/WS failure, blocking every retry for this request.
+      // Same shape as ChatPane.handleConfirm.
+      return sessionActions
         .submitPermission(id, selectedOption, answers)
+        .then(() => undefined)
         .catch((error: unknown) => {
-          if (!owner.isCurrent()) return;
-          reportError(error, 'Failed to submit permission choice');
+          if (owner.isCurrent()) {
+            reportError(error, 'Failed to submit permission choice');
+          }
+          throw error;
         });
     },
     [sessionActions, reportError, sessionOwnerGuard],

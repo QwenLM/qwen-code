@@ -406,6 +406,9 @@ const {
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
+      latestToolApprovalOnConfirm: null as
+        | ((id: string, selectedOption: string) => void | Promise<void>)
+        | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
       askUserKeyboardActiveHistory: [] as Array<boolean | null>,
       latestTodoPanelTodos: [] as Array<{
@@ -1618,12 +1621,16 @@ vi.doMock('./components/messages/ToolApproval', async () => {
     ToolApproval: (props: {
       keyboardActive?: boolean;
       planTodos?: Array<{ id: string }>;
+      onConfirm?: (id: string, selectedOption: string) => void | Promise<void>;
     }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
       testState.toolApprovalKeyboardActiveHistory.push(
         props.keyboardActive ?? null,
       );
       testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
+      // Captured so app-level tests can drive the overlay's confirm path and
+      // observe the promise contract the real component re-arms on.
+      testState.latestToolApprovalOnConfirm = props.onConfirm ?? null;
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
       });
@@ -2940,6 +2947,33 @@ describe('artifact panel fullscreen', () => {
     expect(approvalOverlay?.closest('[aria-hidden="true"]')).toBeNull();
     expect(testState.askUserKeyboardActiveHistory[0]).toBe(false);
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
+  });
+
+  it('rethrows a rejected permission submission so the overlay re-arms', async () => {
+    // The main-chat approval overlay is onConfirm for every main-chat
+    // approval. ToolApproval re-arms its double-submit guard only when the
+    // promise returned by onConfirm rejects — an onConfirm that swallows the
+    // rejection (returning undefined) leaves submittedRef latched after a
+    // transient daemon/WS failure, blocking every retry for that request.
+    testState.blocks = [makePendingPermissionBlock()];
+    renderApp();
+    await flush();
+    expect(testState.latestToolApprovalOnConfirm).not.toBeNull();
+
+    const failure = new Error('daemon unavailable');
+    mockSessionActions.submitPermission.mockRejectedValueOnce(failure);
+
+    const submission = testState.latestToolApprovalOnConfirm?.(
+      'req-1',
+      'proceed_once',
+    );
+    expect(submission).toBeInstanceOf(Promise);
+    await expect(submission).rejects.toBe(failure);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+      undefined,
+    );
   });
 
   it('leaves a docked-fullscreen IME Escape to the window handler guard', async () => {
@@ -4808,6 +4842,7 @@ beforeEach(() => {
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
+  testState.latestToolApprovalOnConfirm = null;
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.askUserKeyboardActiveHistory = [];
   testState.latestTodoPanelTodos = [];
