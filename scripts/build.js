@@ -61,8 +61,12 @@ const buildOrder = [
   'packages/channels/feishu',
   'packages/channels/qqbot',
   'packages/channels/github',
+  // gitlab is a builtin of the cli channel registry like its siblings; it
+  // used to build only transitively via cli's tsconfig project reference.
+  'packages/channels/gitlab',
   'packages/channels/plugin-example',
   'packages/audio-capture',
+  'packages/node-repl',
   'packages/acp-bridge',
   'packages/sdk-typescript',
   'packages/cli',

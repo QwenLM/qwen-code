@@ -49,6 +49,9 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
   parsePositiveIntegerEnv,
@@ -91,7 +94,7 @@ import { RunBudgetEnforcer } from './utils/runBudget.js';
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from './utils/chat-recording-failure.js';
+} from './nonInteractive/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
@@ -148,8 +151,8 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     : SUPPRESSED_OUTPUT_RETRY;
 }
 
+import { normalizePartList } from './utils/normalize-part-list.js';
 import {
-  normalizePartList,
   extractPartsFromUserMessage,
   buildSystemMessage,
   createToolProgressHandler,
@@ -157,7 +160,7 @@ import {
   computeUsageFromMetrics,
   buildInitialSystemReminders,
   insertAfterFunctionResponses,
-} from './utils/nonInteractiveHelpers.js';
+} from './nonInteractive/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -1692,8 +1695,11 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledProviderToolCallIds =
-        geminiClient.getHistoryFunctionResponseIds();
+      // Fresh map per call today; copy so a future cached accessor cannot
+      // turn this run's cross-turn recording into shared-state mutation.
+      const handledToolCallFingerprints = new Map(
+        geminiClient.getHistoryToolCallFingerprints(),
+      );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
       // the current tool batch so we do not send partial tool responses.
@@ -1748,10 +1754,26 @@ export async function runNonInteractive(
           }
           return true;
         });
+        const isReplayOfHandledRequest = (
+          request: ToolCallRequestInfo,
+        ): boolean => {
+          const providerCallId = getProviderResponseId(request);
+          return providerCallId
+            ? isReplayOfHandledToolCall(
+                handledToolCallFingerprints,
+                providerCallId,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
+              )
+            : false;
+        };
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           [...uniqueBatchRequests, ...duplicateBatchRequests],
           getProviderResponseId,
-          handledProviderToolCallIds,
+          isReplayOfHandledRequest,
           duplicateProviderToolCallResponseIds,
         );
         if (repeatedDuplicateRequest) {
@@ -1777,8 +1799,16 @@ export async function runNonInteractive(
             continue;
           }
 
-          if (!handledProviderToolCallIds.has(providerCallId)) {
-            handledProviderToolCallIds.add(providerCallId);
+          if (!isReplayOfHandledRequest(requestInfo)) {
+            recordHandledToolCall(
+              handledToolCallFingerprints,
+              providerCallId,
+              getCachedToolCallFingerprint(
+                requestInfo,
+                requestInfo.name,
+                requestInfo.args,
+              ),
+            );
             executableBatchRequests.push(requestInfo);
             continue;
           }

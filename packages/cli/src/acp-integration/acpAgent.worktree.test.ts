@@ -173,6 +173,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SessionIdCaseConflictError: class SessionIdCaseConflictError extends Error {
+    override readonly name = 'SessionIdCaseConflictError';
+  },
   Storage: {
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
   },
@@ -325,6 +328,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   function makeInnerConfig() {
     const mockSessionService = {
       sessionExists: vi.fn().mockResolvedValue(true),
+      findSessionIdIgnoringCase: vi.fn().mockResolvedValue(SESSION_ID),
       getWorktreeSessionPath: vi.fn().mockReturnValue(SIDECAR_PATH),
     };
     vi.mocked(SessionService).mockImplementation(
@@ -445,6 +449,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     vi.mocked(Session).mockImplementation(() => {
       const mock = {
         getId: vi.fn().mockReturnValue(SESSION_ID),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),

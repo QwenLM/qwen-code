@@ -7,8 +7,8 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import type { ExtendedSystemInfo } from '../../utils/systemInfo.js';
-import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
+import type { ExtendedSystemInfo } from '../systemInfo.js';
+import { getSystemInfoFields } from '../systemInfoFields.js';
 import { t } from '../../i18n/index.js';
 
 type AboutBoxProps = ExtendedSystemInfo & {

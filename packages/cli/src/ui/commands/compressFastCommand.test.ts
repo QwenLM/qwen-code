@@ -155,6 +155,7 @@ describe('compressFastCommand', () => {
           originalTokenCount: 200,
           newTokenCount: 100,
           compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
         },
       },
       expect.any(Number),
