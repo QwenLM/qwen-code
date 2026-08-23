@@ -24,10 +24,15 @@ Stop and say why if any fails:
 ## 1 — Re-verify before touching anything
 
 The evidence was proven against the survey's base, which has since moved.
-Re-run the proof protocol's steps 2 through 5 (`references/survey.md` § 3)
+Re-run the proof protocol's steps 2 through 8 (`references/survey.md` § 3)
 against the branch base — which is current `origin/main` only because the
 precondition above fetched first; against a stale ref every step re-passes
-vacuously. If a consumer now exists, or the surface has changed
+vacuously. Run every step the candidate's shape triggers and record the ones
+you skip and why. Steps 6 through 8 exist exactly for the assent gap: a test
+that now pins the surface for a user, a commit that deliberately unwired it,
+or a design document arguing for it can all land between survey and assent,
+and steps 2 through 5 see none of them. If a consumer now exists, if a design
+doc now argues for the surface, or if the surface has changed
 shape, **the candidate is stale**: record that on the ledger and stop. Do not
 adapt the deletion to fit new code.
 
@@ -57,11 +62,16 @@ function there. In this prettier-formatted repo everything nested is
 indented, so a top-level declaration ends at the next column-0 line that is
 exactly `}`, `};`, `});`, `];`, or `);` — a `const` holding a call or array
 literal closes with its paren or bracket, not a bare `};`. Whatever rule you
-use, prove it after the cut — a pure deletion must show zero added lines in
-`git diff --numstat`, and the deleted line count must match the declaration's
-extent as you established it by reading the declaration before cutting:
-re-measuring with the cut rule itself is circular, and zero added lines alone
-cannot catch over-deletion.
+use, prove it after the cut. For a declaration or whole-file deletion, the
+diff must show zero added lines in `git diff --numstat`, and the deleted line
+count must match the declaration's extent as you established it by reading
+the declaration before cutting: re-measuring with the cut rule itself is
+circular, and zero added lines alone cannot catch over-deletion. The one
+exception is survey.md § 1 class 6 — removing only the `export` keyword from
+a declaration that stays. Git records `export const x` → `const x` as one
+deletion and one addition (numstat `1 1`), so the zero-added-lines invariant
+wrongly rejects it; there, verify instead that the diff touches exactly that
+declaration line and the only change on it is the leading `export `.
 
 Nothing else. No neighbouring cleanup, no rename, no reformat, no "while I
 was here". The diff must contain exactly one idea.
@@ -72,9 +82,18 @@ Always, in this order:
 
 ```bash
 npm run build && npm run bundle && npm run typecheck # integration tests spawn dist/cli.js
-(cd packages/<pkg> && npx vitest run src/path/to/file.test.ts)   # per AGENTS.md
+(cd packages/<pkg> && npx vitest run src/path/to/file.test.ts)   # per AGENTS.md; see below
 npm run lint:ci
 ```
+
+The vitest line runs only against test files that survive the deletion. A
+clean-kill candidate (survey.md § 6, worked example 1) removes the symbol's
+only test as part of the deletion, and `npx vitest run` against a path that
+no longer exists exits 1 with `No test files found` — so an unconditional
+run makes a valid approved deletion impossible to verify. When the deletion
+carries every test that covered the surface, or the surface had none, skip
+the line and record "no applicable targeted unit test" in the § 6 details
+block; the test-corpus re-grep below is what catches any surviving consumer.
 
 Then re-grep the test corpus **on this checkout** for every removed symbol and
 run every file it hits — a deletion's characteristic failure is a distant test

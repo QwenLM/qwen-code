@@ -11,9 +11,13 @@ gone, that is a finding about this document, not about the repo.
 
 1. **Survey fresh code** — `git fetch origin || exit 1`, then survey from a
    throwaway worktree, never by switching the user's checkout:
-   `SURVEY="$(mktemp -d)/main"`,
-   `git worktree add --detach "$SURVEY" origin/main || exit 1`, and run every
-   grep below from `$SURVEY`. This phase is read-only, and a detached HEAD
+   `SURVEY_PARENT="$(mktemp -d)"`, `SURVEY="$SURVEY_PARENT/main"`, then
+   `trap 'cd / && git worktree remove "$SURVEY" 2>/dev/null; rm -rf "$SURVEY_PARENT"' EXIT`
+   before `git worktree add --detach "$SURVEY" origin/main || exit 1`, and
+   run every grep below from `$SURVEY`. The trap goes in before the worktree
+   is added: a mandatory step can still exit early later (SKILL.md § Shared
+   Rules' `"$RG" --version || exit 1`), and a failed run must not leave a
+   registered worktree accumulating run after run. This phase is read-only, and a detached HEAD
    left sitting in the user's checkout belongs to no branch. Fetch only
    updates the ref, while every grep in this phase reads the working tree,
    so "work against `origin/main`" means actually being on it. A local
@@ -22,6 +26,8 @@ gone, that is a finding about this document, not about the repo.
    guards matter: when the fetch fails, `git worktree add` still succeeds
    against the stale cached ref, and no grep below can see the staleness.
 2. **Read the ledger** (SKILL.md § The ledger). Collect every tombstoned id.
+   If the ledger cannot be read, stop per that section — surveying without
+   the tombstones can re-propose a permanently declined id.
 3. **Pick the slice** and note it — you will report which territory you swept.
 4. **Calibrate the search.** Grep a symbol you know exists and confirm a hit.
    A broken search returns zero for everything, which reads exactly like a
@@ -60,7 +66,7 @@ gets rubber-stamped or closed, never reviewed. Landable.
 
 **5. Added-then-removed scaffolding.** A flag, constant, route, or helper
 whose feature left.
-`git log --pickaxe-regex -S '\b<symbol>\b' --format='%ad %h %s' --date=short`
+`git log --pickaxe-regex -S '(^|[^A-Za-z0-9_])<symbol>($|[^A-Za-z0-9_])' --format='%ad %h %s' --date=short`
 shows the arrival and the departure. Landable **only** outside report-only
 territory — a settings key or a `packages/core` symbol in this shape is a
 deprecation decision, not cleanup.
@@ -99,16 +105,24 @@ goes on the ledger and what stops the next run re-deriving it.
 # whole file or directory:
 git log --follow --diff-filter=A --format=%ad --date=short -- <path> | tail -1
 # a symbol, key, or export — the symbol's age, not its file's:
-git log --follow --pickaxe-regex -S '\b<exact symbol>\b' --format='%ad %h' --date=short -- <path> | tail -1
+git log --follow --pickaxe-regex -S '(^|[^A-Za-z0-9_])<exact symbol>($|[^A-Za-z0-9_])' --format='%ad %h' --date=short -- <path> | tail -1
 ```
 
 `--follow` dates a surface at its creation, not its last rename — without it,
 a path-limited `git log` records a rename as an addition, and the gate
 silently suppresses surfaces that only look young. It requires exactly one
-pathspec. `--pickaxe-regex` with `\b` anchors matters the same way: plain
-`-S` matches substrings, so an older, longer identifier that merely contains
-the symbol dates it early, and `tail -1` then fails the gate open toward
-deletion.
+pathspec. Word boundaries matter the same way: plain `-S` matches substrings,
+so an older, longer identifier that merely contains the symbol dates it
+early, and `tail -1` then fails the gate open toward deletion. Write the
+boundary as the explicit alternation above — never `\b` or `[[:<:]]`: Git's
+pickaxe regex runs on a platform-dependent backend, and each shortcut works
+on one and fails on another (measured in this repo: `\b` finds
+`EnumSelector`'s introduction on Linux git while `[[:<:]]` fatals there with
+`invalid regex`; the finding's probe measured the mirror image, `\b` empty
+and `[[:<:]]` finding the introduction). And an empty result is not an age:
+if the query prints nothing, the pattern matched no commit on this platform —
+stop and do not file the candidate, because a symbol you cannot date never
+passes this gate.
 
 Younger than ~90 days → **drop silently**, do not even file it. It is a
 feature someone is still wiring up. (90 days is a heuristic, not a measured
@@ -130,10 +144,14 @@ import from the registry, never from this repo.
 Reachability is not only an import. `packages/vscode-ide-companion`,
 `packages/chrome-extension` and `packages/zed-extension` are consumed as
 store-shipped manifests, and `.github/` is consumed GitHub-side — event
-triggers, branch-protection required checks, cross-repo `uses:` — so a
-zero-hit corpus grep says nothing about them (measured: 0 in-repo
-`uses: ./.github/workflows/…` references across all 52 workflow files).
-Any hit → report-only, no matter how clean the consumer grep looks.
+triggers, branch-protection required checks, cross-repo `uses:`. Even the
+in-repo half of `uses:` hides from a careless pattern: reusable-workflow
+references are quoted YAML — `uses: './.github/workflows/…'` — so the
+quote-less pattern `uses: \./\.github/workflows` measures 0 in-repo while
+the quoted form measures 5 (re-measure both; the count moves). Triggers and
+required checks leave no in-repo trace at all, so a clean corpus grep still
+says nothing about them. Any hit → report-only, no matter how clean the
+consumer grep looks.
 
 **4 — Full-corpus grep.** § 4 below. Any production consumer → drop.
 
@@ -184,15 +202,16 @@ unless you can beat the doc.
       --glob '!node_modules' --glob '!dist' --glob '!bundle' \
       '<Symbol>' \
       packages integrations integration-tests scripts docs docs-site \
-      .github patches esbuild.config.js eslint.config.js \
+      .github .husky .vscode patches esbuild.config.js eslint.config.js \
       eslint.legacy-filenames.mjs vitest.config.ts package.json Makefile
 ```
 
 - Name the root files explicitly. A symbol's only consumer is often
   `esbuild.config.js`, `eslint.legacy-filenames.mjs`, or a `scripts/` entry,
   and a `packages`-only search will not see it.
-- ripgrep skips dot-directories, so `.github`, `.qwen`, and `.husky` are
-  searched only when named — but naming `.qwen` is still not enough: the
+- ripgrep skips dot-directories, so `.github`, `.husky`, `.vscode`, and
+  `.qwen` are searched only when named — but naming `.qwen` is still not
+  enough: the
   `.qwen/*` ignore rule hides tracked content outside the re-included subdirs
   (`commands/`, `skills/`, `agents/`, `team-memory/`, `review-context.json`)
   even from a named search, so sweep its tracked files with
@@ -278,7 +297,9 @@ excellent evidence for an issue, not for a PR.
    (consumers named with certainty) × (lines removed) and file them all.
 5. Write the ledger comment per SKILL.md § Output: survivors with their
    evidence, plus one line per rejected id and the step that killed it.
-6. **STOP.** Return to the user's checkout and remove the survey worktree
-   (`git worktree remove "$SURVEY"`), leaving the checkout as §0 found it.
+6. **STOP.** Return to the user's checkout and remove the survey worktree and
+   its temporary parent (`git worktree remove "$SURVEY"`,
+   `rm -rf "$SURVEY_PARENT"`), then clear §0's trap (`trap - EXIT`), leaving
+   the checkout as §0 found it.
    Do not create a branch, do not edit code, do not open a PR. Landing
    requires an assent and `references/land.md`.

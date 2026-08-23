@@ -138,7 +138,13 @@ git fetch origin || exit 1
 # survey fresh code from a throwaway worktree at origin/main. Never switch
 # the user's checkout: the survey is read-only and must leave the checkout
 # exactly as it found it.
-SURVEY="$(mktemp -d)/main"
+SURVEY_PARENT="$(mktemp -d)"
+SURVEY="$SURVEY_PARENT/main"
+# A mandatory step can still exit early later (e.g. `"$RG" --version ||
+# exit 1` in § Shared Rules); the trap keeps a failed run from leaving a
+# registered worktree and checkout behind. The final step of
+# references/survey.md clears it after the normal-path cleanup.
+trap 'cd / && git worktree remove "$SURVEY" 2>/dev/null; rm -rf "$SURVEY_PARENT"' EXIT
 git worktree add --detach "$SURVEY" origin/main || exit 1
 cd "$SURVEY"
 SLICE=$(( 10#$(date -u +%V) % 4 ))
@@ -188,21 +194,31 @@ gh issue comment <number> --body-file <comment>.md
   `locale-orphans-auth-subcommand`. A prose-derived id reappears forever.
 - One line per candidate: `id — territory — status — date`. Statuses:
   `filed`, `landed`, `declined`, `dropped-recency`, `dropped-consumers`.
-- An id on the ledger with status `declined`, or on a closed-unmerged
-  `simplify/*` PR, is a **permanent tombstone. Never re-propose it**, however
-  good the new evidence looks. Search with `--state all` — the default open
-  filter never returns the closed-unmerged PRs this rule targets — and quote
-  the marker: GitHub tokenizes on hyphens, so
+- An id on the ledger with status `declined` is a **permanent tombstone.
+  Never re-propose it**, however good the new evidence looks. A
+  closed-unmerged `simplify/*` PR tombstones its id only when it closed on
+  the finding's merits — the same test the stop-loss rule below uses. Read
+  the closing comment and the id's ledger line; when neither records a
+  merits decline, treat the close as operational. A PR closed for
+  operational reasons (a stale base, conflicts, an infrastructure retry, a
+  superseding re-file) is not a tombstone: re-survey the id and, if it still
+  survives the proof protocol, re-file it. Search with `--state all` — the
+  default open filter never returns the closed-unmerged PRs this rule targets
+  — and quote the marker: GitHub tokenizes on hyphens, so
   `gh pr list --state all --search 'enum-selector in:body'` returns unrelated
-  PRs, while `--search '"find-simplifications:id=enum-selector" in:body'` does
-  not.
+  PRs, while `--search '"find-simplifications:id=enum-selector" in:body'`
+  does not.
 - Append only. Never rewrite, reorder, prune, or summarize it. A maintainer
   removing a line is the only supported retraction.
 - Record what a run **rejected** and why, not only what it filed. That is the
   whole anti-churn mechanism: without it the next run re-derives and
   re-rejects the same hundred symbols.
-- If the ledger cannot be read, say so in the run's output and continue. It is
-  best-effort; its absence never fails a run.
+- If the ledger cannot be read, stop and say so in the run's output — no
+  candidates this run. The ledger is the only copy of the permanent
+  tombstones and the recent-slice rotation this section keeps, so surveying
+  through a read failure can re-propose a permanently declined id or re-sweep
+  a slice the last run already covered. Fail closed; there is no equally
+  authoritative snapshot to fall back on.
 
 Never treat a previous run's finding as evidence. Evidence is code: a call
 site, a `file:line`, a `git log` result.
