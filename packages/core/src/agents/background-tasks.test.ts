@@ -2701,27 +2701,13 @@ describe('BackgroundTaskRegistry', () => {
       // approvals must stay unstamped — the runtime subagentId and the
       // registry agentId use different suffixes, so the bridge caller
       // declares the nested case rather than anyone comparing ids.
-      const makeWaiting = (callId: string, subagentId: string) => ({
-        subagentId,
-        round: 1,
-        callId,
-        name: 'Shell',
-        description: `run ${callId}`,
-        args: {},
-        confirmationDetails: {
-          type: 'exec',
-        } as BackgroundApproval['confirmationDetails'],
-        respond: vi.fn(async () => {}),
-        timestamp: Date.now(),
-      });
-
       registry.register(makeRegistration('bg-appr-nested'));
 
       const ownEmitter = new AgentEventEmitter();
       registry.bridgeApprovalEvents('bg-appr-nested', ownEmitter);
       ownEmitter.emit(
         AgentEventType.TOOL_WAITING_APPROVAL,
-        makeWaiting('own-1', 'fork-runtime1'),
+        makeWaitingEvent('fork-runtime1', 'own-1'),
       );
 
       const nestedEmitter = new AgentEventEmitter();
@@ -2730,7 +2716,7 @@ describe('BackgroundTaskRegistry', () => {
       });
       nestedEmitter.emit(
         AgentEventType.TOOL_WAITING_APPROVAL,
-        makeWaiting('nested-1', 'review-agent-abc123'),
+        makeWaitingEvent('review-agent-abc123', 'nested-1'),
       );
 
       const parked = registry.getPendingApprovals('bg-appr-nested');
@@ -2835,27 +2821,17 @@ describe('BackgroundTaskRegistry', () => {
       registry.bridgeApprovalEvents('bg-appr-reemit', emitter);
 
       const respond = vi.fn(async () => {});
-      const waiting = {
-        subagentId: 'bg-appr-reemit',
-        round: 1,
-        callId: 'c1',
-        name: 'Shell',
-        description: 'run c1',
-        args: {},
-        confirmationDetails: {
-          type: 'exec',
-        } as BackgroundApproval['confirmationDetails'],
-        respond,
-        timestamp: Date.now(),
-      };
-      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, waiting);
+      emitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('bg-appr-reemit', 'c1', respond),
+      );
       expect(registry.getPendingApprovals('bg-appr-reemit')).toHaveLength(1);
 
       // A batch-mate status transition re-emits the parked call's event.
-      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
-        ...waiting,
-        timestamp: Date.now(),
-      });
+      emitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('bg-appr-reemit', 'c1', respond),
+      );
 
       expect(respond).not.toHaveBeenCalled();
       expect(registry.getPendingApprovals('bg-appr-reemit')).toHaveLength(1);
@@ -2873,6 +2849,44 @@ describe('BackgroundTaskRegistry', () => {
       expect(respond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         undefined,
+      );
+    });
+
+    it('drops a re-emitted waiting event on a nested bridge without double-parking', () => {
+      // The composite dedup key must compare the incoming subagentId with
+      // the parked one, not only check the parked entry's stamp: a nested
+      // runtime's scheduler re-emits TOOL_WAITING_APPROVAL on sibling
+      // status transitions too, so a stamped event can arrive twice on the
+      // same nested bridge. Deduping on `subagentId === undefined` alone
+      // would park a second copy, double-listing the nested call in the
+      // dialog and inflating the pending count.
+      registry.register(makeRegistration('bg-appr-reemit-nested'));
+      const nested = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-appr-reemit-nested', nested, {
+        nestedSource: true,
+      });
+
+      const respond = vi.fn(async () => {});
+      nested.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respond),
+      );
+      nested.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respond),
+      );
+
+      const parked = registry.getPendingApprovals('bg-appr-reemit-nested');
+      expect(parked).toHaveLength(1);
+      expect(parked[0]?.subagentId).toBe('search-agent-aaa111');
+      expect(respond).not.toHaveBeenCalled();
+      // The park and drop log lines name the nested runtime so a collision
+      // on a shared generated callId can be attributed in incident analysis.
+      expect(mockDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('nested search-agent-aaa111'),
+      );
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('(nested search-agent-aaa111)'),
       );
     });
 
@@ -2953,6 +2967,47 @@ describe('BackgroundTaskRegistry', () => {
       const remaining = registry.getPendingApprovals('bg-collide-resolve');
       expect(remaining).toHaveLength(1);
       expect(remaining[0]?.subagentId).toBe('search-agent-bbb222');
+    });
+
+    it('resolves the second-parked runtime when parked callIds collide', async () => {
+      // Resolving the SECOND-parked of two colliding entries pins the
+      // subagentId conjunct in resolvePendingApproval's find: a callId-only
+      // find resumes the FIRST runtime and strips the second's prompt
+      // without ever invoking its respond, leaving that call waiting forever.
+      registry.register(makeRegistration('bg-collide-resolve-2'));
+      const nestedA = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-resolve-2', nestedA, {
+        nestedSource: true,
+      });
+      const nestedB = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-resolve-2', nestedB, {
+        nestedSource: true,
+      });
+      const respondA = vi.fn(async () => {});
+      const respondB = vi.fn(async () => {});
+      nestedA.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respondA),
+      );
+      nestedB.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-bbb222', 'call_qwen_1', respondB),
+      );
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-collide-resolve-2',
+        'call_qwen_1',
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+        'search-agent-bbb222',
+      );
+
+      expect(ok).toBe(true);
+      expect(respondB).toHaveBeenCalledTimes(1);
+      expect(respondA).not.toHaveBeenCalled();
+      const remaining = registry.getPendingApprovals('bg-collide-resolve-2');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.subagentId).toBe('search-agent-aaa111');
     });
 
     it('clears only its own runtime prompt when a TOOL_RESULT collides on callId', () => {

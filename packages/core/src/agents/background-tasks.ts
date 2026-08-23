@@ -1084,7 +1084,9 @@ export class BackgroundTaskRegistry {
     entry.pendingApprovals = [...prior, approval];
     debugLogger.info(
       `Parked approval for background agent ${agentId} ` +
-        `(call ${approval.callId}, ${entry.pendingApprovals.length} pending)`,
+        `(call ${approval.callId}` +
+        (approval.subagentId ? `, nested ${approval.subagentId}` : '') +
+        `, ${entry.pendingApprovals.length} pending)`,
     );
     this.emitApprovalChange(entry);
     return 'parked';
@@ -1126,7 +1128,9 @@ export class BackgroundTaskRegistry {
       );
     } catch (error) {
       debugLogger.error(
-        `Failed to resolve background approval for ${agentId}/${callId}:`,
+        `Failed to resolve background approval for ${agentId}/${callId}` +
+          (subagentId ? ` (nested ${subagentId})` : '') +
+          ':',
         error,
       );
       this.fail(agentId, `Failed to resolve background approval: ${callId}`);
@@ -1207,7 +1211,9 @@ export class BackgroundTaskRegistry {
         // user's real answer. Debug level because re-emissions are
         // frequent while any approval is parked.
         debugLogger.debug(
-          `Dropped re-emitted approval event for already-parked call ${agentId}/${event.callId}`,
+          `Dropped re-emitted approval event for already-parked call ` +
+            `${agentId}/${event.callId}` +
+            (options?.nestedSource ? ` (nested ${event.subagentId})` : ''),
         );
         return;
       }
@@ -1219,7 +1225,9 @@ export class BackgroundTaskRegistry {
         // unhandledRejection.
         void event.respond(REJECTED_OUTCOME).catch((error) => {
           debugLogger.error(
-            `Failed to reject unparkable approval ${agentId}/${event.callId}:`,
+            `Failed to reject unparkable approval ${agentId}/${event.callId}` +
+              (options?.nestedSource ? ` (nested ${event.subagentId})` : '') +
+              ':',
             error,
           );
         });
