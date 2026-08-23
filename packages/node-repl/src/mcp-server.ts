@@ -56,7 +56,9 @@ const NODE_REPL_DESCRIPTION = [
   '',
   'Persistence caveat: timeout, cancellation, reset, or a crash replaces the',
   'kernel process and discards all bindings. For rerunnable declarations prefer',
-  'var, a fresh name, block scope, or node_repl_reset.',
+  'var, a fresh name, block scope, or node_repl_reset. Note: re-declaring an',
+  'existing top-level function or class in a later call fails — use a fresh name',
+  'or node_repl_reset for those.',
 ].join('\n');
 
 /**
