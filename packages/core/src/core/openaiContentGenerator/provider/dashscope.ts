@@ -363,22 +363,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const isTieredQwenModel = isTieredEffortWireModel(
-      this.resolveWireModel(request.model),
-    );
-    const extraBody = isTieredQwenModel
-      ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
-      : this.contentGeneratorConfig.extra_body;
-
-    // Tiered models use a top-level `reasoning_effort`. Older Qwen hybrids
-    // still expose only the on/off `enable_thinking` switch. User extra_body
-    // wins (merged last); the disable path is handled upstream in the pipeline.
     const wireModel = this.resolveWireModel(request.model);
+    const isTieredQwenModel = isTieredEffortWireModel(wireModel);
     const modelReasoning = resolveModelReasoningConfiguration({
       modelId: wireModel,
       authType: this.contentGeneratorConfig.authType,
       baseUrl: this.contentGeneratorConfig.baseUrl,
     });
+    // Nullish thinking knobs carry no intent. Sanitize extra_body wherever a
+    // registry configuration or the tiered-qwen mapping decides the wire
+    // shape: extra_body merges last, so a nullish knob would otherwise
+    // clobber the clamped tier with null on the wire.
+    const extraBody =
+      isTieredQwenModel || modelReasoning
+        ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
+        : this.contentGeneratorConfig.extra_body;
+
+    // Tiered models use a top-level `reasoning_effort`. Older Qwen hybrids
+    // still expose only the on/off `enable_thinking` switch. User extra_body
+    // wins (merged last); the disable path is handled upstream in the pipeline.
     const modelEffortConfig = this.buildModelEffortConfig(
       request.model,
       modelReasoning,
@@ -520,12 +523,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
   /**
    * Translate the unified reasoning effort into the wire shape the model
-   * accepts. The qwen3.8-max family takes the tiered `reasoning_effort`
-   * directly; older qwen hybrid models expose only the on/off
-   * `enable_thinking` switch, so the effort ladder collapses to on/off
-   * there. Gated to qwen-family wire models (mirroring the pipeline's
-   * disable gate) so the qwen-specific fields never leak to a non-qwen
-   * model sharing the DashScope endpoint.
+   * accepts. Models with a non-toggle-only registry configuration ship the
+   * tier clamped to their supported set as a top-level `reasoning_effort`;
+   * that branch runs first and covers registered non-qwen models on
+   * Alibaba endpoints as well as qwen3.8-max. Models outside the registry
+   * fall back to the wire-family gates: tiered qwen models take the raw
+   * tier as `reasoning_effort`, older qwen hybrids collapse it to the
+   * on/off `enable_thinking` switch, and everything else ships nothing
+   * here, so the qwen-specific shapes never leak to an unrelated model
+   * sharing the DashScope endpoint.
    */
   private buildModelEffortConfig(
     model: string | undefined,

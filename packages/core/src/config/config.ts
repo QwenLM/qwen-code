@@ -4651,9 +4651,12 @@ export class Config {
       this.contentGeneratorConfig?.reasoning ??
       this.modelsConfig?.getGenerationConfig().reasoning;
     if (reasoningNow !== false) {
-      this.reasoningOverride = effort
-        ? { type: 'effort', effort }
-        : { type: 'default' };
+      // Clearing the tier returns the session to the untouched state — no
+      // sticky default override — so a later rebuild applies the
+      // model/provider default, including a preset `reasoning: false`. The
+      // explicit "default/on" choice is setReasoningDisabled(false), which
+      // does record the sticky default.
+      this.reasoningOverride = effort ? { type: 'effort', effort } : undefined;
     }
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
@@ -4687,6 +4690,14 @@ export class Config {
     applyEffort(this.modelsConfig?.getGenerationConfig());
   }
 
+  /**
+   * Enable or disable reasoning wholesale. The `reasoning` block is
+   * replaced, not merged, in every store — live config, runtime generator
+   * config, and the rebuildable modelsConfig source — so sibling keys (e.g.
+   * `budget_tokens`) do not survive a disable/re-enable cycle; re-enabling
+   * returns to the model/provider default rather than restoring the
+   * previous block.
+   */
   setReasoningDisabled(disabled: boolean): void {
     this.reasoningOverride = disabled
       ? { type: 'disabled' }

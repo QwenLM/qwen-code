@@ -4935,6 +4935,34 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('falls back to a preset disable after an effort clear, not a sticky default', async () => {
+      // Clearing the tier returns the session to the untouched state per the
+      // documented contract: a later rebuild onto a model whose preset
+      // disables reasoning keeps the disable instead of stripping it under a
+      // sticky default override.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'low' } },
+      });
+      config.setReasoningEffort('high');
+      config.setReasoningEffort(undefined);
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'glm-5.2',
+          authType,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getReasoningEffort()).toBeUndefined();
+    });
+
     it('keeps a user-cleared preset disable cleared across an auth refresh', async () => {
       // The user explicitly chose default/on ("Thinking on") for a model
       // whose preset disables reasoning. That cleared state is distinct from

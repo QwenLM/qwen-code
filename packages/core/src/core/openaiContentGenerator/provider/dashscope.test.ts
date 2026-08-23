@@ -761,12 +761,15 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         mockCliConfig,
       );
 
-      expect(() =>
-        generator.buildRequest(
-          { ...baseRequest, model: 'constructor' },
-          'test-prompt-id',
-        ),
-      ).not.toThrow();
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'constructor' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      // The inherited id resolves to no registry configuration, so no
+      // registry-derived effort shaping may reach the wire.
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBeUndefined();
     });
 
     it('preserves primitive nested reasoning without throwing', () => {
@@ -971,6 +974,41 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       expect(result['reasoning_effort']).toBe('high');
     });
+
+    it.each([
+      {
+        model: 'glm-5.2',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      {
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    ])(
+      'keeps the clamped tier when $model extra_body carries a nullish reasoning_effort',
+      ({ model, baseUrl }) => {
+        // extra_body merges last; registry models need the same nullish-knob
+        // stripping as tiered-qwen wire models, or a nullish extra_body
+        // reasoning_effort clobbers the clamped tier with null on the wire.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            model,
+            reasoning: { effort: 'high' },
+            extra_body: { reasoning_effort: null },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe('high');
+      },
+    );
 
     it.each([
       {
