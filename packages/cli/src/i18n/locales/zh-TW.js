@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
