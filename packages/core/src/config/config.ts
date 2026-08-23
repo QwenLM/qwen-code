@@ -111,11 +111,13 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
@@ -238,7 +240,7 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
@@ -699,7 +701,16 @@ export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
+  type:
+    | 'git'
+    | 'local'
+    | 'link'
+    | 'github-release'
+    | 'npm'
+    | 'archive-url'
+    | 'snapshot';
+  installId?: string;
+  credentialPersistence?: 'stored';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
   gitCommit?: string; // Commit recorded when the installation source was cloned.
@@ -866,6 +877,7 @@ export class MCPServerConfig {
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
     readonly agentPluginV1?: boolean,
+    readonly versionNegotiation?: 'auto' | 'legacy',
   ) {}
 }
 
@@ -1128,6 +1140,12 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  /**
+   * When true, daemon `session/load` and `session/resume` re-hang a trailing
+   * unanswered `ask_user_question` instead of synthesizing a failed tool
+   * result. Default false. CLI: `--restore-ask-user-question`.
+   */
+  restoreAskUserQuestion?: boolean;
   sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
@@ -1135,6 +1153,12 @@ export interface ConfigParameters {
    * expiry. Unset or invalid falls back to the 7-day default.
    */
   cronRecurringMaxAgeDays?: number;
+  /**
+   * Opt-in flag for the built-in `list_directory` tool, which is disabled
+   * by default (glob covers directory listing in most cases). Explicitly
+   * listing the tool in the `coreTools` allowlist also re-enables it.
+   */
+  lsToolEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   artifactEnabled?: boolean;
@@ -1938,6 +1962,7 @@ export class Config {
   private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
@@ -2024,11 +2049,19 @@ export class Config {
   private sessionRegistryActive = false;
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly restoreAskUserQuestion: boolean = false;
+  /**
+   * startChat orphan-repair preserve. Defaults to `restoreAskUserQuestion`.
+   * A load/resume that will not re-hang (no client, fork) turns this off so
+   * Gemini history is repaired in lockstep with replay finalization.
+   */
+  private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
+  private readonly lsToolEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
@@ -2307,6 +2340,8 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.restoreAskUserQuestion = params.restoreAskUserQuestion === true;
+    this.preserveRestorableAskUserQuestion = this.restoreAskUserQuestion;
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
@@ -2314,6 +2349,7 @@ export class Config {
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
     );
+    this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -3222,7 +3258,7 @@ export class Config {
       if (this.sessionWriterShutdownRequested) {
         throw new SessionWriterShutdownError();
       }
-      if (location === 'conflict' || location === 'archived') {
+      if (location === 'archived') {
         throw new SessionTranscriptChangedError();
       }
       let authoritative: ResumedSessionData | undefined;
@@ -3465,29 +3501,35 @@ export class Config {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
+      this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
         this.getWorkingDir(),
       );
       return;
     }
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
-        this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        {
-          explicitOnly: this.getBareMode(),
-          loadReason,
-          onInstructionsLoaded: createInstructionsLoadedCallback(
-            () => this.hookSystem,
-          ),
-        },
-      );
+    const {
+      memoryContent,
+      fileCount,
+      contextFilePaths,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
+        ),
+      },
+    );
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -3616,6 +3658,7 @@ export class Config {
       this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
+    this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
@@ -4003,6 +4046,10 @@ export class Config {
     this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
+    // Pin the outgoing recorder to the session it wrote so late writes (a
+    // turn settling after this rotation) keep targeting that session's
+    // transcript instead of resolving the new session id from this Config.
+    outgoingChatRecordingService?.pinSessionIdentity(previousSessionId);
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
@@ -4318,10 +4365,46 @@ export class Config {
       return;
     }
     const model = this.getModel();
-    registerSessionModel(this.sessionId, model);
+    // Both registered per session: the identity is what /review's same-model
+    // gate compares, and in daemon mode one process-global slot holds
+    // whichever session booted first — handing a later session that value
+    // would qualify its model with ANOTHER session's provider, which passes
+    // gates the bare id would have failed.
+    registerSessionModel(this.sessionId, model, this.resolvedModelIdentity());
     if (this.ownsModelEnvSlot) {
       process.env['QWEN_CODE_MODEL'] = model;
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = this.resolvedModelIdentity();
     }
+  }
+
+  /**
+   * The active model qualified by WHERE it resolves — what a bare id cannot
+   * say.
+   *
+   * A model id is unique only inside one provider configuration: two auth
+   * types, or two registry endpoints, can expose the same name over different
+   * underlying models. Anything that treats "same id" as "same model" is
+   * wrong across such a pair, and /review's incremental anchor is exactly
+   * that kind of consumer — it skips code on the strength of "the same model
+   * already reviewed this". The discriminators are hashed rather than spelled
+   * out because the value is persisted and displayed: a base URL can carry a
+   * tenant or a token-bearing host, and eight hex characters separate the
+   * configurations without publishing where they point. The bare id stays the
+   * readable half, so a mismatch still names the model a human recognises.
+   */
+  private resolvedModelIdentity(): string {
+    const model = this.getModel();
+    const authType = this.getContentGeneratorConfig()?.authType ?? '';
+    const baseUrl =
+      this.getContentGeneratorConfig()?.baseUrl ??
+      this.getCurrentModelRegistryBaseUrl() ??
+      '';
+    if (authType === '' && baseUrl === '') return model;
+    const digest = createHash('sha256')
+      .update(`${authType}\u0000${baseUrl}`)
+      .digest('hex')
+      .slice(0, 8);
+    return `${model}@${digest}`;
   }
 
   /**
@@ -5002,6 +5085,7 @@ export class Config {
       `${this.sessionId}.jsonl`,
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
+      `${this.sessionId}.pr.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -6181,6 +6265,15 @@ export class Config {
     this.geminiMdFileCount = count;
   }
 
+  /** Display paths of the currently loaded context (memory) files. */
+  getContextFilePaths(): string[] {
+    return this.loadedContextFilePaths;
+  }
+
+  setContextFilePaths(paths: string[]): void {
+    this.loadedContextFilePaths = paths;
+  }
+
   getArenaManager(): ArenaManager | null {
     return this.arenaManager;
   }
@@ -6887,6 +6980,23 @@ export class Config {
     return this.cronEnabled;
   }
 
+  /**
+   * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
+   * is disabled by default and turns on either through the
+   * `tools.listDirectory.enabled` setting or by being explicitly listed in
+   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
+   * same parser `PermissionManager` uses to build its allowlist — so alias
+   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
+   */
+  isLsToolEnabled(): boolean {
+    if (this.lsToolEnabled) return true;
+    return (
+      this.getCoreTools()?.some(
+        (name) => parseRule(name).toolName === ToolNames.LS,
+      ) ?? false
+    );
+  }
+
   isAgentTeamEnabled(): boolean {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
@@ -6940,7 +7050,7 @@ export class Config {
 
     const routeMatches = this.getAllConfiguredModels().filter(
       (model) =>
-        model.imageOnly === true &&
+        isImageGenerationCapable(model) &&
         !model.fastOnly &&
         !model.voiceOnly &&
         model.id === selector.modelId &&
@@ -7148,6 +7258,19 @@ export class Config {
 
   getExperimentalZedIntegration(): boolean {
     return this.experimentalZedIntegration;
+  }
+
+  getRestoreAskUserQuestion(): boolean {
+    return this.restoreAskUserQuestion;
+  }
+
+  getPreserveRestorableAskUserQuestion(): boolean {
+    return this.preserveRestorableAskUserQuestion;
+  }
+
+  /** Load/resume declined the re-hang: repair Gemini history like flag-off. */
+  suppressRestorableAskUserQuestionPreservation(): void {
+    this.preserveRestorableAskUserQuestion = false;
   }
 
   isSessionWriterLeaseEnabled(): boolean {
@@ -7822,6 +7945,10 @@ export class Config {
     const runtime = createGoalRuntime({
       journal: recorder,
       evidenceSource: recorder,
+      // The recorder already sees every assistant turn's usage stamped with
+      // the Goal permit that produced it, so the spend is Goal-scoped at the
+      // point it is recorded rather than reconstructed from session totals.
+      tokenLedger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
     });
@@ -8490,10 +8617,15 @@ export class Config {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);
     });
-    await registerLazy(ToolNames.LS, async () => {
-      const { LSTool } = await import('../tools/ls.js');
-      return new LSTool(this);
-    });
+    // list_directory is opt-in (disabled by default): glob covers directory
+    // listing in most cases, so the tool only registers when explicitly
+    // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.
+    if (this.isLsToolEnabled()) {
+      await registerLazy(ToolNames.LS, async () => {
+        const { LSTool } = await import('../tools/ls.js');
+        return new LSTool(this);
+      });
+    }
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
@@ -8641,7 +8773,7 @@ export class Config {
         const { RecordArtifactTool } = await import(
           '../tools/record-artifact.js'
         );
-        return new RecordArtifactTool();
+        return new RecordArtifactTool(this);
       });
     }
     if (this.isLspEnabled() && this.getLspClient()) {

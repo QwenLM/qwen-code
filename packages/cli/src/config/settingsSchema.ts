@@ -29,6 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -62,17 +63,6 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
 export interface SettingEnumOption {
   value: string | number;
   label: string;
-}
-
-export enum MergeStrategy {
-  // Replace the old value with the new value. This is the default.
-  REPLACE = 'replace',
-  // Concatenate arrays.
-  CONCAT = 'concat',
-  // Merge arrays, ensuring unique values.
-  UNION = 'union',
-  // Shallow merge objects.
-  SHALLOW_MERGE = 'shallow_merge',
 }
 
 export interface SettingDefinition {
@@ -202,7 +192,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http'],
+            enum: ['command', 'http', 'prompt'],
             required: true,
           },
           command: {
@@ -214,6 +204,15 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The prompt to send to the model. Required for "prompt" type.',
+          },
+          model: {
+            type: 'string',
+            description: 'The optional model to use for a "prompt" hook.',
           },
           headers: {
             type: 'object',
@@ -724,7 +723,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution. Note: with the footer off, presubmit duplicate detection still recognizes earlier posts by the same GitHub account, but footer-less posts from other accounts escape it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+          'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without VISIBLE AI attribution: no footer, and no "**[Critical]**"/"**[Suggestion]**" severity markers on posted comments and body lists. Unattributed posts stay identifiable in the raw source: each posted comment carries an invisible severity marker ("<!-- qwen-review critical -->") and the review body carries a ledger marker ("<!-- qwen-review-ledger ... -->") — anything reading comment bodies (GitHub API automation, the workflows this setting couples to) still recognizes a /review artifact, and presubmit duplicate detection recognizes the reviewing account\'s earlier posts by the severity marker, though unattributed posts from other accounts escape it. Another consequence: qwen-autofix\'s Critical-only mode (engaged after round 5, or earlier when a counting window\'s diff-growth budget trips) no longer recognizes the posted findings as Critical and defers them. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
       effort: {
@@ -1463,7 +1462,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.',
+      'Model used by the built-in image_gen tool. Set with /model --image. The selected route must set supportsImageGeneration: true (or legacy imageOnly: true) in modelProviders.',
     showInDialog: false,
   },
 
@@ -2604,6 +2603,28 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      listDirectory: {
+        type: 'object',
+        label: 'List Directory',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable ListDirectory',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).',
+            showInDialog: true,
+          },
+        },
+      },
       shell: {
         type: 'object',
         label: 'Shell',
@@ -2784,6 +2805,21 @@ const SETTINGS_SCHEMA = {
         description:
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
+      },
+      workflowsEnabled: {
+        type: 'boolean',
+        label: 'Dynamic Workflows',
+        category: 'Tools',
+        // The Workflow tool is registered once while building the tool
+        // registry and /workflows is gated when commands load. Keyword
+        // steering reads the same startup-built Config on each submission,
+        // so changing the settings file mid-session cannot update any of the
+        // three surfaces until the next launch.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
+        showInDialog: true,
       },
       truncateToolOutputThreshold: {
         type: 'number',

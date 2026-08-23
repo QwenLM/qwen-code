@@ -170,6 +170,7 @@ export const compressCommand: SlashCommand = {
               originalTokenCount: compressed.originalTokenCount,
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
+              compressionKind: 'summarize',
             },
           } as HistoryItemCompression,
           Date.now(),

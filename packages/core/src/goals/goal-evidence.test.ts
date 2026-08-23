@@ -89,6 +89,7 @@ function goal(cursor: string | null = 'cursor'): GoalRecord {
     evidenceCursor: { recordId: cursor },
     turnCount: 2,
     activeTimeMs: 100,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   };

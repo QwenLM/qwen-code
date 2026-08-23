@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,7 +14,9 @@ import {
   ChannelBase,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
+  sanitizePromptText,
   sanitizeSenderName,
+  truncateUtf16Units,
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
@@ -66,16 +68,24 @@ interface DingTalkRichTextPart {
   atName?: string;
 }
 
+interface DingTalkMessageContent {
+  text?: string;
+  richText?: DingTalkRichTextPart[];
+  downloadCode?: string;
+  fileName?: string;
+  recognition?: string;
+  title?: string;
+  summary?: string;
+  chatRecord?: unknown;
+  records?: unknown;
+  messages?: unknown;
+}
+
 interface DingTalkRepliedMsg {
   msgId?: string;
   msgType?: string;
   senderId?: string;
-  content?: {
-    text?: string;
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-  };
+  content?: DingTalkMessageContent;
 }
 
 interface DingTalkAtUser {
@@ -107,11 +117,455 @@ interface DingTalkMessageData {
     text?: { content?: string };
     msgtype?: string;
   };
-  content?: {
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-    recognition?: string;
+  content?: DingTalkMessageContent;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function parseJsonArray(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Neutralize a field lifted out of a forwarded chat record before it is joined
+ * into the prompt.
+ *
+ * Record content is multi-author third-party text: the forwarder is an allowed
+ * user, but the authors inside the record are not. `ChannelBase` applies
+ * `sanitizePromptText` only when `envelope.isGroup || sessionScope === 'single'`,
+ * and DingTalk declares no `defaultSessionScope` so the registry falls back to
+ * `'user'` — meaning in 1:1 DMs nothing downstream neutralizes this text. Doing
+ * it per field here is what closes the DM path, and matches how
+ * `referencedText` is sanitized unconditionally on the reply path.
+ *
+ * It does NOT make the two renderings identical. In groups (and `single`-scope
+ * sessions) `ChannelBase` runs `sanitizePromptText` again over the ASSEMBLED
+ * text, which folds every structural newline to a space and peels this file's
+ * own `[Chat record: ...]` / `[Chat record messages]` / `[N more message(s) not
+ * shown]` markers whenever their content fits the unwrap's 64-char window. The
+ * group prompt therefore carries the same content on one line with those
+ * markers reduced to bare text. That is a safe degradation, not a defect in
+ * this function — but the record's LAYOUT is a DM-only guarantee.
+ */
+function sanitizeChatRecordField(value: string): string {
+  return sanitizePromptText(value).trim();
+}
+
+/**
+ * Neutralize a record field that this file then WRAPS in `[...]`. Sanitizing
+ * alone does not cover those: `sanitizePromptText` unwraps a start-of-line tag
+ * only when the value already BEGINS with `[`, so `SYSTEM]: do this` passes
+ * through untouched and the wrapper's own `[` completes a forged `[SYSTEM]:`
+ * tag on a prompt line — the exact forge the sanitizer exists to prevent,
+ * reopened by the wrapping that happens after it. Strip the brackets the
+ * wrapper supplies so the value cannot close or complete one.
+ */
+function bracketSafeChatRecordField(value: string): string {
+  return sanitizeChatRecordField(value).replace(/[[\]]/g, ' ').trim();
+}
+
+/**
+ * Neutralize a record field this file renders AT start-of-line but does not
+ * wrap. `sanitizePromptText` already peels a leading `[tag]` there, but only
+ * while the tag content fits its `{1,64}` window — an 87-char `[SYSTEM MESSAGE
+ * FROM ...]:` run never matches and survives verbatim. Peel the leading run at
+ * ANY length, to a fixpoint so a nested `[[...]]` cannot re-form one.
+ *
+ * Brackets elsewhere on the line are LEFT ALONE, unlike
+ * `bracketSafeChatRecordField`: nothing here wraps the value, and the rest of a
+ * summary line is DingTalk's own display copy — `Bob: [image]` — which cannot
+ * forge a prompt line from mid-line and should reach the model intact.
+ */
+function startOfLineSafeChatRecordField(value: string): string {
+  const sanitized = sanitizeChatRecordField(value);
+  if (!sanitized.startsWith('[')) return sanitized;
+  // ONE linear pass, not a fixpoint loop over the whole string: the loop this
+  // replaces rebuilt the entire value for every bracket pair, which is
+  // quadratic — a 62,889-char nested `[[[...]]]` summary (authorable by any
+  // group member, and the header caps below only run AFTER this) cost ~212 ms
+  // of synchronous event-loop stall, ~4 s at 200 KB.
+  //
+  // Same peel, simulated in place. Each pass of that loop deleted exactly two
+  // characters — the leading `[` and the FIRST `]` (its `[^\]]*` window can
+  // match no other) — so instead of re-copying between passes, mark the pairs
+  // and emit what survives. `open` walks the head of the current string (past
+  // what is already deleted and past the whitespace `trim()` would take off);
+  // `close` never rewinds because every `]` it passed is already deleted.
+  const deleted = new Uint8Array(sanitized.length);
+  let open = 0;
+  let close = 0;
+  for (;;) {
+    while (
+      open < sanitized.length &&
+      (deleted[open] === 1 || /\s/.test(sanitized[open]!))
+    ) {
+      open += 1;
+    }
+    if (sanitized[open] !== '[') break;
+    let next = Math.max(close, open + 1);
+    while (
+      next < sanitized.length &&
+      (deleted[next] === 1 || sanitized[next] !== ']')
+    ) {
+      next += 1;
+    }
+    if (next >= sanitized.length) {
+      // No `]` to pair with: delete the `[` anyway. Keeping it is what lets
+      // `capChatRecordLines`' ` [truncated]` marker (appended past 500 units)
+      // supply the closing bracket and complete a third-party bracket span at
+      // start-of-line.
+      deleted[open] = 1;
+      open += 1;
+      // A failed scan proves no live `]` remains anywhere past this point,
+      // and later scans only start further right: latch the end so the next
+      // head `[` does not rescan the tail -- that made a run of unpaired `[`
+      // quadratic (R11-1) in the pass this function promises is linear.
+      close = next;
+      continue;
+    }
+    deleted[open] = 1;
+    deleted[next] = 1;
+    open += 1;
+    close = next + 1;
+  }
+  const parts: string[] = [];
+  let cut = 0;
+  for (let i = 0; i < sanitized.length; i++) {
+    if (deleted[i] === 0) continue;
+    if (i > cut) parts.push(sanitized.slice(cut, i));
+    cut = i + 1;
+  }
+  parts.push(sanitized.slice(cut));
+  return parts.join('').trim();
+}
+
+/**
+ * Bounds on how much of a forwarded record is joined into the prompt. A merge
+ * forward can carry an entire group's history, and unbounded it displaces the
+ * user's actual request in the model's context window. Truncation is
+ * ANNOUNCED: a tail the model cannot see is worse than one it can account for.
+ */
+const MAX_CHAT_RECORD_ENTRIES = 50;
+const MAX_CHAT_RECORD_CHARS = 4000;
+const MAX_CHAT_RECORD_LINE_CHARS = 500;
+/**
+ * The budget a record gets on the REPLY leg. `ChannelBase` renders
+ * `envelope.referencedText` through `sanitizeQuotedText(..., 500)`, which cuts
+ * at 500 code points unconditionally — so a record rendered to the 4000-char
+ * budget arrives with everything past the header gone and, worse, its own
+ * `[N more message(s) not shown]` announcement cut off with it, leaving a bare
+ * `…`. Render to the transport's budget instead, so the announcement lands
+ * INSIDE the quote. `sanitizeQuotedText` only substitutes characters (brackets
+ * and newlines become spaces), so a text within this budget is never cut.
+ */
+const MAX_QUOTED_CHAT_RECORD_CHARS = 500;
+const CHAT_RECORD_ENTRIES_LABEL = '[Chat record messages]';
+const CHAT_RECORD_HEADER_LEAD = (title: string) => `[Chat record: ${title}] `;
+/** `parts.join('\n\n')`. */
+const CHAT_RECORD_PART_GAP = 2;
+
+function announcedDrop(count: number): string {
+  return `[${count} more message(s) not shown]`;
+}
+
+/**
+ * What the announcement costs a budget worst case: its own text plus the `\n`
+ * that joins it to the last kept line. `lines.length` bounds the drop count, so
+ * the real announcement is never longer than the one measured here.
+ */
+function chatRecordAnnouncementCost(lines: string[]): number {
+  return lines.length > 0 ? announcedDrop(lines.length).length + 1 : 0;
+}
+
+/**
+ * @param budget Hard ceiling, in UTF-16 units, on everything returned —
+ *   announcement included. UTF-16 length is an upper bound on code-point
+ *   count, so a caller measuring in code points (the quote leg) is safe.
+ */
+function capChatRecordLines(lines: string[], budget: number): string[] {
+  const kept: string[] = [];
+  let dropped = 0;
+  let total = 0;
+  // Reserve the announcement up front rather than appending it over the top of
+  // a full budget: on the quote leg the budget is small enough that the
+  // overshoot is what the transport cuts, which loses exactly the sentence
+  // telling the model the record is partial. `lines.length` bounds `dropped`,
+  // so the reservation is never short.
+  const spendable = budget - chatRecordAnnouncementCost(lines);
+  // Below its own announcement there is nothing this function can say inside
+  // the budget, and saying it anyway is what overflows onto the transport's
+  // cut. Callers reserve the announcement (`chatRecordAnnouncementCost`), so
+  // this is a floor, not a path.
+  if (spendable < 0) return [];
+  // Both caps STOP at the first line they reject rather than skipping it and
+  // trying the next: the announcement below reads as a tail cut, so letting a
+  // later shorter line slip past the size cap would drop messages out of the
+  // MIDDLE of the record while telling the model the missing ones are the last
+  // ones — positional reasoning over the transcript then silently skips a
+  // message the model believes it has. Stopping also means no line past the cut
+  // is measured or truncated, the waste the entry cap was already ordered to
+  // avoid.
+  for (const [index, line] of lines.entries()) {
+    if (kept.length >= MAX_CHAT_RECORD_ENTRIES) {
+      dropped = lines.length - index;
+      break;
+    }
+    // Slice in UTF-16 UNITS, on code-point boundaries: `total` below, the
+    // caller's `spent`, and `chatRecordAnnouncementCost` all measure `.length`,
+    // so a code-point cap would let an astral-heavy line claim up to 2x the
+    // units it was budgeted, while cutting mid-surrogate-pair would emit a lone
+    // surrogate into the prompt. `truncateUtf16Units` returns the input
+    // untouched when it already fits, so the length test is its own fast path.
+    const boundedRaw = truncateUtf16Units(line, MAX_CHAT_RECORD_LINE_CHARS);
+    const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
+    // No first-line exemption: with the per-line cap at 500 the first line
+    // always fits the 4000 budget anyway, so the exemption only ever fired on
+    // the quote leg's budget — where keeping a line the transport then cuts is
+    // exactly the silent truncation this block exists to prevent.
+    if (total + bounded.length > spendable) {
+      dropped = lines.length - index;
+      break;
+    }
+    kept.push(bounded);
+    total += bounded.length + 1;
+  }
+  if (dropped > 0) kept.push(announcedDrop(dropped));
+  return kept;
+}
+
+/**
+ * The placeholder shown for a message whose body is not text. Shared by the
+ * record-entry and reply-quote paths so the two cannot drift — they already had
+ * (different `file` handling, different empty fallback), which described the
+ * same message type two ways to the model depending on how it arrived. Callers
+ * supply their own fallback for an absent/unknown msgType.
+ */
+function mediaTypePlaceholder(
+  msgType: string | undefined,
+  fileName?: unknown,
+): string | undefined {
+  switch (msgType) {
+    case 'picture':
+      return '[image]';
+    case 'file': {
+      // `fileName` is record content, i.e. third-party authored, and it lands
+      // inside a bracket wrapper — same treatment as every other such field.
+      const name = bracketSafeChatRecordField(nonEmptyString(fileName) || '');
+      return `[file: ${name || 'file'}]`;
+    }
+    case 'audio':
+      return '[audio]';
+    case 'video':
+      return '[video]';
+    default:
+      return undefined;
+  }
+}
+
+function formatChatRecordEntryBody(record: Record<string, unknown>): string {
+  const rawContent = record['content'];
+  const content =
+    rawContent && typeof rawContent === 'object'
+      ? (rawContent as Record<string, unknown>)
+      : undefined;
+  const body =
+    nonEmptyString(record['text']) ||
+    nonEmptyString(rawContent) ||
+    nonEmptyString(content?.['text']) ||
+    nonEmptyString(record['message']) ||
+    nonEmptyString(record['body']);
+  if (body) return sanitizeChatRecordField(body) || '[message]';
+
+  const msgType =
+    nonEmptyString(record['msgType']) || nonEmptyString(record['msgtype']);
+  const safeMsgType = msgType ? bracketSafeChatRecordField(msgType) : '';
+  return (
+    mediaTypePlaceholder(msgType, content?.['fileName']) ??
+    // Record-specific fallback: name the type when DingTalk sends one we do
+    // not model, so the model sees *something* arrived rather than a gap.
+    // The name is record content like every other field here, so it is
+    // neutralized before it goes inside the brackets.
+    (safeMsgType ? `[${safeMsgType}]` : '[message]')
+  );
+}
+
+/**
+ * The content keys that actually arrived on a chat-record payload, for the
+ * degraded-path diagnostic below. The payload shape is undocumented and
+ * varies — this file probes three entry field names and two encodings — so
+ * when DingTalk ships another variant the only thing that distinguishes "the
+ * bot cannot see forwarded messages" from a bug is knowing which keys were
+ * present.
+ */
+function describeChatRecordKeys(content?: DingTalkMessageContent): string {
+  if (!content || typeof content !== 'object') return 'none';
+  const keys = Object.keys(content as Record<string, unknown>);
+  return keys.length > 0 ? keys.join(',') : 'none';
+}
+
+/**
+ * The rendered record plus whether an entries key arrived but produced no
+ * lines. That case renders a non-empty title/summary, so the empty-record
+ * warning below never fires for it, yet every forwarded message is gone — the
+ * degradation `describeChatRecordKeys` exists to make diagnosable.
+ */
+interface FormattedChatRecord {
+  text: string;
+  entriesDropped: boolean;
+}
+
+function formatChatRecord(
+  content?: DingTalkMessageContent,
+  budget: number = MAX_CHAT_RECORD_CHARS,
+): FormattedChatRecord {
+  const title = nonEmptyString(content?.title);
+  const rawSummary = nonEmptyString(content?.summary);
+  const parsedSummary = parseJsonArray(rawSummary);
+  // Keep empty placeholder lines: `summaryLines` is positional and indexes
+  // into `entries` for sender recovery below, so filtering here would shift
+  // every later line onto the wrong entry — the exact misattribution the
+  // length guard exists to prevent. `summary` is the display copy and filters
+  // them; the two variables look redundant but are not. Start-of-line-safe
+  // rather than merely sanitized because the lines are joined with `\n` and
+  // rendered after a header, so every line after the first sits at start-of-
+  // line — the privileged prompt position — and the unwrap alone cannot defend
+  // it: its `{1,64}` content window can never match a longer bracketed run, so
+  // an 87-char `[SYSTEM MESSAGE FROM ...]:` tag survives verbatim.
+  const summaryLines: string[] = parsedSummary
+    ? parsedSummary.map(
+        (item) =>
+          startOfLineSafeChatRecordField(nonEmptyString(item) || '') || '',
+      )
+    : rawSummary
+        ?.split('\n')
+        .map((line) =>
+          startOfLineSafeChatRecordField(nonEmptyString(line) || ''),
+        ) || [];
+  const rawEntries =
+    content?.chatRecord ?? content?.records ?? content?.messages;
+  const entries = parseJsonArray(rawEntries);
+
+  const recordLines = Array.isArray(entries)
+    ? entries.flatMap((entry, index) => {
+        if (typeof entry === 'string') {
+          const body = nonEmptyString(entry);
+          if (!body) return [];
+          // Through the shared body pipeline, not a second copy of it: a
+          // string entry and an object entry carrying the same text must be
+          // described to the model the same way, including when the text
+          // sanitizes to nothing.
+          return [`Unknown: ${formatChatRecordEntryBody({ text: body })}`];
+        }
+        if (!entry || typeof entry !== 'object') return [];
+        const record = entry as Record<string, unknown>;
+        const summarySender =
+          summaryLines.length === entries.length
+            ? nonEmptyString(summaryLines[index]?.match(/^([^:：]+)[:：]/)?.[1])
+            : undefined;
+        const rawSender =
+          nonEmptyString(record['senderName']) ||
+          nonEmptyString(record['senderNick']) ||
+          nonEmptyString(record['sender']) ||
+          summarySender ||
+          nonEmptyString(record['senderId']);
+        // A sender lands at start-of-line immediately before `: `, the exact
+        // privileged position the `[tag]:` unwrap defends — so strip the
+        // brackets outright rather than relying on the unwrap alone.
+        const sender =
+          (rawSender && bracketSafeChatRecordField(rawSender)) || 'Unknown';
+        return [`${sender}: ${formatChatRecordEntryBody(record)}`];
+      })
+    : [];
+
+  // The header is record content too, and it was inside NO cap — per-line,
+  // total or code-point — while `capChatRecordLines` bounded only the entry
+  // lines: a 62,889-char `summary` reached the prompt intact, ~15x the total
+  // this function documents, displacing the user's own request. Spend one
+  // budget across header then entries, in render order, reserving what the
+  // entries need to announce their own cut.
+  const entriesFloor =
+    recordLines.length > 0
+      ? CHAT_RECORD_ENTRIES_LABEL.length +
+        1 +
+        chatRecordAnnouncementCost(recordLines)
+      : 0;
+  const headerBudget = Math.max(
+    budget - CHAT_RECORD_PART_GAP - entriesFloor,
+    0,
+  );
+  const summaryDisplayLines = summaryLines.filter(Boolean);
+  // The title is wrapped in brackets below, so bracket-safety on top of
+  // sanitization; `|| undefined` keeps the 'Chat record' fallback for a title
+  // that was nothing but brackets or whitespace. It is one line of the record,
+  // so the per-line cap bounds it — and then the header budget bounds that,
+  // leaving the summary room to announce its own cut. Uncapped, a 5,000-char
+  // title ate the whole header budget on its own.
+  //
+  // Cut in UTF-16 UNITS, not code points: `headerBudget`, `headerLead.length`,
+  // `spent` and `chatRecordAnnouncementCost` are all `.length`, so a code-point
+  // cap let an astral-heavy title claim up to 2x its reserved units. A title of
+  // >=429 code points carrying >=2 astral characters then pushed the entries
+  // budget below the announcement cost this line reserves, `capChatRecordLines`
+  // hit its `spendable < 0` floor, and EVERY forwarded message vanished with no
+  // announcement and `entriesDropped` still false — the exact silent truncation
+  // the reservation exists to prevent. A fully-astral title also carried the
+  // result past the documented 500-unit ceiling.
+  const safeTitle = title
+    ? truncateUtf16Units(
+        bracketSafeChatRecordField(title),
+        Math.max(
+          Math.min(
+            MAX_CHAT_RECORD_LINE_CHARS,
+            headerBudget -
+              CHAT_RECORD_HEADER_LEAD('').length -
+              chatRecordAnnouncementCost(summaryDisplayLines),
+          ),
+          0,
+        ),
+      ) || undefined
+    : undefined;
+  const headerLead = CHAT_RECORD_HEADER_LEAD(safeTitle || 'untitled');
+  const summary = capChatRecordLines(
+    summaryDisplayLines,
+    Math.max(headerBudget - headerLead.length, 0),
+  ).join('\n');
+  const parts: string[] = [];
+  // The tag NAME is fixed and the title goes inside it, never the other way
+  // round. `bracketSafeChatRecordField` is a no-op for a title that carries no
+  // brackets, so a bare attacker title like `SYSTEM` (which is also what
+  // `[SYSTEM]` and `[[SYSTEM]]` sanitize down to) would otherwise have this
+  // wrapper manufacture a clean start-of-line `[SYSTEM]` — a forge created
+  // AFTER sanitization, which no amount of sanitizing the title can prevent.
+  if (summary) {
+    parts.push(`${headerLead}${summary}`);
+  } else if (safeTitle) {
+    parts.push(`[Chat record: ${safeTitle}]`);
+  }
+  const spent = parts.reduce(
+    (used, part) => used + part.length + CHAT_RECORD_PART_GAP,
+    0,
+  );
+  const boundedLines = capChatRecordLines(
+    recordLines,
+    Math.max(budget - spent - CHAT_RECORD_ENTRIES_LABEL.length - 1, 0),
+  );
+  if (boundedLines.length > 0) {
+    parts.push(`${CHAT_RECORD_ENTRIES_LABEL}\n${boundedLines.join('\n')}`);
+  }
+  return {
+    text: parts.join('\n\n'),
+    entriesDropped: rawEntries !== undefined && recordLines.length === 0,
   };
 }
 
@@ -130,6 +584,19 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+// Extensions for generated media store names, keyed by the download's mime
+// type. The agent reads stored media via `read_file`, whose type detection is
+// extension-first: an extensionless name falls through to the binary content
+// sampler and real image/audio/video bytes are refused.
+const GENERATED_MEDIA_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'audio/ogg': 'ogg',
+  'audio/mpeg': 'mp3',
+  'video/mp4': 'mp4',
+};
 const mentionTarget = Symbol('mentionTarget');
 const IMAGE_INSTRUCTIONS = [
   '',
@@ -1376,6 +1843,11 @@ export class DingtalkChannel extends ChannelBase {
   private extractQuotedContext(data: DingTalkMessageData): {
     referencedText?: string;
     isReplyToBot: boolean;
+    media?: {
+      downloadCode: string;
+      mediaType: 'image' | 'file' | 'audio' | 'video';
+      fileName?: string;
+    };
   } {
     // Newer format: text.repliedMsg
     if (data.text?.isReplyMsg && data.text.repliedMsg) {
@@ -1386,7 +1858,21 @@ export class DingtalkChannel extends ChannelBase {
       // Note: DingTalk doesn't include content for interactiveCard replies
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
-      return { referencedText: text || undefined, isReplyToBot };
+      const downloadCode = replied.content?.downloadCode;
+      const mediaType = this.mediaTypeFromMsgType(replied.msgType);
+      return {
+        referencedText: text || undefined,
+        isReplyToBot,
+        ...(downloadCode && mediaType
+          ? {
+              media: {
+                downloadCode,
+                mediaType,
+                fileName: replied.content?.fileName,
+              },
+            }
+          : {}),
+      };
     }
 
     // Legacy format: quoteMessage
@@ -1402,8 +1888,40 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Build a text summary from a repliedMsg, handling text, richText, and
-   * media message types with placeholders.
+   * Warn once when a chat-record payload yields nothing to show the model.
+   * Both chat-record paths degrade silently otherwise — `parseJsonArray`
+   * swallows JSON errors, the top-level path falls back to `(chat record)`
+   * and the replied path to an empty quote — matching this file's convention
+   * of logging degraded paths (`onDownStream`, `onMessage`).
+   */
+  private warnEmptyChatRecord(content?: DingTalkMessageContent): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record had no readable content ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
+   * The partial degradation the empty-record warning cannot see: a title or
+   * summary rendered, so the result is non-empty, but the entries key that
+   * arrived produced no lines at all (an object encoding such as
+   * `{"list":[...]}`, a non-array, or a present-but-unusable first alias).
+   * Every forwarded message is dropped and the user reports only that "the bot
+   * cannot see forwarded messages"; without this line nothing in the log
+   * distinguishes that from model behaviour.
+   */
+  private warnUnreadableChatRecordEntries(
+    content?: DingTalkMessageContent,
+  ): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record summary rendered but no readable entries ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
+   * Build a text summary from a repliedMsg, handling text, richText, chat
+   * records, and media message types with placeholders.
    */
   private summarizeRepliedContent(replied: DingTalkRepliedMsg): string {
     const msgType = replied.msgType;
@@ -1431,32 +1949,52 @@ export class DingtalkChannel extends ChannelBase {
       if (summary) return summary;
     }
 
-    // Media type placeholders
-    switch (msgType) {
-      case 'picture':
-        return '[image]';
-      case 'file':
-        return `[file: ${content?.fileName || 'file'}]`;
-      case 'audio':
-        return '[audio]';
-      case 'video':
-        return '[video]';
-      default:
-        break;
+    if (msgType === 'chatRecord') {
+      // The quote budget, not the record budget: this text becomes
+      // `envelope.referencedText`, which `ChannelBase` renders through
+      // `sanitizeQuotedText(..., 500)`. Rendered to 4000 the quote arrives cut
+      // at 500 with a bare `…` — announcement and all — so the model is told
+      // nothing about what it is missing.
+      const { text, entriesDropped } = formatChatRecord(
+        content,
+        MAX_QUOTED_CHAT_RECORD_CHARS,
+      );
+      if (!text) this.warnEmptyChatRecord(content);
+      else if (entriesDropped) this.warnUnreadableChatRecordEntries(content);
+      return text;
     }
 
-    return '';
+    // Media type placeholders. Shared with the chat-record entry formatter so
+    // the same message type is never described two ways to the model.
+    return mediaTypePlaceholder(msgType, content?.fileName) ?? '';
+  }
+
+  /**
+   * Map a DingTalk message type to the media type used for downloads. Shared
+   * by the direct-media (`extractContent`) and quoted-media
+   * (`extractQuotedContext`) paths so the mapping cannot drift between them.
+   */
+  private mediaTypeFromMsgType(
+    msgType: string | undefined,
+  ): 'image' | 'file' | 'audio' | 'video' | undefined {
+    if (msgType === 'picture') return 'image';
+    if (msgType === 'file' || msgType === 'audio' || msgType === 'video') {
+      return msgType;
+    }
+    return undefined;
   }
 
   /**
    * Extract text and media download codes from an incoming DingTalk message.
-   * Handles text, richText, picture, file, audio, and video message types.
+   * Handles text, richText, chat records, picture, file, audio, and video
+   * message types.
    */
   private extractContent(data: DingTalkMessageData): {
     text: string;
     downloadCodes: string[];
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
+    placeholder?: string;
   } {
     const msgtype = data.msgtype || 'text';
 
@@ -1487,18 +2025,20 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: '(image)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'image',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
       };
     }
 
     if (msgtype === 'file') {
       const code = data.content?.downloadCode;
       const fileName = data.content?.fileName || undefined;
+      const placeholder = `(file: ${fileName || 'file'})`;
       return {
-        text: `(file: ${fileName || 'file'})`,
+        text: placeholder,
         downloadCodes: code ? [code] : [],
-        mediaType: 'file',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
+        placeholder,
       };
     }
 
@@ -1508,7 +2048,8 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: recognition || '(audio)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'audio',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
+        placeholder: recognition ? undefined : '(audio)',
       };
     }
 
@@ -1517,7 +2058,19 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: '(video)',
         downloadCodes: code ? [code] : [],
-        mediaType: 'video',
+        mediaType: this.mediaTypeFromMsgType(msgtype),
+        placeholder: '(video)',
+      };
+    }
+
+    if (msgtype === 'chatRecord') {
+      const { text, entriesDropped } = formatChatRecord(data.content);
+      if (!text) this.warnEmptyChatRecord(data.content);
+      else if (entriesDropped)
+        this.warnUnreadableChatRecordEntries(data.content);
+      return {
+        text: text || '(chat record)',
+        downloadCodes: [],
       };
     }
 
@@ -1528,12 +2081,20 @@ export class DingtalkChannel extends ChannelBase {
   /**
    * Download a media file and attach it to the envelope.
    * Images → base64 in envelope; files → saved to temp dir with path in text.
+   *
+   * `cleanPlaceholderText` is the placeholder `extractContent` generated for
+   * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
+   * direct-media call site has one, and only that call may erase it: on the
+   * quoted-media path `envelope.text` is the user's own reply, and a reply
+   * that happens to read exactly like a placeholder must survive (a group
+   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
    */
   private async attachMedia(
     envelope: Envelope,
     downloadCode: string,
     mediaType: 'image' | 'file' | 'audio' | 'video',
     fileName?: string,
+    cleanPlaceholderText?: string,
   ): Promise<void> {
     let token: string;
     try {
@@ -1555,7 +2116,16 @@ export class DingtalkChannel extends ChannelBase {
     const media = await downloadMedia(downloadCode, robotCode, token);
     if (!media) return;
 
-    if (mediaType === 'image') {
+    // ChannelBase fills a single imageBase64 slot from the FIRST data-only
+    // image attachment and silently drops every later one, so an image
+    // arriving after the slot is taken (e.g. a quoted picture alongside the
+    // message's own picture) falls through to the file-backed path — the
+    // `saved to:` prompt line is what keeps it reachable for the agent.
+    const inlineImageSlotFree = !(envelope.attachments || []).some(
+      (attachment) => attachment.type === 'image' && attachment.data,
+    );
+
+    if (mediaType === 'image' && inlineImageSlotFree) {
       const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
@@ -1568,19 +2138,52 @@ export class DingtalkChannel extends ChannelBase {
         },
       ];
     } else {
-      // Save non-image files to temp dir so the agent can read them
-      const dir = join(tmpdir(), 'channel-files', randomUUID());
-      mkdirSync(dir, { recursive: true });
-      const safeName =
-        basename(fileName || '') || `dingtalk_${mediaType}_${Date.now()}`;
-      const filePath = join(dir, safeName);
-      writeFileSync(filePath, media.buffer);
+      // Save the media to temp dir so the agent can read it.
+      //
+      // R1-2: these are synchronous throw sites — ENOSPC on a write of up to
+      // 50 MB, ENAMETOOLONG from a quoted fileName over 255 bytes (`basename`
+      // does not truncate), a TypeError from a truthy non-string fileName. An
+      // escape rejects `processMessage`, whose catch sends the generic error
+      // reply and never calls `handleInbound`; the msgId is already in
+      // `seenMessages`, so DingTalk's retry is deduped and the user's prompt
+      // is lost for good. Degrade the way a failed download already does:
+      // skip the attachment, keep the text.
+      let dir: string | undefined;
+      let filePath: string;
+      let safeName: string;
+      try {
+        dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true });
+        safeName =
+          basename(typeof fileName === 'string' ? fileName : '') ||
+          `dingtalk_${mediaType}_${Date.now()}.${
+            GENERATED_MEDIA_EXT[media.mimeType] ?? 'bin'
+          }`;
+        filePath = join(dir, safeName);
+        writeFileSync(filePath, media.buffer);
+      } catch (error) {
+        // The store directory (and any partial file) is useless without the
+        // attachment — remove it so failed stores do not accumulate in tmpdir.
+        if (dir) {
+          try {
+            rmSync(dir, { recursive: true, force: true });
+          } catch {
+            // Best effort; the degraded delivery below is the contract.
+          }
+        }
+        process.stderr.write(
+          `[DingTalk:${this.name}] Cannot store media, delivering the text without it: ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        return;
+      }
 
-      // Clean up placeholder text like "(audio)", "(video)", "(file: name)"
+      // Clean up the placeholder this message's own media produced.
       if (
-        envelope.text === `(file: ${fileName || 'file'})` ||
-        envelope.text === '(audio)' ||
-        envelope.text === '(video)'
+        cleanPlaceholderText !== undefined &&
+        envelope.text === cleanPlaceholderText
       ) {
         envelope.text = '';
       }
@@ -1745,6 +2348,15 @@ export class DingtalkChannel extends ChannelBase {
             content.downloadCodes[0]!,
             content.mediaType,
             content.fileName,
+            content.placeholder,
+          );
+        }
+        if (quoted.media) {
+          await this.attachMedia(
+            envelope,
+            quoted.media.downloadCode,
+            quoted.media.mediaType,
+            quoted.media.fileName,
           );
         }
         await this.handleInbound(envelope);
