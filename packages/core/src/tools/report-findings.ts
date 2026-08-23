@@ -28,7 +28,7 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { hasControlCharacter } from './record-artifact.js';
 
 // These enum spellings have two other deliberate copies: the findings
-// artifact (`packages/cli/src/utils/findings.ts`, which re-exports these) and
+// artifact (`packages/cli/src/commands/review/findings.ts`, which re-exports these) and
 // the Web Shell renderer (`CodeReviewArtifactDetail.tsx`, a browser bundle
 // that must not import Node-side packages and fails closed on unknown
 // values). A value added here must be added to the renderer copy in the same

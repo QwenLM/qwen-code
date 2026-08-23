@@ -26,7 +26,7 @@ characters, rejects control characters and duplicate ids, and — mirroring
 result is a `findings_list` structured `returnDisplay`.
 
 The finding enums now live in core (`tools/report-findings.ts`);
-`packages/cli/src/utils/findings.ts` re-exports them under its historical
+`packages/cli/src/commands/review/findings.ts` re-exports them under its historical
 names. The Web Shell renderer keeps its deliberate browser-side copy.
 
 The `/review` skill calls the tool once after writing the findings artifact

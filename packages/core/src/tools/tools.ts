@@ -811,7 +811,7 @@ export interface DiffStat {
  * One review finding as the `report_findings` tool hands it to clients.
  *
  * Field names and enum spellings deliberately match the `qwen review
- * findings` artifact (`packages/cli/src/utils/findings.ts`) so the model
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
  * copies values straight out of the artifact instead of translating them —
  * a translation layer between two spellings of the same list is where
  * severities have historically drifted.
