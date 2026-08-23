@@ -480,6 +480,121 @@ describe('useAcpTranscript', () => {
     });
   });
 
+  it('drops a stale untagged streamEnd while a tagged stream is active', () => {
+    act(() => {
+      postToWebview({
+        type: 'streamStart',
+        data: { timestamp: Date.now(), requestId: 'req-1' },
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'first half '),
+      });
+    });
+
+    // A foreign/stale turn-end (e.g. the abandoned previous request's
+    // streamEnd) arrives mid-stream; finalizing here would split the
+    // in-flight answer into two assistant blocks.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'user_cancelled' },
+      });
+    });
+
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first half ',
+      streaming: true,
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'second half'),
+      });
+    });
+
+    // The reply stays in a single block instead of rendering split.
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first half second half',
+      streaming: true,
+    });
+
+    // The matching tagged streamEnd still finalizes the turn.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn', requestId: 'req-1' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: false });
+  });
+
+  it('drops a streamEnd tagged for a different request while a tagged stream is active', () => {
+    act(() => {
+      postToWebview({
+        type: 'streamStart',
+        data: { timestamp: Date.now(), requestId: 'req-2' },
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'answer'),
+      });
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn', requestId: 'req-1' },
+      });
+    });
+
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+  });
+
+  it('ignores background-notification end-turns so they do not finalize the live turn', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'streaming'),
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+
+    // Background-task completion posts an end-turn (untagged, with the
+    // background_notification source) while the interactive turn streams.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: {
+          timestamp: Date.now(),
+          reason: 'end_turn',
+          source: 'background_notification',
+        },
+      });
+    });
+
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+
+    // The live turn still finalizes on its own untagged end-turn when no
+    // tagged stream is active.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: false });
+  });
+
   it('does not seed the transcript when qwenSessionSwitched carries no messages field', () => {
     const errors: Event[] = [];
     const onError = (event: Event) => {
