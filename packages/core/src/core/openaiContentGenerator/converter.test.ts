@@ -2630,6 +2630,125 @@ describe('OpenAIContentConverter', () => {
       expect(stream.postDemotionReplayText).toBe('<thinking>x</thinking>Ok');
     });
 
+    it('absorbs post-finish redelivered tool-call fragments without failing the completed turn (issue #9348)', () => {
+      // The finish-state gate used to clear parts/visibleText only AFTER
+      // the channels ran: a redelivered id-less arguments-continuation
+      // fragment reached toolCallParser.addChunk pre-gate, found every
+      // buffer complete, and allocated a NEW nameless index via
+      // findMostRecentIncompleteIndex(); the redelivered finish chunk then
+      // threw MALFORMED_TOOL_CALL on a turn the finish response had already
+      // closed. The post-finish skip keeps redelivered deltas out of the
+      // parser entirely, so the redelivered finish converts against the
+      // pristine pre-finish parser state.
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tool-call', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{"path":"/tmp/x"}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+      expect(stream.finishChunkConverted).toBe(true);
+      const finishParts = finish.candidates?.[0]?.content?.parts ?? [];
+      expect(finishParts).toEqual([
+        {
+          functionCall: {
+            id: 'call_read',
+            name: 'read_file',
+            args: { path: '/tmp/x' },
+          },
+        },
+      ]);
+
+      // Redelivered id-less arguments fragment: dropped before the parser.
+      const redeliveredArgs = converter.convertOpenAIChunkToGemini(
+        streamChunk('redelivered-args', {
+          tool_calls: [{ index: 0, function: { arguments: '"}' } }],
+        }),
+        stream,
+      );
+      expect(redeliveredArgs.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.toolCallParser?.hasNamelessToolCall()).toBe(false);
+
+      // Redelivered finish: no MALFORMED_TOOL_CALL, same function call.
+      const redeliveredFinish = converter.convertOpenAIChunkToGemini(
+        streamChunk('redelivered-finish', {}, 'tool_calls'),
+        stream,
+      );
+      expect(redeliveredFinish.candidates?.[0]?.content?.parts).toEqual(
+        finishParts,
+      );
+      expect(stream.toolCallParser?.hasNamelessToolCall()).toBe(false);
+    });
+
+    it('keeps thoughtsTokenCount at pre-finish values when reasoning deltas are redelivered after finish (issue #9348)', () => {
+      // Redelivered reasoning deltas used to pass the normalizer verbatim
+      // pre-gate and re-add estimateTextTokenUnits to emittedTokenUnits; a
+      // redelivered usage chunk then computed thoughtsTokenCount from the
+      // inflated counter and the pipeline merged it into the already-yielded
+      // finish response. The post-finish skip keeps redelivered reasoning
+      // out of the counter, so redelivered usage repeats the pre-finish
+      // estimate.
+      const stream = withStreamParser();
+      for (const piece of ['Let me ', 'think ', 'hard.']) {
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(`reasoning-${piece}`, { reasoning_content: piece }),
+          stream,
+        );
+      }
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      const usage = {
+        prompt_tokens: 10,
+        completion_tokens: 10000,
+        total_tokens: 10010,
+      };
+      const original = converter.convertOpenAIChunkToGemini(
+        {
+          id: 'usage-1',
+          created: 1,
+          model: 'test',
+          choices: [],
+          usage,
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        stream,
+      );
+      const originalThoughts = original.usageMetadata?.thoughtsTokenCount ?? 0;
+      expect(originalThoughts).toBeGreaterThan(0);
+
+      for (const piece of ['Let me ', 'think ', 'hard.']) {
+        const redelivered = converter.convertOpenAIChunkToGemini(
+          streamChunk(`redelivered-${piece}`, { reasoning_content: piece }),
+          stream,
+        );
+        expect(redelivered.candidates?.[0]?.content?.parts).toEqual([]);
+      }
+      const redeliveredUsage = converter.convertOpenAIChunkToGemini(
+        {
+          id: 'usage-2',
+          created: 1,
+          model: 'test',
+          choices: [],
+          usage,
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        stream,
+      );
+      expect(redeliveredUsage.usageMetadata?.thoughtsTokenCount).toBe(
+        originalThoughts,
+      );
+    });
+
     it('releases a held tag-like tail once it resolves into ordinary text after a demotion (issue #9348)', () => {
       // The hold must not swallow or corrupt ordinary text: a held suffix
       // that turns out not to be a tag is emitted verbatim and the turn

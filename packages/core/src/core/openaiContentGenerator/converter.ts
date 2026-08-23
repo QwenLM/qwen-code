@@ -1560,13 +1560,28 @@ export function convertOpenAIChunkToGemini(
     // superset strip further down).
     let tagHoldVerbatimEmission = false;
 
+    // Post-finish redelivery must not mutate channel state. The finish-state
+    // gate further down clears this chunk's parts/visibleText, but every
+    // channel runs before it: a redelivered id-less tool-call arguments
+    // fragment would find all buffers complete, allocate a NEW nameless
+    // parser index via findMostRecentIncompleteIndex(), and make the
+    // redelivered finish chunk throw MALFORMED_TOOL_CALL on a completed
+    // turn; redelivered reasoning deltas pass the normalizer verbatim and
+    // re-add estimateTextTokenUnits to emittedTokenUnits, inflating the
+    // thoughtsTokenCount a redelivered usage chunk merges into the
+    // already-yielded finish response. Skip the reasoning/content/tool-call
+    // accumulation entirely once the finish chunk was converted; the
+    // chunk.usage assembly below still runs, so a redelivered usage chunk is
+    // absorbed with the pre-finish counter values (issue #9348).
+    const postFinishRedelivery = requestContext.finishChunkConverted === true;
+
     // Handle reasoning content (thoughts).
     const reasoningText =
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
 
     // Handle text content
-    if (typeof choice.delta?.content === 'string') {
+    if (typeof choice.delta?.content === 'string' && !postFinishRedelivery) {
       const contentDeltaState = (requestContext.textDeltaState ??= {
         emittedText: '',
         emittedLength: 0,
@@ -1611,7 +1626,7 @@ export function convertOpenAIChunkToGemini(
           Boolean(choice.finish_reason),
         );
       }
-    } else if (choice.finish_reason) {
+    } else if (choice.finish_reason && !postFinishRedelivery) {
       // Flush any buffered tagged-thinking content on stream end
       contentParts = convertOpenAITextToParts('', requestContext, true);
     }
@@ -1633,6 +1648,7 @@ export function convertOpenAIChunkToGemini(
 
     if (
       reasoningText &&
+      !postFinishRedelivery &&
       (!requestContext.responseParsingOptions?.taggedThinkingTags ||
         !requestContext.hasTaggedThinkingThought)
     ) {
@@ -1711,7 +1727,7 @@ export function convertOpenAIChunkToGemini(
     parts.push(...contentParts);
 
     // Handle tool calls using the stream-local parser
-    if (choice.delta?.tool_calls) {
+    if (choice.delta?.tool_calls && !postFinishRedelivery) {
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
 
@@ -1760,7 +1776,11 @@ export function convertOpenAIChunkToGemini(
     // text at all — either shape surviving into the pipeline trips the
     // pendingFinishProtocolTagSanitized latch ('Model response continued
     // after a finish reason.', PROTOCOL_TAG_LEAK) on sanitized turns,
-    // hard-failing the completed turn this gate exists to protect.
+    // hard-failing the completed turn this gate exists to protect. The
+    // postFinishRedelivery skip at the top of this function keeps the
+    // reasoning/content/tool-call channels from mutating parser state or
+    // the token counter before this gate runs; the gate remains the
+    // backstop that clears whatever the guard-zone flushes still produced.
     if (requestContext.finishChunkConverted === true) {
       parts = [];
       visibleText = '';
