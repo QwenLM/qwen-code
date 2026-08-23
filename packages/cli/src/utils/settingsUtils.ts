@@ -253,12 +253,54 @@ export function validateSettingValue(
 }
 
 /**
- * Get all setting keys that should be shown in the dialog, sorted by display order
+ * Settings that can grant sensitive or costly capabilities must never be
+ * honored from Workspace scope.
+ *
+ * This is the ONE list. It drives the Workspace strip
+ * (`stripWorkspaceRestrictedSettings`), the warning that tells the user their
+ * workspace value was ignored, and the settings dialog's scope filter — so
+ * adding a restricted setting is a single edit here, and the three surfaces
+ * cannot drift apart. Previously each was hand-maintained: forgetting the
+ * warning discarded a workspace value silently, and forgetting the strip
+ * honored a value the warning said was ignored.
+ *
+ * It lives here, not in `settings.ts`: that module already value-imports
+ * this one, so defining it there and importing it back would close a
+ * runtime import cycle.
  */
-export function getDialogSettingKeys(): string[] {
+export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'tools', key: 'workflowsEnabled' },
+  { section: 'security', key: 'allowPrivateNetworkHooks' },
+  { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
+] as const satisfies ReadonlyArray<{
+  readonly section: keyof Settings;
+  readonly key: string;
+}>;
+
+/** The restricted settings as flattened dotted keys, e.g. `tools.workflowsEnabled`. */
+export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
+  WORKSPACE_RESTRICTED_SETTINGS.map(({ section, key }) => `${section}.${key}`);
+
+/**
+ * Get all setting keys that should be shown in the dialog, sorted by display order.
+ *
+ * `excludeWorkspaceRestricted` drops the settings that are stripped before the
+ * merge — the caller passes it when the dialog's selected scope is Workspace,
+ * where offering them would only write a dead entry into the repo's settings
+ * file. The scope comparison stays with the caller so this module keeps its
+ * type-only dependency on `settings.ts`.
+ */
+export function getDialogSettingKeys(options?: {
+  excludeWorkspaceRestricted?: boolean;
+}): string[] {
   const dialogSettings = Object.values(getFlattenedSchema())
     .filter((definition) => definition.showInDialog === true)
-    .map((definition) => definition.key);
+    .map((definition) => definition.key)
+    .filter(
+      (key) =>
+        !options?.excludeWorkspaceRestricted ||
+        !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key),
+    );
 
   // Sort by explicit order; settings not in the order array appear at the end
   return dialogSettings.sort((a, b) => {

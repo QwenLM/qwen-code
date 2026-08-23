@@ -1553,6 +1553,25 @@ export class AgentCore {
     );
   }
 
+  /**
+   * Whether the model can actually invoke a skill: declared AND executable.
+   *
+   * Takes the declaration set rather than reading one, so the caller passes
+   * the list it just sent to the model and no second copy exists. A named
+   * method rather than an inline closure so a test can read the ANSWER — a
+   * test that only checks the two inputs separately stays green when the gate
+   * stops combining them, which is how the first version of these tests
+   * missed both mutations.
+   */
+  private canInvokeSkill(
+    declaredToolNames: ReadonlySet<string | undefined>,
+  ): boolean {
+    return (
+      declaredToolNames.has(ToolNames.SKILL) &&
+      this.isToolExecutionAllowed(ToolNames.SKILL)
+    );
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
     if (this.executionAllowedTools === undefined) {
       return true;
@@ -1807,6 +1826,10 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
+      // `declaredToolNames` is the batch's own list, computed above from the
+      // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
+      // for why the registry cannot answer this and what the predicate owes.
+      hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
