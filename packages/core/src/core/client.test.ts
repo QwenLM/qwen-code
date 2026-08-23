@@ -47,6 +47,7 @@ import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import {
   CompressionStatus,
+  createDuplicateProviderToolCallResponse,
   GeminiEventType,
   Turn,
   type ServerGeminiStreamEvent,
@@ -8042,6 +8043,124 @@ hello
       expect(
         (loopEvent?.value as { loopType?: string } | undefined)?.loopType,
       ).toBe('consecutive_identical_tool_calls');
+    });
+
+    // Variant of runTaskListPollTurns where one mid-streak poll arrives as
+    // a cross-round replay of an already-handled call id: useGeminiStream
+    // suppresses the execution and submits the fabricated duplicate error
+    // back as a ToolResult message (executionStatus 'not_started' — never
+    // executed). Streams also yield Finished events so the round-trip
+    // boundary decay runs between rounds, exactly as in production. The
+    // synthetic response must be excluded from the result-aware recording —
+    // the daemon twin filters the same class (issue #9450 requirement #6).
+    async function runReplayedHandledIdPollTurns(
+      board: (round: number) => string,
+      maxRounds = 9,
+    ) {
+      const promptId = 'prompt-task-list-replay-poll';
+      const taskListArgs = { status: 'in_progress', owner: 'peer-a' };
+      const replayRound = 3; // streams a replay of the handled id 'tl-1'
+      const allEvents: Array<{ type: string; value?: unknown }> = [];
+      const request = (callId: string, name: string, args: object) => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+      });
+      for (let round = 0; round <= maxRounds; round++) {
+        const taskListCallId = round === replayRound ? 'tl-1' : `tl-${round}`;
+        mockTurnRunFn.mockReturnValueOnce(
+          (async function* () {
+            yield request(taskListCallId, 'task_list', taskListArgs);
+            yield request(`other-${round}`, 'tool_b', { step: round });
+            yield { type: GeminiEventType.Finished };
+          })(),
+        );
+        let contents: object[];
+        if (round === 0) {
+          contents = [{ text: 'poll the board' }];
+        } else if (round - 1 === replayRound) {
+          // The replayed call never executed: its ToolResult is the
+          // fabricated duplicate error useGeminiStream submits back.
+          const synthetic = createDuplicateProviderToolCallResponse({
+            callId: 'tl-1',
+            name: 'task_list',
+            args: taskListArgs,
+          } as never);
+          contents = [
+            synthetic.responseParts[0],
+            {
+              functionResponse: {
+                id: `other-${round - 1}`,
+                name: 'tool_b',
+                response: { output: `step ${round - 1}` },
+              },
+            },
+          ];
+        } else {
+          contents = [
+            {
+              functionResponse: {
+                id: `tl-${round - 1}`,
+                name: 'task_list',
+                response: { output: board(round - 1) },
+              },
+            },
+            {
+              functionResponse: {
+                id: `other-${round - 1}`,
+                name: 'tool_b',
+                response: { output: `step ${round - 1}` },
+              },
+            },
+          ];
+        }
+        const events = await fromAsync(
+          client.sendMessageStream(
+            contents as never,
+            new AbortController().signal,
+            promptId,
+            {
+              type:
+                round === 0
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+            },
+          ),
+        );
+        allEvents.push(...(events as Array<{ type: string; value?: unknown }>));
+        if (
+          allEvents.some((e) => e.type === GeminiEventType.LoopDetected) ||
+          !events.some((e) => e.type === GeminiEventType.ToolCallRequest)
+        ) {
+          return allEvents;
+        }
+      }
+      return allEvents;
+    }
+
+    it('still halts a frozen board when one poll arrives as a replayed handled id (#9450)', async () => {
+      const events = await runReplayedHandledIdPollTurns(() => 'frozen board');
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      // The replay's fabricated error never executed: it must not pair with
+      // the replayed request as a "changed" result. With it excluded, the
+      // six frozen boards record consecutively across the replay round and
+      // trip the result-time global-duplicate count; with it recorded (the
+      // pre-fix behavior) the streak restarts and no halt lands in budget.
+      expect(loopEvent).toBeDefined();
+      expect(
+        (loopEvent?.value as { loopType?: string } | undefined)?.loopType,
+      ).toBe('global_tool_call_duplicate');
+      // The halt lands at the sixth recorded frozen board — the seventh
+      // ToolResult turn — before that turn's model stream runs: 7 streams
+      // (rounds 0-6) out of the 10 the harness would otherwise consume.
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(7);
     });
 
     it('feeds the loop guards one event per call id per attempt, re-feeding after retries (#9450)', async () => {

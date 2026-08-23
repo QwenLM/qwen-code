@@ -70,6 +70,7 @@ import {
 import {
   CompressionStatus,
   GeminiEventType,
+  isDuplicateProviderToolCallResponse,
   Turn,
   type ChatCompressionInfo,
   type ServerGeminiStreamEvent,
@@ -3370,6 +3371,19 @@ export class GeminiClient {
           }
           const functionResponseId = (part as Part).functionResponse?.id;
           if (!functionResponseId) continue;
+          // Synthetic duplicate responses (cross-round replays of
+          // already-handled call ids, suppressed by useGeminiStream) never
+          // executed, so they carry no result evidence. Recording one would
+          // pair the fabricated error with the replayed request and reset
+          // the guards' streaks as a "changed" result, disarming every
+          // result-aware halt — the daemon twin excludes this class via its
+          // providerDuplicate / not_started filter (issue #9450).
+          if (isDuplicateProviderToolCallResponse(part as Part)) {
+            this.loopDetector.noteSuppressedToolCallByCallId(
+              functionResponseId,
+            );
+            continue;
+          }
           if (
             this.loopDetector.recordToolResultByCallId(functionResponseId, [
               part as Part,
