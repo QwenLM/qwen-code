@@ -77,6 +77,30 @@ export interface PeerControlFrame {
 
 export type PeerFrame = PeerUserFrame | PeerControlFrame;
 
+/**
+ * Accepted shape of a `msgId` on the wire.
+ *
+ * An id is also the handle the user types into `/peers` to decide a held
+ * message: `/peers` tokenizes input on whitespace and prints dash-stripped
+ * handles, so an id with whitespace has no typable handle and an id that
+ * dash-strips to nothing renders an empty one. Either defeats per-message
+ * review — with a benign-plus-malicious pair, the user who wants the
+ * benign message is forced into `accept all`, releasing the malicious one
+ * unreviewed. `buildUserFrame` emits `randomUUID`, which always passes.
+ */
+const MSG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * The one handle form every id comparison and display uses: dashes
+ * stripped, case folded. `/peers` resolution prints and matches handles in
+ * this form, so the gate's duplicate guard must compare ids in it too —
+ * two ids that canonicalize alike would otherwise both park while showing
+ * the identical handle, undecidable individually.
+ */
+export function canonicalizeMsgId(msgId: string): string {
+  return msgId.replace(/-/g, '').toLowerCase();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -105,7 +129,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
   if (typeof msgV !== 'number' || msgV > PEER_FRAME_VERSION) return null;
 
   const msgId = parsed['msgId'];
-  if (typeof msgId !== 'string' || msgId.length === 0) return null;
+  if (typeof msgId !== 'string' || !MSG_ID_RE.test(msgId)) return null;
 
   if (parsed['type'] === 'user') {
     const message = parsed['message'];

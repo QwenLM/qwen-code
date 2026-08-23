@@ -6794,7 +6794,9 @@ describe('AppContainer State Management', () => {
     it('queues the envelope as the model text and the summary as the projection', () => {
       // Swapping these silently strips the attribution and the authority
       // notice from what the model reads, while the transcript and the
-      // recording still look right.
+      // recording still look right. Deferred until idle (second argument):
+      // the mid-turn steer drain returns raw text only, which would record
+      // and display the envelope itself as the user's own prompt.
       const addMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         removeGoalTurns: vi.fn().mockReturnValue([]),
@@ -6815,7 +6817,7 @@ describe('AppContainer State Management', () => {
 
       expect(addMessage).toHaveBeenCalledWith(
         '<cross_session_message …>envelope</…>',
-        false,
+        true,
         'one-liner',
       );
     });

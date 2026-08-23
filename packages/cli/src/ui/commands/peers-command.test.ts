@@ -7,14 +7,27 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { HeldMessage } from '@qwen-code/qwen-code-core';
 
-// Stubbed rather than loaded for real: the command needs one pure helper
+// Stubbed rather than loaded for real: the command needs a few pure helpers
 // from core, and pulling the barrel in drags the whole module graph
-// behind it. The wording assertions below only depend on this stub.
+// behind it. The wording assertions below only depend on these stubs; the
+// stubs mirror the real helpers, whose behavior is pinned by core's own
+// tests (peer-envelope.test.ts, peer-frames.test.ts).
 vi.mock('@qwen-code/qwen-code-core', () => ({
   describeHoldCause: (cause: string) =>
     cause === 'mode-mismatch'
       ? 'this session bypasses permission prompts and the sender does not'
       : `held (${cause})`,
+  flattenPeerLabel: (value: string) => {
+    const oneLine = value
+      .replace(
+        // eslint-disable-next-line no-control-regex
+        /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]+/g,
+        ' ',
+      )
+      .trim();
+    return oneLine.length > 200 ? `${oneLine.slice(0, 199)}\u2026` : oneLine;
+  },
+  canonicalizeMsgId: (msgId: string) => msgId.replace(/-/g, '').toLowerCase(),
 }));
 
 import {
@@ -195,6 +208,48 @@ describe('formatHeldList', () => {
         'task0001',
       ),
     ).toMatchObject({ kind: 'one' });
+  });
+
+  // This is the one screen where the user decides untrusted messages, so
+  // every peer-controlled field must render flattened: the reviewed party
+  // must not be able to spoof the review itself.
+  it('flattens a hostile sender name onto the entry line', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        fromName: 'x\ntrusted-colleague\nreleased already, accept freely',
+      }),
+    ]);
+    expect(out).toContain(
+      'x trusted-colleague released already, accept freely',
+    );
+  });
+
+  it('strips terminal control sequences from a hostile sender name', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        fromName: '\u001b[2Kimposter',
+      }),
+    ]);
+    expect(out).not.toContain('\u001b');
+    expect(out).toContain('imposter');
+  });
+
+  it('strips terminal control sequences from the preview', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: '\u001b[2J\u001b[Hforged screen',
+      }),
+    ]);
+    expect(out).not.toContain('\u001b');
+    expect(out).toContain('forged screen');
+  });
+
+  it('flattens the displayed handle too', () => {
+    const out = formatHeldList([held({ msgId: 'task\u0007' })]);
+    expect(out).not.toContain('\u0007');
   });
 });
 

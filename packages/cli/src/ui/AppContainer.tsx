@@ -2417,12 +2417,16 @@ export const AppContainer = (props: AppContainerProps) => {
   // typed input. First argument is the model-bound text and must stay the
   // full envelope — it carries the attribution and the authority notice;
   // the one-line form rides along as the submitted-prompt projection (what
-  // hooks and the recording see), never as the model's copy.
+  // hooks and the recording see), never as the model's copy. Deferred
+  // until idle: the mid-turn steer drain returns raw text only, so a
+  // drained peer message would be recorded and displayed as the envelope
+  // itself — the user's own prompt apparently wrapped in an authority
+  // notice — with the projection lost for good.
   const peerMessaging = usePeerMessaging();
   useEffect(() => {
     if (!peerMessaging) return;
     peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      addMessage(modelText, false, displayText);
+      addMessage(modelText, true, displayText);
     });
   }, [addMessage, peerMessaging]);
 

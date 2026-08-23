@@ -159,6 +159,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'first prompt\n\nsecond prompt',
       turnKey: firstPeek,
+      submittedPrompt: 'first prompt\n\nsecond prompt',
     });
     expect(result.current.messageQueue).toEqual(['/help']);
     expect(queue.peekNextUserBatchKey!()).toBeUndefined();
@@ -232,6 +233,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'user goes first',
       turnKey: userTurnKey,
+      submittedPrompt: 'user goes first',
     });
     expect(result.current.pendingSubmissionCount).toBe(1);
     let claimedGoal;
@@ -568,7 +570,10 @@ describe('useMessageQueue', () => {
       });
     });
 
-    it('omits submittedPrompt when any message lacks one', () => {
+    it('falls back to each message\u2019s own text when it lacks a projection', () => {
+      // Dropping the batch projection because ONE member lacks its own used
+      // to surface a peer message's raw envelope as the user's prompt; a
+      // projection-less member is its own text, so fall back per member.
       const { result } = renderHook(() => useMessageQueue());
       act(() => {
         result.current.addMessage('msg A', false, 'prompt A');
@@ -583,8 +588,31 @@ describe('useMessageQueue', () => {
       expect(popped).toMatchObject({
         kind: 'user',
         modelText: 'msg A\n\nmsg B',
+        submittedPrompt: 'prompt A\n\nmsg B',
       });
-      expect(popped!.submittedPrompt).toBeUndefined();
+    });
+
+    it('keeps a peer message\u2019s projection when batched with unprojected input', () => {
+      // The model-bound text is the full envelope; the one-liner projection
+      // is what the transcript and the recording may show instead of it.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('typed follow-up');
+        result.current.addMessage(
+          '<cross_session_message from="/tmp/a.sock">hi</cross_session_message>',
+          false,
+          'Message from another session (app-ab): hi',
+        );
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped!.submittedPrompt).toBe(
+        'typed follow-up\n\nMessage from another session (app-ab): hi',
+      );
     });
   });
 
@@ -614,6 +642,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'queued user',
       turnKey: reservedKey,
+      submittedPrompt: 'queued user',
     });
   });
 
@@ -869,7 +898,10 @@ describe('useMessageQueue', () => {
       });
     });
 
-    it('drops submittedPrompt provenance when restoring multiple messages', () => {
+    it('reconstructs the projection from the restored texts when restoring multiple messages', () => {
+      // The single original prompt cannot be attributed across several
+      // restored messages, so it is dropped; the per-member fallback then
+      // reconstructs a projection equal to the restored texts.
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -884,8 +916,8 @@ describe('useMessageQueue', () => {
       expect(popped).toMatchObject({
         kind: 'user',
         modelText: 'first\n\nsecond',
+        submittedPrompt: 'first\n\nsecond',
       });
-      expect(popped!.submittedPrompt).toBeUndefined();
     });
   });
 });

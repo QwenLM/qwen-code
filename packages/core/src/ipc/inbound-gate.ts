@@ -42,7 +42,7 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
-import type { PeerUserFrame } from './peer-frames.js';
+import { canonicalizeMsgId, type PeerUserFrame } from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_INBOUND');
 
@@ -214,12 +214,14 @@ export class InboundGate {
     // body behind an id the user has already been shown — and two entries
     // sharing an id can never be decided individually, because `/peers`
     // rejects an id that matches more than one message. Repeat the
-    // verdict and keep exactly one entry per id. Case-insensitive to
-    // match `/peers` resolution: a case-variant clone is the same handle.
+    // verdict and keep exactly one entry per id. Compared in the same
+    // canonical form `/peers` prints and resolves — dashes stripped, case
+    // folded — so a case- or dash-variant clone is the same handle.
     if (
       this.held.some(
         (entry) =>
-          entry.frame.msgId.toLowerCase() === frame.msgId.toLowerCase(),
+          canonicalizeMsgId(entry.frame.msgId) ===
+          canonicalizeMsgId(frame.msgId),
       )
     ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);

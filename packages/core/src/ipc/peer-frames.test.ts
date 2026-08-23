@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildDeliveryStatusFrame,
   buildUserFrame,
+  canonicalizeMsgId,
   describeDeliveryStatus,
   encodePeerFrame,
   parsePeerFrame,
@@ -103,6 +104,42 @@ describe('parsePeerFrame — user frames', () => {
     expect(parsePeerFrame(line(input))).toBeNull();
   });
 
+  // /peers tokenizes user input on whitespace and prints dash-stripped
+  // handles, so an id that contains whitespace or reduces to nothing has
+  // no typable handle: one such message defeats per-message review, and
+  // a benign-plus-malicious pair forces an `accept all` that releases the
+  // malicious entry unreviewed.
+  it.each([
+    ['a leading-whitespace msgId', { ...validUser, msgId: ' urgent' }],
+    ['an NBSP-prefixed msgId', { ...validUser, msgId: '\u00a0urgent' }],
+    [
+      'an internal-whitespace msgId',
+      { ...validUser, msgId: 'task0001 benign update' },
+    ],
+    ['a trailing-whitespace msgId', { ...validUser, msgId: 'abc ' }],
+    ['a dash-only msgId', { ...validUser, msgId: '---' }],
+    ['an overlong msgId', { ...validUser, msgId: 'a'.repeat(65) }],
+    [
+      'a msgId outside the handle charset',
+      { ...validUser, msgId: 'task/0001' },
+    ],
+  ])('rejects %s so every held id stays typeable', (_label, input) => {
+    expect(parsePeerFrame(line(input))).toBeNull();
+  });
+
+  it('accepts the id shape legitimate senders produce', () => {
+    const frame = buildUserFrame({ content: 'hi' });
+    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toMatchObject({
+      msgId: frame.msgId,
+    });
+    expect(
+      parsePeerFrame(line({ ...validUser, msgId: 'Task-0001' })),
+    ).not.toBeNull();
+    expect(
+      parsePeerFrame(line({ ...validUser, msgId: 'a'.repeat(64) })),
+    ).not.toBeNull();
+  });
+
   it('rejects a frame from a newer protocol rather than guessing', () => {
     expect(
       parsePeerFrame(line({ ...validUser, msgV: PEER_FRAME_VERSION + 1 })),
@@ -132,8 +169,16 @@ describe('parsePeerFrame — control frames', () => {
     ['an unknown action', { ...validControl, action: 'reboot' }],
     ['an unknown status', { ...validControl, status: 'maybe' }],
     ['a missing origMsgId', { ...validControl, origMsgId: undefined }],
+    ['a whitespace-bearing msgId', { ...validControl, msgId: 'has space' }],
   ])('rejects a control frame with %s', (_label, input) => {
     expect(parsePeerFrame(line(input))).toBeNull();
+  });
+});
+
+describe('canonicalizeMsgId', () => {
+  it('is the equivalence /peers resolution and the gate dedupe share', () => {
+    expect(canonicalizeMsgId('Task-0001')).toBe(canonicalizeMsgId('task0001'));
+    expect(canonicalizeMsgId('ABCDEF')).toBe('abcdef');
   });
 });
 

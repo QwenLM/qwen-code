@@ -358,8 +358,10 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
-  // the merge; warn so the user knows their workspace setting has no effect.
+  // security.allowPrivateNetworkHooks, security.allowedInsecureVoiceBaseUrls
+  // and the agents.crossSession* keys are stripped from Workspace scope
+  // during the merge; warn so the user knows their workspace setting has no
+  // effect.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (
     workspaceFile.rawJson !== undefined &&
@@ -377,6 +379,22 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   ) {
     warningSet.add(
       `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.agents?.crossSessionMessaging !== undefined
+  ) {
+    warningSet.add(
+      `Warning: agents.crossSessionMessaging in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.agents?.crossSessionInbound !== undefined
+  ) {
+    warningSet.add(
+      `Warning: agents.crossSessionInbound in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
     );
   }
 
@@ -408,24 +426,45 @@ function tagMcpServerScope(
 }
 
 /**
- * Network security bypasses must never be honored from Workspace scope —
- * otherwise a malicious repository could self-grant access to private
- * infrastructure. Strip them from workspace settings before merging.
- * Returns a shallow copy — never mutates input.
+ * Security-posture settings that must never be honored from Workspace
+ * scope — otherwise a malicious repository could self-grant access to
+ * private infrastructure, or open the cross-session peer channel for
+ * itself and force an inbound policy that overrides the user's own.
+ * Strip them from workspace settings before merging. Returns a shallow
+ * copy — never mutates input.
  */
 function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
+  let next = settings;
+
+  const security = next.security;
   if (
-    settings.security?.allowPrivateNetworkHooks === undefined &&
-    settings.security?.allowedInsecureVoiceBaseUrls === undefined
+    security &&
+    (security.allowPrivateNetworkHooks !== undefined ||
+      security.allowedInsecureVoiceBaseUrls !== undefined)
   ) {
-    return settings;
+    const {
+      allowPrivateNetworkHooks: _privateHooks,
+      allowedInsecureVoiceBaseUrls: _insecureVoice,
+      ...restSecurity
+    } = security;
+    next = { ...next, security: restSecurity };
   }
-  const {
-    allowPrivateNetworkHooks: _privateHooks,
-    allowedInsecureVoiceBaseUrls: _insecureVoice,
-    ...restSecurity
-  } = settings.security;
-  return { ...settings, security: restSecurity };
+
+  const agents = next.agents;
+  if (
+    agents &&
+    (agents.crossSessionMessaging !== undefined ||
+      agents.crossSessionInbound !== undefined)
+  ) {
+    const {
+      crossSessionMessaging: _crossSessionMessaging,
+      crossSessionInbound: _crossSessionInbound,
+      ...restAgents
+    } = agents;
+    next = { ...next, agents: restAgents };
+  }
+
+  return next;
 }
 
 function mergeSettings(

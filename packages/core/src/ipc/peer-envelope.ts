@@ -27,15 +27,22 @@
 const CROSS_SESSION_TAG = 'cross_session_message';
 
 /**
- * Matches the opening/closing delimiter token, including whitespace
- * around the optional slash (`< /tag>` is a closer too), while a negative
- * lookahead on identifier-continuation characters leaves near-misses
- * (`<cross_session_messages>`) intact. An allowlist of followers cannot
- * work here: the character after a peer-written token is peer-chosen, so
- * anything not explicitly allowed would slip through raw.
+ * Matches the opening/closing delimiter token, tolerating any run of
+ * whitespace and slashes between the bracket and the tag name (`</tag>`,
+ * `< /tag>`, `<//tag>`, `</ /tag>` all read as delimiters), while a
+ * negative lookahead on identifier-continuation characters leaves
+ * near-misses (`<cross_session_messages>`) intact. An allowlist of
+ * followers cannot work here: the character after a peer-written token is
+ * peer-chosen, so anything not explicitly allowed would slip through raw.
+ *
+ * The separator is one character class, not adjacent unbounded groups: a
+ * long whitespace run after `<` that never spells the tag would otherwise
+ * be split between the groups in quadratically many ways and stall the
+ * event loop for minutes at the 1 MiB frame cap — synchronously, at admit
+ * time, with no user interaction.
  */
 const CROSS_SESSION_TAG_RE = new RegExp(
-  `<(\\s*\\/?\\s*${CROSS_SESSION_TAG})(?![A-Za-z0-9_-])`,
+  `<([\\s/]*${CROSS_SESSION_TAG})(?![A-Za-z0-9_-])`,
   'gi',
 );
 
@@ -79,12 +86,17 @@ const MAX_ATTRIBUTE_CHARS = 200;
  * the middle of the opening tag, which is the exact confusion the envelope
  * exists to prevent. Control characters go with them — an ESC sequence in
  * a peer's name is a terminal-rewriting trick once it reaches the
- * transcript.
+ * transcript. Invisible format characters (zero-width spaces, bidi
+ * overrides and the like) complete the set: they render as nothing while
+ * letting a label read differently than it compares.
  */
 export function flattenPeerLabel(value: string): string {
   const oneLine = value
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(
+      // eslint-disable-next-line no-control-regex
+      /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]+/g,
+      ' ',
+    )
     .trim();
   return oneLine.length > MAX_ATTRIBUTE_CHARS
     ? `${oneLine.slice(0, MAX_ATTRIBUTE_CHARS - 1)}\u2026`

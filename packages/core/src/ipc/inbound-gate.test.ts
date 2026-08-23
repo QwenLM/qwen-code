@@ -247,6 +247,29 @@ describe('duplicate msgId', () => {
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
   });
+
+  it('treats a dash-variant id as the same message', () => {
+    // /peers prints and resolves ids with dashes stripped, so 'task-0001'
+    // and 'task0001' render the identical handle: parking both would make
+    // neither individually decidable, and only accept-all/deny-all could
+    // reach them.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const first = frame({
+      msgId: 'task-0001',
+      message: { role: 'user', content: 'benign' },
+    });
+    const clone = {
+      ...first,
+      msgId: 'task0001',
+      message: { role: 'user' as const, content: 'malicious' },
+    };
+
+    expect(h.gate.admit(first)).toBe('held');
+    expect(h.gate.admit(clone)).toBe('held');
+
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+  });
 });
 
 describe('a transport that throws', () => {

@@ -14,7 +14,12 @@
  * to send would be the wrong trade.
  */
 
-import { describeHoldCause, type HeldMessage } from '@qwen-code/qwen-code-core';
+import {
+  canonicalizeMsgId,
+  describeHoldCause,
+  flattenPeerLabel,
+  type HeldMessage,
+} from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind } from './types.js';
@@ -24,12 +29,8 @@ export function shortId(msgId: string): string {
   return msgId.replace(/-/g, '').slice(0, 6);
 }
 
-function dashStripped(msgId: string): string {
-  return msgId.replace(/-/g, '');
-}
-
 /**
- * The shortest dash-stripped prefix that distinguishes this id from every
+ * The shortest canonicalized prefix that distinguishes this id from every
  * other held id, at least the short handle long. The list must print a
  * handle the user can type back to decide exactly this message: two ids
  * sharing their first six characters would otherwise be a dead end only
@@ -39,15 +40,13 @@ function displayHandle(
   entry: HeldMessage,
   held: readonly HeldMessage[],
 ): string {
-  const own = dashStripped(entry.frame.msgId).toLowerCase();
+  const own = canonicalizeMsgId(entry.frame.msgId);
   let length = Math.min(shortId(entry.frame.msgId).length, own.length);
   const collides = (len: number) =>
     held.some(
       (other) =>
         other !== entry &&
-        dashStripped(other.frame.msgId)
-          .toLowerCase()
-          .startsWith(own.slice(0, len)),
+        canonicalizeMsgId(other.frame.msgId).startsWith(own.slice(0, len)),
     );
   while (length < own.length && collides(length)) {
     length += 1;
@@ -56,7 +55,7 @@ function displayHandle(
 }
 
 function preview(text: string, max = 100): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const oneLine = flattenPeerLabel(text).replace(/\s+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
@@ -64,9 +63,15 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
-    const who = entry.frame.fromName ?? entry.frame.from ?? 'unknown session';
+    // Every field below is peer-controlled, and this is the screen where
+    // the user decides untrusted messages: a forged listing line or a
+    // terminal-rewriting ESC sequence here spoofs the review itself.
+    const who = flattenPeerLabel(
+      entry.frame.fromName ?? entry.frame.from ?? 'unknown session',
+    );
+    const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
-      `  ${displayHandle(entry, held)}  ${who}\n` +
+      `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
       `      held because ${describeHoldCause(entry.cause)}`
     );
@@ -93,19 +98,20 @@ export function resolveHeld(
 ): { kind: 'one'; msgId: string } | { kind: 'none' } | { kind: 'ambiguous' } {
   // Lowercased on both sides: a peer picks its own msgId, so the handle
   // printed by /peers can contain uppercase, and a handle the user
-  // cannot retype is a dead end. Dash-stripped on both sides for the
-  // same reason: the printed handles have no dashes.
+  // cannot retype is a dead end. Canonicalized (dashes stripped) on both
+  // sides for the same reason: the printed handles have no dashes.
   const needle = token.toLowerCase();
-  const stripped = (msgId: string) => dashStripped(msgId).toLowerCase();
 
   // An exact match wins outright: it is what lets the user pick the
-  // shorter of two ids where one dash-stripped id extends the other.
-  const exact = held.filter((entry) => stripped(entry.frame.msgId) === needle);
+  // shorter of two ids where one canonicalized id extends the other.
+  const exact = held.filter(
+    (entry) => canonicalizeMsgId(entry.frame.msgId) === needle,
+  );
   if (exact.length === 1) return { kind: 'one', msgId: exact[0]!.frame.msgId };
 
   const matches = held.filter(
     (entry) =>
-      stripped(entry.frame.msgId).startsWith(needle) ||
+      canonicalizeMsgId(entry.frame.msgId).startsWith(needle) ||
       entry.frame.msgId.toLowerCase().startsWith(needle),
   );
   if (matches.length === 0) return { kind: 'none' };

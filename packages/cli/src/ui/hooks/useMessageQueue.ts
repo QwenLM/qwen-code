@@ -74,17 +74,18 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  const submittedPrompts = messages.map((message) => message.submittedPrompt);
+  // Every member contributes a projection — its own when it has one, its
+  // model text otherwise — so a single projection-less member cannot drop
+  // a peer message's one-liner and surface the raw envelope as the
+  // user's prompt instead.
+  const submittedPrompt = messages
+    .map((message) => message.submittedPrompt ?? message.text)
+    .join('\n\n');
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    ...(submittedPrompts.every(
-      (submittedPrompt): submittedPrompt is string =>
-        submittedPrompt !== undefined,
-    )
-      ? { submittedPrompt: submittedPrompts.join('\n\n') }
-      : {}),
+    submittedPrompt,
   };
 }
 
