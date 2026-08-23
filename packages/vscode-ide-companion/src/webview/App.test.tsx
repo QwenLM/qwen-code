@@ -1077,4 +1077,49 @@ describe('App /skills secondary picker', () => {
       consoleErrorSpy.mockRestore();
     }
   });
+
+  it('feeds reduced transcript blocks from transcriptUpdate messages into the WebShell transcript', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    expect(mockWebShellTranscriptProps.current).not.toBeNull();
+    const blocksBefore = JSON.stringify(
+      mockWebShellTranscriptProps.current!.blocks,
+    );
+
+    // The extension forwards every ACP session/update notification as a
+    // `transcriptUpdate` webview message; useAcpTranscript reduces it and
+    // App passes the resulting blocks to the renderer.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'timeline-block-content' },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    expect(mockWebShellTranscriptProps.current).not.toBeNull();
+    const blocks = mockWebShellTranscriptProps.current!.blocks;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect((blocks as unknown[]).length).toBeGreaterThan(0);
+    expect(JSON.stringify(blocks)).toContain('timeline-block-content');
+    // The prop must change because of the message, proving the reduced
+    // blocks are actually wired through rather than a static prop.
+    expect(JSON.stringify(blocks)).not.toBe(blocksBefore);
+  });
 });
