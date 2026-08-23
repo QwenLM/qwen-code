@@ -61,7 +61,7 @@
     "src/serve/auth.test.ts",
     "src/serve/server.test.ts",
     "src/utils/cleanup.test.ts",
-    "src/utils/handleAutoUpdate.test.ts",
+    "src/ui/handleAutoUpdate.test.ts",
     "src/utils/startupWarnings.test.ts",
     "src/ui/App.test.tsx",
     "src/ui/commands/aboutCommand.test.ts",

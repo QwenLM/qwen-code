@@ -28,7 +28,7 @@ import {
   buildReport,
   type FindingsReport,
   validateFindings,
-} from '../../utils/findings.js';
+} from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';

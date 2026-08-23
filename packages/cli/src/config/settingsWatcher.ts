@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings, SettingScope } from './settings.js';
-import { getFlattenedSchema } from '../utils/settingsUtils.js';
+import { getFlattenedSchema } from './settingsUtils.js';
 
 const debugLogger = createDebugLogger('SETTINGS_WATCHER');
 

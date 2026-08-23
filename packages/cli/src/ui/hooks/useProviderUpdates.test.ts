@@ -26,9 +26,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
-vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
+vi.mock('../../config/settingsUtils.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../../utils/settingsUtils.js')>();
+    await importOriginal<typeof import('../../config/settingsUtils.js')>();
   return {
     ...actual,
     backupSettingsFile: vi.fn(),

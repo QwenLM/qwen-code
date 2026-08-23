@@ -8,6 +8,7 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
@@ -125,7 +126,6 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
-  type ReasoningEffort,
   type ResumedSessionData,
   type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
@@ -190,7 +190,7 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
-import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -260,7 +260,12 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
+  buildModelReasoningConfigOption,
+  buildModelReasoningConfigPreview,
   getModelConfiguration,
+  REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NAMES,
+  REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
@@ -272,6 +277,7 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -282,11 +288,11 @@ import {
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
-} from '../utils/languageUtils.js';
+} from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
-import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -423,16 +429,6 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
-const ACP_REASONING_EFFORT_DEFAULT = 'default';
-const ACP_REASONING_EFFORT_NONE = 'none';
-const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max',
-};
-
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -1329,6 +1325,7 @@ type QwenMcpServerConfig = {
   url?: string;
   headers?: Record<string, string>;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -2988,6 +2985,19 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   if (typeof cwd === 'string' && cwd.trim()) server.cwd = cwd.trim();
   const timeout = normalizeOptionalNumber(input['timeout']);
   if (timeout !== undefined) server.timeout = timeout;
+  const versionNegotiation = toMcpVersionNegotiation(
+    input['versionNegotiation'],
+  );
+  if (
+    input['versionNegotiation'] !== undefined &&
+    versionNegotiation === undefined
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'MCP versionNegotiation must be auto or legacy',
+    );
+  }
+  server.versionNegotiation = versionNegotiation;
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -3026,6 +3036,7 @@ function toStoredMcpServerConfig(
   const result: Record<string, unknown> = {};
   for (const key of [
     'timeout',
+    'versionNegotiation',
     'trust',
     'description',
     'includeTools',
@@ -3056,6 +3067,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       httpUrl: server['httpUrl'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -3075,6 +3087,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       url: server['url'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -3096,6 +3109,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       cwd: typeof server['cwd'] === 'string' ? server['cwd'] : undefined,
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -3110,6 +3124,12 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
     };
   }
   return undefined;
+}
+
+function toMcpVersionNegotiation(
+  value: unknown,
+): 'auto' | 'legacy' | undefined {
+  return value === 'auto' || value === 'legacy' ? value : undefined;
 }
 
 function redactSecretRecord(
@@ -6378,17 +6398,17 @@ class QwenAgent implements Agent {
             ? undefined
             : modelReasoning.efforts;
           const selected =
-            value === ACP_REASONING_EFFORT_NONE
-              ? ACP_REASONING_EFFORT_NONE
+            value === REASONING_EFFORT_NONE
+              ? REASONING_EFFORT_NONE
               : modelReasoning.toggleOnly
-                ? value === ACP_REASONING_EFFORT_DEFAULT
-                  ? ACP_REASONING_EFFORT_DEFAULT
+                ? value === REASONING_EFFORT_DEFAULT
+                  ? REASONING_EFFORT_DEFAULT
                   : undefined
                 : effortValues?.find((effort) => effort === value);
           if (!selected) {
             const choices = [
-              ACP_REASONING_EFFORT_NONE,
-              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+              REASONING_EFFORT_NONE,
+              ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
             ];
             throw RequestError.invalidParams(
               undefined,
@@ -6396,9 +6416,9 @@ class QwenAgent implements Agent {
             );
           }
           const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === ACP_REASONING_EFFORT_NONE) {
+          if (selected === REASONING_EFFORT_NONE) {
             generation.reasoning = false;
-          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+          } else if (selected === REASONING_EFFORT_DEFAULT) {
             generation.reasoning = undefined;
           } else {
             const current = generation.reasoning;
@@ -6410,13 +6430,13 @@ class QwenAgent implements Agent {
           break;
         }
         const effort =
-          value === ACP_REASONING_EFFORT_DEFAULT
+          value === REASONING_EFFORT_DEFAULT
             ? undefined
             : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+        if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
           throw RequestError.invalidParams(
             undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+            `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
           );
         }
         if (!applyReasoningEffort(session.getConfig(), effort)) {
@@ -7661,6 +7681,10 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
+        const configOptions =
+          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+            ? undefined
+            : buildModelReasoningConfigPreview(model.id);
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -7678,6 +7702,7 @@ class QwenAgent implements Agent {
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
+          ...(configOptions ? { configOptions } : {}),
         };
         provider.models.push(providerModel);
         if (isCurrent) provider.current = true;
@@ -7796,6 +7821,25 @@ class QwenAgent implements Agent {
         if (resolvedApiKey) {
           hasToken = true;
         }
+      }
+      // Keyless Vertex: a configured project selects the ADC path, but it is
+      // routing configuration, not evidence that a usable credential exists.
+      // Report indeterminate rather than a confirmed token and let the session
+      // boot settle it.
+      if (
+        !hasToken &&
+        authType === AuthType.USE_VERTEX_AI &&
+        hasVertexProjectConfigured()
+      ) {
+        return this.acpCell('auth', {
+          status: 'unknown',
+          hint: 'Vertex AI is configured for Application Default Credentials; whether they resolve is only known at session start.',
+          detail: {
+            source: String(authType),
+            hasToken: 'unknown' as const,
+            envVarCandidates: apiKeyVars,
+          },
+        });
       }
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
@@ -13610,70 +13654,32 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
-    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
-      ? {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue:
-            config.getContentGeneratorConfig().reasoning === false
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? ACP_REASONING_EFFORT_DEFAULT
-                : (modelReasoning.efforts.find(
-                    (effort) => effort === currentModelEffort,
-                  ) ?? modelReasoning.defaultEffort),
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_NONE,
-              name: 'Thinking off',
-              description: 'Disable thinking for this session',
-            },
-            ...(modelReasoning.toggleOnly
-              ? [
-                  {
-                    value: ACP_REASONING_EFFORT_DEFAULT,
-                    name: 'Thinking on',
-                    description: 'Use the model or provider thinking default',
-                  },
-                ]
-              : modelReasoning.efforts.map((effort) => ({
-                  value: effort,
-                  name: ACP_REASONING_EFFORT_NAMES[effort],
-                  description: 'Apply this effort to the next request',
-                }))),
-          ],
-          _meta: {
-            'qwenCode/reasoning': {
-              ...(modelReasoning.toggleOnly
-                ? { toggleOnly: true }
-                : { defaultEffort: modelReasoning.defaultEffort }),
-            },
-          },
-        }
-      : {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: 'How hard reasoning-capable models should think',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_DEFAULT,
-              name: 'Default',
-              description: 'Use the model or provider default',
-            },
-            ...REASONING_EFFORT_TIERS.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description:
-                'Providers map or clamp the requested tier for the active model',
-            })),
-          ],
-        };
+    const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
+      ? buildModelReasoningConfigOption(rawCurrentModelId, {
+          enabled: config.getContentGeneratorConfig().reasoning !== false,
+          effort: currentModelEffort,
+        })
+      : undefined) ?? {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      options: [
+        {
+          value: REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
 
     return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }
