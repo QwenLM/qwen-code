@@ -25,6 +25,7 @@ interface RunPresentation {
   statusContext?: ChannelOutputSegmentContext;
   projectionChain: Promise<void>;
   activeSegmentId?: string;
+  closingSegmentId?: string;
   senderPrefix?: string;
   senderRawPrefix?: string;
   cardDelivered?: { text: string; chatId: string; sessionId: string };
@@ -259,6 +260,11 @@ export class DingtalkInteractionPresenter {
     if (run.activeSegmentId === segmentId) {
       run.activeSegmentId = undefined;
     }
+    // R18-4: a close starting BEFORE the run terminalizes clears
+    // `activeSegmentId` synchronously, so the completion would capture
+    // `undefined` and never record the retained segment — remember which
+    // segment's content the display close owns instead.
+    run.closingSegmentId = segmentId;
     return this.enqueue(run, async () => {
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
@@ -427,9 +433,12 @@ export class DingtalkInteractionPresenter {
           );
           // R10-3: the card kept the active segment's content — a boundary
           // close still in flight must not deliver that segment again.
-          if (retained && activeSegmentId) {
+          // R18-4: when the close started first it already cleared
+          // `activeSegmentId`; the retained content is the segment it closed.
+          const retainedSegment = activeSegmentId ?? run.closingSegmentId;
+          if (retained && retainedSegment) {
             const entry = this.terminalReasons.get(runId);
-            if (entry) entry.retainedSegmentId = activeSegmentId;
+            if (entry) entry.retainedSegmentId = retainedSegment;
           }
         }
       }

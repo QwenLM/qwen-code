@@ -365,12 +365,16 @@ export class DingtalkChannel extends ChannelBase {
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   /**
    * R16-4: inbound message ids whose run actually got a status-card
-   * surface (registered correlation + card ensured). The apology gate keys
-   * on this per-run surface, not on the controller existing as a feature —
-   * an unregistered run renders no failure card, and the apology is the
-   * recipient's only feedback there.
+   * surface. R18-2: the record lands only once card creation is KNOWN to
+   * have succeeded — a failed creation leaves no surface to render the
+   * failure state, so suppressing the apology there silences the turn
+   * entirely. The apology gate keys on this per-run surface, not on the
+   * controller existing as a feature — an unregistered run renders no
+   * failure card, and the apology is the recipient's only feedback there.
    */
   private readonly cardSurfaceInboundMessages = new Map<string, true>();
+  /** R18-2: runId → inbound messageId, for the settled-surface record. */
+  private readonly cardRunMessages = new Map<string, string>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
 
@@ -443,6 +447,22 @@ export class DingtalkChannel extends ChannelBase {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
             );
+          },
+          onSurfaceSettled: (runId, ready) => {
+            const messageId = this.cardRunMessages.get(runId);
+            if (messageId === undefined) return;
+            if (ready) {
+              this.cardSurfaceInboundMessages.set(messageId, true);
+              while (this.cardSurfaceInboundMessages.size > 1000) {
+                const oldest = this.cardSurfaceInboundMessages
+                  .keys()
+                  .next().value;
+                if (oldest === undefined) break;
+                this.cardSurfaceInboundMessages.delete(oldest);
+              }
+            } else {
+              this.cardSurfaceInboundMessages.delete(messageId);
+            }
           },
         });
       }
@@ -913,14 +933,17 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     atUserId?: string,
-  ): Promise<boolean> {
+  ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
-      process.stderr.write(
-        `[DingTalk:${this.name}] No webhook for chatId ${chatId}, cannot send.\n`,
+      // R18-1: the file variant fails loudly on this same shape (R5-1);
+      // resolving here booked the turn successful while nothing was
+      // delivered — no response, no apology, no failure event. A DM whose
+      // payload lacks `conversationId` routes a chatId this map never holds.
+      throw new DingTalkDeliveryError(
+        'DingTalk sendMessage failed: no webhook for this chat',
       );
-      return false;
     }
 
     const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
@@ -992,7 +1015,6 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
     }
-    return true;
   }
 
   /**
@@ -1832,6 +1854,7 @@ export class DingtalkChannel extends ChannelBase {
       this.cardRunBySession.delete(sessionId);
       this.interactionPresenter?.terminalizeRun(cardRunId, 'cancelled');
       this.cardRuns.delete(cardRunId);
+      this.cardRunMessages.delete(cardRunId);
     }
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
@@ -1868,15 +1891,17 @@ export class DingtalkChannel extends ChannelBase {
           event.sessionId,
           inboundOwner.sender,
         );
-        this.interactionPresenter?.startStatusCard(event.runId);
-        if (this.statusCardController && event.messageId) {
-          this.cardSurfaceInboundMessages.set(event.messageId, true);
-          while (this.cardSurfaceInboundMessages.size > 1000) {
-            const oldest = this.cardSurfaceInboundMessages.keys().next().value;
+        // R18-2: correlate the run with its inbound message; the surface
+        // record itself lands only when card creation settles ready.
+        if (event.messageId) {
+          this.cardRunMessages.set(event.runId, event.messageId);
+          while (this.cardRunMessages.size > 1000) {
+            const oldest = this.cardRunMessages.keys().next().value;
             if (oldest === undefined) break;
-            this.cardSurfaceInboundMessages.delete(oldest);
+            this.cardRunMessages.delete(oldest);
           }
         }
+        this.interactionPresenter?.startStatusCard(event.runId);
       }
       return;
     }
@@ -1900,6 +1925,7 @@ export class DingtalkChannel extends ChannelBase {
           this.interactionPresenter?.terminalizeRun(event.runId, 'completed');
         }
         this.cardRuns.delete(event.runId);
+        this.cardRunMessages.delete(event.runId);
         if (this.cardRunBySession.get(event.sessionId) === event.runId) {
           this.cardRunBySession.delete(event.sessionId);
         }
@@ -2027,8 +2053,41 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.sessionMentionTargets.delete(sessionId);
-    this.pendingBoundaryFailures.delete(sessionId);
+    this.surfacePendingBoundaryFailure(chatId, sessionId);
     this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  /**
+   * R17-3: turns can end without reaching `onResponseComplete` — ChannelBase
+   * skips it for cancelled turns and empty final responses — so a recorded
+   * boundary failure was swept unheard there, and a close still in flight
+   * recorded after the sweep and poisoned the next turn. Drain the session's
+   * in-flight close, then surface whatever it recorded: the turn is already
+   * booked, so the apology the rethrow would otherwise have earned is sent
+   * best-effort instead.
+   */
+  private surfacePendingBoundaryFailure(
+    chatId: string,
+    sessionId: string,
+  ): void {
+    const surface = () => {
+      const failure = this.pendingBoundaryFailures.get(sessionId);
+      if (failure === undefined) return;
+      this.pendingBoundaryFailures.delete(sessionId);
+      process.stderr.write(
+        `[DingTalk:${this.name}] boundary failure after turn end: ${sanitizeLogText(
+          failure instanceof Error ? failure.message : String(failure),
+          300,
+        )}\n`,
+      );
+      void this.sendMessage(
+        chatId,
+        'Sorry, something went wrong processing your message.',
+      ).catch(() => {});
+    };
+    const close = this.boundaryClosesInFlight.get(sessionId);
+    if (close) void close.then(surface, surface);
+    else surface();
   }
 
   protected override async sendResponseMessage(
@@ -2048,13 +2107,19 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     prepared: PreparedDingTalkOutput,
     sessionId: string,
+    consumeMentionTarget = true,
   ): Promise<void> {
     // R7-4: residue-only output sanitizes to nothing — nothing to send.
     if (!prepared.text.trim() && prepared.files.length === 0) return;
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
-    if (atUserId) this.sessionMentionTargets.delete(sessionId);
+    // R17-2: only the final-answer deliveries consume the prompt's one-shot
+    // mention target — a mid-run boundary delivery that consumed it left the
+    // final answer shipping without the @ the channel promises.
+    if (atUserId && consumeMentionTarget) {
+      this.sessionMentionTargets.delete(sessionId);
+    }
     await this.deliverPreparedReply(chatId, prepared, atUserId);
   }
 
@@ -2096,6 +2161,10 @@ export class DingtalkChannel extends ChannelBase {
       throw boundaryFailure;
     }
     if (segment && this.interactionPresenter) {
+      // R17-1: the final segment's delivery copy has no boundary consumer —
+      // reclaim it, or every successful turn pins its raw text until the
+      // session dies.
+      this.deleteSegmentDeliveryText(sessionId, segment.segmentId);
       const prepared = await this.prepareOutgoingContent(text);
       // R2-5: deliver BEFORE the card finalizes. `closeOutput` bakes
       // `prepared.text` — receipts included — into a card `finalize` can no
@@ -2181,7 +2250,7 @@ export class DingtalkChannel extends ChannelBase {
       await close;
       return;
     }
-    this.segmentDeliveryText.get(sessionId)?.delete(segment.segmentId);
+    this.deleteSegmentDeliveryText(sessionId, segment.segmentId);
     await this.interactionPresenter.closeOutput(
       segment.segmentId,
       '',
@@ -2212,6 +2281,35 @@ export class DingtalkChannel extends ChannelBase {
         this.boundaryClosesInFlight.delete(sessionId);
       }
     });
+  }
+
+  /**
+   * R17-3/R18-3: the FIRST recorded failure stays the turn's verdict — a
+   * later display-close or fallback rejection must not displace the more
+   * specific delivery error it follows.
+   */
+  private recordPendingBoundaryFailure(
+    sessionId: string,
+    error: unknown,
+  ): void {
+    if (!this.pendingBoundaryFailures.has(sessionId)) {
+      this.pendingBoundaryFailures.set(sessionId, error);
+    }
+  }
+
+  /**
+   * R17-1: drop a segment's delivery copy, and the session entry once it
+   * empties — an empty per-session map per dead turn is the same unbounded
+   * retention at one level up.
+   */
+  private deleteSegmentDeliveryText(
+    sessionId: string,
+    segmentId: string,
+  ): void {
+    const segments = this.segmentDeliveryText.get(sessionId);
+    if (!segments) return;
+    segments.delete(segmentId);
+    if (segments.size === 0) this.segmentDeliveryText.delete(sessionId);
   }
 
   private logBoundaryCloseFailure(error: unknown): void {
@@ -2315,7 +2413,7 @@ export class DingtalkChannel extends ChannelBase {
         // and a rejection escaping there is swallowed by ChannelBase's
         // catch-and-log: the turn would book completed with the file and
         // the notice both lost.
-        this.pendingBoundaryFailures.set(sessionId, error);
+        this.recordPendingBoundaryFailure(sessionId, error);
         try {
           await presenter.closeOutput(segment.segmentId, '', reason, segment);
         } catch (closeError) {
@@ -2327,9 +2425,10 @@ export class DingtalkChannel extends ChannelBase {
       // throwable display-close and fallback awaits below — the same
       // masking hazard as the catch arm.
       if (deliveryError) {
-        this.pendingBoundaryFailures.set(sessionId, deliveryError);
+        this.recordPendingBoundaryFailure(sessionId, deliveryError);
       }
       let delivered = false;
+      let closeRejected = false;
       try {
         delivered = await presenter.closeOutput(
           segment.segmentId,
@@ -2338,9 +2437,17 @@ export class DingtalkChannel extends ChannelBase {
           segment,
         );
       } catch (closeError) {
+        // R17-4: the rejection can come from the fallback delivery inside
+        // `closeOutput` after part of the text already POSTED — re-sending
+        // the whole segment duplicates what landed (nothing downstream
+        // dedupes DingTalk messages). Skip the adapter resend and record the
+        // loss instead; the display close failing at all means the corrected
+        // text never reached the recipient.
+        closeRejected = true;
         this.logBoundaryCloseFailure(closeError);
+        this.recordPendingBoundaryFailure(sessionId, closeError);
       }
-      if (!delivered) {
+      if (!delivered && !closeRejected) {
         // R9-1: the run can still terminalize as cancelled or failed DURING
         // the delivery above; `closeOutput` then answers false on
         // terminality, and the fallback would POST the baked receipts after
@@ -2356,14 +2463,20 @@ export class DingtalkChannel extends ChannelBase {
             !presenter.terminalCardRetained(segment.runId, segment.segmentId)
           ) {
             // The files already went out above — the fallback must not resend
-            // them.
+            // them. R17-2: a boundary delivery is mid-run — it must not
+            // consume the prompt's one-shot mention target.
             try {
               await this.sendPreparedResponse(
                 chatId,
                 { ...prepared, text: outgoingText, files: [] },
                 sessionId,
+                false,
               );
             } catch (fallbackError) {
+              // R18-3: the display close AND the plain delivery both failed —
+              // recorded, or the turn books completed while the recipient got
+              // no file, no failure notice, and no apology.
+              this.recordPendingBoundaryFailure(sessionId, fallbackError);
               this.logBoundaryCloseFailure(fallbackError);
             }
           }
@@ -2374,7 +2487,7 @@ export class DingtalkChannel extends ChannelBase {
       // recorded, not thrown (R15-1), because the production caller swallows
       // hook errors; `onResponseComplete` rethrows it.
     } finally {
-      this.segmentDeliveryText.get(sessionId)?.delete(segment.segmentId);
+      this.deleteSegmentDeliveryText(sessionId, segment.segmentId);
     }
   }
 
@@ -2387,7 +2500,11 @@ export class DingtalkChannel extends ChannelBase {
     if (!segment) return;
     this.interactionPresenter?.appendOutput(segment, chunk);
     // R16-2: keep the delivery-scoped copy the boundary close sources its
-    // markers from — the presenter's copy is display-bounded.
+    // markers from — the presenter's copy is display-bounded. R17-1: the
+    // accumulation exists for `closeSegmentWithFiles`, which never runs
+    // without a presenter — without one nothing reclaims it, so nothing may
+    // accumulate.
+    if (!this.interactionPresenter) return;
     const segments = this.segmentDeliveryText.get(sessionId);
     if (segments) {
       segments.set(

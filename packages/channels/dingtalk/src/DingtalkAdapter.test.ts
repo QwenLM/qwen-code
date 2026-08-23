@@ -4308,6 +4308,15 @@ describe('DingtalkChannel mention target lifecycle', () => {
       bridge,
       { registerBridgeEvents: false },
     );
+    // R18-1: the reply delivery fails loudly when the chat has no webhook;
+    // this test pins mention-buffer cleanup, so give the turn a live one.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+    );
+    (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+      'cid-123',
+      'https://oapi.dingtalk.com/robot/send?access_token=token',
+    );
     const finalCommand: Envelope = {
       chatId: 'cid-123',
       senderId: 'sender-123',
@@ -4986,7 +4995,13 @@ describe('DingtalkChannel outbound file delivery', () => {
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
-      await channel.sendMessage('missing-chat', `[FILE: ${file.path}]`);
+      // R18-1: the missing webhook fails the send loudly instead of
+      // resolving with nothing delivered — the file variant already threw
+      // (R5-1) while the text variant booked the turn successful. The
+      // throw lands before any prepare, so no upload happens either way.
+      await expect(
+        channel.sendMessage('missing-chat', `[FILE: ${file.path}]`),
+      ).rejects.toThrow(/no webhook/);
 
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -5744,9 +5759,10 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('records the card surface through the started lifecycle (R16-4)', async () => {
     // End-to-end half of the per-run gate: the 'started' lifecycle
-    // correlates the inbound message with the run and records the card
-    // surface — that lifecycle-produced record (not a seeded one) keeps
-    // the apology suppressed for a delivery failure.
+    // correlates the inbound message with the run, and the surface record
+    // lands once card creation settles ready (R18-2) — that
+    // lifecycle-produced record (not a seeded one) keeps the apology
+    // suppressed for a delivery failure.
     const channel = createChannel();
     seedWebhook(channel, 'cid123');
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -5757,6 +5773,19 @@ describe('DingtalkChannel outbound file delivery', () => {
         }),
       ),
     );
+    // Creation succeeds without the network: stub the card client itself.
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi.fn().mockResolvedValue(undefined);
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
     // Correlate exactly like production: inboundCardOwners seeded before
     // 'started', consumed by the lifecycle.
     (
@@ -5787,6 +5816,18 @@ describe('DingtalkChannel outbound file delivery', () => {
       type: 'started',
     });
 
+    // R18-2: the record lands only once creation is known to have
+    // succeeded.
+    await vi.waitFor(() => {
+      expect(
+        (
+          channel as unknown as {
+            cardSurfaceInboundMessages: Map<string, true>;
+          }
+        ).cardSurfaceInboundMessages.has('msg-cid123'),
+      ).toBe(true);
+    });
+
     const deliveryError: unknown = await channel
       .sendMessage('cid123', 'the answer')
       .catch((error: unknown) => error);
@@ -5804,6 +5845,94 @@ describe('DingtalkChannel outbound file delivery', () => {
       ),
     );
     expect(apologyPosts).toHaveLength(0);
+  });
+
+  it('restores the apology when status-card creation failed (R18-2)', async () => {
+    // R18-2: the surface record used to land at 'started', before card
+    // creation was known to have succeeded. A failed creation renders no
+    // failure state, so the suppressed apology left the recipient nothing
+    // at all — the record lands only once creation settles ready.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ errcode: 130101, errmsg: 'flow' }), {
+          status: 200,
+        }),
+      ),
+    );
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<
+          string,
+          { ownerId: string; target: { chatId: string; isGroup: boolean } }
+        >;
+      }
+    ).inboundCardOwners.set('msg-cid123', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid123', isGroup: true },
+    });
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'started',
+    });
+    await vi.waitFor(() => {
+      expect(cardClient.createAndDeliver).toHaveBeenCalled();
+    });
+    // Let the creation rejection settle into record.ready.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(
+      (
+        channel as unknown as {
+          cardSurfaceInboundMessages: Map<string, true>;
+        }
+      ).cardSurfaceInboundMessages.has('msg-cid123'),
+    ).toBe(false);
+
+    const deliveryError: unknown = await channel
+      .sendMessage('cid123', 'the answer')
+      .catch((error: unknown) => error);
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(deliveryError);
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Creation failed, so no surface exists — the apology gets through.
+    const apologyPosts = fetchSpy.mock.calls.filter((call) =>
+      String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+        'Sorry, something went wrong processing your message.',
+      ),
+    );
+    expect(apologyPosts).toHaveLength(1);
   });
 
   it('restores the apology for a delivery failure without status cards', async () => {

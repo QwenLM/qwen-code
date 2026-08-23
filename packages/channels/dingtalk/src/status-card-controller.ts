@@ -50,6 +50,12 @@ export interface StatusCardControllerOptions {
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
   model?: string;
   onError?(operation: string, error: unknown): void;
+  /**
+   * R18-2: reports when a run's card creation settles — `true` once the
+   * card exists, `false` when creation failed. The apology gate may only
+   * credit a run with a status-card surface once creation succeeded.
+   */
+  onSurfaceSettled?(runId: string, ready: boolean): void;
 }
 
 function boundContent(content: string): string {
@@ -176,6 +182,7 @@ export class StatusCardController {
     record.ready = this.create(record, target);
     void record.ready.then((ready) => {
       if (ready) this.scheduleStatusRefresh(record);
+      this.options.onSurfaceSettled?.(record.runId, ready);
     });
     return record;
   }

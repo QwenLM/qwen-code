@@ -517,3 +517,477 @@ describe('boundary segment failure through the real ChannelBase wrapper', () => 
     }
   });
 });
+
+/** Envelope with a configurable messageId so two turns do not dedup. */
+function envelopeWith(messageId: string): Envelope {
+  return {
+    channelName: 'test-dingtalk',
+    senderId: 'owner-1',
+    senderName: 'Owner One',
+    chatId: SESSION_WEBHOOK_CHAT_ID,
+    text: 'send me the report',
+    isGroup: false,
+    isMentioned: false,
+    isReplyToBot: false,
+    messageId,
+  };
+}
+
+/** Fetch stub that records every webhook POST body it answers. */
+function stubWebhookFetch(
+  postBodies: Array<Record<string, unknown>>,
+  markdownVerdict: (markdownCall: number) => number = () => 0,
+  fileVerdict: () => number = () => 0,
+): void {
+  let markdownCall = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            errcode: 0,
+            access_token: 'upload-token',
+            expires_in: 7200,
+          }),
+          { status: 200 },
+        ),
+      );
+    }
+    if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ errcode: 0, media_id: '@lAL-file-media-1' }),
+          { status: 200 },
+        ),
+      );
+    }
+    const body = JSON.parse(String((init as RequestInit | undefined)?.body));
+    postBodies.push(body);
+    if (body.msgtype === 'markdown') {
+      const errcode = markdownVerdict(markdownCall++);
+      return Promise.resolve(
+        new Response(JSON.stringify({ errcode }), { status: 200 }),
+      );
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ errcode: fileVerdict() }), {
+        status: 200,
+      }),
+    );
+  });
+}
+
+function segmentDeliveryTextMap(
+  channel: DingtalkChannelInstance,
+): Map<string, Map<string, string>> {
+  return (
+    channel as unknown as {
+      segmentDeliveryText: Map<string, Map<string, string>>;
+    }
+  ).segmentDeliveryText;
+}
+
+describe('round-17/18 boundary delivery fixes', () => {
+  it('fails a card-less text turn whose chat has no webhook (R18-1)', async () => {
+    // R18-1: `sendPreparedReply` logged the missing webhook and returned
+    // false, which every caller ignored — a DM payload lacking
+    // `conversationId` (chatId = sessionWebhook, no map entry) resolved the
+    // turn successful with zero webhook POSTs: no response, no apology, no
+    // failure event. The missing webhook now throws like the file variant.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r181-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        interactiveCards: undefined,
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      );
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r181')),
+      ).rejects.toThrow(/no webhook/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not accumulate delivery text without a presenter (R17-1)', async () => {
+    // R17-1: the delivery accumulation existed only for
+    // `closeSegmentWithFiles`, which never runs without a presenter — yet
+    // every streamed chunk of every turn accumulated until the session
+    // died, unbounded, in the default card-less deployment.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r171-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        interactiveCards: undefined,
+      });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      stubWebhookFetch([]);
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, 'streamed chunk');
+        bridge.emit('responseBoundary', sessionId);
+        return 'final answer';
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r171a')),
+      ).resolves.toBe(undefined);
+      expect(segmentDeliveryTextMap(channel).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims the final segment delivery text after completion (R17-1)', async () => {
+    // R17-1 card arm: the FINAL segment of every successful turn was never
+    // deleted — `onResponseComplete` has no delete and `onPromptEnd` does
+    // not touch the map — so a long-lived session pinned every turn's raw
+    // text forever.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r171b-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      stubWebhookFetch([]);
+      installPresenter(channel, 'segment body');
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, 'segment body');
+        return 'final answer';
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r171b')),
+      ).resolves.toBe(undefined);
+      expect(segmentDeliveryTextMap(channel).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the mention for the final answer after a boundary fallback (R17-2)', async () => {
+    // R17-2: the boundary fallback delivered through `sendPreparedResponse`,
+    // which deletes the prompt's one-shot mention target — correct for the
+    // final answer, wrong mid-run: the final answer then shipped without
+    // the @ the channel promises.
+    const file = createTempFile();
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: file.dir, atSender: true });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      stubWebhookFetch(postBodies);
+      (
+        channel as unknown as { mentionTargets: Map<string, string> }
+      ).mentionTargets.set('msg-r172', 'staff-1');
+
+      let resolveBoundaryClosed!: () => void;
+      const boundaryClosed = new Promise<void>((resolve) => {
+        resolveBoundaryClosed = resolve;
+      });
+      installPresenter(channel, `[FILE: ${file.path}]`, (_s, _t, reason) => {
+        if (reason === 'response_boundary') {
+          resolveBoundaryClosed();
+          return Promise.resolve(false);
+        }
+        if (reason === 'completed') return Promise.resolve(false);
+        return Promise.resolve(true);
+      });
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, `[FILE: ${file.path}]`);
+        bridge.emit('responseBoundary', sessionId);
+        await boundaryClosed;
+        return 'final answer';
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r172')),
+      ).resolves.toBe(undefined);
+
+      const markdowns = postBodies.filter(
+        (b) => b.msgtype === 'markdown',
+      ) as Array<{
+        markdown: { text: string };
+        at?: { atUserIds: string[] };
+      }>;
+      // Both the boundary fallback and the final answer carry the mention.
+      expect(markdowns).toHaveLength(2);
+      expect(markdowns[0]!.markdown.text).toContain('@staff-1');
+      expect(markdowns[0]!.markdown.text).toContain('[File sent: report.txt]');
+      expect(markdowns[0]!.at?.atUserIds).toEqual(['staff-1']);
+      expect(markdowns[1]!.markdown.text).toContain('@staff-1');
+      expect(markdowns[1]!.markdown.text).toContain('final answer');
+      expect(markdowns[1]!.at?.atUserIds).toEqual(['staff-1']);
+      // The final answer consumed the target; nothing outlives the turn.
+      expect(
+        (
+          channel as unknown as {
+            sessionMentionTargets: Map<string, string>;
+          }
+        ).sessionMentionTargets.size,
+      ).toBe(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces a boundary failure when the turn ends with an empty response (R17-3)', async () => {
+    // R17-3 arm B: ChannelBase skips `onResponseComplete` for an empty
+    // final response, and `onPromptEnd` swept the recorded failure without
+    // consulting it — the file and its notice lost, the turn booked
+    // completed. The sweep now drains and surfaces: best-effort apology
+    // plus a loud log.
+    const file = createTempFile();
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: file.dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // Quota-dead webhook: the file, the notice, and the apology alike.
+      stubWebhookFetch(
+        postBodies,
+        () => 310000,
+        () => 310000,
+      );
+      const writes: string[] = [];
+      vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+      installPresenter(channel, `[FILE: ${file.path}]`);
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, `[FILE: ${file.path}]`);
+        bridge.emit('responseBoundary', sessionId);
+        return '';
+      };
+
+      // The turn books completed — the failure can no longer fail it — but
+      // it is no longer silent.
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r173')),
+      ).resolves.toBe(undefined);
+
+      await vi.waitFor(() => {
+        const apologies = postBodies.filter((b) =>
+          String(
+            (b as { markdown?: { text?: string } }).markdown?.text ?? '',
+          ).includes('Sorry, something went wrong processing your message.'),
+        );
+        expect(apologies).toHaveLength(1);
+      });
+      expect(writes.join('')).toContain('boundary failure after turn end');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not poison the next turn with a late boundary failure (R17-3)', async () => {
+    // R17-3 arm A: a close still in flight recorded its failure AFTER the
+    // sweep — the entry survived and the NEXT healthy turn rethrew it,
+    // booking that turn failed for this turn's delivery failure. The
+    // sweep now chains onto the in-flight close and surfaces the failure
+    // itself.
+    const file = createTempFile();
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: file.dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // Gate the upload-token fetch so the boundary close is provably in
+      // flight when the empty-response turn ends.
+      let releaseTokenFetch!: () => void;
+      const tokenGate = new Promise<void>((resolve) => {
+        releaseTokenFetch = resolve;
+      });
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return tokenGate.then(
+            () =>
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: 'upload-token',
+                  expires_in: 7200,
+                }),
+                { status: 200 },
+              ),
+          );
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, media_id: '@lAL-file-media-1' }),
+              { status: 200 },
+            ),
+          );
+        }
+        const body = JSON.parse(
+          String((init as RequestInit | undefined)?.body),
+        );
+        postBodies.push(body);
+        // Quota-dead webhook: file, notice, and apology all rejected.
+        return Promise.resolve(
+          new Response(JSON.stringify({ errcode: 310000 }), {
+            status: 200,
+          }),
+        );
+      });
+      installPresenter(channel, `[FILE: ${file.path}]`);
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, `[FILE: ${file.path}]`);
+        bridge.emit('responseBoundary', sessionId);
+        setTimeout(releaseTokenFetch, 10);
+        return '';
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r173a1')),
+      ).resolves.toBe(undefined);
+
+      // The late failure surfaces against its OWN turn's chat — as the
+      // best-effort apology — not against the next turn.
+      await vi.waitFor(() => {
+        const apologies = postBodies.filter((b) =>
+          String(
+            (b as { markdown?: { text?: string } }).markdown?.text ?? '',
+          ).includes('Sorry, something went wrong processing your message.'),
+        );
+        expect(apologies).toHaveLength(1);
+      });
+
+      // Turn 2, healthy: it must not be booked failed for turn 1's loss.
+      (bridge as unknown as { prompt: unknown }).prompt = async () =>
+        'final answer';
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r173a2')),
+      ).resolves.toBe(undefined);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not resend after a rejected display close (R17-4)', async () => {
+    // R17-4: `closeOutput`'s fallback can reject after part of the text
+    // already POSTED; the adapter then re-POSTed the ENTIRE segment — the
+    // recipient saw the first chunk twice. A rejected display close now
+    // skips the adapter resend and records the loss instead.
+    const file = createTempFile();
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: file.dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      stubWebhookFetch(postBodies);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      installPresenter(channel, `[FILE: ${file.path}]`, (_s, _t, reason) =>
+        reason === 'response_boundary'
+          ? Promise.reject(new Error('card stream latched failed'))
+          : Promise.resolve(true),
+      );
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, `[FILE: ${file.path}]`);
+        bridge.emit('responseBoundary', sessionId);
+        return 'final answer';
+      };
+
+      // The recorded display-close failure becomes the turn's verdict.
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r174')),
+      ).rejects.toThrow(/card stream latched failed/);
+
+      // The file went out, but the adapter never resent the segment text.
+      expect(postBodies.filter((b) => b.msgtype === 'file')).toHaveLength(1);
+      expect(postBodies.filter((b) => b.msgtype === 'markdown')).toHaveLength(
+        0,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the turn when the display close and the fallback both reject (R18-3)', async () => {
+    // R18-3: with `files: []` (the upload failed in
+    // `prepareOutgoingContent`, the prepared text is the corrective notice)
+    // `sendReplyFiles` returns before any webhook check; a rejecting
+    // display close plus a rejecting fallback left nothing recorded — the
+    // turn booked completed while the recipient got nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r183-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      // Marker points at a nonexistent file: prepare bakes the
+      // `[File delivery failed: …]` notice and yields `files: []`.
+      const channel = createChannel(bridge, { cwd: dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // The boundary fallback notice dies on the quota-dead webhook; the
+      // final answer would succeed — pre-fix the turn resolved with the
+      // loss unrecorded.
+      stubWebhookFetch(postBodies, (call) => (call === 0 ? 310000 : 0));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // No display surface at all: the close answers false and the plain
+      // fallback rides the quota-dead webhook.
+      installPresenter(channel, '[FILE: /nonexistent/missing.txt]', () =>
+        Promise.resolve(false),
+      );
+
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, '[FILE: /nonexistent/missing.txt]');
+        bridge.emit('responseBoundary', sessionId);
+        return 'final answer';
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r183')),
+      ).rejects.toThrow(/API code 310000/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

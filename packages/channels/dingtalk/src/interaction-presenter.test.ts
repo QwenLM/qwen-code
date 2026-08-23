@@ -327,6 +327,45 @@ describe('DingtalkInteractionPresenter', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('records the retained segment when the close beats the completion (R18-4)', async () => {
+    // R18-4: `closeOutput` clears `activeSegmentId` synchronously BEFORE
+    // enqueueing its card work, so when a boundary close starts first and
+    // the run completes second, `terminalizeRun` captured `undefined` and
+    // never recorded `retainedSegmentId` — the double-delivery gate failed
+    // open and the fallback re-POSTed the retained card content.
+    const statusCards = {
+      ensure: vi.fn(),
+      replace: vi.fn(),
+      isCardLive: vi.fn().mockResolvedValue(false),
+      flushPending: vi.fn(),
+      complete: vi.fn().mockResolvedValue(true),
+    };
+    const sendFallback = vi
+      .fn()
+      .mockRejectedValue(new Error('fallback rejected'));
+    const presenter = new DingtalkInteractionPresenter({
+      statusCards: statusCards as never,
+      sendFallback,
+    });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-A'), 'boundary content');
+
+    const close = presenter.closeOutput(
+      'segment-A',
+      'boundary content',
+      'response_boundary',
+    );
+    // The completion lands while the close is still in flight.
+    presenter.terminalizeRun('run-1', 'completed');
+
+    await expect(close).rejects.toThrow('fallback rejected');
+    await presenter.terminalSettled('run-1');
+
+    // The retained content is the segment the close owned, even though
+    // `activeSegmentId` was already cleared when the completion ran.
+    expect(presenter.terminalCardRetained('run-1', 'segment-A')).toBe(true);
+  });
+
   it('removes stale segment presentations on a terminal close', async () => {
     // R9-2: `closeOutput` answered false on `run.terminal` BEFORE deleting,
     // and `terminalizeRun` deletes only the active segment — a boundary
