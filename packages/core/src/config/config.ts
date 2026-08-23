@@ -4943,6 +4943,12 @@ export class Config {
       if (priorReasoningDisabled) {
         this.setReasoningDisabled(true);
       } else if (priorReasoningEffort) {
+        // A target-model preset `reasoning: false` would make the restore a
+        // no-op and pin thinking off without the user flag; clear it so the
+        // explicit user tier wins.
+        if (this.contentGeneratorConfig.reasoning === false) {
+          this.setReasoningDisabled(false);
+        }
         this.setReasoningEffort(priorReasoningEffort);
       }
       resetPreloadedContentGenerator(this.contentGenerator);
@@ -4960,6 +4966,12 @@ export class Config {
     if (priorReasoningDisabled) {
       this.setReasoningDisabled(true);
     } else if (priorReasoningEffort) {
+      // Same preset-disable hole as the hot-update path above: the rebuild
+      // can leave the target preset's `reasoning: false` in place, which
+      // would no-op the effort restore.
+      if (this.contentGeneratorConfig.reasoning === false) {
+        this.setReasoningDisabled(false);
+      }
       this.setReasoningEffort(priorReasoningEffort);
     }
   }

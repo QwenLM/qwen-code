@@ -1292,8 +1292,7 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (dashScopeModelReasoning &&
           !isQwenFamilyWireModel(model) &&
-          typed['enable_thinking'] !== false &&
-          reasoningEffort !== 'none') ||
+          typed['enable_thinking'] !== false) ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||

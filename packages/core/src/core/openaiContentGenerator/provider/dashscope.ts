@@ -161,12 +161,7 @@ function withoutNestedReasoningEffort(
     return request;
   }
   const next = { ...request };
-  const { effort: _drop, ...rest } = reasoning;
-  if (Object.keys(rest).length === 0) {
-    delete next['reasoning'];
-  } else {
-    next['reasoning'] = rest;
-  }
+  delete next['reasoning'];
   return next;
 }
 

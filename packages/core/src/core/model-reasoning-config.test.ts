@@ -195,6 +195,20 @@ describe('resolveModelReasoningConfiguration', () => {
     ).toBeUndefined();
   });
 
+  it('registers GLM 5.2 on an international standard endpoint', () => {
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'glm-5.2',
+        authType: OPENAI,
+        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      }),
+    ).toEqual({
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+    });
+  });
+
   it('does not register GLM 5.2 on Alibaba Coding Plan', () => {
     expect(
       resolveModelReasoningConfiguration({
@@ -268,6 +282,13 @@ describe('resolveModelReasoningConfiguration', () => {
         modelId: 'kimi-k2.5',
         authType: OPENAI,
         baseUrl: CODING_PLAN,
+      }),
+    ).toEqual({ thinking: true, toggleOnly: true });
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'kimi-k2.5',
+        authType: OPENAI,
+        baseUrl: 'https://coding-intl.dashscope-intl.aliyuncs.com/v1',
       }),
     ).toEqual({ thinking: true, toggleOnly: true });
     expect(
@@ -355,6 +376,10 @@ describe('classifyModelReasoningEndpoint', () => {
     [CODING_PLAN, 'alibaba-coding-plan'],
     ['https://coding-intl.dashscope.aliyuncs.com/v1', 'alibaba-coding-plan'],
     [
+      'https://coding-intl.dashscope-intl.aliyuncs.com/v1',
+      'alibaba-coding-plan',
+    ],
+    [
       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
       'alibaba-standard',
     ],
@@ -368,20 +393,6 @@ describe('classifyModelReasoningEndpoint', () => {
     expect(classifyModelReasoningEndpoint({ authType: OPENAI, baseUrl })).toBe(
       family,
     );
-  });
-
-  it('registers GLM 5.2 on an international standard endpoint', () => {
-    expect(
-      resolveModelReasoningConfiguration({
-        modelId: 'glm-5.2',
-        authType: OPENAI,
-        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-      }),
-    ).toEqual({
-      thinking: true,
-      efforts: ['high', 'max'],
-      defaultEffort: 'high',
-    });
   });
 });
 

@@ -836,6 +836,44 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       },
     );
 
+    it.each([
+      {
+        model: 'qwen3.8-max',
+        effort: 'low',
+        expectedEffort: 'low',
+      },
+      {
+        model: 'glm-5.2',
+        effort: 'high',
+        expectedEffort: 'high',
+      },
+    ])(
+      'drops the whole nested reasoning for $model so sibling keys do not leak',
+      ({ model, effort, expectedEffort }) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            model,
+            reasoning: { effort, budget_tokens: 4096 },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort, budget_tokens: 4096 },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe(expectedEffort);
+        expect(result['reasoning']).toBeUndefined();
+      },
+    );
+
     it('drops stale effort for toggle-only Token Plan GLM 5.2', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {

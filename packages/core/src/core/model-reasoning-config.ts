@@ -152,7 +152,8 @@ export function classifyModelReasoningEndpoint(
   }
   if (
     hostname === 'coding.dashscope.aliyuncs.com' ||
-    hostname === 'coding-intl.dashscope.aliyuncs.com'
+    hostname === 'coding-intl.dashscope.aliyuncs.com' ||
+    hostname === 'coding-intl.dashscope-intl.aliyuncs.com'
   ) {
     return 'alibaba-coding-plan';
   }

@@ -809,6 +809,19 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'drop required tool selection when a registered non-Qwen model ships an opaque reasoning_effort none',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        extraBody: { enable_thinking: true, reasoning_effort: 'none' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: true,
+        expectedReasoningEffort: 'none',
+        expectedToolChoice: undefined,
+      },
+      {
         name: 'preserve required tool selection when GLM thinking is disabled',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',

@@ -4638,6 +4638,49 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('syncs the reasoning disable to a distinct runtime generator config', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'low' } },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'low' },
+      };
+      const runtimeConfig = {
+        model: 'runtime-model',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'low' },
+      } as ContentGeneratorConfig;
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: {
+            generateContentStream: vi.fn(),
+          } as unknown as ContentGenerator,
+          contentGeneratorConfig: runtimeConfig,
+        },
+        async () => {
+          config.setReasoningDisabled(true);
+          expect(runtimeConfig.reasoning).toBe(false);
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            false,
+          );
+
+          config.setReasoningDisabled(false);
+          expect(runtimeConfig.reasoning).toBeUndefined();
+        },
+      );
+    });
+
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -4950,6 +4993,22 @@ describe('Server Config (config.ts)', () => {
         requiresRefresh: true,
         userDisabled: true,
         expected: false as const,
+      },
+      {
+        name: 'restores a user effort over a target preset disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        initialReasoning: { effort: 'low' as const },
+        targetReasoning: false as const,
+        expected: { effort: 'low' as const },
+      },
+      {
+        name: 'restores a user effort over a target preset disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        initialReasoning: { effort: 'low' as const },
+        targetReasoning: false as const,
+        expected: { effort: 'low' as const },
       },
       {
         name: 'uses the target preset after Default on hot-update',

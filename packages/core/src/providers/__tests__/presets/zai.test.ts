@@ -40,9 +40,9 @@ describe('zaiProvider', () => {
     expect(models?.[0]).toMatchObject({
       id: 'GLM-5.2',
       name: '[Z.AI] GLM-5.2',
-      generationConfig: {
-        contextWindowSize: 1000000,
-      },
+    });
+    expect(models?.[0]?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
     });
     expect(models?.[1]).toMatchObject({
       id: 'GLM-5.1',
