@@ -7072,6 +7072,22 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(
       (viaReason.body.match(/qwen-review-deferred/g) ?? []).length,
     ).toBeGreaterThanOrEqual(2);
+    // The read-limit exit renders caller-named uncoverable chunks through
+    // `callerShown` — the fourth disclosure exit hardened this round, and
+    // the only one no leg above feeds a forged marker through.
+    const viaReadLimit = composeReview(
+      base({
+        severityFloor: 'critical',
+        uncoverableChunks: [`chunk 5 (docs/${MARKER}.md)`],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    located(viaReadLimit.body);
+    // The neutralised copy stays readable in the disclosure.
+    expect(viaReadLimit.body).toContain('Not reviewed: chunk 5');
+    expect(
+      (viaReadLimit.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(2);
   });
 });
 

@@ -83,6 +83,14 @@ const fnmatch = (pattern, name) =>
 const inReviews = (name) => reviewsPatterns.some((p) => fnmatch(p, name));
 const inTmp = (name) => tmpPatterns.some((p) => fnmatch(p, name));
 
+// The findings artifact's name has no code constant — SKILL.md prose is its
+// only producer-side authority. Bind the documented template to this test's
+// PR number and match THAT against the find patterns (the pin below holds
+// the template to the doc), so a rename on either side fails here instead
+// of silently emptying the artifact.
+const findingsTemplate = 'qwen-review-{target}-findings.json';
+const findingsName = findingsTemplate.replace('{target}', 'pr-42');
+
 const bashAvailable = spawnSync('bash', ['--version']).status === 0;
 /** Run the stage step's extracted script against a fixture tree. */
 const runStageStep = (cwd, runnerTemp, prNumber) =>
@@ -121,12 +129,12 @@ describe('review artifact upload — naming contract', () => {
     expect(inReviews(name)).toBe(true);
   });
 
-  it.each([
-    'qwen-review-pr-42-composed.json',
-    'qwen-review-pr-42-findings.json',
-  ])('stages the main-checkout side file %s', (name) => {
-    expect(inTmp(name)).toBe(true);
-  });
+  it.each(['qwen-review-pr-42-composed.json', findingsName])(
+    'stages the main-checkout side file %s',
+    (name) => {
+      expect(inTmp(name)).toBe(true);
+    },
+  );
 
   it.each([
     // A near PR number must not ride the pattern — `-pr-42.` is not a
@@ -153,6 +161,7 @@ describe('review artifact upload — naming contract', () => {
     expect(runTs).toContain('qwen-review-pr-${cls.number}-composed.json');
     expect(runTs).toContain('-pr-${cls.number}\\\\.md$');
     expect(skillMd).toContain('-cost-ledger.json');
+    expect(skillMd).toContain(findingsTemplate);
   });
 
   it('never reads the contributor-controlled worktree, and stages regular files only', () => {
@@ -190,6 +199,12 @@ describe('review artifact upload — naming contract', () => {
     // attempt 409s and the stale first-attempt record survives.
     expect(uploadBlock).toContain('${{ github.run_attempt }}');
     expect(uploadBlock).toContain('retention-days: 90');
+    // SKILL.md promises the same window beside the overflow pointer, and
+    // its own test pins the promise against the doc's text alone — join
+    // the two sides here, so an edit on either fails against the other
+    // instead of leaving the promise describing a different artifact.
+    const days = uploadBlock.match(/retention-days: (\d+)/)?.[1] ?? '';
+    expect(skillMd).toContain(`${days}-day retention window`);
   });
 
   it('runs on the failure and cancellation paths it exists for', () => {
