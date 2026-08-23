@@ -2102,6 +2102,19 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
     );
   }
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk" — a premise a stale
+  // file from an interrupted earlier round breaks: nothing else removes
+  // this path between rounds (fetch-pr's stale-clean sweeps the worktree
+  // and branch only), and this command writes it only at the end of a
+  // successful run. Remove it up front so a run that fails leaves the
+  // documented missing-file shape as the only one the launched agents can
+  // meet — a re-run that behaved as if it had read the context it just
+  // lost is the exact invariant the paragraph closes on. The
+  // \`-prev-ledger.json\` side file is deliberately NOT removed:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing.
+  rmSync(out, { force: true });
   const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
   const ctx = platform.getReviewContext(prNum, ownerRepo);

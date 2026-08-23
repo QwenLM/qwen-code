@@ -3372,6 +3372,24 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
+  it('gives Agent 0 the missing-context branch its context-unavailable launch needs', () => {
+    // R4-2 on #9717: the same-repo failure flow launches Agent 0 against a
+    // context file that is not on disk. 6d's brief carries an explicit
+    // cannot-read branch; Agent 0's only documented failure return was
+    // conditioned on the welded issue-context fetch ALSO failing — when
+    // that fetch succeeded, the agent had no branch for the missing file,
+    // and its empty-scope receipt attested "the PR context names no target
+    // issue": knowledge an unread file cannot supply.
+    const p0 = buildRoleBrief(PR_PLAN, '0');
+    expect(p0).toContain('If the PR context file cannot be read');
+    expect(p0).toContain('naming the PR context as unread');
+    // The issue-evidence half stays performable — the branch is a scope
+    // determination, not a failure return.
+    expect(p0).toContain('perform the half that does not need it');
+    // The attestation ban, pinned at the receipt the hazard was filed on.
+    expect(p0).toContain('over an unread file it is a guess, not a receipt');
+  });
+
   it('pins the counter-frame and prose-execution briefs — the #9707 roster additions', () => {
     // Lens prose lives only in agent-briefs.ts: a deletion ships green unless
     // the load-bearing clauses are pinned literally (the enumeration-trap
