@@ -1203,7 +1203,7 @@ describe('InProcessBackend Session Workflow revision write-through', () => {
     const { runtimeContext } = destructureAgentCoreCall(
       MockAgentCore.mock.calls.at(-1)!,
     );
-    return { base, agentContext: runtimeContext as Config };
+    return { base, agentContext: runtimeContext as unknown as Config };
   }
 
   it('routes revision mutations from the plain per-agent wrapper to the base Config', async () => {
