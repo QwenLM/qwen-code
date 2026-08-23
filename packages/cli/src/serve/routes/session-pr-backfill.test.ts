@@ -50,14 +50,18 @@ const SESSION_E = '00000000-0000-4000-8000-000000000005';
 const SESSION_F = '00000000-0000-4000-8000-000000000006';
 const SESSION_G = '00000000-0000-4000-8000-000000000007';
 
-function pr(number: number, headRefName: string) {
+function pr(
+  number: number,
+  headRefName: string,
+  state: 'open' | 'merged' | 'closed' = 'open',
+) {
   return {
     number,
     title: `PR ${number}`,
     url: `https://github.com/o/r/pull/${number}`,
     author: 'octocat',
     headRefName,
-    state: 'open' as const,
+    state,
     reviewDecision: null,
     checks: 'passing' as const,
     updatedAt: 1_800_000_000,
@@ -244,6 +248,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       { state: 'all', limit: 500, slim: true },
     );
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
@@ -255,6 +260,24 @@ describe('backfillWorkspaceSessionPrs', () => {
         state: 'open',
       },
     ]);
+  });
+
+  it('binds a merged PR with its terminal state', async () => {
+    // `--state all` is load-bearing because merged heads are bindable (the
+    // common case for stale worktrees); the accept side needs a witness.
+    await seedSession(SESSION_A, 'stale/worktree');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(31, 'stale/worktree', 'merged')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({ number: 31, state: 'merged' });
   });
 
   it('falls back to the remote web URL when gh is unavailable', async () => {
@@ -496,6 +519,25 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.map((entry) => entry.number)).toEqual([250]);
   });
 
+  it('maps a reused head branch to the newest PR regardless of arrival order', async () => {
+    await seedSession(SESSION_A, 'chore/deps');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      // The slim field set omits updatedAt, so nothing guarantees a
+      // newest-first arrival order survives parsing; the branch mapping
+      // must not depend on it.
+      pullRequests: [pr(10, 'chore/deps'), pr(250, 'chore/deps')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.map((entry) => entry.number)).toEqual([250]);
+  });
+
   it('keeps the convention number bound when candidates exceed the cap', async () => {
     await seedSession(SESSION_A, 'b-1');
     const chatsDir = path.join(
@@ -533,9 +575,71 @@ describe('backfillWorkspaceSessionPrs', () => {
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
-    // The pr-<N> slug names the session's own PR — the tail slice must not
-    // evict it in favor of branch-mapped numbers.
-    expect(prs?.map((entry) => entry.number)).toContain(50);
+    // The pr-<N> slug names the session's own PR — the cap slice must not
+    // evict it in favor of branch-mapped numbers, and it is bound last so
+    // it stays the sidecar's newest entry.
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      4, 5, 6, 7, 8, 9, 10, 11, 12, 50,
+    ]);
+  });
+
+  it('keeps the convention number bound when a later run adds a candidate', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const appendBranch = async (i: number) =>
+      fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    for (let i = 2; i <= 12; i++) {
+      await appendBranch(i);
+    }
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    const fetchFor = (branchCount: number) =>
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [
+          pr(50, 'worktree-pr-50'),
+          ...Array.from({ length: branchCount }, (_, i) =>
+            pr(i + 1, `b-${i + 1}`),
+          ),
+        ],
+      });
+    fetchFor(12);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+
+    await backfillWorkspaceSessionPrs(runtime);
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toContain(50);
+
+    // A new branch appears in the transcript and gh knows its PR: the new
+    // binding must evict a branch-mapped number, not the convention one.
+    await appendBranch(13);
+    fetchFor(13);
+
+    const second = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(second).toMatchObject({ bound: 1, alreadyBound: 9 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toContain(50);
   });
 
   it('keeps backfilling other sessions when one sidecar write fails', async () => {

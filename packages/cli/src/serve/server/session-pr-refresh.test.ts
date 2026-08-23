@@ -429,6 +429,49 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('closed');
   });
 
+  it('keeps sweeping when a transcript head has no string cwd', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    // A head that parses as an object but carries no string cwd is
+    // inconclusive; it must not abort the whole workspace's sweep.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_B}.jsonl`),
+      `${JSON.stringify({})}\n`,
+      'utf8',
+    );
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 2, updated: 2 });
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+  });
+
   it('does not rewrite sidecars owned by a colliding project', async () => {
     // sanitizeCwd maps every non-alphanumeric to '-', so `my-app` and
     // `my.app` share one chats dir; the sweep must stay on its own side of
@@ -489,6 +532,55 @@ describe('refreshWorkspaceSessionPrStates', () => {
       expect(result).toEqual({ scanned: 0, updated: 0 });
       expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
       expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('open');
+    } finally {
+      await fsp.rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes a pre-flush sidecar despite a cwd collision (accepted fail-open)', async () => {
+    // Same collision as above, but the foreign session has no transcript
+    // yet: the belongs-check is inconclusive and deliberately fails open so
+    // pre-flush bindings stay refreshable. Harm is bounded — only `state`
+    // is rewritten, and the owner's flush reasserts its own project.
+    const parent = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-collide-open-'),
+    );
+    try {
+      const cwdA = path.join(parent, 'my-app');
+      const cwdB = path.join(parent, 'my.app');
+      await fsp.mkdir(cwdA, { recursive: true });
+      await fsp.mkdir(cwdB, { recursive: true });
+      const runtimeB = {
+        workspaceId: 'collide-b',
+        workspaceCwd: cwdB,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+      } as unknown as WorkspaceRuntime;
+      const serviceA = createWorkspaceRuntimeSessionService({
+        ...runtimeB,
+        workspaceId: 'collide-a',
+        workspaceCwd: cwdA,
+      } as unknown as WorkspaceRuntime);
+      const prPathA = serviceA.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPathA, {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+
+      const result = await refreshWorkspaceSessionPrStates(runtimeB);
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
     } finally {
       await fsp.rm(parent, { recursive: true, force: true });
     }

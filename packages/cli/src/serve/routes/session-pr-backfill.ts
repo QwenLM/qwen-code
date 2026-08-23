@@ -223,11 +223,12 @@ export async function backfillWorkspaceSessionPrs(
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-      // First-write-wins: the list arrives newest-first (gh's order
-      // survives the slim fetch's no-op sort), so the newest PR owns a
-      // reused head branch — overwriting would map the branch to the
-      // oldest PR instead.
-      if (pr.headRefName && !branchToNumber.has(pr.headRefName)) {
+      // Highest-number-wins a reused head branch: PR numbers are assigned
+      // monotonically, so this picks the newest PR regardless of arrival
+      // order — the slim field set omits updatedAt, so no sort order is
+      // guaranteed to survive parsing.
+      const mapped = branchToNumber.get(pr.headRefName);
+      if (pr.headRefName && (mapped === undefined || pr.number > mapped)) {
         branchToNumber.set(pr.headRefName, pr.number);
       }
     }
@@ -254,10 +255,12 @@ export async function backfillWorkspaceSessionPrs(
       result.overLimit += numbers.length - SESSION_PR_LIST_LIMIT;
       if (candidate.conventionNumber !== undefined) {
         // The pr-<N> slug names the session's own PR — keep it and evict
-        // the oldest branch-mapped numbers instead.
+        // the oldest branch-mapped numbers instead. Bound last, it is the
+        // sidecar's newest entry, so a later run that binds a new number
+        // evicts a branch mapping rather than the convention number.
         numbers = [
-          candidate.conventionNumber,
           ...numbers.slice(1).slice(-(SESSION_PR_LIST_LIMIT - 1)),
+          candidate.conventionNumber,
         ];
       } else {
         numbers = numbers.slice(-SESSION_PR_LIST_LIMIT);

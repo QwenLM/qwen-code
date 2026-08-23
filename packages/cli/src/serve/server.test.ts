@@ -15741,6 +15741,68 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('reads the live-only PR sidecar from an explicit runtime base dir', async () => {
+      // The route passes `{ runtimeBaseDir: runtime.sessionRuntimeBaseDir }`;
+      // for a managed runtime with a distinct pinned base dir the read must
+      // honor it instead of the ambient default.
+      const id = '550e8400-e29b-41d4-a716-44665544b007';
+      const altBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-alt-runtime-'),
+      );
+      try {
+        const sidecarPath = Storage.runWithResolvedRuntimeBaseDir(
+          altBaseDir,
+          () =>
+            new SessionService(WS_BOUND).getPrSessionPathForArchiveState(
+              id,
+              'active',
+            ),
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          undefined,
+          { runtimeBaseDir: altBaseDir },
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'merged',
+          },
+        ]);
+      } finally {
+        await fsp.rm(altBaseDir, { recursive: true, force: true });
+      }
+    });
+
     it('survives PR sidecars on the organized listing path', async () => {
       const id = '550e8400-e29b-41d4-a716-446655440005';
       await writeStoredSession({

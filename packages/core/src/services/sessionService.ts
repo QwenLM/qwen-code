@@ -721,7 +721,7 @@ export class SessionService {
       return true;
     }
     const head = records[0];
-    if (!head) return true;
+    if (!head || typeof head.cwd !== 'string') return true;
     return this.sessionBelongsToCurrentProject(sessionId, head.cwd);
   }
 
