@@ -122,8 +122,8 @@ function normalizeStreamingTextDelta(
   state: StreamingTextDeltaState,
 ): string {
   // Per-call regime signal for the guard zone: true only when this delta is
-  // emitted verbatim by one of the tag-hold overlap guards below (prefix
-  // overlap against the baseline while a pre-demotion opening-shaped
+  // emitted verbatim by one of the tag-hold guards below (prefix overlap or
+  // exact repeat against the baseline while a pre-demotion opening-shaped
   // candidate is held). A delta on that path is a cumulative re-send of the
   // held block's bytes until proven otherwise, while the identical shape on
   // any other path is genuinely fresh content — content comparison alone
@@ -251,6 +251,27 @@ function normalizeStreamingTextDelta(
   }
 
   if (rawDelta === state.emittedText) {
+    if (
+      state.tagHoldActive &&
+      OPENING_THINKING_TAG_WORD_PATTERN.test(rawDelta)
+    ) {
+      // Tag-hold twin of the prefix-overlap guards above: pre-demotion the
+      // held candidate's bytes ARE the baseline, so a delta byte-equal to
+      // the baseline is undecidable between the held snapshot's cumulative
+      // re-send and a genuine nested re-spell of the candidate (a nested
+      // block restarting with the candidate's bytes, arriving as its own
+      // delta). Suppressing it here as an ordinary exact repeat would lose
+      // the genuine nested opener before the guard zone ever sees it — the
+      // block never balances and the turn fails closed mid-stream,
+      // chunking-dependently against the single-chunk twin. Emit it
+      // verbatim with the regime signal and let the guard zone carry the
+      // decision: its equality entrance appends an opening-word equal
+      // re-send regardless of regime, the same pinned R8-1 horn the
+      // sub-64-byte short exact repeat below already rides (issue #9348).
+      state.tagHoldVerbatimEmission = true;
+      state.emittedLength += rawDelta.length;
+      return rawDelta;
+    }
     if (rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH) {
       state.cumulativeMode = true;
       debugLogger.debug(
@@ -1832,7 +1853,14 @@ export function convertOpenAIChunkToGemini(
     // the hidden channel. Equality against a baseline that already carries
     // visible content is unambiguous (a genuine block can never re-send the
     // accepted visible tail) and stays dropped. A prefix-extending chunk is
-    // a cumulative superset whose already-accepted prefix must be stripped.
+    // a cumulative superset whose already-accepted prefix must be stripped
+    // — with the same blocks-only exception: when the stripped prefix is
+    // balanced blocks only, the delta can equally be a genuine consecutive
+    // identical block run continuing into further blocks (chunked together),
+    // and stripping silently loses the repeated block where both
+    // single-chunk twins yield it. The blocks-only prefix is appended; a
+    // true cumulative superset then degrades to a duplicated thought inside
+    // the hidden channel, matching the equality branch's pinned horn.
     // A proper prefix of the sequence is NOT dropped: every demotion-seeded
     // baseline starts with an opening tag, so a lone genuine consecutive
     // block opener ('<thinking>') always prefixes the baseline and is
@@ -1859,19 +1887,18 @@ export function convertOpenAIChunkToGemini(
       const alignedVisibleText = visibleText.trimStart();
       const alignedReplayText =
         requestContext.postDemotionReplayText.trimStart();
-      const baselineBlocksOnly = (() => {
-        if (alignedVisibleText !== alignedReplayText) return false;
-        const baselineBlocks =
-          extractLeadingBalancedThinkingBlocks(alignedReplayText);
-        return baselineBlocks !== undefined && baselineBlocks.rest === '';
-      })();
+      const baselineBlocks =
+        extractLeadingBalancedThinkingBlocks(alignedReplayText);
+      const baselineBlocksOnly =
+        baselineBlocks !== undefined && baselineBlocks.rest === '';
       if (alignedVisibleText === alignedReplayText && !baselineBlocksOnly) {
         parts = parts.filter((part) => !getVisibleText(part));
         visibleText = '';
       } else if (
         alignedReplayText.length > 0 &&
         alignedVisibleText.startsWith(alignedReplayText) &&
-        alignedVisibleText !== alignedReplayText
+        alignedVisibleText !== alignedReplayText &&
+        !baselineBlocksOnly
       ) {
         const leadingLength = visibleText.length - alignedVisibleText.length;
         visibleText = visibleText.slice(

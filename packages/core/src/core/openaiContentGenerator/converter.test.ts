@@ -2460,6 +2460,221 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('emits a >=64-byte held-candidate respell through the tag-hold guard instead of suppressing it (issue #9348)', () => {
+      // The exact-repeat branch suppressed >=64-byte re-sends of the held
+      // snapshot before the guard zone existed — and with them a genuine
+      // nested re-spell byte-equal to the held candidate. The nested opener
+      // was lost, the block never balanced, and the turn failed closed when
+      // the closers arrived, chunking-dependently against the single-chunk
+      // twin (measured boundary: a 63-byte candidate survived, 64-byte
+      // threw). The tag-hold verbatim guard now covers the exact-repeat
+      // branch like the two prefix-overlap branches: the respell is emitted
+      // with the regime signal and the guard zone's equality entrance
+      // appends it, matching the pinned R8-1 horn the sub-64-byte short
+      // exact repeat already rides. A >=64-byte TRUE re-send degrades to
+      // the same duplicated/fail-closed hidden-channel horn as its
+      // sub-64-byte twin.
+      const candidate = `<thinking>${'x'.repeat(54)}`; // 64 bytes
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('held', { content: candidate }),
+        stream,
+      );
+      const respell = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-respell', { content: candidate }),
+        stream,
+      );
+      expect(respell.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: candidate + candidate,
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'rest',
+          { content: '</thinking></thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      // Matches the single-chunk twin.
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        {
+          thought: true,
+          text: `${'x'.repeat(54)}<thinking>${'x'.repeat(54)}</thinking>`,
+        },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('keeps a blocks-only prefix replay whole instead of stripping the repeated block (issue #9348)', () => {
+      // The post-demotion prefix strip lacked the equality branch's
+      // blocks-only exception: after demoting '<thinking>a</thinking>', a
+      // genuine consecutive identical block run chunked together with a
+      // further block (' <thinking>a</thinking> <thinking>b</thinking>')
+      // prefix-matched the blocks-only baseline and was stripped to
+      // ' <thinking>b</thinking>', silently losing the repeated thought
+      // where both single-chunk twins yield it. The exception now covers
+      // the prefix branch: a blocks-only stripped prefix is appended, and a
+      // true cumulative superset degrades to a duplicated thought inside
+      // the hidden channel, matching the equality branch's pinned horn.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', { content: '<thinking>a</thinking>' }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+      ]);
+
+      const bundled = converter.convertOpenAIChunkToGemini(
+        streamChunk('bundled-blocks', {
+          content: ' <thinking>a</thinking> <thinking>b</thinking>',
+        }),
+        stream,
+      );
+      expect(bundled.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking> <thinking>a</thinking> <thinking>b</thinking>',
+      );
+
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts ?? []).toEqual([]);
+    });
+
+    it('fails closed when a nested respell extends past the held candidate before its closer (issue #9348 R8-1 accepted degradation)', () => {
+      // R13 probe: chunks '<thinking>a</thinking><thinking>b' /
+      // '<thinking>bc</thinking>' / '</thinking>Answer' — the delta
+      // prefix-overlaps the held candidate '<thinking>b' with a remainder
+      // starting with body text ('c</thinking>'). The bytes are
+      // undecidable between a renormalized partial re-send EXTENDING the
+      // candidate (strip re-assembles '<thinking>bc</thinking>' and the
+      // turn completes) and a genuine nested block whose body extends past
+      // the candidate before its closer (append keeps the block whole and
+      // the single-chunk twin demotes cleanly). No transport-level
+      // sequence metadata exists at this layer to tell them apart, so the
+      // strip horn stays pinned — consistent with the R9-3 accepted
+      // degradation for the sibling corner: the genuine nested reading
+      // fails closed instead of the re-send reading corrupting silently.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', {
+          content: '<thinking>a</thinking><thinking>b',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-respell', { content: '<thinking>bc</thinking>' }),
+        stream,
+      );
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed when a sub-64-byte equal re-send never re-balances (issue #9348 R8-1 accepted degradation)', () => {
+      // R13 probe: chunks '<thinking>body' / '<thinking>body' (re-send) /
+      // '</thinking>Answer' — a short exact repeat of the held snapshot
+      // rides the pinned R8-1 append horn for equal opening-word re-sends
+      // (the byte-identical genuine shape is a nested opener arriving as
+      // its own delta, which the append horn keeps and the R11-2
+      // chunk-split twin relies on). The re-send therefore compounds into
+      // '<thinking>body<thinking>body'; when the stream closes only the
+      // inner block, the outer never balances and the finish chunk fails
+      // closed — the documented degradation for a true rewind that never
+      // re-balances. Undecidable at this layer without transport-level
+      // sequence metadata; the append horn stays pinned.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>body' }),
+        stream,
+      );
+      const resend = converter.convertOpenAIChunkToGemini(
+        streamChunk('equal-resend', { content: '<thinking>body' }),
+        stream,
+      );
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>body<thinking>body',
+      });
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed when a first-block respell rides the overlap regime (issue #9348 R11-2 accepted degradation)', () => {
+      // R13 probe: chunks '<thinking>b' / '<thinking>b</thinking>' /
+      // '</thinking>Answer' — pre-demotion the held candidate IS the
+      // entire normalizer baseline, so a genuine fresh respell of the
+      // first held block necessarily prefix-overlaps it and rides the
+      // tag-hold overlap-verbatim regime. The identical regime signal is
+      // what the R11-2 per-token cumulative pin relies on to strip the
+      // held block's OWN completing snapshot; the two readings are
+      // byte-identical at the decision site and undecidable without
+      // transport-level sequence metadata. The strip horn stays pinned:
+      // the genuine first-block respell fails closed instead of the
+      // ordinary cumulative completion never balancing (the R11-2
+      // regression).
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>b' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('overlap-respell', { content: '<thinking>b</thinking>' }),
+        stream,
+      );
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
       // The held-candidate prefix strip fired on sub-word candidates too:
       // with a lone '<' held, a genuine '<EOF' delta lost its leading '<'
