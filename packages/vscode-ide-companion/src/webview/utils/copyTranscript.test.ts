@@ -26,7 +26,12 @@ function textBlock(kind: TextKind, id: string, text: string) {
   } satisfies DaemonTranscriptBlock;
 }
 
-function toolBlock(id: string, title: string, details?: string) {
+function toolBlock(
+  id: string,
+  title: string,
+  details?: string,
+  toolKind?: string,
+) {
   return {
     kind: 'tool',
     id,
@@ -35,6 +40,41 @@ function toolBlock(id: string, title: string, details?: string) {
     status: 'completed',
     preview: { kind: 'generic', summary: '' },
     details,
+    toolKind,
+    clientReceivedAt: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  } satisfies DaemonTranscriptBlock;
+}
+
+function shellBlock(id: string, text: string) {
+  return {
+    kind: 'shell',
+    id,
+    text,
+    clientReceivedAt: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  } satisfies DaemonTranscriptBlock;
+}
+
+function userShellBlock(id: string, command: string, text: string) {
+  return {
+    kind: 'user_shell',
+    id,
+    command,
+    text,
+    clientReceivedAt: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  } satisfies DaemonTranscriptBlock;
+}
+
+function statusBlock(id: string, text: string) {
+  return {
+    kind: 'status',
+    id,
+    text,
     clientReceivedAt: 0,
     createdAt: 0,
     updatedAt: 0,
@@ -61,16 +101,48 @@ describe('getBlockCopyText', () => {
 });
 
 describe('formatBlocksForCopyAll', () => {
-  it('labels conversation blocks like the pre-PR timeline and skips others', () => {
+  it('labels conversation blocks like the pre-PR timeline, including tool and shell output', () => {
     const blocks = [
       textBlock('user', 'u-1', 'question'),
-      toolBlock('t-1', 'Ran ls'),
+      toolBlock('t-1', 'Ran ls', '2 files', 'execute'),
+      shellBlock('s-1', 'agent shell output'),
+      userShellBlock('us-1', 'ls -la', 'user shell output'),
+      statusBlock('st-1', 'Compacting context'),
       textBlock('thought', 'th-1', 'pondering'),
       textBlock('assistant', 'a-1', 'answer'),
     ];
     expect(formatBlocksForCopyAll(blocks)).toBe(
-      '**User:** question\n\n---\n\n**Thinking:** pondering\n\n---\n\n**Qwen Code:** answer',
+      [
+        '**User:** question',
+        '**[Tool: execute]**\n\nRan ls\n2 files',
+        '**Shell:** agent shell output',
+        '**User Shell:** ls -la\nuser shell output',
+        '**Status:** Compacting context',
+        '**Thinking:** pondering',
+        '**Qwen Code:** answer',
+      ].join('\n\n---\n\n'),
     );
+  });
+
+  it('falls back to the tool name or a generic label when no tool kind is set', () => {
+    const namedTool: DaemonTranscriptBlock = {
+      ...toolBlock('t-1', 'Read file'),
+      toolName: 'read_file',
+    };
+    const blocks = [namedTool, toolBlock('t-2', 'Did work')];
+    expect(formatBlocksForCopyAll(blocks)).toBe(
+      '**[Tool: read_file]**\n\nRead file\n\n---\n\n**[Tool: tool]**\n\nDid work',
+    );
+  });
+
+  it('skips tool, shell, and status blocks without copyable text', () => {
+    const blocks = [
+      toolBlock('t-1', '   '),
+      shellBlock('s-1', '  '),
+      statusBlock('st-1', ''),
+      textBlock('assistant', 'a-1', 'answer'),
+    ];
+    expect(formatBlocksForCopyAll(blocks)).toBe('**Qwen Code:** answer');
   });
 
   it('returns an empty string when there is nothing to copy', () => {
@@ -116,5 +188,24 @@ describe('findBlockByRowKey', () => {
 
   it('does not match across block id prefixes', () => {
     expect(findBlockByRowKey(blocks, 'msg:a-10')).toBeNull();
+  });
+
+  it('prefers the exact block when one id dash-prefixes a sibling id', () => {
+    const ambiguous = [
+      textBlock('user', 'a', 'first'),
+      textBlock('assistant', 'a-1', 'second'),
+    ];
+    expect(findBlockByRowKey(ambiguous, 'msg:a-1')).toBe(ambiguous[1]);
+    expect(findBlockByRowKey(ambiguous, 'msg:a')).toBe(ambiguous[0]);
+  });
+
+  it('matches projection suffixes against the longest block id, not the first', () => {
+    const ambiguous = [
+      textBlock('user', 'a', 'first'),
+      textBlock('assistant', 'a-1', 'second'),
+    ];
+    expect(findBlockByRowKey(ambiguous, 'msg:a-1-ip')).toBe(ambiguous[1]);
+    expect(findBlockByRowKey(ambiguous, 'msg:a-1-t-2')).toBe(ambiguous[1]);
+    expect(findBlockByRowKey(ambiguous, 'msg:a-ip')).toBe(ambiguous[0]);
   });
 });
