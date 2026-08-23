@@ -711,6 +711,180 @@ describe('App /skills secondary picker', () => {
     );
   });
 
+  it('exposes the chat-messages webviewSection context key when content exists', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // The contributed copy commands filter on
+    // `when: "webviewSection == 'chat-messages'"`; without the attribute
+    // the context-menu items never appear.
+    expect(area.getAttribute('data-vscode-context')).toBe(
+      '{"webviewSection": "chat-messages"}',
+    );
+  });
+
+  it('reports contextMenuTriggered so copy commands route to this webview', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    mockPostMessage.mockClear();
+
+    act(() => {
+      document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'contextMenuTriggered',
+      data: {},
+    });
+  });
+
+  async function renderAppWithTranscriptText(text: string) {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // Feed one assistant block through the real transcript reducer.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    return rendered;
+  }
+
+  it('copies the last assistant reply on copyLastReply', async () => {
+    await renderAppWithTranscriptText('reply text');
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyLastReply' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'reply text' },
+    });
+  });
+
+  it('copies labeled conversation text on copyAllMessages', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+    void rendered;
+
+    // Also feed a user block so the labeled format is exercised.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'the question' },
+              },
+            },
+          },
+        }),
+      );
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyAllMessages' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: {
+        text: '**Qwen Code:** reply text\n\n---\n\n**User:** the question',
+      },
+    });
+  });
+
+  it('copies the block under the cursor on copyMessage', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // Simulate a MessageList row for the first assistant block
+    // (reducer block ids are `assistant-<ordinal>`, ordinal starts at 1).
+    const row = document.createElement('div');
+    row.setAttribute('data-message-row-key', 'msg:assistant-1');
+    row.textContent = 'reply text';
+    area.appendChild(row);
+
+    act(() => {
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyMessage' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'reply text' },
+    });
+  });
+
   it('disables WebShell transcript turn auto-collapse while a response is in flight', async () => {
     mockMessageState.isStreaming = true;
     resetWebShellTranscriptProps();

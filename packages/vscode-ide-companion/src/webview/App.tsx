@@ -51,6 +51,12 @@ import { useImagePaste } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
 import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
 import {
+  findBlockByRowKey,
+  findLastAssistantText,
+  formatBlocksForCopyAll,
+  getBlockCopyText,
+} from './utils/copyTranscript.js';
+import {
   SKILL_ITEM_ID_PREFIX,
   isSkillsSecondaryQuery,
   shouldOpenSkillsSecondaryPicker,
@@ -825,6 +831,66 @@ export const App: React.FC = () => {
   }, []);
   const transcriptBlocks = useAcpTranscript();
 
+  // === Contributed copy commands (qwen-code.copyMessage/copyAllMessages/
+  // copyLastReply) ===
+  // The extension host routes the commands back to the webview that last
+  // reported a context menu (`contextMenuTriggered`) via a `copyCommand`
+  // message. The transcript container carries the `webviewSection` context
+  // key the `webview/context` contributions filter on.
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const transcriptBlocksRef = useRef(transcriptBlocks);
+  useEffect(() => {
+    transcriptBlocksRef.current = transcriptBlocks;
+  }, [transcriptBlocks]);
+  const contextMenuRowKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const trackTarget = (event: MouseEvent) => {
+      const container = messagesContainerRef.current;
+      const target = event.target instanceof Element ? event.target : null;
+      const row = target?.closest?.('[data-message-row-key]') as
+        | HTMLElement
+        | null
+        | undefined;
+      contextMenuRowKeyRef.current =
+        container && row && container.contains(row)
+          ? row.getAttribute('data-message-row-key')
+          : null;
+      // Notify the extension that this webview was right-clicked, so the
+      // contributed copy commands route here.
+      vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
+    };
+    document.addEventListener('contextmenu', trackTarget, true);
+    return () => document.removeEventListener('contextmenu', trackTarget, true);
+  }, [vscode]);
+
+  useEffect(() => {
+    const handleCopyCommand = (event: MessageEvent) => {
+      const message = event.data as {
+        type?: string;
+        data?: { action?: string };
+      };
+      if (message?.type !== 'copyCommand') {
+        return;
+      }
+      const blocks = transcriptBlocksRef.current;
+      let text: string | null = null;
+      if (message.data?.action === 'copyMessage') {
+        const block = findBlockByRowKey(blocks, contextMenuRowKeyRef.current);
+        text = block ? getBlockCopyText(block) : null;
+      } else if (message.data?.action === 'copyAllMessages') {
+        text = formatBlocksForCopyAll(blocks);
+      } else if (message.data?.action === 'copyLastReply') {
+        text = findLastAssistantText(blocks);
+      }
+      if (text) {
+        vscode.postMessage({ type: 'copyToClipboard', data: { text } });
+      }
+    };
+    window.addEventListener('message', handleCopyCommand);
+    return () => window.removeEventListener('message', handleCopyCommand);
+  }, [vscode]);
+
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
@@ -867,7 +933,16 @@ export const App: React.FC = () => {
         }
       />
 
-      <div className="flex-1 min-h-0 relative" onClick={handleTranscriptClick}>
+      <div
+        ref={messagesContainerRef}
+        className="flex-1 min-h-0 relative"
+        onClick={handleTranscriptClick}
+        // Context key the contributed copy commands filter on
+        // (`when: "webviewSection == 'chat-messages'"` in package.json).
+        data-vscode-context={
+          hasContent ? '{"webviewSection": "chat-messages"}' : undefined
+        }
+      >
         {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
             <Onboarding />
