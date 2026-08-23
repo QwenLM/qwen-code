@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import {
   closeSync,
   fstatSync,
+  ftruncateSync,
   openSync,
   readSync,
   writeSync,
@@ -135,8 +136,11 @@ export function readGuarded(abs: string, maxBytes: number): Buffer | null {
  *  forever, so the prescribed "re-run the command" remedy hangs too) between
  *  the check and the open. O_NOFOLLOW refuses the symlink in the kernel,
  *  O_NONBLOCK refuses the FIFO, and the post-open fstat refuses every other
- *  non-regular shape before a byte is written. Throws on all three, so a
- *  caller reports the planted path instead of silently landing elsewhere. */
+ *  non-regular shape before a byte is written. A HARD LINK is a regular
+ *  file to all of that, but the write would land in the linked host inode —
+ *  so nlink > 1 refuses too, the same shape guard-check voids plan credit
+ *  on. Throws on every refusal, so a caller reports the planted path
+ *  instead of silently landing elsewhere. */
 export function writeFileGuarded(
   path: string,
   data: string | Buffer,
@@ -144,11 +148,13 @@ export function writeFileGuarded(
 ): void {
   let fd: number;
   try {
+    // No O_TRUNC here: truncation fires at open, BEFORE any gate can run,
+    // so a refused shape (a hardlink planted on the artifact path) would
+    // still empty the linked host file. The truncate moves past the gate.
     fd = openSync(
       path,
       constants.O_WRONLY |
         constants.O_CREAT |
-        constants.O_TRUNC |
         constants.O_NONBLOCK |
         constants.O_NOFOLLOW,
       0o600,
@@ -162,12 +168,21 @@ export function writeFileGuarded(
     );
   }
   try {
-    if (!fstatSync(fd).isFile()) {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
       throw new Error(
         `audit: cannot write ${what} at ${path} — it is not a regular file. ` +
           `Remove it and re-run.`,
       );
     }
+    if (st.nlink > 1) {
+      throw new Error(
+        `audit: cannot write ${what} at ${path} — it has more than one ` +
+          `hard link, so the write would land in a path the auditor chose ` +
+          `nothing about. Remove it and re-run.`,
+      );
+    }
+    ftruncateSync(fd, 0);
     const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
     let off = 0;
     // One writeSync is not guaranteed to consume the whole buffer.

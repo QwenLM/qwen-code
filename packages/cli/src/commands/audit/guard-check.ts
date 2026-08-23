@@ -57,6 +57,7 @@ function planRelocated(
   planPath: string,
   fallbackRoot: string,
   planTs: string,
+  reportFileName: string,
 ): boolean {
   if (fallbackRoot === '') return false;
   // The handed plan must BE the relocated file: a symlink leaves its
@@ -78,17 +79,18 @@ function planRelocated(
   }
   const rel = relative(realRoot, realPlan);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false;
-  // A copy credits while the original stays stageable under .qwen/tmp (a
-  // killed mid-relocation leaves exactly that): the original must be gone
-  // from its pre-relocation home for the suppression to stand.
-  //
-  // Keyed on the WRITER-PINNED name, never on the basename of the path the
-  // agent handed us: `--plan <fallback>/anything.json` makes the in-repo
-  // lookup ask about `.qwen/tmp/anything.json`, which of course does not
-  // exist, and the real `audit-plan-<ts>.json` keeps sitting there
-  // committable while the guard reports the relocation complete.
-  return !existsSync(
-    join(process.cwd(), AUDIT_TMP_DIR, `audit-plan-${planTs}.json`),
+  // A copy credits while ANY original stays stageable under .qwen/tmp (a
+  // relocation killed mid-move leaves exactly that): the whole tmp class
+  // must be gone from its pre-relocation home for the suppression to
+  // stand. Step 0 writes the args artifacts BEFORE the guard verdict, so
+  // the plan file alone never proves the multi-file move completed — the
+  // leftover args record is committable module content while the credit
+  // silences every later checkpoint. Keyed on the WRITER-PINNED names,
+  // never on the basename of the path the agent handed us: `--plan
+  // <fallback>/anything.json` would otherwise ask about names that never
+  // existed while the real artifacts keep sitting there committable.
+  return !guardProbeShapes(reportFileName, planTs).tmp.some((shape) =>
+    existsSync(join(process.cwd(), AUDIT_TMP_DIR, shape)),
   );
 }
 
@@ -258,7 +260,7 @@ export const guardCheckCommand: CommandModule = {
       plan !== undefined &&
       planTs !== undefined &&
       slugSafe &&
-      planRelocated(plan, guard.fallbackRoot, planTs) &&
+      planRelocated(plan, guard.fallbackRoot, planTs, reportFileName) &&
       fallbackLandingSafe(guard.fallbackRoot, reportFileName, planTs);
     if (guardTripped(guard, planTime, relocated)) {
       process.exitCode = 5;

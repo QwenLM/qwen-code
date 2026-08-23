@@ -179,6 +179,18 @@ describe('checkReportMarkers', () => {
     ].join('\n');
     expect(checkReportMarkers(report, findings)).toEqual([]);
   });
+
+  it('accepts a schema-legal hyphenated id in the report marker', () => {
+    // Hyphens are legal in the id grammar; the marker capture is built
+    // from the same grammar, so a hyphenated report can satisfy the
+    // marker check instead of failing it forever.
+    const hyphenFindings = [finding({ id: 'auth-bypass' })];
+    const report = [
+      '<!-- audit-finding: auth-bypass -->',
+      '### [Critical] a',
+    ].join('\n');
+    expect(checkReportMarkers(report, hyphenFindings)).toEqual([]);
+  });
 });
 
 describe('resolveAnchors', () => {
@@ -379,5 +391,74 @@ describe('resolveAnchors', () => {
       { ...plan, targetPathAbsolute: join(dir, 'nowhere') },
     );
     expect(results[0].verdict).toBe('unresolved');
+  });
+
+  it('resolves an anchor quoted with a trailing newline like the bare quote', () => {
+    writeFileSync(join(dir, 'trail.ts'), 'foo();\n}\n');
+    const trailPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    // A code-block copy routinely carries the trailing newline; the
+    // verdict must not depend on a line outside the quoted block.
+    const bare = resolveAnchors(
+      [finding({ locations: ['trail.ts'], anchor: 'foo();' })],
+      trailPlan,
+    );
+    const trailing = resolveAnchors(
+      [finding({ locations: ['trail.ts'], anchor: 'foo();\n' })],
+      trailPlan,
+    );
+    expect(bare[0]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+    expect(trailing[0]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+  });
+
+  it('does not certify a multi-line quote whose first line exists only mid-line', () => {
+    writeFileSync(
+      join(dir, 'midline.ts'),
+      '// TODO: check if (user.isAdmin) {\n return secret;\n',
+    );
+    const midPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    // The first quoted line is a suffix of a longer file line; certifying
+    // it would ship a snippet whose first line does not exist as a line.
+    const results = resolveAnchors(
+      [
+        finding({
+          locations: ['midline.ts'],
+          anchor: 'if (user.isAdmin) {\n return secret;',
+        }),
+      ],
+      midPlan,
+    );
+    expect(results[0].verdict).toBe('unresolved');
+  });
+
+  it('does not fuse a URL fragment or glob into a trailing comment', () => {
+    writeFileSync(join(dir, 'frag.ts'), 'const home = "a.html#top";\n');
+    writeFileSync(join(dir, 'glob.sh'), 'rm -rf /build/*;\n');
+    const fusePlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        finding({ locations: ['frag.ts'], anchor: 'const home = "a.html' }),
+        finding({ id: 'f2', locations: ['glob.sh'], anchor: 'rm -rf /build' }),
+      ],
+      fusePlan,
+    );
+    // '#top' and '/*' sit inside a token here, not after it: accepting
+    // them as comment introducers would certify a line that does not exist.
+    expect(results[0].verdict).toBe('unresolved');
+    expect(results[1].verdict).toBe('unresolved');
+  });
+
+  it('still resolves a snippet ending before a spaced trailing comment', () => {
+    writeFileSync(join(dir, 'cmt.ts'), 'const x = 1; // TODO\n');
+    const cmtPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [finding({ locations: ['cmt.ts'], anchor: 'const x = 1;' })],
+      cmtPlan,
+    );
+    expect(results[0].verdict).toBe('resolved');
   });
 });

@@ -823,13 +823,24 @@ interface GitSpawn {
  *  process invocation lands in one place. */
 function spawnGit(root: string, args: string[], timeoutMs: number): GitSpawn {
   try {
-    const out = execFileSync('git', ['-C', root, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-      env: gitEnv(),
-    });
+    // -c core.fsmonitor=false: a repo-local core.fsmonitor NAMES A PROGRAM,
+    // and git runs it for the index-refreshing commands the capture and the
+    // plan-time probes spawn — attacker-chosen code executing as the
+    // auditor against a hostile checkout (the module's stated purpose).
+    // --no-ext-diff/--no-textconv close the diff-driver channels at the
+    // diff arm itself; the env scrub cannot reach a config channel, so the
+    // command-line override lands here, in front of every subcommand.
+    const out = execFileSync(
+      'git',
+      ['-c', 'core.fsmonitor=false', '-C', root, ...args],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: timeoutMs,
+        maxBuffer: 64 * 1024 * 1024,
+        env: gitEnv(),
+      },
+    );
     return { ok: true, out, stderr: '', status: 0 };
   } catch (err) {
     const e = err as { status?: number | null; stderr?: unknown } | null;

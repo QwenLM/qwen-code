@@ -1303,6 +1303,29 @@ describe('git-backed checks', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    "never runs a nested repo's fsmonitor during the tracked-files probe",
+    () => {
+      // The tracked-files override probes `git ls-files` INSIDE a
+      // name-excluded directory: a planted nested repository there gets
+      // its local config honored, and repo-local core.fsmonitor names a
+      // program — which must not run as the auditor at enumeration.
+      const repo = join(dir, 'repo-fsmonitor');
+      mkdirSync(repo, { recursive: true });
+      git(['init', '-q'], repo);
+      const nested = join(repo, 'node_modules');
+      mkdirSync(nested, { recursive: true });
+      git(['init', '-q'], nested);
+      const marker = join(dir, 'fsmonitor-marker');
+      git(['config', 'core.fsmonitor', `touch ${marker}`], nested);
+      writeFileSync(join(repo, 'main.ts'), 'export const m = 1;\n');
+      const { files, excludedDirs } = walkAuditTree(repo);
+      expect(files).toContain('main.ts');
+      expect(excludedDirs).toContain('node_modules');
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
   it('never walks the audit artifact dirs, even under the tracked override', () => {
     // This repository itself tracks files under .qwen/: the override
     // descends into .qwen, but the command group's own artifact dirs must

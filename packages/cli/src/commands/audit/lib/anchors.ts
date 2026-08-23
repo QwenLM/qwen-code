@@ -38,12 +38,19 @@ import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
 import type { FilesPlan } from './files-plan.js';
 import { SEVERITIES, type Severity } from '../../../utils/findings.js';
 
-/** The marker the report's finding blocks carry, one per finding. */
-const FINDING_MARKER_RE = /<!--\s*audit-finding:\s*([^\s->]+)\s*-->/g;
-
 /** The manifest id space: interpolated into the marker and compared as a
- *  set key, so it stays a short opaque token. */
-const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+ *  set key, so it stays a short opaque token. Defined ONCE — the marker
+ *  capture is built from the same source, so a schema-legal id can never
+ *  fail the marker check (hyphens are legal in the id grammar). */
+const FINDING_ID_SRC = '[A-Za-z0-9][A-Za-z0-9._-]{0,63}';
+
+/** The marker the report's finding blocks carry, one per finding. */
+const FINDING_MARKER_RE = new RegExp(
+  `<!--\\s*audit-finding:\\s*(${FINDING_ID_SRC})\\s*-->`,
+  'g',
+);
+
+const FINDING_ID_RE = new RegExp(`^${FINDING_ID_SRC}$`);
 
 /** Verbatim snippets have no business exceeding a few hundred lines; the
  *  scan below is O(haystack × needle) on agent-authored input and the
@@ -225,11 +232,20 @@ export function checkReportMarkers(
 function followRuleOk(text: string, pos: number): boolean {
   const c1 = text[pos];
   if (c1 === undefined || c1 === '\n') return true;
-  if (c1 === '#') return true;
-  if (c1 === '/' && (text[pos + 1] === '/' || text[pos + 1] === '*')) {
-    return true;
+  if (/^\s/.test(c1)) return true;
+  if (
+    c1 !== '#' &&
+    !(c1 === '/' && (text[pos + 1] === '/' || text[pos + 1] === '*'))
+  ) {
+    return false;
   }
-  return /^\s/.test(c1);
+  // '#', '//' and '/*' are comment introducers only when they do not sit
+  // inside a token: after an identifier character, '.' or '-' they are
+  // PART of the token in most languages (a.html#top, rm -rf /build/*,
+  // this.#bar), and accepting them fuses the token's remainder away —
+  // certifying a line that does not exist.
+  const prev = pos > 0 ? text[pos - 1] : '';
+  return !/[A-Za-z0-9_.$-]/.test(prev);
 }
 
 function leadingIndent(line: string): number {
@@ -349,7 +365,17 @@ export function resolveAnchors(
   const normalize = (p: string): string => p.replace(/\\/g, '/');
   const callerSet = new Set(registeredCallers.map(normalize));
   return findings.map((finding) => {
-    const needle = finding.anchor.replace(/\r\n/g, '\n');
+    // Boundary newlines of a quote are copy artifacts, not matching
+    // constraints: a code-block copy routinely carries a trailing newline,
+    // and a quoted block never opens on a blank line the cited file must
+    // also carry. Left in, the phantom empty needle line makes the verdict
+    // depend on a line OUTSIDE the quoted block.
+    const needle = finding.anchor
+      .replace(/\r\n/g, '\n')
+      .replace(/^\n+|\n+$/g, '');
+    if (needle === '') {
+      return { finding, verdict: 'unresolved', matchCount: 0 };
+    }
     const needleLines = needle.split('\n');
     if (needleLines.length > AUDIT_ANCHOR_MAX_LINES) {
       return { finding, verdict: 'unresolved', matchCount: 0 };
@@ -384,26 +410,12 @@ export function resolveAnchors(
       // resolves only when each cited file contributes exactly one hit.
       let locationMatches: number;
       if (needleLines.length > 1) {
-        // The window matcher covers every line-start occurrence (base 0 is
-        // the verbatim reading); add only raw matches starting MID-line.
+        // Line-start windows are the ONLY reading that preserves line
+        // structure: a raw mid-line hit means the first quoted line is a
+        // suffix of a longer file line (or sits inside a comment), so a
+        // raw scan here would certify a quoted line that does not exist.
         const hayLines = haystack.split('\n');
         locationMatches = countIndentTolerantMatches(hayLines, needleLines);
-        let idx = haystack.indexOf(needle);
-        while (idx !== -1) {
-          const lineStart = haystack.lastIndexOf('\n', idx - 1) + 1;
-          if (haystack.slice(lineStart, idx).trim() !== '') {
-            // A mid-line hit carries neither boundary the line-start
-            // windows get by construction: the preceding character must
-            // not fuse an identifier, and the last needle line obeys the
-            // bounded follow rule — or the raw scan certifies a quoted
-            // line that does not exist in the file.
-            const leadingOk = !/[A-Za-z0-9_$]/.test(haystack[idx - 1]);
-            if (leadingOk && followRuleOk(haystack, idx + needle.length)) {
-              locationMatches++;
-            }
-          }
-          idx = haystack.indexOf(needle, idx + 1);
-        }
       } else {
         // The same bounded follow rule the multi-line last line applies,
         // plus the leading-edge rule: a bare indexOf fuses tokens in BOTH

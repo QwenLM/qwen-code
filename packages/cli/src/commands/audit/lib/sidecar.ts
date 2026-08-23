@@ -212,11 +212,34 @@ function recordCaller(sidecarDir: string, caller: string): string | undefined {
   // error into permanent false drift.
   try {
     mkdirSync(dirname(dest), { recursive: true });
+    if (!copyDestContained(dest, sidecarDir)) {
+      throw new Error('copy destination escapes the sidecar root');
+    }
     copyGuarded(caller, dest, CALLER_MAX_BYTES);
   } catch {
     // copy skipped: the hash stays in callerHashes.
   }
   return hash;
+}
+
+/** The copy destination's parent must RESOLVE inside the sidecar root:
+ *  writeFileGuarded's O_NOFOLLOW guards only the final component, so a
+ *  symlinked INTERMEDIATE directory under the sidecar (`callers`,
+ *  `untracked/<dir>`) would otherwise carry the copy out of containment.
+ *  Re-checked at every copy — the adversary writes the tree the capture
+ *  fans out over, so a containment answer from capture start is stale by
+ *  the time the extend re-run writes. */
+function copyDestContained(dest: string, sidecarDir: string): boolean {
+  let realParent: string;
+  let realRoot: string;
+  try {
+    realParent = realpathSync(dirname(dest));
+    realRoot = realpathSync(sidecarDir);
+  } catch {
+    return false;
+  }
+  const rel = relative(realRoot, realParent);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** Open-and-copy with the same FIFO/regular-file/size discipline the other
@@ -325,6 +348,9 @@ function captureUntrackedArm(
     const dest = join(sidecarDir, 'untracked', rel);
     try {
       mkdirSync(dirname(dest), { recursive: true });
+      if (!copyDestContained(dest, sidecarDir)) {
+        throw new Error('copy destination escapes the sidecar root');
+      }
       // Open-gated copy: a writer-less FIFO swapped in between the
       // listing and the copy must not hang, and an oversize subject must
       // not exhaust the sidecar disk (every other read in this module

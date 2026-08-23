@@ -43,6 +43,17 @@ function plan() {
   return buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
 }
 
+/** Every regular file under a root (empty directories contribute nothing). */
+function filesUnder(root: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const p = join(root, entry.name);
+    if (entry.isDirectory()) out.push(...filesUnder(p));
+    else out.push(p);
+  }
+  return out;
+}
+
 describe('captureSidecar outside any worktree', () => {
   it('records noVcs and hashes every walked file', () => {
     const sidecar = captureSidecar(plan(), sidecarDir);
@@ -385,6 +396,26 @@ describe('the registered-caller policy', () => {
     expect(sidecar.callerHashes[a]).not.toBe(sidecar.callerHashes[b]);
     expect(driftCheck(plan(), sidecarDir).driftedCallers).toEqual([]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'never copies a caller through a symlinked intermediate under the sidecar',
+    () => {
+      // O_NOFOLLOW guards only the final component: a symlinked callers/
+      // subdirectory under the sidecar would carry the copy out of
+      // containment on the extend re-run.
+      const caller = join(dir, 'caller.ts');
+      writeFileSync(caller, 'caller-secret-content()\n');
+      const escape = join(dir, 'escape');
+      mkdirSync(escape, { recursive: true });
+      const p = plan();
+      captureSidecar(p, sidecarDir);
+      symlinkSync(escape, join(sidecarDir, 'callers'));
+      const extended = captureSidecar(p, sidecarDir, [caller]);
+      expect(filesUnder(escape)).toEqual([]);
+      // The hash baseline survives the skipped copy.
+      expect(extended.callerHashes[caller]).toBeDefined();
+    },
+  );
 });
 
 describe('captureSidecar inside a worktree', () => {
@@ -457,6 +488,60 @@ describe('captureSidecar inside a worktree', () => {
       false,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    "never runs the audited repo's fsmonitor command at capture",
+    () => {
+      // Repo-local core.fsmonitor names a program; the capture's git arms
+      // must not execute it as the auditor against a hostile checkout.
+      const repo = join(dir, 'repo-fsmon');
+      mkdirSync(repo, { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'f.ts'), 'const f = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'init', '-q'], repo);
+      const marker = join(dir, 'fsmonitor-marker');
+      git(['config', 'core.fsmonitor', `touch ${marker}`], repo);
+      // Dirty tracked content and add an untracked file so both capture
+      // arms have work.
+      writeFileSync(join(repo, 'f.ts'), 'const f = 2;\n');
+      writeFileSync(join(repo, 'u.ts'), 'const u = 1;\n');
+      const repoPlan = buildFilesPlan(
+        repo,
+        repo,
+        'medium',
+        collectAuditFiles(repo),
+      );
+      captureSidecar(repoPlan, sidecarDir);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never copies untracked subjects through a symlinked sidecar subdirectory',
+    () => {
+      const repo = join(dir, 'repo-escape');
+      mkdirSync(repo, { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'tracked.ts'), 'const t = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'init', '-q'], repo);
+      writeFileSync(join(repo, 'u.ts'), 'const u = 1;\n');
+      const repoPlan = buildFilesPlan(
+        repo,
+        repo,
+        'medium',
+        collectAuditFiles(repo),
+      );
+      const escape = join(dir, 'escape-untracked');
+      mkdirSync(escape, { recursive: true });
+      mkdirSync(sidecarDir, { recursive: true });
+      symlinkSync(escape, join(sidecarDir, 'untracked'));
+      const sidecar = captureSidecar(repoPlan, sidecarDir);
+      expect(filesUnder(escape)).toEqual([]);
+      expect(sidecar.meta.captureDegraded).toContain('untracked');
+    },
+  );
 
   it('expands a collapsed nested-repository listing onto enumerated files', () => {
     const repo = join(dir, 'repo4');
@@ -737,7 +822,7 @@ describe('captureSidecar inside a worktree', () => {
       const savedPath = process.env['PATH'];
       writeFileSync(
         join(shimDir, 'git'),
-        `#!/bin/sh\nif [ "$3 $4" = "rev-parse HEAD" ]; then exit 3; fi\nPATH="${savedPath}" exec git "$@"\n`,
+        `#!/bin/sh\nprev=''\nfor arg in "$@"; do\n  if [ "$prev $arg" = "rev-parse HEAD" ]; then exit 3; fi\n  prev="$arg"\ndone\nPATH="${savedPath}" exec git "$@"\n`,
       );
       chmodSync(join(shimDir, 'git'), 0o755);
       process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -114,6 +115,20 @@ describe('writeFileGuarded', () => {
       /cannot write the artifact/,
     );
     expect(readFileSync(decoy, 'utf8')).toBe('do not touch\n');
+  });
+
+  it('refuses a planted hard link instead of truncating the linked file', () => {
+    // O_NOFOLLOW refuses only symlinks: a hard link is a regular file, so
+    // without an nlink gate the write truncates the linked host inode and
+    // the payload lands in a path the auditor chose nothing about.
+    const host = join(dir, 'host.txt');
+    writeFileSync(host, 'precious host content\n');
+    const artifact = join(dir, 'artifact.json');
+    linkSync(host, artifact);
+    expect(() => writeFileGuarded(artifact, 'payload', 'the artifact')).toThrow(
+      /cannot write the artifact/,
+    );
+    expect(readFileSync(host, 'utf8')).toBe('precious host content\n');
   });
 
   it.skipIf(process.platform === 'win32')(

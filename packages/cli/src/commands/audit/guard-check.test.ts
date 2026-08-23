@@ -346,6 +346,26 @@ describe('guardCheckCommand handler', () => {
     expect(process.exitCode).toBe(5);
   });
 
+  it('does not credit a relocation killed before every tmp artifact moved', () => {
+    // Step 0 writes the args record BEFORE the guard verdict; a relocation
+    // killed after the plan lands leaves it committable in the exposed
+    // directory, so the plan file's departure alone never proves the
+    // multi-file move completed.
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'audit-args-2026-08-13-120000.json'),
+      '{}',
+    );
+    const body = JSON.stringify({ guard: planTime });
+    writeFileSync(join(fallback, PINNED_PLAN_NAME), body);
+    run({ reportSlug: 'mod', plan: join(fallback, PINNED_PLAN_NAME) });
+    expect(process.exitCode).toBe(5);
+  });
+
   it('does not credit a plan whose hardlink twin stays committable in the repo', () => {
     writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
     const fallback = Storage.getAuditFallbackDir(repo);
