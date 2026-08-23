@@ -186,9 +186,17 @@ export function useResumeCommand(
         // first so the load sees the live session's trailing records.
         // Best-effort — without it the rollback still restores sessionId and
         // recorder, but the re-initialize restarts the old session blank.
-        const outgoingRecording = config.getChatRecordingService();
-        outgoingRecording?.finalize();
-        await outgoingRecording?.flush();
+        try {
+          const outgoingRecording = config.getChatRecordingService();
+          outgoingRecording?.finalize();
+          await outgoingRecording?.flush();
+        } catch {
+          // Best-effort snapshot (see above). A degraded outgoing recorder
+          // must not block the swap the way /branch blocks: flush() rethrows
+          // its sticky writeFailure, and the swap is the only path that
+          // replaces that recorder, so throwing here would strand the user
+          // in the degraded session.
+        }
         try {
           prevSessionData = await sessionService.loadSession(oldSessionId);
         } catch {

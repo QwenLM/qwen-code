@@ -969,6 +969,11 @@ describe('useResumeCommand', () => {
     };
     getSessionId?: () => string;
     startNewSession?: ReturnType<typeof vi.fn>;
+    chatRecordingService?: {
+      rebuildTurnBoundaries: ReturnType<typeof vi.fn>;
+      finalize: ReturnType<typeof vi.fn>;
+      flush: ReturnType<typeof vi.fn>;
+    };
   }) {
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -1002,11 +1007,12 @@ describe('useResumeCommand', () => {
       }),
       loadPausedBackgroundAgents:
         overrides.loadPausedBackgroundAgents ?? vi.fn().mockResolvedValue([]),
-      getChatRecordingService: () => ({
-        rebuildTurnBoundaries: vi.fn(),
-        finalize: vi.fn(),
-        flush: vi.fn(),
-      }),
+      getChatRecordingService: () =>
+        overrides.chatRecordingService ?? {
+          rebuildTurnBoundaries: vi.fn(),
+          finalize: vi.fn(),
+          flush: vi.fn(),
+        },
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -1107,5 +1113,56 @@ describe('useResumeCommand', () => {
     // the swap commits (drops this swap's own undo).
     expect(geminiClient.settleTelemetryReplay).toHaveBeenCalledTimes(2);
     expect(geminiClient.undoTelemetryReplay).not.toHaveBeenCalled();
+  });
+
+  it('does not let a degraded outgoing recorder block the swap', async () => {
+    // Once the recorder latches a writeFailure (disk full, lost transcript
+    // lease), flush() rethrows it on every call and nothing ever clears it.
+    // The flush here only enriches the rollback snapshot, so it must stay
+    // best-effort: throwing aborts every /resume before the core swap, and
+    // startNewSession — the only place the recorder is replaced — is never
+    // reached, stranding the user in the degraded session until restart.
+    const flush = vi.fn().mockRejectedValue(new Error('disk full'));
+    const finalize = vi.fn();
+    const { config } = resumeConfigForTelemetry({
+      chatRecordingService: {
+        rebuildTurnBoundaries: vi.fn(),
+        finalize,
+        flush,
+      },
+    });
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        rekeySessionId: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await result.current.handleResume('new-session-id');
+    });
+
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(flush).toHaveBeenCalledTimes(1);
+    // The swap proceeds despite the flush failure...
+    expect(config.startNewSession).toHaveBeenCalledWith(
+      'new-session-id',
+      expect.any(Object),
+    );
+    expect(startNewSession).toHaveBeenCalledWith('new-session-id');
+    // ...and the recorder's failure is not blamed on the resume target.
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+      expect.any(Number),
+    );
   });
 });

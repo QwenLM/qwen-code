@@ -932,6 +932,59 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(mockConfig.getSessionId).mockReturnValue('test-session-id');
     });
 
+    it('covers the outgoing session in the replay undo snapshot', async () => {
+      // A failed swap's rollback re-initializes the outgoing session, and
+      // that replay's resetSession wipes its live bucket — in-memory-only
+      // skill usage is never rebuilt from the transcript. The undo must
+      // capture the outgoing bucket at arm time, while initializedSessionId
+      // still names it, so the restore can put it back.
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      const restore = vi.mocked(uiTelemetryService.restoreFromReplaySnapshot);
+      snapshotForReplay.mockClear();
+      restore.mockClear();
+      snapshotForReplay.mockImplementation(
+        (sessionId: string, outgoingSessionId?: string) =>
+          ({ sessionId, outgoingSessionId }) as never,
+      );
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      resumedClient.settleTelemetryReplay();
+      // The startup replay had no outgoing session to cover.
+      expect(snapshotForReplay).toHaveBeenNthCalledWith(
+        1,
+        'test-session-id',
+        undefined,
+      );
+
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('incoming-session');
+      await resumedClient.initialize();
+
+      expect(snapshotForReplay).toHaveBeenLastCalledWith(
+        'incoming-session',
+        'test-session-id',
+      );
+      resumedClient.undoTelemetryReplay();
+      expect(restore).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'incoming-session',
+          outgoingSessionId: 'test-session-id',
+        }),
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('test-session-id');
+    });
+
     it('undoes nothing once the swap has settled', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {

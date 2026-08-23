@@ -232,6 +232,19 @@ export interface UiTelemetryReplaySnapshot {
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
   readonly sessionWasClosed: boolean;
+  /**
+   * The session the process was on when the replay began — the one a failed
+   * swap rolls back to. Absent when no session was initialized yet (the
+   * process's first replay). The rollback's own re-initialize replays this
+   * session, and that replay's `resetSession` wipes its live bucket; only
+   * what the transcript persists comes back. Restore puts the captured
+   * bucket back so in-memory-only state (skill invocations are never
+   * persisted) survives the round trip.
+   */
+  readonly outgoingSessionId?: string;
+  /** Absent when the outgoing session had no bucket yet — restore removes it. */
+  readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionWasClosed?: boolean;
   readonly lastPromptTokenCount: number;
   readonly lastCachedContentTokenCount: number;
 }
@@ -324,8 +337,18 @@ export class UiTelemetryService extends EventEmitter {
    * See {@link UiTelemetryReplaySnapshot} for why a snapshot is the only
    * compensation available.
    */
-  snapshotForReplay(sessionId: string): UiTelemetryReplaySnapshot {
+  snapshotForReplay(
+    sessionId: string,
+    outgoingSessionId?: string,
+  ): UiTelemetryReplaySnapshot {
+    const outgoing =
+      outgoingSessionId && outgoingSessionId !== sessionId
+        ? outgoingSessionId
+        : undefined;
     const sessionMetrics = this.#sessionMetrics.get(sessionId);
+    const outgoingSessionMetrics = outgoing
+      ? this.#sessionMetrics.get(outgoing)
+      : undefined;
     return {
       metrics: cloneSessionMetrics(this.#metrics),
       sessionId,
@@ -333,6 +356,13 @@ export class UiTelemetryService extends EventEmitter {
         ? cloneSessionMetrics(sessionMetrics)
         : undefined,
       sessionWasClosed: this.#closedSessions.has(sessionId),
+      outgoingSessionId: outgoing,
+      outgoingSessionMetrics: outgoingSessionMetrics
+        ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionWasClosed: outgoing
+        ? this.#closedSessions.has(outgoing)
+        : undefined,
       lastPromptTokenCount: this.#lastPromptTokenCount,
       lastCachedContentTokenCount: this.#lastCachedContentTokenCount,
     };
@@ -346,20 +376,17 @@ export class UiTelemetryService extends EventEmitter {
    */
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
     this.#metrics = cloneSessionMetrics(snapshot.metrics);
-    if (snapshot.sessionMetrics) {
-      this.#sessionMetrics.set(
-        snapshot.sessionId,
-        cloneSessionMetrics(snapshot.sessionMetrics),
+    this.#restoreSessionState(
+      snapshot.sessionId,
+      snapshot.sessionMetrics,
+      snapshot.sessionWasClosed,
+    );
+    if (snapshot.outgoingSessionId) {
+      this.#restoreSessionState(
+        snapshot.outgoingSessionId,
+        snapshot.outgoingSessionMetrics,
+        snapshot.outgoingSessionWasClosed,
       );
-    } else {
-      // No bucket existed before the replay; the replay created one. Drop it
-      // rather than leave an empty bucket that reads as a live session.
-      this.#sessionMetrics.delete(snapshot.sessionId);
-    }
-    if (snapshot.sessionWasClosed) {
-      this.#closedSessions.add(snapshot.sessionId);
-    } else {
-      this.#closedSessions.delete(snapshot.sessionId);
     }
     this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
     this.#lastCachedContentTokenCount = snapshot.lastCachedContentTokenCount;
@@ -367,6 +394,25 @@ export class UiTelemetryService extends EventEmitter {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
     });
+  }
+
+  #restoreSessionState(
+    sessionId: string,
+    metrics: SessionMetrics | undefined,
+    wasClosed: boolean | undefined,
+  ): void {
+    if (metrics) {
+      this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
+    } else {
+      // No bucket existed before the replay; the replay created one. Drop it
+      // rather than leave an empty bucket that reads as a live session.
+      this.#sessionMetrics.delete(sessionId);
+    }
+    if (wasClosed) {
+      this.#closedSessions.add(sessionId);
+    } else {
+      this.#closedSessions.delete(sessionId);
+    }
   }
 
   /**

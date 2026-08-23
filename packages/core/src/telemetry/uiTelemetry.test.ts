@@ -1429,6 +1429,49 @@ describe('UiTelemetryService', () => {
       expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
     });
 
+    it('snapshotForReplay covers the outgoing session a rollback replay wipes', () => {
+      // /resume B from live session A: when the swap fails after B's replay,
+      // the rollback re-initializes A through replayUiTelemetryFromConversation,
+      // whose resetSession(A) wipes A's live bucket. Skill invocations are
+      // never persisted to the transcript (recordSkillInvocation is in-memory
+      // only), so that replay cannot rebuild them — the undo must put A's
+      // pre-swap bucket back itself.
+      service.recordSkillInvocation('bugfix', true, SESSION_A);
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // Forward replay lands B's history in the aggregate, then the rollback
+      // replay resets A's bucket and rebuilds only the persisted events.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.skills?.totalCalls).toBe(1);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(100);
+      // The abandoned incoming bucket is still dropped and the aggregate
+      // still restored.
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(100);
+    });
+
+    it('restoreFromReplaySnapshot drops an outgoing bucket created after the snapshot', () => {
+      // The outgoing session was initialized but had not accumulated a bucket
+      // when the swap armed its undo; the rollback replay then creates one.
+      // Restore drops it again rather than leaving a phantom bucket behind.
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('m', 50), SESSION_A);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getMetricsForSession(SESSION_A).models).toEqual({});
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBeUndefined();
+    });
+
     it('#closedSessions should be bounded', () => {
       // Add more than MAX_CLOSED_SESSIONS
       for (let i = 0; i < 1005; i++) {

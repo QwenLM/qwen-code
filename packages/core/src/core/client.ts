@@ -598,11 +598,20 @@ export class GeminiClient {
    * `??=`, not `=`: a rollback's own re-initialize runs while the failed
    * swap's undo is still outstanding, and the undo that matters is the
    * outermost one — the state before the swap began.
+   *
+   * The snapshot also covers the session the process is currently on —
+   * `initializedSessionId` still names it at arm time. A failed swap's
+   * rollback re-initializes that session, and that re-initialize's replay
+   * wipes its live bucket; only what the transcript persists comes back
+   * (skill invocations never do), so the undo must put the bucket back.
    */
   private armTelemetryReplayUndo(sessionId: string): void {
     this.telemetryReplayUndo ??= {
       sessionId,
-      snapshot: uiTelemetryService.snapshotForReplay(sessionId),
+      snapshot: uiTelemetryService.snapshotForReplay(
+        sessionId,
+        this.initializedSessionId,
+      ),
     };
   }
 
