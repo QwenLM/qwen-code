@@ -663,7 +663,7 @@ describe('serve-bridge', () => {
       );
       expect(result.isError).toBeUndefined();
       expect(calls[0]?.url).toBe(
-        'http://127.0.0.1:4170/sessions/test-session/approval-mode',
+        'http://127.0.0.1:4170/session/test-session/approval-mode',
       );
       expect(JSON.parse(calls[0]?.body ?? '{}')).toMatchObject({
         mode: 'plan',
