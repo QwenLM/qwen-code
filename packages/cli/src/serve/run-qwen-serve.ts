@@ -1085,14 +1085,21 @@ export function buildProviderSetupInputs(
         migratedLegacyModelIds.push(model.id);
         return [preserved];
       }
-      if (attributable) {
-        // An attributable entry that leaves the plan at its OWN endpoint —
-        // explicitly deselected, or superseded by a generated default — must
-        // still be claimed by id so buildInstallPlan removes the stored
-        // original; otherwise a deselection at the entry's endpoint silently
-        // no-ops forever (the entry stays baseUrl-less and attributable, so
-        // every reconnect repeats the no-op — R41-3). buildInstallPlan's
-        // sibling guard keeps this from over-claiming.
+      if (attributable && defaultIds.has(model.id)) {
+        // An attributable entry whose id is superseded by a generated
+        // default leaves the plan at its OWN endpoint while this run writes
+        // that very id, so it must still be claimed by id for
+        // buildInstallPlan to remove the stored original (R41-3). A mere
+        // ABSENCE from the requested ids, by contrast, is not deselection
+        // intent on this route: the serve catalog exposes no existingConfig,
+        // so Web Shell and SDK selections are defaults-seeded and can never
+        // carry a baseUrl-less legacy id — claiming on pure absence deleted
+        // the user's attributable custom model on a plain defaults-only
+        // reconnect, while a stamped custom survived the identical request
+        // via the merge-only branch below (R42-1). Seeded CLI/ACP/VS flows
+        // (which round-trip the saved ids) remain the authoritative
+        // deselection surfaces; buildInstallPlan's sibling guard keeps this
+        // claim from over-claiming.
         migratedLegacyModelIds.push(model.id);
       }
       return [];
@@ -1101,9 +1108,10 @@ export function buildProviderSetupInputs(
       helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
       selectedEndpoint;
     // The serve catalog does not expose existingConfig, so Web Shell and SDK
-    // callers cannot seed and round-trip a free-form provider's saved IDs.
-    // Treat this route as merge-only; seeded CLI/ACP/VS flows remain the
-    // authoritative replacement surfaces.
+    // callers cannot seed and round-trip saved IDs. Treat this route as
+    // merge-only; seeded CLI/ACP/VS flows remain the authoritative
+    // replacement surfaces (the baseUrl-less branch above applies the same
+    // merge-only rule to attributable legacy entries — R42-1).
     const shouldPreserve = selectedModel && !defaultIds.has(preserved.id);
     return shouldPreserve ? [preserved] : [];
   });

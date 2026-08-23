@@ -680,15 +680,19 @@ describe('buildProviderSetupInputs', () => {
     expect(written).toHaveLength(6);
   });
 
-  it('removes a deselected attributable baseUrl-less legacy entry on an array merge provider (R41-3)', async () => {
-    // For merge providers with endpoint options, buildInstallPlan claims a
-    // baseUrl-less entry only via migratedLegacyModelIds. The deselection
-    // exit must therefore record the id too: otherwise an explicit selection
-    // omitting the entry never removes the stored original — a permanent
-    // silent deselection no-op, contradicting the "a deselection at the
-    // entry's endpoint must remove it like any other omitted entry"
-    // contract (provider-config.ts). KIMI_CODE_API_KEY is unique to the
-    // coding endpoint, so this entry is attributable there.
+  it('keeps an attributable baseUrl-less legacy entry on a defaults-only serve reconnect (R42-1)', async () => {
+    // R41-3 claimed every attributable entry omitted from an explicit
+    // selection, treating absence as deselection. But the serve catalog
+    // exposes no existingConfig: Web Shell and SDK selections are
+    // defaults-seeded and can never carry a baseUrl-less legacy id, so a
+    // plain defaults-only reconnect claimed and permanently deleted the
+    // user's attributable custom model — while a stamped custom survived
+    // the identical request via the merge-only branch ('preserves saved
+    // endpoint custom models for a defaults-only web reconnect'). Pure
+    // absence is not deselection intent on this route; only a generated
+    // default superseding the id claims the stored original (next test).
+    // KIMI_CODE_API_KEY is unique to the coding endpoint, so this entry is
+    // attributable there.
     const legacyModel = {
       id: 'my-code-custom',
       name: '[Kimi Code] my-code-custom',
@@ -705,7 +709,9 @@ describe('buildProviderSetupInputs', () => {
         protocol: qwenCore.AuthType.USE_OPENAI,
         apiKey: 'sk-code',
         baseUrl: qwenCore.KIMI_CODE_BASE_URL,
-        // An explicit selection omitting 'my-code-custom' deselects it.
+        // The exact shape a Web Shell/SDK caller produces: the endpoint
+        // defaults, explicitly. It can neither contain nor deliberately
+        // omit 'my-code-custom' — the catalog never exposed it.
         modelIds: codingDefaults,
       },
       qwenCore.kimiProvider,
@@ -717,7 +723,7 @@ describe('buildProviderSetupInputs', () => {
       },
     );
     expect(inputs.preserveModels).toBeUndefined();
-    expect(inputs.migratedLegacyModelIds).toEqual(['my-code-custom']);
+    expect(inputs.migratedLegacyModelIds).toBeUndefined();
 
     const adapter = createSettingsAdapter({
       [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
@@ -739,10 +745,83 @@ describe('buildProviderSetupInputs', () => {
       (call: unknown[]) => call[0] === 'modelProviders.openai',
     )?.[1] as Array<Record<string, unknown>> | undefined;
     expect(written).toBeDefined();
-    // The deselected entry is gone — no baseUrl-less original, no copy.
-    expect(
-      written!.filter((model) => model['id'] === 'my-code-custom'),
-    ).toHaveLength(0);
+    // The entry survives the defaults-only reconnect byte-identical: still
+    // baseUrl-less, still carrying its own env key — not deleted, not
+    // stamped.
+    expect(written).toContainEqual(
+      expect.objectContaining({
+        id: 'my-code-custom',
+        name: '[Kimi Code] my-code-custom',
+        envKey: qwenCore.KIMI_CODE_ENV_KEY,
+        generationConfig: { contextWindowSize: 12345 },
+      }),
+    );
+    const survivor = written!.find(
+      (model) => model['id'] === 'my-code-custom',
+    );
+    expect(survivor?.['baseUrl']).toBeUndefined();
+  });
+
+  it('claims an attributable baseUrl-less legacy entry superseded by a generated default (R42-1)', async () => {
+    // The claim R42-1 keeps: when the entry's id collides with a generated
+    // default, this run writes that very id at the selected endpoint, so
+    // the stored baseUrl-less original must be claimed and collapse into
+    // the stamped default — on an implicit reconnect too, where the entry
+    // would otherwise be preserved beside its own replacement.
+    const legacyModel = {
+      id: 'k3',
+      name: '[Kimi Code] k3',
+      envKey: qwenCore.KIMI_CODE_ENV_KEY,
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const codingDefaults = qwenCore.getDefaultModelIds(
+      qwenCore.kimiProvider,
+      qwenCore.KIMI_CODE_BASE_URL,
+    );
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-code',
+        baseUrl: qwenCore.KIMI_CODE_BASE_URL,
+        modelIds: codingDefaults,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(inputs.preserveModels).toBeUndefined();
+    expect(inputs.migratedLegacyModelIds).toEqual(['k3']);
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.kimiProvider, {
+      ...inputs,
+      apiKey: 'sk-code',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[qwenCore.KIMI_CODE_ENV_KEY];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // Exactly one 'k3' remains — the stamped generated default; the
+    // baseUrl-less original is gone.
+    const k3Entries = written!.filter((model) => model['id'] === 'k3');
+    expect(k3Entries).toHaveLength(1);
+    expect(k3Entries[0]?.['baseUrl']).toBe(qwenCore.KIMI_CODE_BASE_URL);
   });
 
   it('never re-homes or deletes a shared-key baseUrl-less legacy entry (R41-4)', async () => {

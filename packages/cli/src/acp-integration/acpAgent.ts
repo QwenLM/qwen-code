@@ -2413,6 +2413,31 @@ function readExistingProviderConfig(
                       restoredEndpoint),
               )
               .map((model) => model.id);
+            if (config.mergeModelsByIdentity) {
+              // Seed attributable baseUrl-less legacy ids at their endpoint
+              // so the client can round-trip them: the connect handler
+              // treats an explicit selection as authoritative (omission
+              // deselects, like a stamped custom), so an entry the seed
+              // never exposed would be silently deleted by a client merely
+              // echoing the seed back (R42-1). Shared-key entries fail
+              // attribution closed and stay unseeded — untouchable on
+              // every surface (R41-4).
+              const { namesSelectedEndpoint } = legacyEnvKeyAttribution(
+                config,
+                protocol,
+                option.url,
+              );
+              for (const model of existing.models) {
+                if (
+                  model.baseUrl === undefined &&
+                  (config.ownsModel ? config.ownsModel(model) : true) &&
+                  namesSelectedEndpoint(model) &&
+                  !ids.includes(model.id)
+                ) {
+                  ids.push(model.id);
+                }
+              }
+            }
             return ids.length > 0 ? [[option.url, [...new Set(ids)]]] : [];
           }),
         )
@@ -2496,6 +2521,14 @@ function readExistingProviderConfig(
     }
   }
 
+  // Attributable baseUrl-less legacy ids belong to the restored endpoint's
+  // saved selection too (R42-1): seeding them keeps a client echoing the
+  // seed back from silently deleting them (the connect handler treats an
+  // explicit selection as authoritative), mirroring modelIdsByBaseUrl.
+  const restoredLegacyAttribution = endpointScoped
+    ? legacyEnvKeyAttribution(config, protocol, baseUrl)
+    : undefined;
+
   return {
     protocol,
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
@@ -2508,15 +2541,22 @@ function readExistingProviderConfig(
     ...(existing
       ? {
           modelIds: existing.models
-            .filter((model) =>
-              endpointScoped
-                ? model.baseUrl !== undefined &&
-                  normalizeBaseUrlForMatching(model.baseUrl) ===
-                    restoredEndpoint
-                : model.baseUrl === undefined ||
-                  firstModel?.baseUrl === undefined ||
-                  normalizeBaseUrlForMatching(model.baseUrl) ===
-                    normalizeBaseUrlForMatching(firstModel?.baseUrl),
+            .filter(
+              (model) =>
+                endpointScoped
+                  ? (model.baseUrl !== undefined &&
+                      normalizeBaseUrlForMatching(model.baseUrl) ===
+                        restoredEndpoint) ||
+                    (model.baseUrl === undefined &&
+                      restoredLegacyAttribution !== undefined &&
+                      (config.ownsModel
+                        ? config.ownsModel(model)
+                        : true) &&
+                      restoredLegacyAttribution.namesSelectedEndpoint(model))
+                  : model.baseUrl === undefined ||
+                    firstModel?.baseUrl === undefined ||
+                    normalizeBaseUrlForMatching(model.baseUrl) ===
+                      normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
           ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
@@ -2740,8 +2780,11 @@ function readProviderSetupInputs(
         // explicitly deselected, or superseded by a generated default — must
         // still be claimed by id so buildInstallPlan removes the stored
         // original; otherwise the deselection silently no-ops forever
-        // (R41-3; see the matching comment in serve's
-        // buildProviderSetupInputs).
+        // (R41-3). Unlike the serve route (merge-only: its catalog exposes
+        // no existingConfig), this route seeds attributable baseUrl-less ids
+        // into existingConfig (readExistingProviderConfig), so an explicit
+        // selection omitting one carries the same informed-deselection
+        // meaning as omitting a stamped custom (R42-1).
         migratedLegacyModelIds.push(model.id);
       }
       return [];

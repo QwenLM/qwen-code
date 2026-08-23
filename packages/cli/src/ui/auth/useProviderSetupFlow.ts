@@ -634,11 +634,40 @@ export function useProviderSetupFlow(
           normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
         if (!provider.mergeModelsByIdentity && belongsToAnotherEndpoint) {
           // Non-merge providers own every endpoint, so sibling-endpoint
-          // models must be carried or the replace-owned patch deletes
-          // them. Merge providers own only the submitted endpoint —
-          // sibling entries are not removed there and carrying them would
-          // duplicate them (the preserved existing copy survives too).
-          return true;
+          // models must be carried or the remove-owned merge deletes them.
+          // Merge providers own only the submitted endpoint — sibling
+          // entries are not removed there and carrying them would duplicate
+          // them (the preserved existing copy survives too).
+          //
+          // Carry a sibling entry only if its id is still part of that
+          // endpoint's live model set: preserveModelsRef is the dialog-open
+          // snapshot and is never updated by changeModelIds or
+          // switchEndpointModelState, so carrying it unconditionally revived
+          // a custom model the user explicitly deleted from the sibling
+          // endpoint's models field (R42-2). Reconstruct the set the way
+          // the field is seeded — the endpoint's defaults minus deselected
+          // defaults, plus its live custom ids. An endpoint with no live
+          // state at all (never visited, nothing seeded) fails closed
+          // toward preservation, as before R42-2.
+          const siblingEndpoint = normalizeBaseUrlForMatching(model.baseUrl);
+          const liveCustomIds =
+            customModelIdsByBaseUrlRef.current.get(siblingEndpoint);
+          const liveTrimmedDefaults =
+            trimmedDefaultModelIdsRef.current.get(siblingEndpoint);
+          if (
+            liveCustomIds === undefined &&
+            liveTrimmedDefaults === undefined
+          ) {
+            return true;
+          }
+          const trimmedSet = new Set(liveTrimmedDefaults ?? []);
+          const liveSiblingIds = new Set([
+            ...(liveCustomIds ?? []),
+            ...getDefaultModelIds(provider, siblingEndpoint).filter(
+              (id) => !trimmedSet.has(id),
+            ),
+          ]);
+          return liveSiblingIds.has(model.id);
         }
         const belongsToSelectedMergeEndpoint =
           !provider.mergeModelsByIdentity ||

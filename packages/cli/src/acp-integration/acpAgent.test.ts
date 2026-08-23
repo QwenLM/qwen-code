@@ -13449,6 +13449,182 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect preserves an echoed attributable baseUrl-less legacy entry (R42-1)', async () => {
+    // readExistingProviderConfig seeds attributable baseUrl-less ids into
+    // existingConfig (per endpoint), so a client echoing the seed back
+    // round-trips the entry: it is stamped at its own endpoint and claimed
+    // for the collapse of the stored original — not deleted. Pair of the
+    // R41-3 test above, where an equally INFORMED explicit omission claims
+    // and removes the entry: on this route the seed makes both directions
+    // of the selection meaningful.
+    const legacyModel = {
+      id: 'my-code-custom',
+      name: '[Kimi Code] my-code-custom',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.kimi.com/coding/v1',
+        apiKey: 'sk-code',
+        // Coding-endpoint defaults plus the seeded legacy id — exactly the
+        // existingConfig.modelIdsByBaseUrl round-trip.
+        modelIds: [
+          'k3-256k',
+          'k3',
+          'kimi-for-coding',
+          'kimi-for-coding-highspeed',
+          'my-code-custom',
+        ],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        preserveModels: [
+          { ...legacyModel, baseUrl: 'https://api.kimi.com/coding/v1' },
+        ],
+        migratedLegacyModelIds: ['my-code-custom'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/list seeds attributable legacy ids per endpoint and fails shared keys closed (R42-1)', async () => {
+    // modelIdsByBaseUrl must expose an attributable baseUrl-less entry at
+    // its own endpoint so echoing the seed round-trips it, while a
+    // shared-key entry (MOONSHOT_API_KEY serves BOTH Kimi api endpoints)
+    // fails attribution closed and stays unseeded everywhere — omission
+    // can never carry deselection intent for an entry the seed could not
+    // expose (R41-4 × R42-1).
+    //
+    // The mocked core module's ALL_PROVIDERS carries only deepseek, so the
+    // Kimi provider is injected here — with ALL THREE real endpoints, since
+    // the shared-key ambiguity (api-china and api-international both keying
+    // MOONSHOT_API_KEY) is exactly what makes attribution fail closed.
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const legacyCoding = {
+      id: 'my-code-custom',
+      name: '[Kimi Code] my-code-custom',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacySharedApi = {
+      id: 'my-api-custom',
+      name: '[Kimi API] my-api-custom',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        env: { KIMI_CODE_API_KEY: 'sk-code', MOONSHOT_API_KEY: 'sk-api' },
+        modelProviders: { openai: [legacyCoding, legacySharedApi] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    providers.push({
+      id: 'kimi',
+      label: 'Kimi',
+      description: 'Choose Kimi Code or a regional Kimi API endpoint',
+      protocol: 'openai',
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: 'https://api.kimi.com/coding/v1',
+          models: [{ id: 'k3-256k' }],
+        },
+        {
+          id: 'api-china',
+          label: 'API Key (China)',
+          url: 'https://api.moonshot.cn/v1',
+          models: [{ id: 'kimi-k3' }],
+        },
+        {
+          id: 'api-international',
+          label: 'API Key (International)',
+          url: 'https://api.moonshot.ai/v1',
+          models: [{ id: 'kimi-k3' }],
+        },
+      ],
+      envKey: (_protocol: string, baseUrl: string) =>
+        baseUrl === 'https://api.kimi.com/coding/v1'
+          ? 'KIMI_CODE_API_KEY'
+          : 'MOONSHOT_API_KEY',
+      models: [{ id: 'k3-256k' }, { id: 'kimi-k3' }],
+      modelsEditable: true,
+      mergeModelsByIdentity: true,
+      modelNamePrefix: (baseUrl: string) =>
+        baseUrl === 'https://api.kimi.com/coding/v1' ? 'Kimi Code' : 'Kimi API',
+      ownsModel: (model: { envKey?: string; name?: string }) =>
+        (model.envKey === 'KIMI_CODE_API_KEY' &&
+          model.name?.startsWith('[Kimi Code] ') === true) ||
+        (model.envKey === 'MOONSHOT_API_KEY' &&
+          model.name?.startsWith('[Kimi API] ') === true),
+      uiGroup: 'third-party',
+    });
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const listed = (await agent.extMethod('qwen/providers/list', {})) as {
+        providers: Array<{
+          id: string;
+          existingConfig?: Record<string, unknown>;
+        }>;
+      };
+      const kimi = listed.providers.find((p) => p.id === 'kimi');
+      expect(kimi?.existingConfig).toEqual({
+        protocol: 'openai',
+        baseUrl: 'https://api.kimi.com/coding/v1',
+        hasApiKey: true,
+        // The coding-attributable entry is seeded at the restored endpoint;
+        // the shared-key entry appears nowhere.
+        modelIds: ['my-code-custom'],
+        modelIdsByBaseUrl: {
+          'https://api.kimi.com/coding/v1': ['my-code-custom'],
+        },
+        advancedConfig: { contextWindowSize: 12345 },
+      });
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('qwen/providers/connect preserves a same-id proxy model for a non-merge provider', async () => {
     const baseSettings = makeSessionSettings();
     const proxyModel = {
@@ -13670,7 +13846,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/providers/list scopes existing model IDs to the restored endpoint', async () => {
+  it('qwen/providers/list scopes existing model IDs to the restored endpoint and seeds attributable legacy ids (R42-1)', async () => {
     const providers = ALL_PROVIDERS as unknown as Array<
       Record<string, unknown>
     >;
@@ -13762,9 +13938,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
                 protocol: 'openai',
                 baseUrl: 'https://first.example/v1',
                 hasApiKey: true,
-                modelIds: ['first-model', 'custom-first'],
+                // The baseUrl-less entry carrying the first endpoint's own
+                // (unshared) env key is attributed there and seeded, so a
+                // client echoing the seed round-trips it instead of
+                // silently deleting it on connect (R42-1).
+                modelIds: [
+                  'first-model',
+                  'custom-first',
+                  'legacy-without-base-url',
+                ],
                 modelIdsByBaseUrl: {
-                  'https://first.example/v1': ['first-model', 'custom-first'],
+                  'https://first.example/v1': [
+                    'first-model',
+                    'custom-first',
+                    'legacy-without-base-url',
+                  ],
                   'https://second.example/v1': [
                     'custom-second',
                     'wrong-url-shared-env',

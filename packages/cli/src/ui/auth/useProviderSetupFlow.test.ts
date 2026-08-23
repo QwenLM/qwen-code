@@ -11,6 +11,8 @@ import {
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
+  getDefaultModelIds,
+  zaiProvider,
   type ModelProvidersConfig,
   type ProviderConfig,
   type ProviderModelConfig,
@@ -1290,6 +1292,122 @@ describe('useProviderSetupFlow', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       provider,
       expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+  });
+
+  it('does not revive a non-merge sibling custom deleted from the models field (R42-2)', async () => {
+    // For non-merge array providers the sibling-endpoint branch must carry
+    // preserved entries or the remove-owned merge deletes them — but
+    // preserveModelsRef is the dialog-open snapshot, never updated by
+    // changeModelIds/switchEndpointModelState. Carrying it unconditionally
+    // revived a custom model the user explicitly deleted from the sibling
+    // endpoint's models field whenever setup completed at another
+    // endpoint. The carry must be rebuilt from the live per-endpoint maps.
+    const standardUrl = 'https://api.z.ai/api/paas/v4';
+    const codingUrl = 'https://api.z.ai/api/coding/paas/v4';
+    const zaiDefaults = getDefaultModelIds(zaiProvider, standardUrl);
+    const removedCustom: ProviderModelConfig = {
+      id: 'my-glm',
+      name: '[Z.AI] my-glm',
+      baseUrl: standardUrl,
+      envKey: 'ZAI_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const keptCustom: ProviderModelConfig = {
+      id: 'other-glm',
+      name: '[Z.AI] other-glm',
+      baseUrl: standardUrl,
+      envKey: 'ZAI_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    // Delete 'my-glm' from the standard endpoint's models field, then
+    // complete setup at the sibling coding endpoint.
+    act(() => {
+      result.current.start(
+        zaiProvider,
+        undefined,
+        { ZAI_API_KEY: 'sk-zai' },
+        ['my-glm', 'other-glm'],
+        standardUrl,
+        undefined,
+        new Map<string, string[]>([
+          [standardUrl, [...zaiDefaults, 'my-glm', 'other-glm']],
+          [codingUrl, [...zaiDefaults]],
+        ]),
+        [removedCustom, keptCustom],
+      );
+    });
+    act(() => {
+      result.current.changeModelIds(
+        [...zaiDefaults, 'other-glm'].join(', '),
+      );
+    });
+    act(() => {
+      result.current.selectBaseUrl(codingUrl);
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    // The deleted custom is gone; the untouched sibling custom is still
+    // carried (dropping it would delete it in the remove-owned merge).
+    expect(onSubmit).toHaveBeenCalledWith(
+      zaiProvider,
+      expect.objectContaining({ preserveModels: [keptCustom] }),
+    );
+  });
+
+  it('drops a non-merge custom deleted at the submitted endpoint itself (R42-2 control)', async () => {
+    const standardUrl = 'https://api.z.ai/api/paas/v4';
+    const zaiDefaults = getDefaultModelIds(zaiProvider, standardUrl);
+    const removedCustom: ProviderModelConfig = {
+      id: 'my-glm',
+      name: '[Z.AI] my-glm',
+      baseUrl: standardUrl,
+      envKey: 'ZAI_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const keptCustom: ProviderModelConfig = {
+      id: 'other-glm',
+      name: '[Z.AI] other-glm',
+      baseUrl: standardUrl,
+      envKey: 'ZAI_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        zaiProvider,
+        undefined,
+        { ZAI_API_KEY: 'sk-zai' },
+        ['my-glm', 'other-glm'],
+        standardUrl,
+        undefined,
+        new Map<string, string[]>([
+          [standardUrl, [...zaiDefaults, 'my-glm', 'other-glm']],
+        ]),
+        [removedCustom, keptCustom],
+      );
+    });
+    act(() => {
+      result.current.changeModelIds(
+        [...zaiDefaults, 'other-glm'].join(', '),
+      );
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith(
+      zaiProvider,
+      expect.objectContaining({ preserveModels: [keptCustom] }),
     );
   });
 
