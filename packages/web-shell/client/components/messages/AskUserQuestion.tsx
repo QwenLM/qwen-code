@@ -595,10 +595,16 @@ export function AskUserQuestion({
     if (requestChanged && currentIdx !== 0) return;
     if (wasActive && !requestChanged) return;
     prevRequestIdRef.current = request.id;
-    // Yield to a user who is typing in the composer. Moving focus to an option
-    // could redirect Enter, Space, digits, or typed text into the question and
-    // submit an answer the user never chose.
-    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+    // Yield to a user who is typing outside this panel. Moving focus to an
+    // option could redirect Enter, Space, digits, or typed text into the
+    // question and submit an answer the user never chose. The panel's own
+    // custom input is different: a request swap removes it, so focus must move
+    // into the replacement question instead of being left on document.body.
+    const activeElement = getShadowAwareActiveElement(panelRef.current);
+    if (
+      isEditableTarget(activeElement) &&
+      !panelRef.current?.contains(activeElement)
+    ) {
       return;
     }
     const idx = requestChanged ? 0 : (selectedIdxRef.current ?? 0);

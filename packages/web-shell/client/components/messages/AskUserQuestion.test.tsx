@@ -79,7 +79,8 @@ const multipleQuestionsRequest: PermissionRequest = {
 };
 
 let root: Root | null = null;
-let container: HTMLDivElement | null = null;
+let container: HTMLDivElement | ShadowRoot | null = null;
+let shadowHost: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
 let onError: ReturnType<typeof vi.fn>;
 
@@ -90,9 +91,11 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root?.unmount());
-  container?.remove();
+  if (container instanceof HTMLElement) container.remove();
+  shadowHost?.remove();
   root = null;
   container = null;
+  shadowHost = null;
 });
 
 function rerender(
@@ -119,6 +122,17 @@ function render(
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
+  root = createRoot(container);
+  rerender(keyboardActive, req);
+}
+
+function renderInShadowRoot(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
+  shadowHost = document.createElement('div');
+  document.body.appendChild(shadowHost);
+  container = shadowHost.attachShadow({ mode: 'open' });
   root = createRoot(container);
   rerender(keyboardActive, req);
 }
@@ -321,6 +335,27 @@ describe('AskUserQuestion accessibility', () => {
 
     expect(document.activeElement).toBe(editor);
     editor.remove();
+  });
+
+  it('focuses the replacement question when a request swaps from its custom input', () => {
+    render(undefined);
+    act(() => optionButtons()[2]!.click());
+    expect(document.activeElement).toBe(container!.querySelector('input'));
+
+    rerender(undefined, { ...request, id: 'req-2' });
+
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('yields focus to an editable target in a shadow root', () => {
+    renderInShadowRoot(false);
+    const editor = document.createElement('textarea');
+    container!.appendChild(editor);
+    editor.focus();
+
+    rerender(true);
+
+    expect((container as ShadowRoot).activeElement).toBe(editor);
   });
 
   it('moves focus between options with arrow keys', () => {
