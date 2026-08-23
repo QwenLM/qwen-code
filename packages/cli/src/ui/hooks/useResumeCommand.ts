@@ -9,6 +9,7 @@ import {
   SessionService,
   buildSessionRecoveryPlan,
   type Config,
+  type ResumedSessionData,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -123,11 +124,13 @@ export function useResumeCommand(
       let coreSwapped = false;
       let uiSwapped = false;
       let clientInitializationAttempted = false;
+      let prevSessionData: ResumedSessionData | undefined;
       // The incoming session's stored telemetry is replayed by the client's
       // `initialize()` below, straight into the process-wide usage aggregate.
       // The service has no subtraction API, so a resume abandoned after that
       // point would leave the whole abandoned history in the aggregate that
-      // `persistSessionUsage` writes out. Hold a snapshot to restore from.
+      // `persistSessionUsage` writes out. The client holds the snapshot and
+      // restores it on the rollback path below.
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
@@ -172,10 +175,30 @@ export function useResumeCommand(
           });
         }
 
+        // Snapshot the old session for the rollback's re-initialize,
+        // mirroring useBranchCommand: finalize + flush the outgoing recorder
+        // first so the load sees the live session's trailing records.
+        // Best-effort — without it the rollback still restores sessionId and
+        // recorder, but the re-initialize restarts the old session blank.
+        const outgoingRecording = config.getChatRecordingService();
+        outgoingRecording?.finalize();
+        await outgoingRecording?.flush();
+        try {
+          prevSessionData = await sessionService.loadSession(oldSessionId);
+        } catch {
+          // Best-effort snapshot (see above).
+        }
+
         // 1. Swap core first. Matches useBranchCommand's core-before-UI
         //    pattern: if anything fails between core swap and UI swap,
         //    the catch block rolls core back to the old session so the
         //    user is not stranded with a half-live client.
+        // Settle any undo armed by a replay outside a swap — e.g. the
+        // startup `qwen --resume` replay — first: that replay now belongs to
+        // the session the user is on, and leaving it pending would block the
+        // forward initialize's own snapshot and make this swap's failure
+        // restore a pre-startup state, wiping all usage accrued since.
+        config.getGeminiClient()?.settleTelemetryReplay?.();
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
@@ -229,7 +252,7 @@ export function useResumeCommand(
           // orphaned session JSONL while UI still shows the old session.
           try {
             resetBackgroundStateForSessionSwitch(config);
-            config.startNewSession(oldSessionId, undefined);
+            config.startNewSession(oldSessionId, prevSessionData);
             if (clientInitializationAttempted) {
               await config.getGeminiClient()?.initialize?.();
             }
@@ -256,6 +279,12 @@ export function useResumeCommand(
           // replay the old session, and undoing first would leave the
           // duplicate it adds in the aggregate.
           config.getGeminiClient()?.undoTelemetryReplay?.();
+          // Re-key the stats display back to the old session: the forward
+          // path may already have keyed it to the incoming session, and
+          // SessionStatsProvider seeds its session id once — left on the
+          // abandoned session, every usage display reads a bucket the undo
+          // just removed and renders zeros until the next successful swap.
+          startNewSession(oldSessionId);
         }
         addItem(
           {

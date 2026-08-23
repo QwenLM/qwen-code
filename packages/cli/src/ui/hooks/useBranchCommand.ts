@@ -132,7 +132,8 @@ export function useBranchCommand(
       // below, straight into the process-wide usage aggregate. The service has
       // no subtraction API, so a branch abandoned after that point would leave
       // the abandoned fork's whole history in the aggregate that
-      // `persistSessionUsage` writes out. Hold a snapshot to restore from.
+      // `persistSessionUsage` writes out. The client holds the snapshot and
+      // restores it on the rollback path below.
       let forkCreated = false;
       let prevSessionData: ResumedSessionData | undefined;
 
@@ -202,6 +203,12 @@ export function useBranchCommand(
         //    block below — without it, a failure between swap and UI
         //    update would leave core on the fork while UI still shows
         //    the parent, silently recording user input into an orphan.
+        // Settle any undo armed by a replay outside a swap — e.g. the
+        // startup `qwen --resume` replay — first: that replay now belongs to
+        // the session the user is on, and leaving it pending would block the
+        // forward initialize's own snapshot and make this swap's failure
+        // restore a pre-startup state, wiping all usage accrued since.
+        config.getGeminiClient()?.settleTelemetryReplay?.();
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -295,6 +302,12 @@ export function useBranchCommand(
           // parent would still end up double-counted. Restoring afterwards
           // discards both the abandoned fork's replay and that duplicate.
           config.getGeminiClient()?.undoTelemetryReplay?.();
+          // Re-key the stats display back to the parent session: step 8 may
+          // already have keyed it to the fork, and SessionStatsProvider seeds
+          // its session id once — left on the abandoned fork, every usage
+          // display reads a bucket the undo just removed and renders zeros
+          // until the next successful swap.
+          startNewSession(oldSessionId);
         }
         if (forkCreated && !uiSwapped) {
           try {

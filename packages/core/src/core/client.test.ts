@@ -809,6 +809,61 @@ describe('Gemini Client (client.ts)', () => {
       expect(snapshotForReplay).toHaveBeenCalledTimes(1);
     });
 
+    it('arms no replay undo on a fresh-start initialize', async () => {
+      // A fresh start replays nothing, so there is nothing to undo. Arming
+      // there would let the process's first failed session swap restore the
+      // startup snapshot — wiping all usage accrued since — and the `??=`
+      // would block that swap's own pre-swap snapshot.
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      snapshotForReplay.mockClear();
+
+      const freshClient = new GeminiClient(mockConfig);
+      await freshClient.initialize();
+
+      expect(snapshotForReplay).not.toHaveBeenCalled();
+      expect(freshClient.undoTelemetryReplay()).toBe(false);
+    });
+
+    it('settling frees the undo slot for the next swap', async () => {
+      // Production shape: a settled replay — the startup `qwen --resume`
+      // replay, or a committed earlier swap — belongs to the session the user
+      // is on. The next swap must then capture its OWN pre-swap snapshot; a
+      // settle that left the old undo pending would `??=`-block it and make
+      // the next failed swap restore the stale state.
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      const restore = vi.mocked(uiTelemetryService.restoreFromReplaySnapshot);
+      snapshotForReplay.mockClear();
+      restore.mockClear();
+      snapshotForReplay.mockImplementation(
+        (sessionId: string) => ({ sessionId }) as never,
+      );
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      resumedClient.settleTelemetryReplay();
+
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('incoming-session');
+      await resumedClient.initialize();
+
+      expect(snapshotForReplay).toHaveBeenCalledTimes(2);
+      resumedClient.undoTelemetryReplay();
+      expect(restore).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'incoming-session' }),
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('test-session-id');
+    });
+
     it('undoes the replay and lets a retry replay again', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {

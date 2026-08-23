@@ -296,7 +296,12 @@ describe('useBranchCommand', () => {
     });
 
     expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
-    expect(startNewSessionUI).not.toHaveBeenCalled();
+    // UI never swapped to the fork; the stats display is only re-keyed back
+    // to the parent.
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
+    expect(startNewSessionUI).toHaveBeenCalledWith(
+      '12345678-aaaa-bbbb-cccc-dddddddddddd',
+    );
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
@@ -595,6 +600,21 @@ describe('useBranchCommand', () => {
     const restoreOrder = undoTelemetryReplay.mock.invocationCallOrder[0];
     const rollbackInitOrder = initialize.mock.invocationCallOrder.at(-1);
     expect(restoreOrder).toBeGreaterThan(rollbackInitOrder!);
+    // One settle only — the pre-swap one, before the forward initialize, so
+    // any undo armed by a replay outside a swap cannot block this swap's own
+    // snapshot. No commit settle follows a failed swap.
+    expect(settleTelemetryReplay).toHaveBeenCalledTimes(1);
+    expect(settleTelemetryReplay.mock.invocationCallOrder[0]).toBeLessThan(
+      initialize.mock.invocationCallOrder[0]!,
+    );
+    // The forward path already keyed the stats display on the fork; the
+    // rollback re-keys it back to the parent so usage reads don't hit the
+    // bucket the undo just removed and render zeros.
+    expect(startNewSessionUI).toHaveBeenCalledTimes(2);
+    expect(startNewSessionUI).toHaveBeenNthCalledWith(
+      2,
+      '12345678-aaaa-bbbb-cccc-dddddddddddd',
+    );
   });
 
   it('keeps the replayed usage when the branch commits', async () => {
@@ -612,7 +632,9 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('x');
     });
 
-    expect(settleTelemetryReplay).toHaveBeenCalledTimes(1);
+    // Once pre-swap (clears any undo a non-swap replay armed) and once when
+    // the swap commits (drops this swap's own undo).
+    expect(settleTelemetryReplay).toHaveBeenCalledTimes(2);
     expect(undoTelemetryReplay).not.toHaveBeenCalled();
   });
 
@@ -665,10 +687,12 @@ describe('useBranchCommand', () => {
     // Client was re-initialized after rollback so chat history re-hydrates
     // against the parent session.
     expect(initialize).toHaveBeenCalledTimes(2);
-    // UI never switched — no cleared history, no UI sessionId swap.
+    // UI never switched — no cleared history, no UI sessionId swap; the
+    // stats display is only re-keyed back to the parent.
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
-    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
+    expect(startNewSessionUI).toHaveBeenCalledWith(oldSessionId);
     expect(setSessionName).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
     expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();

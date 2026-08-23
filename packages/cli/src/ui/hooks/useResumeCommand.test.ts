@@ -12,7 +12,6 @@ import {
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
 
-
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -275,7 +274,11 @@ describe('useResumeCommand', () => {
       getBackgroundAgentResumeService: () => ({
         buildRecoveredBackgroundAgentsNotice: vi.fn(),
       }),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -377,7 +380,11 @@ describe('useResumeCommand', () => {
       getBackgroundAgentResumeService: () => ({
         buildRecoveredBackgroundAgentsNotice: vi.fn(),
       }),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -456,7 +463,11 @@ describe('useResumeCommand', () => {
       getBackgroundAgentResumeService: () => ({
         buildRecoveredBackgroundAgentsNotice: vi.fn(),
       }),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -537,7 +548,11 @@ describe('useResumeCommand', () => {
         abortAll: vi.fn(),
       }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -638,7 +653,11 @@ describe('useResumeCommand', () => {
       getBackgroundAgentResumeService: () => ({
         buildRecoveredBackgroundAgentsNotice,
       }),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -853,7 +872,11 @@ describe('useResumeCommand', () => {
         abortAll: vi.fn(),
       }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -889,13 +912,15 @@ describe('useResumeCommand', () => {
     expect(config.startNewSession).toHaveBeenNthCalledWith(
       2,
       'old-session-id',
-      undefined,
+      expect.objectContaining({ conversation: expect.anything() }),
     );
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',
     );
-    // UI never swapped.
-    expect(startNewSession).not.toHaveBeenCalled();
+    // UI never swapped to the incoming session; the stats display is only
+    // re-keyed back to the old one.
+    expect(startNewSession).toHaveBeenCalledTimes(1);
+    expect(startNewSession).toHaveBeenCalledWith('old-session-id');
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
     // User sees the failure.
@@ -953,7 +978,11 @@ describe('useResumeCommand', () => {
       }),
       loadPausedBackgroundAgents:
         overrides.loadPausedBackgroundAgents ?? vi.fn().mockResolvedValue([]),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getChatRecordingService: () => ({
+        rebuildTurnBoundaries: vi.fn(),
+        finalize: vi.fn(),
+        flush: vi.fn(),
+      }),
       getDebugLogger: () => ({
         warn: vi.fn(),
         debug: vi.fn(),
@@ -1003,9 +1032,26 @@ describe('useResumeCommand', () => {
     const rollbackInitOrder =
       geminiClient.initialize.mock.invocationCallOrder.at(-1);
     expect(undoOrder).toBeGreaterThan(rollbackInitOrder!);
-    expect(geminiClient.settleTelemetryReplay).not.toHaveBeenCalled();
-    // UI never swapped, so core rolled back too.
-    expect(startNewSession).not.toHaveBeenCalled();
+    // The pre-swap settle runs exactly once — before the forward initialize
+    // — so any undo armed by a replay outside a swap cannot block this
+    // swap's own snapshot, and no commit settle follows a failed swap.
+    expect(geminiClient.settleTelemetryReplay).toHaveBeenCalledTimes(1);
+    expect(
+      geminiClient.settleTelemetryReplay.mock.invocationCallOrder[0],
+    ).toBeLessThan(geminiClient.initialize.mock.invocationCallOrder[0]!);
+    // The rollback re-hydrates the old session with its stored data —
+    // rolling back with `undefined` would rebuild its chat with no
+    // conversation history while the UI still shows it.
+    expect(config.startNewSession).toHaveBeenNthCalledWith(
+      2,
+      'old-session-id',
+      expect.objectContaining({ conversation: expect.anything() }),
+    );
+    // UI never swapped to the incoming session; the stats display is
+    // re-keyed back to the old one so usage reads don't hit the bucket the
+    // undo just removed.
+    expect(startNewSession).toHaveBeenCalledTimes(1);
+    expect(startNewSession).toHaveBeenCalledWith('old-session-id');
   });
 
   it('settles the replay when the resume commits', async () => {
@@ -1028,7 +1074,9 @@ describe('useResumeCommand', () => {
       await result.current.handleResume('new-session-id');
     });
 
-    expect(geminiClient.settleTelemetryReplay).toHaveBeenCalledTimes(1);
+    // Once pre-swap (clears any undo a non-swap replay armed) and once when
+    // the swap commits (drops this swap's own undo).
+    expect(geminiClient.settleTelemetryReplay).toHaveBeenCalledTimes(2);
     expect(geminiClient.undoTelemetryReplay).not.toHaveBeenCalled();
   });
 });

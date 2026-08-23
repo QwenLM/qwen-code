@@ -468,26 +468,11 @@ export class GeminiClient {
       return;
     }
 
-    // Past the early return, so this call WILL replay stored telemetry into
-    // the process-wide usage aggregate — either the restore-runtime events
-    // below or `replayUiTelemetryFromConversation`. Capture the undo here
-    // rather than in the caller: whether a replay happens is decided by
-    // `initializedSessionId`, which the caller cannot see, so a caller that
-    // guessed from its own session id would snapshot when nothing replays and
-    // skip the snapshot when something does.
-    //
-    // `??=`, not `=`: a rollback's own re-initialize runs while the failed
-    // swap's undo is still outstanding, and the undo that matters is the
-    // outermost one — the state before the swap began.
-    this.telemetryReplayUndo ??= {
-      sessionId,
-      snapshot: uiTelemetryService.snapshotForReplay(sessionId),
-    };
-
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     if (restoreRuntime) {
+      this.armTelemetryReplayUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
         uiTelemetryService.addEvent(event, sessionId);
@@ -512,6 +497,7 @@ export class GeminiClient {
         );
       }
     } else if (resumedSessionData) {
+      this.armTelemetryReplayUndo(sessionId);
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -598,6 +584,26 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Arms the undo for a replay this `initialize()` call is about to perform.
+   * Only the branches that replay stored telemetry call this — a fresh-start
+   * `initialize()` replays nothing, and an undo armed there would outlive the
+   * transaction: the process's first failed swap would restore it, wiping all
+   * usage accrued since. Whether a replay happens is decided by
+   * `initializedSessionId`, which the caller cannot see, so the client arms
+   * the snapshot itself instead of trusting a caller's guess.
+   *
+   * `??=`, not `=`: a rollback's own re-initialize runs while the failed
+   * swap's undo is still outstanding, and the undo that matters is the
+   * outermost one — the state before the swap began.
+   */
+  private armTelemetryReplayUndo(sessionId: string): void {
+    this.telemetryReplayUndo ??= {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId),
+    };
   }
 
   /**
