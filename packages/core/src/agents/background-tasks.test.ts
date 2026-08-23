@@ -2684,6 +2684,33 @@ describe('BackgroundTaskRegistry', () => {
       expect(onNotify).toHaveBeenCalledOnce();
     });
 
+    it('names the nested runtime in the resolve fail reason', async () => {
+      // The entry's failure reason is what incident analysis reads when a
+      // parked call never resumes; with colliding generated callIds it
+      // must name which runtime's respond() tore down, like the error log.
+      const respond = vi.fn(async () => {
+        throw new Error('frames torn down');
+      });
+      registry.register(makeRegistration('bg-appr-retry-nested'));
+      registry.addPendingApproval('bg-appr-retry-nested', {
+        ...makeApproval('c1', respond),
+        subagentId: 'search-agent-aaa111',
+      });
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-appr-retry-nested',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+        'search-agent-aaa111',
+      );
+
+      expect(ok).toBe(false);
+      expect(registry.get('bg-appr-retry-nested')?.error).toBe(
+        'Failed to resolve background approval: c1 (nested search-agent-aaa111)',
+      );
+    });
+
     it('auto-rejects parked approvals on cancel', () => {
       const respond = vi.fn(async () => {});
       registry.register(makeRegistration('bg-appr-8'));
@@ -2693,6 +2720,32 @@ describe('BackgroundTaskRegistry', () => {
 
       expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
       expect(registry.getPendingApprovals('bg-appr-8')).toHaveLength(0);
+    });
+
+    it('names the nested runtime in the auto-reject error log', async () => {
+      // rejectPendingApprovals' .catch is the only trace when a parked
+      // call's respond rejects during teardown; with colliding generated
+      // callIds the runtime stamp is the only way to attribute it.
+      const respond = vi.fn(async () => {
+        throw new Error('frames torn down');
+      });
+      registry.register(makeRegistration('bg-appr-autorej-nested'));
+      registry.addPendingApproval('bg-appr-autorej-nested', {
+        ...makeApproval('c1', respond),
+        subagentId: 'search-agent-aaa111',
+      });
+
+      registry.cancel('bg-appr-autorej-nested', { notify: false });
+      // respond rejects asynchronously; let the .catch handler run.
+      await Promise.resolve();
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'bg-appr-autorej-nested/c1 (nested search-agent-aaa111)',
+        ),
+        expect.any(Error),
+      );
     });
 
     it('stamps subagentId on bridged approvals only for a nestedSource bridge', () => {
@@ -3045,6 +3098,84 @@ describe('BackgroundTaskRegistry', () => {
       expect(remaining[0]?.subagentId).toBe('search-agent-bbb222');
       expect(respondA).not.toHaveBeenCalled();
       expect(respondB).not.toHaveBeenCalled();
+    });
+
+    it('resolves the unstamped own approval when a stamped callId collides', async () => {
+      // The dialog resolves an entry's OWN approval with its (absent)
+      // subagentId. With a nested approval parked FIRST under the same
+      // generated callId, relaxing the find conjunct to match any parked
+      // approval when no subagentId is given would resume the nested
+      // runtime and strip its prompt, leaving the entry's own call
+      // waiting forever — the silent hang this PR fixes.
+      registry.register(makeRegistration('bg-collide-own'));
+      const nested = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-own', nested, {
+        nestedSource: true,
+      });
+      const ownEmitter = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-own', ownEmitter);
+      const respondNested = vi.fn(async () => {});
+      const respondOwn = vi.fn(async () => {});
+      nested.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respondNested),
+      );
+      ownEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('bg-collide-own-runtime', 'call_qwen_1', respondOwn),
+      );
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-collide-own',
+        'call_qwen_1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect(ok).toBe(true);
+      expect(respondOwn).toHaveBeenCalledTimes(1);
+      expect(respondNested).not.toHaveBeenCalled();
+      const remaining = registry.getPendingApprovals('bg-collide-own');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.subagentId).toBe('search-agent-aaa111');
+    });
+
+    it('clears the unstamped own prompt without dropping a stamped collision', () => {
+      registry.register(makeRegistration('bg-collide-clear-own'));
+      const nested = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-clear-own', nested, {
+        nestedSource: true,
+      });
+      const ownEmitter = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-collide-clear-own', ownEmitter);
+      const respondNested = vi.fn(async () => {});
+      const respondOwn = vi.fn(async () => {});
+      nested.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('search-agent-aaa111', 'call_qwen_1', respondNested),
+      );
+      ownEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent(
+          'bg-collide-clear-own-runtime',
+          'call_qwen_1',
+          respondOwn,
+        ),
+      );
+
+      // The entry's own call settled elsewhere; the nested prompt parked
+      // under the same callId must stay parked.
+      ownEmitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'bg-collide-clear-own-runtime',
+        round: 1,
+        callId: 'call_qwen_1',
+        success: true,
+      } as never);
+
+      const remaining = registry.getPendingApprovals('bg-collide-clear-own');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.subagentId).toBe('search-agent-aaa111');
+      expect(respondNested).not.toHaveBeenCalled();
+      expect(respondOwn).not.toHaveBeenCalled();
     });
 
     it('auto-rejects a bridged approval that arrives after termination', () => {

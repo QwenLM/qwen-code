@@ -1133,7 +1133,11 @@ export class BackgroundTaskRegistry {
           ':',
         error,
       );
-      this.fail(agentId, `Failed to resolve background approval: ${callId}`);
+      this.fail(
+        agentId,
+        `Failed to resolve background approval: ${callId}` +
+          (subagentId ? ` (nested ${subagentId})` : ''),
+      );
       entry.abortController.abort();
       return false;
     }
@@ -1865,7 +1869,9 @@ export class BackgroundTaskRegistry {
       // an unhandledRejection).
       void approval.respond(REJECTED_OUTCOME).catch((error) => {
         debugLogger.error(
-          `Failed to auto-reject parked approval ${entry.agentId}/${approval.callId}:`,
+          `Failed to auto-reject parked approval ${entry.agentId}/${approval.callId}` +
+            (approval.subagentId ? ` (nested ${approval.subagentId})` : '') +
+            ':',
           error,
         );
       });
