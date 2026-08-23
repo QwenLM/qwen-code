@@ -291,10 +291,13 @@ read site anywhere — textbook dead scaffolding. Its five hits are the schema
 declaration, two web-shell label strings, the generated
 `vscode-ide-companion/schemas/settings.schema.json`, and
 `docs/users/configuration/settings.md:98`: a **documented, user-settable
-option**. Removing it makes `settings.ts:261` print `Unknown setting
-'general.dynamicCommandTranslation' will be ignored` in the terminal of every
-user who set it. Report-only. The `git log -S` evidence is excellent — it is
-excellent evidence for an issue, not for a PR.
+option**. Removing it withdraws that option: the docs row, the two label
+strings, and the schema entry users' editors complete against all
+disappear, while anyone who set the key keeps a settings line nothing
+reads and nothing warns about — the unknown-key check compares top-level
+keys only, and its output is a debug-log append, never the terminal. A
+deprecation decision, not cleanup. Report-only. The `git log -S` evidence
+is excellent — it is excellent evidence for an issue, not for a PR.
 
 ## Steps
 
@@ -311,11 +314,13 @@ excellent evidence for an issue, not for a PR.
    Nothing from §0's shell survived to this call, so the cleanup is
    self-contained: re-derive the fixed path
    (`SURVEY="${TMPDIR:-/tmp}/find-simplifications-survey/main"`), then
-   `git worktree remove --force "$SURVEY" || git worktree prune`, then
-   `rm -rf "$(dirname "$SURVEY")"`. `--force` discards nothing foreign — the
-   worktree is this phase's own throwaway — and without it one untracked
-   file (step 5's ledger-comment file, if written there) makes `remove`
-   refuse and orphans the registration; `prune` recovers when the directory
-   is already gone. Leave the checkout as §0 found it.
+   `rm -rf "$(dirname "$SURVEY")"`, then `git worktree prune`. Delete the
+   directory first, never `git worktree remove --force` on the fixed path:
+   `remove` resolves symlinks, so if the path had been relinked to another
+   registered worktree of this repo at any point during the run, it would
+   force-delete that foreign tree, uncommitted work included; `rm -rf` on
+   the parent only unlinks a symlink. `prune` then clears the stale
+   registration — and recovers when the directory is already gone. Leave
+   the checkout as §0 found it.
    Do not create a branch, do not edit code, do not open a PR. Landing
    requires an assent and `references/land.md`.
