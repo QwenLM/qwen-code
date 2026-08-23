@@ -4980,18 +4980,32 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Whether a restore replay may finalize dangling tool calls. A session
-   * with an active turn — a client prompt or an autonomous goal/cron/
-   * notification turn — may still owe the trailing call's result, so the
-   * replay keeps it pending and lets the live stream deliver it (#9704).
-   * Samples the turn state before the transcript read and again at replay
-   * time so a turn that starts or settles inside the read window is seen.
+   * Whether an ungated restore replay (qwen/session/loadUpdates) may
+   * finalize dangling tool calls. A session with an active turn — a client
+   * prompt or an autonomous goal/cron/notification turn — may still owe the
+   * trailing call's result, so the replay keeps it pending and lets the
+   * live stream deliver it (#9704). Samples the turn state before the
+   * transcript read and again at replay time so a turn that starts or
+   * settles inside the read window is seen. Not for the live loadSession
+   * path: that restore runs under the close gate, which drains active
+   * turns, blocks new ones, and reports closing=true — so isTurnIdle()
+   * there is structurally false and would keep genuinely abandoned calls
+   * pending forever.
    */
   private finalizeDanglingForRestore(
     session: Session | undefined,
     turnIdleBeforeRead: boolean,
   ): boolean {
-    return turnIdleBeforeRead && (session?.isTurnIdle() ?? true);
+    const idleAtReplay = session?.isTurnIdle() ?? true;
+    const finalize = turnIdleBeforeRead && idleAtReplay;
+    debugLogger.debug(
+      '[ACP] restore replay finalizeDangling=%s (idleBeforeRead=%s, idleAtReplay=%s) session=%s',
+      finalize,
+      turnIdleBeforeRead,
+      idleAtReplay,
+      session?.getId() ?? '(non-live)',
+    );
+    return finalize;
   }
 
   private async assertLiveSessionScope(
@@ -5385,7 +5399,6 @@ class QwenAgent implements Agent {
         loadSettingsCached(params.cwd),
       );
       const liveConfig = liveSession.getConfig();
-      const turnIdleBeforeRead = liveSession.isTurnIdle();
       return profiler.time('live_restore', async () => {
         await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
         return this.withLiveSessionRestore(
@@ -5421,15 +5434,13 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
-                // A trailing unmatched call is in-flight, not abandoned,
-                // while the session still has an active turn (#9704); keep
-                // it pending instead of finalizing it as a permanent
-                // failure. The paged transcript read applies the same
-                // guard on its own predicate.
-                finalizeDangling: this.finalizeDanglingForRestore(
-                  liveSession,
-                  turnIdleBeforeRead,
-                ),
+                // The restore gate already drained active turns and blocks
+                // new ones (and a drain timeout rejects before replay), so
+                // a trailing unmatched call here is genuinely abandoned —
+                // finalize it. The turn-activity guard cannot be sampled
+                // under the gate: isTurnIdle() is structurally false while
+                // the close gate is held (#9704).
+                finalizeDangling: true,
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -11943,7 +11954,9 @@ class QwenAgent implements Agent {
           // Read-only history dump never re-hangs the question. Skip
           // finalize only on load/resume that will actually restore.
           suppressRestoreAskUserQuestion: true,
-          // Same in-flight guard as the session-load replay (#9704).
+          // Ungated read: unlike the live loadSession restore (whose gate
+          // drains turns), a turn may still be running here, so guard on
+          // turn activity instead of finalizing unconditionally (#9704).
           finalizeDangling: this.finalizeDanglingForRestore(
             liveSession,
             turnIdleBeforeRead,

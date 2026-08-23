@@ -272,9 +272,11 @@ export async function collectHistoryReplayUpdates({
    */
   suppressRestoreAskUserQuestion?: boolean;
   /**
-   * Live-session loads while a prompt is still active must not finalize
-   * dangling calls: a trailing unmatched call is in-flight, not abandoned,
-   * and its result arrives through the live stream (#9704).
+   * Ungated live-session loads (qwen/session/loadUpdates) while the
+   * session still has an active turn must not finalize dangling calls: a
+   * trailing unmatched call is in-flight, not abandoned, and its result
+   * arrives through the live stream (#9704). The gated live loadSession
+   * path and non-live loads pass true.
    */
   finalizeDangling?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
