@@ -159,7 +159,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
         "an operator has already supplied the issuing CA. Read once into a local: the check now needs the file's " +
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
-        'daemon environment into the TLS trust probe child.',
+        'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
+        'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
@@ -170,6 +172,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
         'key:DEV': 1,
         'key:NODE_EXTRA_CA_CERTS': 1,
+        'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
