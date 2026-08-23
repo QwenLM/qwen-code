@@ -257,6 +257,7 @@ import {
   getAgentViewAnswerableToolCalls,
   getAgentViewWorkerStateForUi,
   getLastAgentViewModelOutputLine,
+  retainAnsweredAgentViewSoftQuestion,
 } from './agent-view/worker-ui-bridge.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
@@ -2239,9 +2240,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     if (readAgentViewWorkerSidebandEnv() === undefined) return;
-    if (streamingState !== StreamingState.Idle) {
-      answeredAgentViewSoftQuestionRef.current = undefined;
-    }
+    answeredAgentViewSoftQuestionRef.current =
+      retainAnsweredAgentViewSoftQuestion(
+        answeredAgentViewSoftQuestionRef.current,
+        agentViewLastResult,
+      );
     const report = getAgentViewWorkerStateForUi({
       initError,
       streamingState,

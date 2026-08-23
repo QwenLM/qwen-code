@@ -15,6 +15,7 @@ import {
   getAgentViewAnswerableToolCalls,
   getAgentViewWorkerStateForUi,
   getLastAgentViewModelOutputLine,
+  retainAnsweredAgentViewSoftQuestion,
 } from './worker-ui-bridge.js';
 
 describe('getAgentViewWorkerStateForUi', () => {
@@ -133,6 +134,17 @@ describe('getAgentViewWorkerStateForUi', () => {
         answeredSoftQuestion: lastResult,
       }),
     ).toEqual({ sessionState: 'idle', lastResult });
+  });
+
+  it('retains an answered soft question until model output changes', () => {
+    const question = 'What should I do next?';
+
+    expect(retainAnsweredAgentViewSoftQuestion(question, question)).toBe(
+      question,
+    );
+    expect(
+      retainAnsweredAgentViewSoftQuestion(question, 'Here is the result.'),
+    ).toBeUndefined();
   });
 });
 

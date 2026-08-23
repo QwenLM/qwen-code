@@ -256,16 +256,19 @@ describe('AgentViewRoster', () => {
     press('\x1b[I', {});
     press('\x1b[?u', {});
     press('\x1b[10;20R', {});
+    press('\x1b', {});
     press('[?u', {});
+    press('\x1b', {});
     press('[10;20R', {});
+    press('\x1b', {});
     press('[27;2;13~', {});
     expect(onPromptChange).not.toHaveBeenCalled();
 
-    press('[f', {});
-    expect(onPromptChange).toHaveBeenLastCalledWith('[f');
+    press('[3]', {});
+    expect(onPromptChange).toHaveBeenLastCalledWith('[3]');
 
     press('[Info] check', {});
-    expect(onPromptChange).toHaveBeenLastCalledWith('[f[Info] check');
+    expect(onPromptChange).toHaveBeenLastCalledWith('[3][Info] check');
   });
 
   it('does not append terminal responses to peek replies', () => {
@@ -277,9 +280,13 @@ describe('AgentViewRoster', () => {
       onPeekPromptChange,
     });
 
+    press('\x1b', {});
     press('[?u', {});
 
     expect(onPeekPromptChange).not.toHaveBeenCalled();
+
+    press('[404]', {});
+    expect(onPeekPromptChange).toHaveBeenLastCalledWith('[404]');
   });
 
   it('moves selection and cancels from keyboard shortcuts', () => {
@@ -532,6 +539,24 @@ describe('AgentViewRoster', () => {
       onDispatch,
       onPromptChange,
       slashCommands: slashCommands([{ name: 'quit' }]),
+    });
+    await settleCompletion();
+
+    press('', { return: true });
+    await settleCompletion();
+
+    expect(onPromptChange).toHaveBeenLastCalledWith('/quit ');
+    expect(onDispatch).not.toHaveBeenCalled();
+  });
+
+  it('accepts a slash suggestion matched through an alias', async () => {
+    const onDispatch = vi.fn(() => true);
+    const onPromptChange = vi.fn();
+    renderRoster({
+      prompt: '/exi',
+      onDispatch,
+      onPromptChange,
+      slashCommands: slashCommands([{ name: 'quit', altNames: ['exit'] }]),
     });
     await settleCompletion();
 
@@ -1042,10 +1067,15 @@ function row(
 }
 
 function slashCommands(
-  commands: Array<{ name: string; description?: string }>,
+  commands: Array<{
+    name: string;
+    description?: string;
+    altNames?: string[];
+  }>,
 ): SlashCommand[] {
   return commands.map((command) => ({
     name: command.name,
+    altNames: command.altNames,
     description: command.description ?? command.name,
     kind: CommandKind.BUILT_IN,
     action: () => undefined,

@@ -192,6 +192,7 @@ export function AgentViewRoster({
   // re-renders; an imperative mirror keeps peek accumulation from reading a
   // stale prop on the second event.
   const peekPromptRef = useRef(peekPrompt);
+  const terminalEscapePendingRef = useRef(false);
   useEffect(() => {
     peekPromptRef.current = peekPrompt;
   }, [peekPrompt]);
@@ -200,7 +201,13 @@ export function AgentViewRoster({
     const currentPrompt = promptInput.buffer.text;
     const hasPrompt = currentPrompt.trim().length > 0;
 
-    if (isUnresolvedTerminalControlInput(input)) return;
+    if (key.escape) {
+      terminalEscapePendingRef.current = false;
+    } else if (
+      isUnresolvedTerminalControlInput(input, terminalEscapePendingRef)
+    ) {
+      return;
+    }
 
     const selectedRow = rows[selectedIndexRef.current];
     const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
@@ -476,11 +483,19 @@ function isReturnInput(input: string, key: RosterInputKey): boolean {
   return getReturnInputPrefix(input, key) !== undefined;
 }
 
-const CSI_RESIDUE_PATTERN =
-  /^(?:\[(?:[\x30-\x3f]+[\x20-\x2f]*|[\x20-\x2f]+)[\x40-\x7e])+$/;
+const CSI_RESIDUE_PATTERN = /^\[[\x20-\x3f]*[\x40-\x7e]$/;
 
-function isUnresolvedTerminalControlInput(input: string): boolean {
-  return input.includes('\x1b') || CSI_RESIDUE_PATTERN.test(input);
+function isUnresolvedTerminalControlInput(
+  input: string,
+  pendingEscape: { current: boolean },
+): boolean {
+  if (input.includes('\x1b')) {
+    pendingEscape.current = input === '\x1b';
+    return true;
+  }
+  if (!pendingEscape.current) return false;
+  pendingEscape.current = false;
+  return CSI_RESIDUE_PATTERN.test(input);
 }
 
 function getReturnInputPrefix(
@@ -706,10 +721,14 @@ function useAgentViewPromptInput({
             : completion.activeSuggestionIndex;
         const suggestion = completion.suggestions[targetIndex];
         const query = buffer.text.trim().slice(1).split(/\s/, 1)[0] ?? '';
+        const normalizedQuery = query.toLowerCase();
+        const matchesQuery = [suggestion?.value, suggestion?.matchedAlias]
+          .filter((value): value is string => value !== undefined)
+          .some((value) => value.toLowerCase().startsWith(normalizedQuery));
         if (
           !suggestion ||
-          !suggestion.value.toLowerCase().startsWith(query.toLowerCase()) ||
-          suggestion.value.toLowerCase() === query.toLowerCase()
+          !matchesQuery ||
+          suggestion.value.toLowerCase() === normalizedQuery
         ) {
           return false;
         }

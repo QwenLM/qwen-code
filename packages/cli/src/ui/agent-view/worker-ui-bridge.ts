@@ -35,6 +35,13 @@ export interface AgentViewWorkerUiStateReport {
   lastResult?: string;
 }
 
+export function retainAnsweredAgentViewSoftQuestion(
+  answeredQuestion: string | undefined,
+  lastResult: string | undefined,
+): string | undefined {
+  return answeredQuestion === lastResult ? answeredQuestion : undefined;
+}
+
 export function getAgentViewWorkerStateForUi({
   initError,
   streamingState,

@@ -1229,6 +1229,30 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).not.toContain('working-session');
   });
 
+  it('dispatches prompts whose later words start with s:', async () => {
+    const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({ dispatchPrompt })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    const prompt = 'fix the s:12:34 timestamp bug';
+    for (const char of prompt) {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    await flushInk();
+    expect(lastFrame()).toContain('session-1');
+
+    stdin.write('\r');
+    await flushInk();
+
+    expect(dispatchPrompt).toHaveBeenCalledWith(prompt, false);
+  });
+
   it('keeps rows visible while typing a new-session prompt', async () => {
     const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
     const { stdin, lastFrame } = render(
@@ -1343,6 +1367,34 @@ describe('AgentViewApp', () => {
 
       expect(dispatchPrompt).not.toHaveBeenCalled();
       expect(onResumeRequested).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['/exit\nfinish the task', '/continue\nfinish the task'] as const)(
+    'dispatches the multi-line prompt %j instead of handling it locally',
+    async (input) => {
+      const dispatchPrompt = vi.fn(async () => ({ sessionId: 'new-session' }));
+      const onExit = vi.fn();
+      const onResumeRequested = vi.fn();
+      const { stdin } = render(
+        <AgentViewApp
+          rows={[row('session-1')]}
+          actions={actions({ dispatchPrompt })}
+          onExit={onExit}
+          onResumeRequested={onResumeRequested}
+        />,
+      );
+
+      for (const char of input) {
+        stdin.write(char);
+        await Promise.resolve();
+      }
+      stdin.write('\r');
+      await flushInk();
+
+      expect(dispatchPrompt).toHaveBeenCalledWith(input, false);
+      expect(onExit).not.toHaveBeenCalled();
+      expect(onResumeRequested).not.toHaveBeenCalled();
     },
   );
 

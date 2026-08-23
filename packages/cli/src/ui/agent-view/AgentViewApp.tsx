@@ -742,19 +742,17 @@ function getDisplayFilter(prompt: string): string | undefined {
 }
 
 function isBlockingFilterPrompt(prompt: string): boolean {
-  return prompt
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .some((term) => term.startsWith('s:'));
+  return prompt.trimStart().toLowerCase().split(/\s+/, 1)[0].startsWith('s:');
 }
 
 function isRosterExitCommand(prompt: string): boolean {
+  if (/[\r\n]/.test(prompt)) return false;
   const command = prompt.trim().toLowerCase().split(/\s+/, 1)[0];
   return command === '/quit' || command === '/exit';
 }
 
 function isRosterResumeCommand(prompt: string): boolean {
+  if (/[\r\n]/.test(prompt)) return false;
   const command = prompt.trim().toLowerCase().split(/\s+/, 1)[0];
   return command === '/resume' || command === '/continue';
 }
