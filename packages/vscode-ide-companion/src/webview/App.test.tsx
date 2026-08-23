@@ -19,6 +19,7 @@ const {
   mockMessageState,
   mockAddMessage,
   mockEndStreaming,
+  mockWebShellTranscriptProps,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -29,6 +30,9 @@ const {
   },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
+  mockWebShellTranscriptProps: {
+    current: null as null | Record<string, unknown>,
+  },
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -284,6 +288,13 @@ vi.mock('./components/layout/InputForm.js', () => ({
   ),
 }));
 
+vi.mock('@qwen-code/web-shell', () => ({
+  WebShellTranscript: (props: Record<string, unknown>) => {
+    mockWebShellTranscriptProps.current = props;
+    return null;
+  },
+}));
+
 import { App } from './App.js';
 
 function createDomRect(): DOMRect {
@@ -362,6 +373,11 @@ function renderApp() {
   });
 
   return { container, root };
+}
+
+/** Reset via a call so tsc does not narrow the prop capture to `null`. */
+function resetWebShellTranscriptProps(): void {
+  mockWebShellTranscriptProps.current = null;
 }
 
 describe('App /skills secondary picker', () => {
@@ -566,6 +582,44 @@ describe('App /skills secondary picker', () => {
     expect(mockPostMessage).toHaveBeenCalledWith({
       type: 'cancelStreaming',
       data: {},
+    });
+  });
+
+  it('disables WebShell transcript turn auto-collapse while a response is in flight', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // WebShellTranscript hardcodes isResponding={false}; without an
+    // explicit opt-out, MessageList would auto-collapse the in-progress
+    // turn mid-response.
+    const transcriptProps = mockWebShellTranscriptProps.current;
+    expect(transcriptProps).not.toBeNull();
+    expect(transcriptProps!.collapseCompletedTurns).toBe(false);
+  });
+
+  it('reserves composer clearance on the WebShell transcript scroll area', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // MessageList pads its scroll area by
+    // calc(8px + var(--web-shell-bottom-panel-inset, 0px)); the absolutely
+    // positioned composer would otherwise occlude the transcript tail.
+    const transcriptProps = mockWebShellTranscriptProps.current;
+    expect(transcriptProps).not.toBeNull();
+    expect(transcriptProps!.style).toMatchObject({
+      '--web-shell-bottom-panel-inset': '140px',
     });
   });
 });
