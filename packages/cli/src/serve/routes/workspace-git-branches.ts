@@ -82,12 +82,14 @@ function sendGitError(
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  // `unmerged files` / `have not concluded your merge` cover the states a
-  // conflicting stash restore or an abandoned merge leaves behind: pull and
-  // stash both refuse until the conflicts are resolved, so the resolution
-  // panel (whose discard path clears the state) must reappear for them.
+  // Recovery-panel entrance states beyond a plain dirty tree: an unresolved
+  // merge (`unmerged files`, `have not concluded your merge`, `needs merge`),
+  // a stash pull whose merge conflicted and was aborted back to the dirty
+  // state (`CONFLICT (`, `Automatic merge failed`), and the diverged-branch
+  // force refusal (`has diverged from its upstream`), where the panel's
+  // stash option still works.
   if (
-    /dirty|uncommitted|would be overwritten|unmerged files|have not concluded your merge/i.test(
+    /dirty|uncommitted|would be overwritten|unmerged files|have not concluded your merge|needs merge|CONFLICT \(|Automatic merge failed|has diverged from its upstream/i.test(
       message,
     )
   ) {

@@ -25,15 +25,18 @@ sending both is a 400):
   untracked files that could block the merge are covered), run the pull,
   then `git stash pop`. If the pull fails, any partial merge/rebase is
   aborted and the stash is popped back, restoring the pre-pull state. If
-  the restore conflicts after a successful pull, the response is still a
-  success with `stashRestoreConflict: true` and its `output` carries git's
-  conflict notice; git keeps the stash entry, so nothing is lost.
+  the restore fails after a successful pull — a conflict, or an
+  untracked-file collision — the response is still a success with
+  `stashRestoreConflict: true` and its `output` carries git's failure
+  notice; git keeps the stash entry, so nothing is lost.
 - `force`: discard all local changes first (`git reset --hard` +
   `git clean -fd`; ignored files are kept), then pull. Destructive.
-  Both commands act on the whole repository, so `force` is refused when
-  the workspace cwd is below the repository root (it could destroy
-  tracked changes outside the workspace while leaving the files that
-  block the merge in place). The pull is validated before anything is
+  `git reset --hard` acts on the whole repository regardless of the cwd,
+  but `git clean -fd` run from a subdirectory only removes untracked
+  files inside that subtree, so `force` is refused when the workspace
+  cwd is below the repository root (it would destroy tracked changes
+  outside the workspace while leaving the untracked files that block the
+  merge in place). The pull is validated before anything is
   discarded: the fetch runs first and a diverged branch (local commits
   on both sides) is refused, because the post-discard merge could wedge
   the repository mid-merge; a failed post-discard pull still aborts any
@@ -61,7 +64,9 @@ own stash/discard pull is in flight, and resets whenever the popover is
 reopened. When the blocking state is an unmerged working tree (conflicting
 restore or abandoned merge), the stash option is replaced by an
 explanation — `git stash push` refuses unmerged entries — leaving discard
-as the recovery path.
+as the recovery path, except in workspaces below the repository root,
+where discarding is unsupported and the conflicts must be resolved from
+a terminal.
 
 ## Ownership
 
@@ -75,6 +80,5 @@ surface.
 
 Automatic stash on every dirty pull was rejected: silently moving the
 user's changes through a stash is surprising, and the discard option is
-destructive, so both need an explicit choice. `git pull --autostash` was
-not usable because autostash only exists for rebase, while the default
-pull here is a merge.
+destructive, so both need an explicit choice. `git pull --autostash`
+performs that same stash-then-restore implicitly, so it was not adopted.

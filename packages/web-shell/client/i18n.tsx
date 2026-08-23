@@ -59,7 +59,7 @@ const EN: Messages = {
   'branchPicker.pullUnmergedHint':
     'Stashing is unavailable while conflicts are unresolved. Discard resets the workspace to its last commit.',
   'branchPicker.pullStashConflict':
-    'Updated, but restoring your stashed changes conflicted. Resolve the conflict markers in your files; the stash entry is kept.',
+    'Updated, but restoring your stashed changes failed. Resolve any conflict markers in your files; the stash entry is kept.',
   'branchPicker.pullStash': 'Stash Changes and Update',
   'branchPicker.pullDiscard': 'Discard Changes and Update…',
   'branchPicker.pullDiscardConfirm':
@@ -3089,7 +3089,7 @@ const ZH: Messages = {
   'branchPicker.pullUnmergedHint':
     '冲突未解决时无法使用 Stash。放弃会将工作区重置为最近一次提交。',
   'branchPicker.pullStashConflict':
-    '更新成功，但恢复 Stash 中的修改时发生冲突。请解决文件中的冲突标记；Stash 条目已保留。',
+    '更新成功，但恢复 Stash 中的修改失败。请解决文件中的冲突标记（如有）；Stash 条目已保留。',
   'branchPicker.pullStash': 'Stash 修改并更新',
   'branchPicker.pullDiscard': '放弃修改并更新…',
   'branchPicker.pullDiscardConfirm':

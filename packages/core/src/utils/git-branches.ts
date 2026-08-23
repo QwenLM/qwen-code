@@ -495,9 +495,10 @@ export interface GitPullResult {
   success: boolean;
   output: string;
   /**
-   * The pull succeeded but restoring the auto-stashed changes conflicted.
-   * The working tree carries conflict markers and git keeps the stash
-   * entry, so the user must resolve the conflicts manually.
+   * The pull succeeded but restoring the auto-stashed changes failed —
+   * conflict markers in the working tree, or an untracked-file collision
+   * that restored nothing. Git keeps the stash entry, so nothing is lost,
+   * but the user must restore it manually.
    */
   stashRestoreConflict?: boolean;
 }
@@ -555,7 +556,7 @@ export async function gitPull(
     ).trim();
     if (prefix) {
       throw new Error(
-        'cannot discard changes: the workspace is a subdirectory of the git repository, and discarding is only supported at the repository root; use the stash option instead',
+        'cannot discard changes: the workspace is a subdirectory of the git repository, and discarding is only supported at the repository root',
       );
     }
     // Validate before destroying: a failing fetch or missing upstream must
@@ -630,13 +631,11 @@ export async function gitPull(
   if (stashed) {
     let stashRestoreConflict = false;
     const popOutput = await runGit(cwd, ['stash', 'pop'], env).catch(
-      async (popErr) => {
-        // Conflicting restore: git keeps the stash entry, so report the
-        // details instead of failing an otherwise successful pull.
-        stashRestoreConflict =
-          (
-            await runGit(cwd, ['ls-files', '--unmerged'], env).catch(() => '')
-          ).trim().length > 0;
+      (popErr) => {
+        // A failed pop always keeps the stash entry and leaves the changes
+        // unrestored — conflict markers, or an untracked-file collision — so
+        // flag it instead of failing an otherwise successful pull.
+        stashRestoreConflict = true;
         const e = popErr as { stdout?: string; stderr?: string };
         return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
       },

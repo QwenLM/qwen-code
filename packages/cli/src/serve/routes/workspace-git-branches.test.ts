@@ -10,7 +10,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
@@ -184,6 +192,41 @@ describe('legacy route trust guard', () => {
 
 const tmpRoots: string[] = [];
 
+// Ambient git config (a host-wide `merge.ff = only`, pull policies, hooks)
+// must not reach the fixtures or the git invocations of the code under test:
+// point HOME and the XDG config home at an empty directory for this file's
+// lifetime, and GIT_CONFIG_* at an empty file for the fixture helper, which
+// does not go through gitEnv().
+const hermeticHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
+const savedAmbientGitEnv: Record<string, string | undefined> = {};
+beforeAll(() => {
+  fs.writeFileSync(path.join(hermeticHome, 'gitconfig'), '');
+  for (const key of [
+    'HOME',
+    'USERPROFILE',
+    'XDG_CONFIG_HOME',
+    'GIT_CONFIG_GLOBAL',
+    'GIT_CONFIG_SYSTEM',
+  ]) {
+    savedAmbientGitEnv[key] = process.env[key];
+  }
+  process.env['HOME'] = hermeticHome;
+  process.env['USERPROFILE'] = hermeticHome;
+  process.env['XDG_CONFIG_HOME'] = hermeticHome;
+  process.env['GIT_CONFIG_GLOBAL'] = path.join(hermeticHome, 'gitconfig');
+  process.env['GIT_CONFIG_SYSTEM'] = path.join(hermeticHome, 'gitconfig');
+});
+afterAll(() => {
+  for (const [key, value] of Object.entries(savedAmbientGitEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  fs.rmSync(hermeticHome, { recursive: true, force: true });
+});
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
@@ -252,6 +295,49 @@ function makeDirtyPullRepo(): string {
     .readFileSync(path.join(dir, 'a.txt'), 'utf8')
     .replace('line 1\n', 'line 1 local\n');
   fs.writeFileSync(path.join(dir, 'a.txt'), localContent);
+  return dir;
+}
+
+// Repo whose index carries unmerged entries: a divergent local commit
+// touching the same file as a remote commit, then a failed merge.
+function makeUnmergedRepo(): string {
+  const dir = makeRepo();
+  const remote = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+  );
+  tmpRoots.push(remote);
+  git(remote, 'init', '-q', '--bare');
+  git(dir, 'remote', 'add', 'origin', remote);
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  const clone = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+  );
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
+  git(clone, 'add', '.');
+  git(clone, 'commit', '-q', '-m', 'remote edit');
+  git(clone, 'push', '-q', 'origin', 'HEAD');
+
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'local change\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'local edit');
+  git(dir, 'fetch', '-q', 'origin');
+  let mergeFailed = false;
+  try {
+    git(
+      dir,
+      'merge',
+      'origin/' + git(dir, 'symbolic-ref', '--short', 'HEAD').trim(),
+    );
+  } catch {
+    mergeFailed = true;
+  }
+  expect(mergeFailed).toBe(true);
   return dir;
 }
 
@@ -382,7 +468,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.body.stashRestoreConflict).toBe(true);
   });
 
-  it('classifies a pull blocked by unmerged files as dirty_working_tree', async () => {
+  it('classifies a conflicting stash pull as dirty_working_tree and restores the state', async () => {
     const dir = makeRepo();
     const remote = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
@@ -405,23 +491,57 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(clone, 'commit', '-q', '-m', 'remote edit');
     git(clone, 'push', '-q', 'origin', 'HEAD');
 
-    // Divergent local commit touching the same file, then a failed merge:
-    // the index now carries unmerged entries.
+    // Divergent local commit on the same file plus a dirty edit: the
+    // post-stash merge conflicts and the recovery aborts it back to the
+    // pre-pull state.
     fs.writeFileSync(path.join(dir, 'a.txt'), 'local change\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'local edit');
-    git(dir, 'fetch', '-q', 'origin');
-    let mergeFailed = false;
-    try {
-      git(
-        dir,
-        'merge',
-        'origin/' + git(dir, 'symbolic-ref', '--short', 'HEAD').trim(),
-      );
-    } catch {
-      mergeFailed = true;
-    }
-    expect(mergeFailed).toBe(true);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    // The recovery restored the pre-pull state.
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local change\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('classifies the diverged-branch force refusal as dirty_working_tree', async () => {
+    const dir = makeDirtyPullRepo();
+    // A divergent local commit: force must refuse before discarding anything.
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'local commit file\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(response.body.message).toContain('diverged');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    // Nothing was discarded.
+    expect(fs.existsSync(path.join(dir, 'c.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toContain(
+      'line 1 local',
+    );
+  });
+
+  it('classifies a pull blocked by unmerged files as dirty_working_tree', async () => {
+    const dir = makeUnmergedRepo();
 
     const response = await request(appWithWorkspace(dir))
       .post('/workspace/git/pull')
@@ -431,6 +551,20 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.body.error).toBe('dirty_working_tree');
     const body = JSON.stringify(response.body);
     expect(body).not.toContain(dir);
+  });
+
+  it('classifies a stash pull refused on unmerged files as dirty_working_tree', async () => {
+    const dir = makeUnmergedRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    // `stash push` refuses unmerged entries; the resolution panel must
+    // still reappear for the state it can act on.
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(response.body.message).toContain('needs merge');
   });
 
   it('rejects force pull from a subdirectory workspace without discarding', async () => {

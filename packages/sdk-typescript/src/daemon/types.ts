@@ -338,8 +338,8 @@ export interface DaemonGitPullResult {
   output: string;
   /**
    * Present and true when the pull succeeded but restoring the
-   * auto-stashed changes conflicted; the working tree carries conflict
-   * markers and the stash entry is kept.
+   * auto-stashed changes failed; the stash entry is kept, and the
+   * working tree may carry conflict markers.
    */
   stashRestoreConflict?: boolean;
 }

@@ -228,8 +228,12 @@
 
 .statusBarWarning {
   white-space: normal;
-  color: var(--warning, #d29922);
-  background: color-mix(in srgb, var(--warning, #d29922) 10%, transparent);
+  color: var(--warning-color, #d29922);
+  background: color-mix(
+    in srgb,
+    var(--warning-color, #d29922) 10%,
+    transparent
+  );
 }
 
 .statusBarSuccess {

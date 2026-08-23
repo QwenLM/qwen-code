@@ -372,7 +372,7 @@ describe('BranchPickerPopover actions', () => {
     await flush();
 
     expect(document.body.textContent).toContain(
-      'restoring your stashed changes conflicted',
+      'restoring your stashed changes failed',
     );
     expect(document.body.textContent).not.toContain('Updated successfully');
   });
@@ -476,7 +476,13 @@ describe('BranchPickerPopover actions', () => {
         'POST /workspaces/:workspace/git/pull: dirty_working_tree',
       ),
     );
-    workspaceGitPush.mockRejectedValueOnce(new Error('push rejected'));
+    let rejectPush: ((err: unknown) => void) | undefined;
+    workspaceGitPush.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPush = reject;
+        }),
+    );
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -488,15 +494,73 @@ describe('BranchPickerPopover actions', () => {
     await flush();
     expect(document.body.textContent).toContain('Stash Changes and Update');
 
-    // A push failing while the panel is up must surface its own status.
+    // While the push runs, the stale blocked message must not resurface.
     clickButton('Push');
     await flush();
 
     expect(workspaceGitPush).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+
+    rejectPush?.(new Error('push rejected'));
+    await flush();
+
+    // A push failing while the panel is up must surface its own status.
     expect(document.body.textContent).toContain('push rejected');
     expect(document.body.textContent).not.toContain(
       'Update blocked by uncommitted changes',
     );
+  });
+
+  it('keeps the resolution panel on an empty new-branch submit', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'dirty_working_tree', message: 'would be overwritten' },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    // Submitting the empty New Branch input is a no-op: it must not dismiss
+    // the panel nor leak its hidden status line into the status bar.
+    clickButton('New Branch');
+    await flush();
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Branch name"]',
+    );
+    expect(input).toBeTruthy();
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+    expect(workspaceGitCreateBranch).not.toHaveBeenCalled();
   });
 
   it('explains an invalid branch name instead of silently returning', async () => {

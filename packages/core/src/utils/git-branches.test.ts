@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   fetchGitBranches,
   gitCheckout,
@@ -22,6 +22,41 @@ import {
 import { getDefaultBranch } from './github-prs.js';
 
 const tmpRoots: string[] = [];
+
+// Ambient git config (a host-wide `merge.ff = only`, pull policies, hooks)
+// must not reach the fixtures or the git invocations of the code under test:
+// point HOME and the XDG config home at an empty directory for this file's
+// lifetime, and GIT_CONFIG_* at an empty file for the fixture helper, which
+// does not go through gitEnv().
+const hermeticHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
+const savedAmbientGitEnv: Record<string, string | undefined> = {};
+beforeAll(() => {
+  fs.writeFileSync(path.join(hermeticHome, 'gitconfig'), '');
+  for (const key of [
+    'HOME',
+    'USERPROFILE',
+    'XDG_CONFIG_HOME',
+    'GIT_CONFIG_GLOBAL',
+    'GIT_CONFIG_SYSTEM',
+  ]) {
+    savedAmbientGitEnv[key] = process.env[key];
+  }
+  process.env['HOME'] = hermeticHome;
+  process.env['USERPROFILE'] = hermeticHome;
+  process.env['XDG_CONFIG_HOME'] = hermeticHome;
+  process.env['GIT_CONFIG_GLOBAL'] = path.join(hermeticHome, 'gitconfig');
+  process.env['GIT_CONFIG_SYSTEM'] = path.join(hermeticHome, 'gitconfig');
+});
+afterAll(() => {
+  for (const [key, value] of Object.entries(savedAmbientGitEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  fs.rmSync(hermeticHome, { recursive: true, force: true });
+});
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -603,9 +638,42 @@ describe('gitPull', () => {
     expect(result.output).toContain('CONFLICT');
     expect(result.stashRestoreConflict).toBe(true);
     expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
-    expect(
-      git(dir, 'stash', 'list', '--oneline').trim().split('\n'),
-    ).toHaveLength(1);
+    const stashes = git(dir, 'stash', 'list', '--oneline')
+      .trim()
+      .split('\n')
+      .filter((line) => line !== '');
+    expect(stashes).toHaveLength(1);
+    expect(stashes[0]).toContain('auto-stash before pull');
+  });
+
+  it('stash pull flags a failed restore that leaves no unmerged entries', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    // The incoming commit adds a tracked file with the same name as the
+    // user's untracked file: the pull succeeds, but the stash pop aborts
+    // with "already exists, no checkout" and keeps the entry, leaving no
+    // unmerged index entries behind.
+    fs.writeFileSync(path.join(clone, 'notes.txt'), 'incoming\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'add notes');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'local notes\n');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(result.stashRestoreConflict).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'notes.txt'), 'utf8')).toBe(
+      'incoming\n',
+    );
+    expect(git(dir, 'stash', 'list', '--oneline')).toContain(
+      'auto-stash before pull',
+    );
   });
 
   it('restores the dirty state when a stash pull fails', async () => {
@@ -703,6 +771,7 @@ describe('gitPull', () => {
     fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'local commit');
+    const headBefore = headSha(dir);
     fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
 
     const result = await gitPull(dir, { stash: true });
@@ -713,6 +782,13 @@ describe('gitPull', () => {
       'local edit\n',
     );
     expect(git(dir, 'stash', 'list').trim()).toBe('');
+    // The divergent local commit must survive the merge: a destructive
+    // reset to the upstream tip would drop it and its file.
+    expect(() =>
+      git(dir, 'merge-base', '--is-ancestor', headBefore, 'HEAD'),
+    ).not.toThrow();
+    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+    expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
   });
 
   it('a conflicting stash pull aborts the partial merge and restores the dirty state', async () => {
@@ -732,6 +808,7 @@ describe('gitPull', () => {
     fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'local commit');
+    const headBefore = headSha(dir);
     fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
 
     await expect(gitPull(dir, { stash: true })).rejects.toThrow();
@@ -743,6 +820,46 @@ describe('gitPull', () => {
     expect(() =>
       git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
     ).toThrow();
+    // The recovery must abort the merge, not reset to the upstream tip:
+    // HEAD and the divergent local content survive.
+    expect(headSha(dir)).toBe(headBefore);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local version\n',
+    );
+  });
+
+  it('restores the dirty state when a rebasing stash pull conflicts', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // A divergent local commit touching the same file: the post-stash rebase
+    // conflicts and leaves rebase state unless the recovery aborts it.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir, { stash: true, rebase: true })).rejects.toThrow();
+
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local version\n',
+    );
+    expect(headSha(dir)).toBe(headBefore);
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-apply'))).toBe(false);
   });
 
   it('force pull refuses a diverged branch before discarding anything', async () => {

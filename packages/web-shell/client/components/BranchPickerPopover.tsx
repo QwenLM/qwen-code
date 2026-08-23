@@ -56,7 +56,7 @@ function isUnmergedStateError(err: unknown): boolean {
       : undefined;
   return (
     typeof message === 'string' &&
-    /unmerged files|have not concluded your merge/i.test(message)
+    /unmerged files|have not concluded your merge|needs merge/i.test(message)
   );
 }
 
@@ -163,6 +163,9 @@ export function BranchPickerPopover({
     setPullBlocked(false);
     setConfirmDiscard(false);
     setPullBlockedUnmerged(false);
+    // The panel's status line is hidden while it is up; drop it too so a
+    // competing action does not run with the stale blocked message showing.
+    setStatusMsg(null);
   }, []);
 
   const handleCheckout = useCallback(
@@ -195,15 +198,17 @@ export function BranchPickerPopover({
 
   const handleNewBranch = useCallback(async () => {
     if (busyAction) return;
-    clearPullPanel();
     if (!validateBranchName(newBranchName)) {
-      // An empty name just means "not typed yet"; only explain the rejection
-      // once the user has actually entered something invalid.
+      // An empty name is a no-op: leave the resolution panel untouched so it
+      // is neither dismissed nor leaks its hidden status line. Only explain
+      // the rejection once the user has actually entered something invalid.
       if (newBranchName) {
+        clearPullPanel();
         showStatus(t('branchPicker.invalidBranchName'), 'error');
       }
       return;
     }
+    clearPullPanel();
     setBusyAction('newBranch');
     try {
       await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);
@@ -737,10 +742,7 @@ export function BranchPickerPopover({
                     type="button"
                     className={styles.pullBlockedButton}
                     disabled={!!busyAction}
-                    onClick={() => {
-                      clearPullPanel();
-                      setStatusMsg(null);
-                    }}
+                    onClick={() => clearPullPanel()}
                   >
                     {t('branchPicker.cancel')}
                   </button>
