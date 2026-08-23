@@ -17,13 +17,25 @@
  * behind `debugLogger`).
  */
 
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { URL } from 'node:url';
 
 const CORE_SRC_MARKER = 'packages/core/src/';
 const UTILS_SRC_MARKER = 'packages/core/src/utils/';
 const CORE_PACKAGE_SPECIFIER = '@qwen-code/qwen-code-core';
 const CORE_PACKAGE_SRC_PREFIX = `${CORE_PACKAGE_SPECIFIER}/src/`;
 const CORE_PACKAGE_DIST_PREFIX = `${CORE_PACKAGE_SPECIFIER}/dist/`;
+const CORE_PACKAGE_SUBPATH_PREFIX = `${CORE_PACKAGE_SPECIFIER}/`;
+
+// Resolve named self-reference subpaths from the package contract so this
+// boundary cannot drift from packages/core/package.json.
+const CORE_PACKAGE_EXPORTS = JSON.parse(
+  readFileSync(
+    new URL('../packages/core/package.json', import.meta.url),
+    'utf8',
+  ),
+).exports;
 
 // Deferred inversions, keyed by the utils-relative importer. Targets are
 // relative to packages/core/src and omit their extension. See the file header
@@ -52,6 +64,38 @@ function coreSrcAbs(filename) {
 
 function stripExtension(rel) {
   return rel.replace(/\.(js|ts|tsx|mjs|cjs)$/, '');
+}
+
+function corePackageSourcePath(importedPath) {
+  if (importedPath.startsWith(CORE_PACKAGE_SRC_PREFIX)) {
+    return importedPath.slice(CORE_PACKAGE_SRC_PREFIX.length);
+  }
+
+  if (importedPath.startsWith(CORE_PACKAGE_DIST_PREFIX)) {
+    const distRelative = importedPath.slice(CORE_PACKAGE_DIST_PREFIX.length);
+    return distRelative.startsWith('src/')
+      ? distRelative.slice('src/'.length)
+      : distRelative;
+  }
+
+  if (!importedPath.startsWith(CORE_PACKAGE_SUBPATH_PREFIX)) {
+    return null;
+  }
+
+  const exportKey = `./${importedPath.slice(CORE_PACKAGE_SUBPATH_PREFIX.length)}`;
+  const exportEntry = CORE_PACKAGE_EXPORTS[exportKey];
+  const exportTarget =
+    typeof exportEntry === 'string' ? exportEntry : exportEntry?.import;
+  if (typeof exportTarget !== 'string') {
+    return null;
+  }
+  if (exportTarget.startsWith('./dist/src/')) {
+    return exportTarget.slice('./dist/src/'.length);
+  }
+  if (exportTarget.startsWith('./src/')) {
+    return exportTarget.slice('./src/'.length);
+  }
+  return null;
 }
 
 export default {
@@ -89,18 +133,12 @@ export default {
       let resolved;
       if (importedPath.startsWith('.')) {
         resolved = path.resolve(path.dirname(filename), importedPath);
-      } else if (importedPath.startsWith(CORE_PACKAGE_SRC_PREFIX)) {
-        resolved = path.resolve(
-          srcRoot,
-          importedPath.slice(CORE_PACKAGE_SRC_PREFIX.length),
-        );
-      } else if (importedPath.startsWith(CORE_PACKAGE_DIST_PREFIX)) {
-        resolved = path.resolve(
-          srcRoot,
-          importedPath.slice(CORE_PACKAGE_DIST_PREFIX.length),
-        );
       } else {
-        return;
+        const sourcePath = corePackageSourcePath(importedPath);
+        if (!sourcePath) {
+          return;
+        }
+        resolved = path.resolve(srcRoot, sourcePath);
       }
 
       // Leave cross-package relative imports to no-relative-cross-package-imports.

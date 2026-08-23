@@ -78,7 +78,13 @@ describe('no-core-utils-upward-import', () => {
     ).toHaveLength(1);
     expect(
       runRule(
-        "import { Storage } from '@qwen-code/qwen-code-core/dist/config/storage.js';",
+        "import { Storage } from '@qwen-code/qwen-code-core/dist/src/config/storage.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+    expect(
+      runRule(
+        "import { wireGoal } from '@qwen-code/qwen-code-core/goalWire';",
         'packages/core/src/utils/foo.ts',
       ),
     ).toHaveLength(1);
@@ -127,6 +133,18 @@ describe('no-core-utils-upward-import', () => {
         'packages/core/src/utils/foo.ts',
       ),
     ).toHaveLength(0);
+    expect(
+      runRule(
+        "import { TranscriptRecordType } from '@qwen-code/qwen-code-core/transcriptRecords';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import { ToolError } from '@qwen-code/qwen-code-core/dist/src/utils/errors.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(0);
   });
 
   it('allowlists the deferred debugLogger inversions', () => {
@@ -145,6 +163,12 @@ describe('no-core-utils-upward-import', () => {
     expect(
       runRule(
         "import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';",
+        'packages/core/src/utils/debugLogger.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/dist/src/config/storage.js';",
         'packages/core/src/utils/debugLogger.ts',
       ),
     ).toHaveLength(0);
