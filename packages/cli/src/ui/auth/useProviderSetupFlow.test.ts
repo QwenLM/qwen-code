@@ -1868,4 +1868,188 @@ describe('useProviderSetupFlow model discovery', () => {
       RETIRED_ID,
     );
   });
+
+  it('banks the deletion of a shielded token retyped as a fresh extension', async () => {
+    // R22-1, round 24. The growth exemption inferred provenance from two set
+    // snapshots — the customs at the freeze and the customs at the commit —
+    // with no edit history in between. Deleting the shielded token and then
+    // typing a fresh strict extension of it presents the same snapshot pair
+    // as continuous growth, so the exemption fired and the committed
+    // deletion never reached the baseline — the next pair change resurrected
+    // the id the user had deleted.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in into the custom input; the lookup resolves
+    // on that keystroke, and the keep clause shields and freezes the token.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The user deletes the shielded token entirely...
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== RETIRED_ID)
+          .join(', '),
+        { customModelIds: [] },
+      ),
+    );
+    // ...and types a fresh strict extension of it as a new token.
+    act(() =>
+      result.current.changeModelIds(
+        `${normalizeModelIds(result.current.state.modelIds).join(', ')}, ${RETIRED_ID}-latest`,
+        {
+          customModelIds: [`${RETIRED_ID}-latest`],
+          activeCustomModelId: `${RETIRED_ID}-latest`,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline. The second endpoint serves
+    // the whole built-in list, so only the baseline can resurrect the
+    // deleted id.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).not.toContain(RETIRED_ID);
+    expect(restored).toContain(`${RETIRED_ID}-latest`);
+  });
+
+  it('keeps a frozen default banked when growth resumes after an unrelated edit', async () => {
+    // The latch clears the freeze at the first edit whose customs hold
+    // neither the frozen id nor a fresh extension of it — so an edit that
+    // still holds the id itself must not clear it: unchecking a
+    // recommendation between the freeze and the next keystroke syncs the
+    // unchanged custom text, and dropping the freeze there would read the
+    // resumed growth as a removal of a default the user never unchecked.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in; the lookup resolves on that keystroke,
+    // and the keep clause shields and freezes the token.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // Before the token grows, the user unchecks a recommended model: the
+    // step syncs the composed selection with the custom text unchanged.
+    const unchecked = SERVED_IDS[0]!;
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== unchecked)
+          .join(', '),
+        {
+          customModelIds: [RETIRED_ID],
+          removedRecommendationId: unchecked,
+        },
+      ),
+    );
+
+    // Then the growth resumes: the token grows past the frozen id.
+    act(() =>
+      result.current.changeModelIds(
+        `${normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== RETIRED_ID)
+          .join(', ')}, ${RETIRED_ID}-latest`,
+        {
+          customModelIds: [`${RETIRED_ID}-latest`],
+          activeCustomModelId: `${RETIRED_ID}-latest`,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline; the second endpoint serves
+    // the whole built-in list, so only the baseline can drop the default.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain(RETIRED_ID);
+    expect(restored).toContain(`${RETIRED_ID}-latest`);
+  });
 });

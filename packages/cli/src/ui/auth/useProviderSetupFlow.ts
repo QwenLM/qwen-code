@@ -213,12 +213,14 @@ export function useProviderSetupFlow(
   // the authorship reference point; typing on past it drops it from the
   // committed selection, and the commit delta must not read that as a
   // removal. The user can also DELETE the shielded token though, which is
-  // one — so the exemption is limited to growth evidence at commit: a
-  // strict extension of the id the customs gained since the freeze. A
-  // positional pin cannot carry that evidence — any edit between freeze
-  // and commit can re-split and re-index the buffer — while the frozen
-  // customs survive re-indexing, and a twin already on screen at the
-  // freeze is not growth.
+  // one — so the exemption is limited to growth, and the growth evidence
+  // is latched into the edit stream, not re-derived at commit:
+  // `editModelIds` sees every edit and clears the freeze at the first one
+  // whose customs hold neither the id nor a strict extension of it that
+  // was not already on screen at the freeze (a twin is not growth). The
+  // freeze surviving to a commit therefore means the token grew in place
+  // on every edit since the shield fired; a deletion followed by a fresh
+  // retype passes through an edit holding neither, and clears it.
   const frozenTokenRef = useRef<{
     id: string;
     customs: string[];
@@ -248,6 +250,23 @@ export function useProviderSetupFlow(
       // still decisive immediately so unchecking and rechecking can endorse it.
       const customModelIds = context?.customModelIds ?? [];
       customModelIdsRef.current = customModelIds;
+      // Growth evidence for a frozen token is latched here, edit by edit:
+      // the freeze clears at the first edit whose customs hold neither the
+      // frozen id nor a fresh strict extension of it, so a deletion clears
+      // it and a later retype cannot read as growth the freeze never saw.
+      const frozen = frozenTokenRef.current;
+      if (
+        frozen !== null &&
+        !customModelIds.includes(frozen.id) &&
+        !customModelIds.some(
+          (custom) =>
+            custom !== frozen.id &&
+            custom.startsWith(frozen.id) &&
+            !frozen.customs.includes(custom),
+        )
+      ) {
+        frozenTokenRef.current = null;
+      }
       const injected = injectedModelIdRef.current;
       if (injected !== null && !normalizeModelIds(value).includes(injected)) {
         injectedModelIdRef.current = null;
@@ -315,26 +334,15 @@ export function useProviderSetupFlow(
     // into the reference point; typing on past it drops it from the
     // committed selection. That is growth, not a removal — the user never
     // unchecked anything. The shielded token can also be deleted outright,
-    // though, and that IS a removal — so the exemption needs growth
-    // evidence: a custom id that strictly extends the frozen id AND was not
-    // on screen at the freeze. A prefix twin already in the buffer then is
-    // a different token, so its survival is not growth; and customs survive
-    // the re-splits and re-indexing a positional pin falls to. Provenance,
-    // not string shape: a removed id that merely prefixes a surviving one
-    // is a rename or a deleted prefix twin, and both are genuine removals.
+    // though, and that IS a removal: the exemption rests on the freeze
+    // surviving to here, which the latch in `editModelIds` maintains — a
+    // deletion passes through an edit whose customs hold neither the id
+    // nor a fresh extension of it, and clears the freeze on the spot.
+    // Provenance, not string shape: a removed id that merely prefixes a
+    // surviving one is a rename or a deleted prefix twin, and both are
+    // genuine removals.
     const frozen = frozenTokenRef.current;
-    let exemptFrozenId: string | null = null;
-    if (frozen !== null) {
-      const grown = customModelIdsRef.current.find(
-        (custom) =>
-          custom !== frozen.id &&
-          custom.startsWith(frozen.id) &&
-          !frozen.customs.includes(custom),
-      );
-      if (grown !== undefined) {
-        exemptFrozenId = frozen.id;
-      }
-    }
+    const exemptFrozenId = frozen !== null ? frozen.id : null;
     const removed = new Set(
       before.filter((id) => !after.includes(id) && id !== exemptFrozenId),
     );
