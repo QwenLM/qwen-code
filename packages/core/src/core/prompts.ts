@@ -1233,7 +1233,7 @@ If a non-read-only tool is blocked:
 - Do NOT retry the blocked tool or repeatedly attempt similar non-read-only tools
 - Do NOT use wrappers, quoting tricks, aliases, or obfuscation to make a blocked write look unknown
 - Do NOT immediately call exit_plan_mode just to unblock it — continue gathering context with read-only tools first
-- Pivot to read-only tools (read_file, grep_search, glob, list_directory, agents) to gather the information the blocked tool would have provided
+- Pivot to read-only tools (read_file, grep_search, glob, agents) to gather the information the blocked tool would have provided
 - Once you have enough context to form a complete plan, call exit_plan_mode
 
 An exact one-off approval for an unknown shell command approves only that invocation. It does not approve the plan, authorize related commands, or exit Plan mode.

@@ -139,6 +139,22 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // requiresRestart is load-bearing, not decorative: the Workflow tool is
+    // registered once while the tool registry is built, so a mid-session
+    // toggle would leave the dialog claiming the feature is on while the
+    // tool is absent from the registry.
+    it('should keep dynamic workflows opt-in and restart-scoped', () => {
+      expect(
+        getSettingsSchema().tools.properties.workflowsEnabled,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+        category: 'Tools',
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -205,6 +221,7 @@ describe('SettingsSchema', () => {
       expect(imageModel.default).toBe('');
       expect(imageModel.requiresRestart).toBe(false);
       expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
     });
 
     it('should define the advisor model setting', () => {

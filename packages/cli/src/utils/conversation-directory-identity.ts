@@ -67,21 +67,20 @@ export type ConversationDirectoryIdentityFailureReason =
 
 export class ConversationDirectoryIdentityError extends Error {
   override readonly name = 'ConversationDirectoryIdentityError';
-  override readonly cause?: unknown;
 
   constructor(
     readonly scope: ConversationDirectoryIdentityScope,
     readonly reason: ConversationDirectoryIdentityFailureReason,
     cause?: unknown,
   ) {
-    super(`Conversation ${scope} identity validation failed: ${reason}`);
-    if (cause !== undefined) {
-      Object.defineProperty(this, 'cause', {
-        configurable: true,
-        enumerable: false,
-        value: cause,
-      });
-    }
+    // Passing the options bag through to Error keeps `cause` a non-enumerable
+    // own property that exists only when one was provided; a class field
+    // declaration would define an enumerable `cause: undefined` on every
+    // instance instead.
+    super(
+      `Conversation ${scope} identity validation failed: ${reason}`,
+      cause !== undefined ? { cause } : undefined,
+    );
   }
 }
 
@@ -319,9 +318,9 @@ export async function inspectConversationDirectoryIdentity(
     canonical = await realpath(candidate);
     after = await lstat(canonical);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
-    }
+    // A child deleted between the lstat and the realpath is "already gone" —
+    // the same verdict as the initial-lstat ENOENT — not an identity change.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throwIdentityIoError('child', error);
   }
   validateDirectoryStats(after, 'child');

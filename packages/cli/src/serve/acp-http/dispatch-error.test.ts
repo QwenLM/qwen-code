@@ -9,6 +9,7 @@ import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import {
   BridgeChannelQuarantinedError,
+  InvalidSessionMetadataError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
@@ -102,6 +103,22 @@ describe('toRpcError', () => {
         retryAfterSeconds: 90,
         httpStatus: 503,
       },
+    });
+  });
+
+  it('maps invalid session metadata to the REST-equivalent invalid_metadata contract', () => {
+    // Without an arm, every invalid `pr`/`displayName` over ACP degrades to
+    // an opaque -32603 Internal error and clients cannot tell their own bad
+    // input from a daemon fault. REST maps the same error to 400
+    // `invalid_metadata` with the offending `field`.
+    const error = new InvalidSessionMetadataError(
+      'pr',
+      'must be an object with a positive integer `number`',
+    );
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: error.message,
+      data: { httpStatus: 400, errorKind: 'invalid_metadata', field: 'pr' },
     });
   });
 
