@@ -29,6 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -62,17 +63,6 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
 export interface SettingEnumOption {
   value: string | number;
   label: string;
-}
-
-export enum MergeStrategy {
-  // Replace the old value with the new value. This is the default.
-  REPLACE = 'replace',
-  // Concatenate arrays.
-  CONCAT = 'concat',
-  // Merge arrays, ensuring unique values.
-  UNION = 'union',
-  // Shallow merge objects.
-  SHALLOW_MERGE = 'shallow_merge',
 }
 
 export interface SettingDefinition {

@@ -36,7 +36,7 @@ vi.mock('../../../config/settings.js', async (importOriginal) => {
   return { ...actual, loadSettings: loadSettingsMock };
 });
 import { operatorReviewSettings } from './review-settings.js';
-import { getDialogSettingKeys } from '../../../utils/settingsUtils.js';
+import { getDialogSettingKeys } from '../../../config/settingsUtils.js';
 
 function setReview(review: unknown): void {
   loadSettingsMock.mockReturnValue({ merged: { review } });

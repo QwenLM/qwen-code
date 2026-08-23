@@ -37,7 +37,7 @@ import {
   SOURCES,
   type Severity,
   type Source,
-} from '../../utils/findings.js';
+} from './findings.js';
 import { BRIEFS } from './lib/agent-briefs.js';
 import {
   budgetStopDisclosure,
