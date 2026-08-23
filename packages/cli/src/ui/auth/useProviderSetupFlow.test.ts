@@ -1647,4 +1647,225 @@ describe('useProviderSetupFlow model discovery', () => {
       'my-deploy',
     );
   });
+
+  it('banks the deletion of a shielded token whose prefix twin survives', async () => {
+    // R22-1, entrance A. The growth exemption pinned the frozen occurrence
+    // by its raw comma-segment index and read the NORMALIZED custom-ids
+    // array with it, and the pin went stale the moment the buffer
+    // re-indexed: deleting the shielded token slid the surviving prefix
+    // twin into the pinned slot, the exemption read the twin as the frozen
+    // token's growth, and the committed deletion never reached the
+    // baseline — the next pair change restored it.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    // The prefix twin is a saved alias, so it sits in the custom buffer
+    // beside the token being typed.
+    act(() =>
+      result.current.start(codingPlanProvider, undefined, undefined, [
+        `${RETIRED_ID}-latest`,
+      ]),
+    );
+    const baseUrls = codingPlanProvider.baseUrl;
+    if (Array.isArray(baseUrls)) {
+      const firstUrl = baseUrls[0]!.url;
+      act(() => result.current.selectBaseUrl(firstUrl));
+    }
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    expect(result.current.state.step).toBe('models');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in into the custom input ahead of the twin;
+    // the step reports the raw segment owning the caret...
+    act(() =>
+      result.current.changeModelIds(
+        [...BUILT_IN_IDS, `${RETIRED_ID}-latest`].join(', '),
+        {
+          customModelIds: [RETIRED_ID, `${RETIRED_ID}-latest`],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    // ...and the lookup resolves over the keystroke: shield and freeze.
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The user deletes the shielded token; the twin slides into the first
+    // custom segment and the caret report follows it there.
+    act(() =>
+      result.current.changeModelIds(
+        [...SERVED_IDS, `${RETIRED_ID}-latest`].join(', '),
+        {
+          customModelIds: [`${RETIRED_ID}-latest`],
+          activeCustomModelId: `${RETIRED_ID}-latest`,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline. The second endpoint serves
+    // the whole built-in list, so only the baseline can resurrect the
+    // deleted id.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      RETIRED_ID,
+    );
+  });
+
+  it('keeps a default whose frozen token grew behind a leading empty segment', async () => {
+    // R22-1, entrance A, other direction. The buffer led with an empty
+    // comma segment, so the caret's raw segment index was 1 while the
+    // normalized customs array held a single entry; the exemption read
+    // customs[1] === undefined at commit and dropped a default the user
+    // never unchecked from the baseline.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // The caret sits after a bare leading comma: the step reports the id
+    // with its raw segment index 1, and the normalized customs with 0.
+    act(() =>
+      result.current.changeModelIds(BUILT_IN_IDS.join(', '), {
+        customModelIds: [RETIRED_ID],
+        activeCustomModelId: RETIRED_ID,
+        activeCustomModelSegment: 1,
+      }),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The user keeps typing; the token grows past the default id.
+    act(() =>
+      result.current.changeModelIds(
+        [...SERVED_IDS, `${RETIRED_ID}-latest`].join(', '),
+        {
+          customModelIds: [`${RETIRED_ID}-latest`],
+          activeCustomModelId: `${RETIRED_ID}-latest`,
+          activeCustomModelSegment: 1,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline; the second endpoint serves
+    // the whole built-in list, so only the baseline can drop the default.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain(RETIRED_ID);
+    expect(restored).toContain(`${RETIRED_ID}-latest`);
+  });
+
+  it('keeps shielding a token when the caret detours through an empty segment', async () => {
+    // R22-1, entrance B. A pure caret move into an empty comma segment
+    // reports an undefined id with a numeric segment; the focus-leave
+    // clear keyed on the id alone dropped the edited-occurrence marker,
+    // the latch could not re-arm when the caret came back, and a lookup
+    // resolving in that window pruned the token being typed from under
+    // the caret.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in into the second raw segment — the buffer
+    // leads with an empty one — and the edit owns that occurrence.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 1,
+        },
+      ),
+    );
+    // Arrow into the empty leading segment — a pure caret move: id
+    // undefined, segment numeric...
+    act(() => result.current.changeActiveCustomModelId(undefined, 0));
+    // ...and back into the token being typed. The edit is still alive.
+    act(() => result.current.changeActiveCustomModelId(RETIRED_ID, 1));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+  });
 });

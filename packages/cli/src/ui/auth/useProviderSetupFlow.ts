@@ -209,15 +209,19 @@ export function useProviderSetupFlow(
   // of any edit before that edit becomes the authored baseline.
   const injectedModelIdRef = useRef<string | null>(null);
   // The id the keep clause shielded during an in-flight edit, plus the
-  // custom-input segment owning it when the step reported one. The shield
-  // freezes it into the authorship reference point; typing on past it drops
-  // it from the committed selection, and the commit delta must not read
-  // that as a removal. The user can also DELETE the shielded token though,
-  // which is one — so the exemption is limited to growth evidence at
-  // commit, keyed to this pinned occurrence.
+  // custom ids on screen when the shield fired. The shield freezes it into
+  // the authorship reference point; typing on past it drops it from the
+  // committed selection, and the commit delta must not read that as a
+  // removal. The user can also DELETE the shielded token though, which is
+  // one — so the exemption is limited to growth evidence at commit: a
+  // strict extension of the id the customs gained since the freeze. A
+  // positional pin cannot carry that evidence — any edit between freeze
+  // and commit can re-split and re-index the buffer — while the frozen
+  // customs survive re-indexing, and a twin already on screen at the
+  // freeze is not growth.
   const frozenTokenRef = useRef<{
     id: string;
-    segment: number | undefined;
+    customs: string[];
   } | null>(null);
   // Ids the user deleted from the screen during an edit a resolve then
   // advanced the reference point over. Such a deletion carries no
@@ -312,27 +316,22 @@ export function useProviderSetupFlow(
     // committed selection. That is growth, not a removal — the user never
     // unchecked anything. The shielded token can also be deleted outright,
     // though, and that IS a removal — so the exemption needs growth
-    // evidence: the custom input at commit must still carry what the frozen
-    // occurrence grew into, at the pinned segment when the freeze knows it
-    // (a surviving prefix twin elsewhere is a different token), anywhere
-    // when it does not. Provenance, not string shape: a removed id that
-    // merely prefixes a surviving one is a rename or a deleted prefix twin,
-    // and both are genuine removals.
+    // evidence: a custom id that strictly extends the frozen id AND was not
+    // on screen at the freeze. A prefix twin already in the buffer then is
+    // a different token, so its survival is not growth; and customs survive
+    // the re-splits and re-indexing a positional pin falls to. Provenance,
+    // not string shape: a removed id that merely prefixes a surviving one
+    // is a rename or a deleted prefix twin, and both are genuine removals.
     const frozen = frozenTokenRef.current;
     let exemptFrozenId: string | null = null;
     if (frozen !== null) {
-      const customs = customModelIdsRef.current;
-      const grown =
-        frozen.segment === undefined
-          ? customs.find(
-              (custom) => custom !== frozen.id && custom.startsWith(frozen.id),
-            )
-          : customs[frozen.segment];
-      if (
-        grown !== undefined &&
-        grown !== frozen.id &&
-        grown.startsWith(frozen.id)
-      ) {
+      const grown = customModelIdsRef.current.find(
+        (custom) =>
+          custom !== frozen.id &&
+          custom.startsWith(frozen.id) &&
+          !frozen.customs.includes(custom),
+      );
+      if (grown !== undefined) {
         exemptFrozenId = frozen.id;
       }
     }
@@ -466,7 +465,7 @@ export function useProviderSetupFlow(
         ) {
           frozenTokenRef.current = {
             id,
-            segment: editedTokenRef.current?.segment,
+            customs: customModelIdsRef.current,
           };
           kept.push(id);
         }
@@ -816,12 +815,16 @@ export function useProviderSetupFlow(
   const changeActiveCustomModelId = useCallback(
     (value?: string, segment?: number) => {
       activeCustomModelIdRef.current = value;
-      // Focus leaving (the undefined report) drops the edited-occurrence
-      // marker for good: the tab/up paths back into the input re-report the
-      // id at the unchanged caret offset, and a marker that survived the
-      // leave would let that pure navigation re-arm the latch below. The
-      // next real edit sets the marker again.
-      if (value === undefined) {
+      // Focus leaving (the undefined report with no segment) drops the
+      // edited-occurrence marker for good: the tab/up paths back into the
+      // input re-report the id at the unchanged caret offset, and a marker
+      // that survived the leave would let that pure navigation re-arm the
+      // latch below. A caret move into an EMPTY segment also reports an
+      // undefined id, but with a numeric segment — that is navigation
+      // inside the edit, not a leave, and the marker must survive it or
+      // the latch cannot re-arm when the caret returns to the occurrence.
+      // The next real edit sets the marker again either way.
+      if (value === undefined && segment === undefined) {
         editedTokenRef.current = null;
       }
       // Navigation is not editing — except inside the very occurrence the
