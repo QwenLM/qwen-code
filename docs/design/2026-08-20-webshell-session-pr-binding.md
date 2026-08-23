@@ -36,7 +36,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - bridge `updateSessionMetadata`（`packages/acp-bridge/src/bridge.ts`）先做全部校验再变更（组合请求不允许部分生效）；upsert 进 live entry.prs（去重按 number，上限 10），`session_metadata_updated` SSE 事件 data 带完整 `prs`。
 - ACP `session/update_metadata`（`acp-http/dispatch.ts`）同样把最新绑定 upsert 进 sidecar。
 - `GitDialog.doCreatePr` 成功后：仅用 dialog 已有的 `sessionId`（`sessionIdRef.current`，即连接会话或 dialog 已为提交信息生成等操作解析出的会话）调用 `updateSessionMetadata(sessionId, { pr })`。**不调 `resolveSessionForWorkspace`**——它可能创建幽灵会话或误绑"最近会话"。写入失败仅降级为 console 警告，不影响 PR 创建成功的状态展示。
-- **shell 工具 post-hook**：`run_shell_command` 完成且未中止时，`detectGhPrCreateBinding(command, output)`（core `session-pr-service.ts`）识别 `gh pr create`（排除 `--dry-run`）并从 stdout 提取首个 `/pull/<N>` URL——gh 失败/dry-run 不打印 URL，天然防误报；命中则直接 `upsertSessionPr(..., state:'open')` 直写 sidecar（复刻 worktree sidecar 的"工具进程直写"模式，CLI/daemon 双模生效，daemon 列表 ~2s 内展示）。best-effort，失败不影响工具结果。
+- **shell 工具 post-hook**：`run_shell_command` 完成、未中止且退出码为 0 时，先过执行闸门（某命令段以 `gh pr create` 开头，core `session-pr-service.ts` 的 `commandRunsGhPrCreate`），再由 **gh 本身做归因**：`gh pr view --json number,url`（core `github-prs.ts` 的 `fetchCurrentBranchPullRequest`）解析当前工作分支对应的 PR，仅当该 PR 的 URL 出现在本次命令输出里才绑定——命令/输出文本无法把打印出的 URL 归因到 gh 自身的执行（复合命令、引号内短语、注释、`--help` 都能骗过纯文本匹配），所以文本匹配只做执行闸门，归因以 gh 的解析为准，gh 无法解析时一律不绑（fail-closed）。命中则 `upsertSessionPr(..., state:'open')` 直写 sidecar（复刻 worktree sidecar 的"工具进程直写"模式，CLI/daemon 双模生效），并经 `qwen/notify/session/pr-binding` 通知 daemon 标记 session catalog（同自动标题的 `onSessionCatalogChanged` 通道），live-state 客户端 ~2s 内 refetch 到绑定。sidecar 写入与 daemon 侧写入（GitDialog/回填/刷新）经 `proper-lockfile` 跨进程锁序列化（两级：进程内队列 + 文件锁，同 mailbox 先例）。best-effort，失败不影响工具结果。
 
 ### 持久化
 
@@ -58,14 +58,16 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 
 新增 daemon 路由 `POST /sessions/backfill-prs`（进程级、按需触发，启动不自动扫描），实现见 `packages/cli/src/serve/routes/session-pr-backfill.ts`：
 
-- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），解析三源：
-  1. **约定**：worktree sidecar slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
-  2. **`gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding`（命令段首匹配 + 成功输出 URL）提取创建时打印的 URL；
-  3. **`/review <N|url>` 显式指令**：transcript 用户消息解析（`#N` 与 `pull/N` 两种形态），review 会话绑到**被 review 的 PR**——搜索"PR N 的 review 会话"的正确语义。
-- **明确不用裸 `gitBranch`**：首版曾把会话 transcript 的 gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理了前两轮写入的 596 条错误绑定后重跑。
+- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived，`isValidSessionId` 门禁先于一切路径构造），解析三源（按权威升序插入，最强者最后、不被 tail-10 挤出）：
+  1. **`/review <N|url>` 显式指令**：transcript 用户消息解析（`#N` 与 `pull/N` 两种形态），review 会话绑到**被 review 的 PR**——搜索"PR N 的 review 会话"的正确语义；
+  2. **`gh pr create` 配对痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，命令段首过执行闸门（`commandRunsGhPrCreate`，排除 `--dry-run`），且打印 URL 必须与 workspace 同仓库（repo-key 校验）——配对响应即 gh 该次执行的 stdout，归因成立；
+  3. **约定**：worktree sidecar slug `pr-<N>` / branch `worktree-pr-<N>`（`[1-9]` 开头，无 PR 0）直接给出 PR 号（零网络），会话"为该 PR 存在"，权威最高。
+- **明确不用裸 `gitBranch`**：首版曾把 transcript gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理了前两轮写入的 596 条错误绑定后重跑。
 - 每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})` 提供 number→url/state 映射；`slim` 只取 number/url/headRefName（全字段 + 500 触发 GitHub GraphQL 504，slim 约 4s/60KB）。
-- URL 兜底链：gh 映射 → 创建时打印的 URL → git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host；仅约定号与 review 号）；解析不到号的会话原样跳过。
-- 已绑定同一 number 的会话跳过（不刷新 createdAt），重复调用幂等；写入复用 `upsertSessionPr`。
+- **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**，页内 PR 属于另一仓库——与 workspace origin key 不一致的条目一律跳过（fail-closed）；workspace key 不可解析时同样 fail-closed。
+- URL 兜底链：gh 映射 → 创建时打印的 URL（仅 direct 源，已同仓库校验）→ git remote web URL 推导 `<repo>/pull/<N>`（`fetchRemoteWebUrl`，支持 https / scp 风格 ssh / `ssh://` 与 enterprise host；仅约定号与 review 号）；解析不到号的会话原样跳过。
+- 已绑定同一 number 的结果跳过（不刷新 createdAt，保持绑定序）；**驱逐修复**：若本轮新绑定把已绑定的约定号挤过 tail-10，恢复它；重复调用幂等；写入复用 `upsertSessionPr`（进程内队列 + 跨进程文件锁，与 shell/daemon 侧写入序列化）。
+- 路由在 `bound > 0` 时 `markSessionCatalogChanged()`，live-state 客户端 ~2s 内 refetch。
 - 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`；untrusted workspace 跳过。
 
 ### 合入状态快照 + 定时刷新
@@ -78,7 +80,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 
 ## 关键决策
 
-- **绑定时机 = GitDialog 创建 PR 成功时**（用户主力流程）；agent 在 shell 里 `gh pr create` 由 shell 工具 post-hook 实时识别 + backfill 的 transcript 痕迹源回填存量（后续补充，见写入端与回填章节）。
+- **绑定时机 = GitDialog 创建 PR 成功时**（用户主力流程）；agent 在 shell 里 `gh pr create` 由 shell 工具 post-hook 实时识别（归因以 `gh pr view` 为准，见写入端章节）；存量由 backfill 三源回填（`/review` 指令、gh-create 配对痕迹、worktree 约定），**不用裸 gitBranch**（实测纯噪声，见回填章节）。
 - **sidecar 而非 transcript 记录**：displayName 走 `custom_title` transcript 记录是因为标题属于会话内容流；PR 绑定是会话外部元数据，worktree sidecar 是同类先例，改动面更小。
 - **多 PR 列表（cap 10）**：一个会话可能创建多个 PR（stacked PR、连续修复），只保留最新一个会让"按 PR 号反查会话"在这些场景失效。绑定按 number 去重、重复绑定移到最新位；badge 显示最新号 + `+N`，tooltip 列全部，搜索匹配任意一个。上限 10 防无界增长。
 - **workspace 级打开 GitDialog（无会话上下文）时不回写**：dialog 没有已解析的会话就跳过，不报错；绝不通过 `resolveSessionForWorkspace` 创建新会话来绑定（会产生幽灵会话/误绑）。

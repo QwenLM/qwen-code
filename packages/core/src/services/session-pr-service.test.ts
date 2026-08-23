@@ -8,9 +8,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import {
   SESSION_PR_LIST_LIMIT,
-  detectGhPrCreateBinding,
+  SESSION_PR_URL_MAX_LENGTH,
+  commandRunsGhPrCreate,
   mergeSessionPrLists,
   readSessionPrs,
   updateSessionPrStates,
@@ -132,6 +134,28 @@ describe('upsertSessionPr', () => {
     );
   });
 
+  it('waits for a foreign file-lock holder before mutating', async () => {
+    // The lock must reach ACROSS processes: another writer holding the
+    // sidecar's proper-lockfile lock (the daemon sweep while the session
+    // child binds, or vice versa) delays the mutation until release
+    // instead of interleaving with it.
+    await upsertSessionPr(filePath, { number: 41, url: entry(41).url });
+    const release = await lockfile.lock(filePath, { retries: 0 });
+    let resolved = false;
+    const pending = upsertSessionPr(filePath, {
+      number: 42,
+      url: entry(42).url,
+    }).then((prs) => {
+      resolved = true;
+      return prs;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(resolved).toBe(false);
+    await release();
+    const prs = await pending;
+    expect(prs.map((p) => p.number)).toEqual([41, 42]);
+  });
+
   it('serializes concurrent upserts so no binding is dropped', async () => {
     // Without the per-path queue, interleaved read-modify-write cycles would
     // let a later writer overwrite an earlier binding (read [] → read [] →
@@ -143,6 +167,33 @@ describe('upsertSessionPr', () => {
     ]);
     const prs = await readSessionPrs(filePath);
     expect(prs?.map((p) => p.number)).toEqual([100, 101, 102]);
+  });
+
+  it('rejects an over-long URL at the write boundary', async () => {
+    // The read side rejects the WHOLE list when one entry is invalid, so a
+    // poisoned write would erase every earlier binding from the badge and
+    // the refresh sweep. The write boundary must decline it instead.
+    await upsertSessionPr(filePath, { number: 41, url: entry(41).url });
+    const poisoned = await upsertSessionPr(filePath, {
+      number: 42,
+      url: `https://github.com/owner/repo/pull/${'9'.repeat(
+        SESSION_PR_URL_MAX_LENGTH,
+      )}`,
+    });
+    expect(poisoned.map((p) => p.number)).toEqual([41]);
+    await upsertSessionPr(filePath, { number: 43, url: entry(43).url });
+    const prs = await readSessionPrs(filePath);
+    expect(prs?.map((p) => p.number)).toEqual([41, 43]);
+  });
+
+  it('rejects a control-character URL at the write boundary', async () => {
+    await upsertSessionPr(filePath, { number: 51, url: entry(51).url });
+    const poisoned = await upsertSessionPr(filePath, {
+      number: 52,
+      url: 'https://github.com/owner/repo/pull/52\u001b[forged',
+    });
+    expect(poisoned.map((p) => p.number)).toEqual([51]);
+    expect(await readSessionPrs(filePath)).not.toBeNull();
   });
 });
 
@@ -218,38 +269,44 @@ describe('updateSessionPrStates', () => {
       { ...entry(100), state: 'open' },
       { ...entry(101), state: 'open' },
     ]);
-    const updated = await updateSessionPrStates(
+    const changed = await updateSessionPrStates(
       filePath,
-      new Map([[100, 'merged']]),
+      new Map([
+        [100, 'merged'],
+        [101, 'open'],
+      ]),
     );
-    expect(updated?.map((p) => p.number)).toEqual([100, 101]);
-    expect(updated?.[0]?.state).toBe('merged');
-    expect(updated?.[0]?.createdAt).toBe(entry(100).createdAt);
-    expect(updated?.[1]?.state).toBe('open');
+    // Only the entry whose state actually differs counts as rewritten.
+    expect(changed).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(persisted?.[1]?.state).toBe('open');
   });
 
-  it('returns null without writing when nothing changes', async () => {
+  it('returns 0 without writing when nothing changes', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
-  it('returns null when the sidecar is absent', async () => {
+  it('returns 0 when the sidecar is absent', async () => {
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
-    const [updated, prs] = await Promise.all([
+    const [changed, prs] = await Promise.all([
       updateSessionPrStates(filePath, new Map([[100, 'merged']])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
-    expect(updated?.[0]?.state).toBe('merged');
+    expect(changed).toBe(1);
     expect(prs?.map((p) => p.number)).toEqual([100, 101]);
     // Whichever ran second read the first's write — nothing was clobbered.
     const persisted = await readSessionPrs(filePath);
@@ -305,54 +362,25 @@ describe('mergeSessionPrLists', () => {
   });
 });
 
-describe('detectGhPrCreateBinding', () => {
-  const url = 'https://github.com/owner/repo/pull/9729';
-
-  it('binds the PR URL printed by a successful gh pr create', () => {
-    expect(
-      detectGhPrCreateBinding(
-        'cd /w && gh pr create --title x --body y',
-        `some noise\n${url}\n`,
-      ),
-    ).toEqual({ number: 9729, url });
+describe('commandRunsGhPrCreate', () => {
+  it('matches a bare gh pr create segment', () => {
+    expect(commandRunsGhPrCreate('gh pr create --title x --body y')).toBe(true);
+    expect(commandRunsGhPrCreate('cd /w && gh pr create --fill')).toBe(true);
   });
 
   it('matches wrapped commands, env prefixes, and pipes', () => {
+    expect(commandRunsGhPrCreate('cd /w && gh.exe pr create --fill')).toBe(
+      true,
+    );
     expect(
-      detectGhPrCreateBinding('cd /w && gh.exe pr create --fill', url),
-    ).toEqual({ number: 9729, url });
-    expect(
-      detectGhPrCreateBinding('GH_TOKEN=x gh pr create --fill | tee log', url),
-    ).toEqual({ number: 9729, url });
+      commandRunsGhPrCreate('GH_TOKEN=x gh pr create --fill | tee log'),
+    ).toBe(true);
   });
 
-  it('returns undefined when the command is not gh pr create', () => {
-    expect(detectGhPrCreateBinding('gh pr view 1', url)).toBeUndefined();
-    expect(detectGhPrCreateBinding('git commit -m gh', url)).toBeUndefined();
+  it('returns false when the command is not gh pr create', () => {
+    expect(commandRunsGhPrCreate('gh pr view 1')).toBe(false);
+    expect(commandRunsGhPrCreate('git commit -m gh')).toBe(false);
     // The phrase as a search argument is not an execution.
-    expect(
-      detectGhPrCreateBinding(`grep -rn 'gh pr create' .`, url),
-    ).toBeUndefined();
-  });
-
-  it('returns undefined for elided placeholder URLs', () => {
-    expect(
-      detectGhPrCreateBinding(
-        'gh pr create --fill',
-        'https://github.com/.../pull/8388',
-      ),
-    ).toBeUndefined();
-    expect(
-      detectGhPrCreateBinding('gh pr create --fill', 'https://.../pull/8388'),
-    ).toBeUndefined();
-  });
-
-  it('returns undefined for dry runs and failed creates (no URL)', () => {
-    expect(
-      detectGhPrCreateBinding('gh pr create --dry-run', url),
-    ).toBeUndefined();
-    expect(
-      detectGhPrCreateBinding('gh pr create --title x', 'error: not logged in'),
-    ).toBeUndefined();
+    expect(commandRunsGhPrCreate(`grep -rn 'gh pr create' .`)).toBe(false);
   });
 });

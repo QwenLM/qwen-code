@@ -3383,6 +3383,7 @@ export class Session implements SessionContext {
       this.#shellStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -7916,6 +7917,25 @@ export class Session implements SessionContext {
           .catch(() => {
             // Best-effort: a dropped notification only delays the title
             // until the client's next session-list refresh.
+          });
+      });
+
+    // Shell-detected `gh pr create` bindings persist in the child's own
+    // sidecar write; the daemon never sees it, so carry the catalog-clock
+    // mark — version-watching clients then refetch the binding the same way
+    // they pick up automatic titles.
+    this.config
+      .getSessionService()
+      .setSessionPrBoundCallback((sessionId, pr) => {
+        void this.client
+          .extNotification('qwen/notify/session/pr-binding', {
+            v: 1,
+            sessionId,
+            pr: { number: pr.number, url: pr.url },
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the badge
+            // until the client's next catalog refresh.
           });
       });
 

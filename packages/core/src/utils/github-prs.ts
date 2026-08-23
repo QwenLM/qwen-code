@@ -26,7 +26,7 @@ export const GITHUB_PR_LIST_LIMIT = 30;
 const GH_PR_LIST_FIELDS =
   'number,title,url,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt';
 
-const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state';
+const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state,updatedAt';
 
 export type GitHubPullRequestState = 'open' | 'draft' | 'merged' | 'closed';
 
@@ -187,9 +187,9 @@ export interface FetchGitHubPullRequestsOptions {
   /** `open` (default, glanceable panel) or `all` (merged/closed heads too). */
   state?: 'open' | 'all';
   /**
-   * Request only number/url/headRefName. The panel's CI rollup field makes
-   * large `--state all` queries hit GitHub GraphQL server timeouts (504);
-   * branch-mapping consumers like PR backfill don't need it.
+   * Request only number/url/headRefName/state/updatedAt. The panel's CI
+   * rollup field makes large `--state all` queries hit GitHub GraphQL server
+   * timeouts (504); branch-mapping consumers like PR backfill don't need it.
    */
   slim?: boolean;
 }
@@ -396,4 +396,137 @@ export async function getDefaultBranch(
   } catch {
     return null;
   }
+}
+
+// ── Git remote → repository identity ─────────────────────────────
+
+const GIT_REMOTE_TIMEOUT_MS = 5_000;
+
+/**
+ * Converts a git remote URL (https / ssh:// / scp-style `[user@]host:path`)
+ * to the repository's web URL without any port — used to build
+ * `<repo>/pull/<N>` links and to compare a binding's URL against the
+ * workspace repository.
+ */
+export function normalizeRemoteToWebUrl(remote: string): string | undefined {
+  const trimmed = remote.trim();
+  if (!trimmed) return undefined;
+  let input = trimmed;
+  if (input.startsWith('ssh://')) {
+    input = `https://${input.slice('ssh://'.length)}`;
+  } else if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(input)) {
+    // scp-style [user@]host:path — any user, not only `git`.
+    const scp = /^(?:[^@\s/]+@)?([^:\s/]+):(.+)$/.exec(input);
+    if (!scp) return undefined;
+    input = `https://${scp[1]}/${scp[2]}`;
+  }
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  const pathname = url.pathname.replace(/\.git\/?$/, '');
+  if (!pathname || pathname === '/') return undefined;
+  // `hostname` drops any port an ssh:// remote carried — a web link must
+  // not point at the SSH port.
+  return `${url.protocol}//${url.hostname}${pathname}`.replace(/\/$/, '');
+}
+
+/**
+ * Repository identity key (`host/owner/repo`, lowercased) for a GitHub web
+ * or PR URL. Used to verify a bound PR URL belongs to the workspace's own
+ * repository before persisting or refreshing it.
+ */
+export function repoKeyFromWebUrl(webUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(webUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length < 2) return undefined;
+  return `${url.hostname}/${segments[0]}/${segments[1]}`.toLowerCase();
+}
+
+/**
+ * Resolves the web URL of the `origin` remote of the repo containing `cwd`
+ * (best-effort: undefined when not a repo, no origin, or git stalls past
+ * the timeout). Async on purpose — callers run inside daemon request
+ * handlers/timers that must not block the event loop.
+ */
+export function fetchRemoteWebUrl(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | undefined> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['remote', 'get-url', 'origin'],
+      {
+        cwd: gitRoot,
+        timeout: GIT_REMOTE_TIMEOUT_MS,
+        encoding: 'utf8',
+        windowsHide: true,
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        resolve(error ? undefined : normalizeRemoteToWebUrl(stdout));
+      },
+    );
+  });
+}
+
+/**
+ * Resolves the PR gh associates with the current branch of the repo
+ * containing `cwd` (`gh pr view` with no argument names one), best-effort:
+ * undefined when the branch has no PR, gh is unavailable, or the repo
+ * cannot be resolved. Used to attribute a `gh pr create` run to the PR it
+ * created — command/output text alone cannot prove which printed URL gh
+ * itself produced.
+ */
+export function fetchCurrentBranchPullRequest(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<{ number: number; url: string } | undefined> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    execFile(
+      'gh',
+      ['pr', 'view', '--json', 'number,url'],
+      {
+        cwd: gitRoot,
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout) as {
+            number?: number;
+            url?: string;
+          };
+          resolve(
+            typeof parsed.number === 'number' && typeof parsed.url === 'string'
+              ? { number: parsed.number, url: parsed.url }
+              : undefined,
+          );
+        } catch {
+          resolve(undefined);
+        }
+      },
+    );
+  });
 }

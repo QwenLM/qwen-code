@@ -13,10 +13,13 @@
 // static barrel importer (ACP agent included).
 import {
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
   readSessionPrs,
+  repoKeyFromWebUrl,
   updateSessionPrStates,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
+import { isValidSessionId } from '../../config/session-id.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -60,9 +63,14 @@ export interface SessionPrRefreshResult {
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  resolveRemoteWebUrl: (cwd: string) => Promise<string | undefined> = (cwd) =>
+    fetchRemoteWebUrl(cwd, runtime.env.effectiveEnv),
 ): Promise<SessionPrRefreshResult> {
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
-  const pendingNumbers: Array<{ prPath: string; numbers: number[] }> = [];
+  const pendingBindings: Array<{
+    prPath: string;
+    bindings: Array<{ number: number; url: string }>;
+  }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
     let cursor: number | undefined;
@@ -73,6 +81,11 @@ export async function refreshWorkspaceSessionPrStates(
         archiveState,
       });
       for (const item of page.items) {
+        // `item.sessionId` comes verbatim from the transcript's first
+        // record and names the sidecar path below — a traversal id must be
+        // rejected before path construction (the backfill route shares
+        // this sink).
+        if (!isValidSessionId(item.sessionId)) continue;
         const prPath = sessionService.getPrSessionPathForArchiveState(
           item.sessionId,
           archiveState,
@@ -85,19 +98,29 @@ export async function refreshWorkspaceSessionPrStates(
         }
         if (!prs) continue;
         scanned += 1;
-        const numbers = prs
+        const bindings = prs
           // Only merged is terminal: closed PRs can be reopened, so they
           // keep participating in the sweep.
           .filter((p) => p.state !== 'merged')
-          .map((p) => p.number);
-        if (numbers.length > 0) {
-          pendingNumbers.push({ prPath, numbers });
+          .map((p) => ({ number: p.number, url: p.url }));
+        if (bindings.length > 0) {
+          pendingBindings.push({ prPath, bindings });
         }
       }
       cursor = page.nextCursor;
     } while (cursor !== undefined);
   }
-  if (pendingNumbers.length === 0) return { scanned, updated: 0 };
+  if (pendingBindings.length === 0) return { scanned, updated: 0 };
+
+  // PR numbers are dense small integers — stamping states by bare number
+  // would hit a same-numbered PR of another repository whenever a
+  // binding's URL points elsewhere. Each binding's own URL names its
+  // repository, so only bindings belonging to a repository this run
+  // actually queried are updated.
+  const remoteWebUrl = await resolveRemoteWebUrl(runtime.workspaceCwd);
+  const workspaceRepoKey = remoteWebUrl
+    ? repoKeyFromWebUrl(remoteWebUrl)
+    : undefined;
 
   const result = await fetchPullRequests(
     runtime.workspaceCwd,
@@ -111,20 +134,32 @@ export async function refreshWorkspaceSessionPrStates(
     numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
   }
 
+  // Stamping authority is the repository this run actually queried, and the
+  // page's own URLs name it. In the fork layout origin is the fork while
+  // gh lists the PARENT repo's PRs — the same repo the writers bind — so
+  // gating on the origin key alone would freeze every fork-layout binding.
+  // Accept both identities; bindings matching neither stay skipped.
+  const acceptedRepoKeys = new Set<string>();
+  if (workspaceRepoKey) acceptedRepoKeys.add(workspaceRepoKey);
+  for (const pr of result.pullRequests) {
+    const key = repoKeyFromWebUrl(pr.url);
+    if (key) acceptedRepoKeys.add(key);
+  }
+
   let updated = 0;
-  for (const target of pendingNumbers) {
+  for (const target of pendingBindings) {
     const states = new Map<number, SessionPrState>();
-    for (const number of target.numbers) {
-      const state = numberToState.get(number);
+    for (const binding of target.bindings) {
+      const bindingRepoKey = repoKeyFromWebUrl(binding.url);
+      if (!bindingRepoKey || !acceptedRepoKeys.has(bindingRepoKey)) continue;
+      const state = numberToState.get(binding.number);
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
       // supersedes a stale 'closed' after a reopen.
-      if (state !== undefined) states.set(number, state);
+      if (state !== undefined) states.set(binding.number, state);
     }
     if (states.size === 0) continue;
-    if (await updateSessionPrStates(target.prPath, states)) {
-      updated += states.size;
-    }
+    updated += await updateSessionPrStates(target.prPath, states);
   }
   return { scanned, updated };
 }

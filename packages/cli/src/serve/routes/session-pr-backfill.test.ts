@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   Storage,
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
   readSessionPrs,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
@@ -26,7 +26,6 @@ import {
 } from '../workspace-registry.js';
 import {
   backfillWorkspaceSessionPrs,
-  normalizeRemoteToWebUrl,
   parsePrNumberFromWorktree,
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
@@ -34,9 +33,11 @@ import {
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   fetchGitHubPullRequests: vi.fn(),
+  fetchRemoteWebUrl: vi.fn(),
 }));
 
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
+const fetchRemoteWebUrlMock = vi.mocked(fetchRemoteWebUrl);
 
 const passthroughMutate = () =>
   ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
@@ -89,38 +90,6 @@ describe('parsePrNumberFromWorktree', () => {
   });
 });
 
-describe('normalizeRemoteToWebUrl', () => {
-  it('normalizes https remotes, stripping .git', () => {
-    expect(normalizeRemoteToWebUrl('https://github.com/o/r.git')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('normalizes scp-style ssh remotes', () => {
-    expect(normalizeRemoteToWebUrl('git@github.com:o/r.git')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('normalizes ssh:// remotes', () => {
-    expect(normalizeRemoteToWebUrl('ssh://git@github.com/o/r')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('keeps enterprise hosts', () => {
-    expect(normalizeRemoteToWebUrl('git@code.example.com:team/repo.git')).toBe(
-      'https://code.example.com/team/repo',
-    );
-  });
-
-  it('rejects garbage and non-http protocols', () => {
-    expect(normalizeRemoteToWebUrl('not a url')).toBeUndefined();
-    expect(normalizeRemoteToWebUrl('git://github.com/o/r')).toBeUndefined();
-    expect(normalizeRemoteToWebUrl('')).toBeUndefined();
-  });
-});
-
 describe('backfillWorkspaceSessionPrs', () => {
   let runtimeDir: string;
   let workspaceCwd: string;
@@ -129,6 +98,9 @@ describe('backfillWorkspaceSessionPrs', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // The repo-key gate fail-closes without a resolvable workspace origin,
+    // so tests default to the same repo the `pr()` fixture URLs belong to.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
     runtimeDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-runtime-'),
     );
@@ -241,11 +213,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('falls back to the remote web URL when gh is unavailable', async () => {
-    execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
-    execSync('git remote add origin git@github.com:o/r.git', {
-      cwd: workspaceCwd,
-      stdio: 'pipe',
-    });
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
     await seedSession(SESSION_B);
     await seedWorktreeSidecar(SESSION_B, 'pr-7', 'worktree-pr-7');
     fetchGitHubPullRequestsMock.mockResolvedValue({
@@ -403,6 +371,40 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.[0]).toMatchObject({ number: 43 });
   });
 
+  it('ignores /review mentions outside user text records', async () => {
+    // Assistant prose and tool results quote `/review <N>` without
+    // requesting one; only the user's command records count.
+    await seedSession(SESSION_G);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_G}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_G}-assistant`,
+        parentUuid: `${SESSION_G}-user-1`,
+        sessionId: SESSION_G,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ text: 'I will run /review 55 for you.' }],
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(55, 'fix/55')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+  });
+
   it('does not bind the session git branch (noise source removed)', async () => {
     await seedSession(SESSION_G, 'fix/thing');
     fetchGitHubPullRequestsMock.mockResolvedValue({
@@ -416,6 +418,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   });
 
   it('recovers PRs created via gh pr create in the session shell', async () => {
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
     const sessionId = '00000000-0000-4000-8000-000000000008';
     await seedSession(sessionId);
     const chatsDir = path.join(
@@ -488,6 +491,112 @@ describe('backfillWorkspaceSessionPrs', () => {
       },
     ]);
   });
+
+  it('does not recover a transcript URL from another repository', async () => {
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    const sessionId = '00000000-0000-4000-8000-000000000009';
+    await seedSession(sessionId);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-call`,
+        parentUuid: `${sessionId}-user-1`,
+        sessionId,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'run_shell_command',
+                args: { command: 'gh pr create --title x' },
+              },
+            },
+          ],
+        },
+        cwd: workspaceCwd,
+      })}\n${JSON.stringify({
+        uuid: `${sessionId}-resp`,
+        parentUuid: `${sessionId}-call`,
+        sessionId,
+        timestamp: '2026-08-02T00:00:01.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'run_shell_command',
+                response: {
+                  output: 'https://github.com/evil/other/pull/5\n',
+                },
+              },
+            },
+          ],
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+  });
+
+  it('never binds number 0 from a pr-0 user slug', async () => {
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    await seedSession(SESSION_F);
+    await seedWorktreeSidecar(SESSION_F, 'pr-0', 'worktree-pr-0');
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+  });
+
+  it('rejects traversal sessionIds before building sidecar paths', async () => {
+    const fileName = '00000000-0000-4000-8000-00000000000a';
+    const traversalId = '../../pwn';
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${fileName}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${fileName}-user-1`,
+        parentUuid: null,
+        sessionId: traversalId,
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 0, bound: 0 });
+    const escapedSidecar = sessionService.getPrSessionPathForArchiveState(
+      traversalId,
+      'active',
+    );
+    expect(path.relative(chatsDir, escapedSidecar).startsWith('..')).toBe(true);
+    await expect(fsp.access(escapedSidecar)).rejects.toThrow();
+  });
 });
 
 describe('registerSessionPrBackfillRoutes', () => {
@@ -535,5 +644,83 @@ describe('registerSessionPrBackfillRoutes', () => {
     );
     expect(untrusted.error).toBe('untrusted workspace skipped');
     expect(response.body).toMatchObject({ v: 1, bound: 0 });
+  });
+
+  it('marks the session catalog only when a run binds new PRs', async () => {
+    const workCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-work-'),
+    );
+    const runtimeBase = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-runtime-'),
+    );
+    try {
+      fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+      const sessionId = '00000000-0000-4000-8000-000000000001';
+      const chatsDir = path.join(
+        new Storage(workCwd, runtimeBase).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workCwd,
+        })}\n`,
+        'utf8',
+      );
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.worktree.json`),
+        JSON.stringify({
+          slug: 'pr-7',
+          worktreePath: `${workCwd}/.qwen/worktrees/pr-7`,
+          worktreeBranch: 'worktree-pr-7',
+          originalCwd: workCwd,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        }),
+        'utf8',
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(7, 'worktree-pr-7')],
+      });
+      const markSessionCatalogChanged = vi.fn();
+      const app = express();
+      registerSessionPrBackfillRoutes(app, {
+        workspaceRegistry: registry([
+          {
+            workspaceId: 'primary',
+            workspaceCwd: workCwd,
+            sessionRuntimeBaseDir: runtimeBase,
+            primary: true,
+            trusted: true,
+            env: { mode: 'parent-process', overlayKeys: [] },
+            bridge: { markSessionCatalogChanged },
+          } as unknown as WorkspaceRuntime,
+        ]),
+        sendBridgeError,
+        mutate: passthroughMutate,
+      });
+
+      const first = await request(app).post('/sessions/backfill-prs');
+      expect(first.status).toBe(200);
+      expect(first.body.bound).toBe(1);
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+
+      // Second run binds nothing new: no catalog bump.
+      const second = await request(app).post('/sessions/backfill-prs');
+      expect(second.status).toBe(200);
+      expect(second.body.bound).toBe(0);
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      await fsp.rm(workCwd, { recursive: true, force: true });
+      await fsp.rm(runtimeBase, { recursive: true, force: true });
+    }
   });
 });

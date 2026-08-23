@@ -37,9 +37,10 @@ import {
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import {
-  detectGhPrCreateBinding,
+  commandRunsGhPrCreate,
   upsertSessionPr,
 } from '../services/session-pr-service.js';
+import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -2721,8 +2722,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
-    if (!result.aborted) {
-      this.bindGhPrCreate(commandToExecute, result.output);
+    if (!result.aborted && result.exitCode === 0) {
+      this.bindGhPrCreate(commandToExecute, result.output, cwd);
     }
 
     const abortReasonName = getAbortReasonName(combinedSignal);
@@ -3065,21 +3066,38 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Best-effort PR binding for agents that create PRs via `gh pr create` in
    * the shell (the GitDialog binds at creation; this covers the shell path).
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
-   * pattern; a failure must never shadow the tool result.
+   * pattern; a failure must never shadow the tool result. gh itself is the
+   * attribution authority: the binding is the PR gh resolves for the working
+   * branch, accepted only when this command's output carries gh's URL —
+   * command/output text alone cannot attribute a printed URL to gh's own
+   * execution, so a text-matched URL never binds on its own.
    */
-  private bindGhPrCreate(command: string, output: string): void {
-    const binding = detectGhPrCreateBinding(command, output);
-    if (!binding) return;
-    try {
-      const prPath = this.config
-        .getSessionService()
-        .getPrSessionPathForArchiveState(this.config.getSessionId(), 'active');
-      void upsertSessionPr(prPath, { ...binding, state: 'open' }).catch(() => {
+  private bindGhPrCreate(command: string, output: string, cwd: string): void {
+    void (async () => {
+      try {
+        if (!commandRunsGhPrCreate(command)) return;
+        // The execution directory, not the target dir: the `directory`
+        // parameter may point at another registered workspace, and gh
+        // attributes the branch of the repo the command actually ran in.
+        const created = await fetchCurrentBranchPullRequest(cwd);
+        if (!created || !output.includes(created.url)) return;
+        const prPath = this.config
+          .getSessionService()
+          .getPrSessionPathForArchiveState(
+            this.config.getSessionId(),
+            'active',
+          );
+        await upsertSessionPr(prPath, { ...created, state: 'open' });
+        // The daemon never sees this write; the notification carries the
+        // catalog mark so live-state clients refetch it (~2s) instead of
+        // waiting for unrelated catalog churn.
+        this.config
+          .getSessionService()
+          .emitSessionPrBound(this.config.getSessionId(), created);
+      } catch {
         /* best-effort binding */
-      });
-    } catch {
-      /* best-effort binding */
-    }
+      }
+    })();
   }
 
   /**

@@ -4,19 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
-  detectGhPrCreateBinding,
+  commandRunsGhPrCreate,
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
   readSessionPrs,
   readWorktreeSession,
+  repoKeyFromWebUrl,
   upsertSessionPr,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { isValidSessionId } from '../../config/session-id.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -26,8 +28,11 @@ import type {
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
 // `worktree-pr-<N>` (see worktreeStartup / worktreeBranchForSlug); the
 // sidecars survive restarts, so they are the zero-network backfill source.
-const SLUG_PR_PATTERN = /^pr-(\d{1,9})$/;
-const BRANCH_PR_PATTERN = /^worktree-pr-(\d{1,9})$/;
+// `[1-9]` mirrors parsePRReference's n > 0 invariant: `pr-0` is a legal
+// user-chosen slug but PR 0 does not exist, and a persisted number 0 poisons
+// the whole sidecar read; leading zeros stay out for unambiguous round-trips.
+const SLUG_PR_PATTERN = /^pr-([1-9]\d{0,8})$/;
+const BRANCH_PR_PATTERN = /^worktree-pr-([1-9]\d{0,8})$/;
 
 /**
  * Extracts the PR number a worktree sidecar's slug/branch convention names.
@@ -43,44 +48,6 @@ export function parsePrNumberFromWorktree(
   const branchMatch = BRANCH_PR_PATTERN.exec(branch ?? '');
   if (branchMatch) return Number(branchMatch[1]);
   return undefined;
-}
-
-/**
- * Converts a git remote URL (https / ssh / scp-style) to the repository's
- * web URL, used to build `<repo>/pull/<N>` when `gh` is unavailable.
- */
-export function normalizeRemoteToWebUrl(remote: string): string | undefined {
-  const trimmed = remote.trim();
-  if (!trimmed) return undefined;
-  let input = trimmed;
-  if (input.startsWith('git@')) {
-    input = `https://${input.slice('git@'.length).replace(':', '/')}`;
-  } else if (input.startsWith('ssh://')) {
-    input = `https://${input.slice('ssh://'.length)}`;
-  }
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
-  const pathname = url.pathname.replace(/\.git\/?$/, '');
-  if (!pathname || pathname === '/') return undefined;
-  return `${url.protocol}//${url.host}${pathname}`.replace(/\/$/, '');
-}
-
-function getRemoteWebUrl(cwd: string): string | undefined {
-  try {
-    const remote = execSync('git remote get-url origin', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    return normalizeRemoteToWebUrl(remote);
-  } catch {
-    return undefined;
-  }
 }
 
 export interface SessionPrBackfillWorkspaceResult {
@@ -107,21 +74,18 @@ interface BackfillCandidate {
   reviewed: readonly number[];
 }
 
+// A printed URL only counts when gh itself printed it in the response of
+// the very `gh pr create` run (paired by part id) AND it belongs to the
+// workspace's own repo — text alone must never forge a binding.
+const PRINTED_PR_URL_PATTERN =
+  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})/g;
+
 // `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`. Bare
 // session git branches are NOT a source: they bind the workspace's current
 // branch PR onto every session (including unrelated chats and reviews of
-// other PRs), which is noise, not signal.
+// other PRs) — measured pure noise, removed with cleanup.
 const REVIEW_COMMAND_PATTERN =
   /\/review\b[^\n"\\]*?(?:pull\/|#)(\d{1,9})|\/review\s+(\d{1,9})/g;
-
-function collectReviewedPrNumbers(raw: string): readonly number[] {
-  const numbers = new Set<number>();
-  for (const match of raw.matchAll(REVIEW_COMMAND_PATTERN)) {
-    const value = match[1] ?? match[2];
-    if (value !== undefined) numbers.add(Number(value));
-  }
-  return [...numbers];
-}
 
 interface TranscriptToolPart {
   functionCall?: {
@@ -136,13 +100,10 @@ interface TranscriptToolPart {
   };
 }
 
-/**
- * Recovers PRs the session created by running `gh pr create` in the shell:
- * pairs each `run_shell_command` call (by part id) with its response and
- * applies the same command+URL gate as the live shell-tool binding. Covers
- * sessions that predate the live hook.
- */
-function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
+function collectGhPrCreateBindings(
+  raw: string,
+  workspaceRepoKey: string | undefined,
+): ReadonlyMap<number, string> {
   const commandById = new Map<string, string>();
   const bindings = new Map<number, string>();
   for (const line of raw.split('\n')) {
@@ -174,26 +135,73 @@ function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
         continue;
       }
       const command = commandById.get(response.id);
-      if (command === undefined) continue;
-      const binding = detectGhPrCreateBinding(
-        command,
-        response.response.output,
-      );
-      if (binding) bindings.set(binding.number, binding.url);
+      if (command === undefined || !commandRunsGhPrCreate(command)) {
+        continue;
+      }
+      if (command.includes('--dry-run')) continue;
+      for (const match of response.response.output.matchAll(
+        PRINTED_PR_URL_PATTERN,
+      )) {
+        const url = match[0];
+        // Elided owner/repo placeholders are not link targets; foreign
+        // repos must never bind into this workspace.
+        if (url.includes('...')) continue;
+        if (
+          workspaceRepoKey === undefined ||
+          repoKeyFromWebUrl(url) !== workspaceRepoKey
+        ) {
+          continue;
+        }
+        bindings.set(Number(match[1]), url);
+      }
     }
   }
   return bindings;
 }
 
+// Only USER text records count: assistant prose, tool calls, and tool
+// results (read_file echoes of fixtures/docs) quote `/review <N>` without
+// requesting one, and raw-text matching over escaped JSON would bind them.
+function collectReviewedPrNumbers(raw: string): readonly number[] {
+  const numbers = new Set<number>();
+  for (const line of raw.split('\n')) {
+    if (!line.includes('/review')) continue;
+    let record: {
+      type?: string;
+      message?: {
+        parts?: Array<{ text?: string; functionResponse?: unknown }>;
+      };
+    };
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record.type !== 'user') continue;
+    for (const part of record.message?.parts ?? []) {
+      if (typeof part.text !== 'string' || part.functionResponse) {
+        continue;
+      }
+      for (const match of part.text.matchAll(REVIEW_COMMAND_PATTERN)) {
+        const value = match[1] ?? match[2];
+        if (value !== undefined) numbers.add(Number(value));
+      }
+    }
+  }
+  return [...numbers];
+}
+
 /**
- * Backfills PR bindings onto a workspace's persisted sessions. Sources: the
- * worktree slug/branch convention (`pr-<N>`, zero network), `gh pr create`
- * traces in the transcript (number + printed URL), and explicit `/review
- * <N|url>` requests (the reviewed PR). Bare session git branches are NOT a
- * source — they bind the workspace's current branch PR onto every session.
- * URLs resolve from the batched slim `gh pr list --state all`, then the
- * printed create URL, then the git remote web URL (convention/review
- * numbers). A session may bind several PRs.
+ * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
+ * ascending authority (strongest inserted last so the sidecar's tail cap
+ * never evicts it): `/review <N|url>` requests (the reviewed PR), paired
+ * `gh pr create` traces (the command ran and gh printed the created PR's
+ * URL in that very response, same repo), and the worktree slug/branch
+ * convention `pr-<N>` (the session exists FOR that PR). Bare session git
+ * branches are NOT a source — they bind the workspace's current branch PR
+ * onto every session (measured pure noise). URLs resolve from the batched
+ * slim `gh pr list --state all` (repo-key filtered), then the printed
+ * create URL, then the workspace remote web URL (convention/review).
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -207,6 +215,14 @@ export async function backfillWorkspaceSessionPrs(
     unresolved: 0,
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
+  // One remote lookup per backfill run, before transcript scanning so the
+  // gh-create source can repo-validate printed URLs; async so the daemon
+  // event loop is never blocked by it.
+  const remote = await fetchRemoteWebUrl(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
+  const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
     let cursor: number | undefined;
@@ -217,6 +233,11 @@ export async function backfillWorkspaceSessionPrs(
         archiveState,
       });
       for (const item of page.items) {
+        // `item.sessionId` comes verbatim from the transcript's first
+        // record, and every sidecar path below embeds it — a traversal id
+        // must be rejected before path construction, the same way the
+        // sibling sidecar routes gate.
+        if (!isValidSessionId(item.sessionId)) continue;
         result.scanned += 1;
         const dir = path.dirname(
           sessionService.getWorktreeSessionPathForArchiveState(
@@ -241,7 +262,10 @@ export async function backfillWorkspaceSessionPrs(
         } catch {
           transcriptRaw = '';
         }
-        const direct = collectGhPrCreateBindings(transcriptRaw);
+        const direct = collectGhPrCreateBindings(
+          transcriptRaw,
+          workspaceRepoKey,
+        );
         const reviewed = collectReviewedPrNumbers(transcriptRaw);
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
@@ -275,23 +299,43 @@ export async function backfillWorkspaceSessionPrs(
   );
   if (prs.kind === 'ok') {
     for (const pr of prs.pullRequests) {
+      // Fork layout: gh resolves the PARENT repo for list queries when the
+      // origin is a fork, so the page can hold another repository's PRs. A
+      // bare head-branch collision with one of them would bind a stranger's
+      // PR into this workspace's sessions — reject every foreign URL. Fail
+      // CLOSED when the workspace key is unknown (no resolvable origin): gh
+      // may then resolve a default repo that is not this workspace's, and
+      // the convention URL fallback is already disabled in that state.
+      if (
+        workspaceRepoKey === undefined ||
+        repoKeyFromWebUrl(pr.url) !== workspaceRepoKey
+      ) {
+        continue;
+      }
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
     }
   }
 
-  let remoteWebUrl: string | undefined;
   for (const candidate of candidates) {
+    // Insert in ASCENDING authority so the strongest bindings survive the
+    // sidecar's tail-10 cap: reviewed first (the session merely looked at
+    // that PR), then gh-create traces, and the worktree slug/branch
+    // convention last (the session exists FOR that PR, so it must never be
+    // evicted by weaker numbers).
     const numbers: number[] = [];
-    if (candidate.conventionNumber !== undefined) {
-      numbers.push(candidate.conventionNumber);
+    for (const reviewedNumber of candidate.reviewed) {
+      if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
     }
     for (const directNumber of candidate.direct.keys()) {
       if (!numbers.includes(directNumber)) numbers.push(directNumber);
     }
-    for (const reviewedNumber of candidate.reviewed) {
-      if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
+    if (candidate.conventionNumber !== undefined) {
+      const conventionNumber = candidate.conventionNumber;
+      const rest = numbers.filter((n) => n !== conventionNumber);
+      numbers.length = 0;
+      numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
     const prPath = sessionService.getPrSessionPathForArchiveState(
@@ -304,33 +348,59 @@ export async function backfillWorkspaceSessionPrs(
     } catch {
       existing = null;
     }
-    const have = new Set(existing?.map((pr) => pr.number));
+    const initialNumbers = new Set(existing?.map((pr) => pr.number));
+    let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
     for (const number of numbers) {
-      if (have.has(number)) {
+      const isConvention = number === candidate.conventionNumber;
+      if (initialNumbers.has(number)) {
         result.alreadyBound += 1;
+        // Plain skip for EVERY already-bound number: a re-upsert would move
+        // the entry to the end with a fresh createdAt, violating the
+        // binding-time order the badge and tooltip render by.
         continue;
       }
       let url = numberToUrl.get(number) ?? candidate.direct.get(number);
       if (
         url === undefined &&
-        (number === candidate.conventionNumber ||
-          candidate.reviewed.includes(number))
+        (isConvention || candidate.reviewed.includes(number)) &&
+        remote !== undefined
       ) {
-        remoteWebUrl ??= getRemoteWebUrl(runtime.workspaceCwd);
-        if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;
+        url = `${remote}/pull/${number}`;
       }
       if (url === undefined) {
         result.unresolved += 1;
         continue;
       }
       const state = numberToState.get(number);
-      await upsertSessionPr(prPath, {
+      persisted = await upsertSessionPr(prPath, {
         number,
         url,
         ...(state ? { state } : {}),
       });
-      have.add(number);
       result.bound += 1;
+    }
+    // Eviction repair: when this run's NEW bindings pushed an already-bound
+    // convention number past the tail cap, restore it — the session exists
+    // for that PR. Runs that bind nothing new leave the sidecar untouched.
+    const conventionNumber = candidate.conventionNumber;
+    if (
+      conventionNumber !== undefined &&
+      initialNumbers.has(conventionNumber) &&
+      persisted !== undefined &&
+      !persisted.some((pr) => pr.number === conventionNumber)
+    ) {
+      let url = numberToUrl.get(conventionNumber);
+      if (url === undefined && remote !== undefined) {
+        url = `${remote}/pull/${conventionNumber}`;
+      }
+      if (url !== undefined) {
+        const state = numberToState.get(conventionNumber);
+        await upsertSessionPr(prPath, {
+          number: conventionNumber,
+          url,
+          ...(state ? { state } : {}),
+        });
+      }
     }
   }
   return result;
@@ -361,7 +431,12 @@ export function registerSessionPrBackfillRoutes(
           continue;
         }
         try {
-          workspaces.push(await backfillWorkspaceSessionPrs(runtime));
+          const result = await backfillWorkspaceSessionPrs(runtime);
+          // New bindings write sidecars the daemon never sees; bump the
+          // catalog revision so live-state clients refetch, the way every
+          // other daemon-side writer of persisted session state does.
+          if (result.bound > 0) runtime.bridge.markSessionCatalogChanged();
+          workspaces.push(result);
         } catch (error) {
           workspaces.push({
             workspaceCwd: runtime.workspaceCwd,
