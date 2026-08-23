@@ -1804,12 +1804,16 @@ describe('thinking rows in the compact summary', () => {
       '[class*="chatSummaryThoughtHeader"]',
     ) as HTMLElement;
     expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain('private chain of thought');
+    // The pointer-styled row is the hit target, not just the nested controls.
+    act(() => header.click());
+    expect(container.textContent).toContain('private chain of thought');
+    act(() => header.click());
+    expect(container.textContent).not.toContain('private chain of thought');
     const chevron = header.querySelector(
       '[class*="chatSummaryThoughtChevron"]',
     ) as HTMLElement;
     expect(chevron).toBeTruthy();
-    expect(container.textContent).not.toContain('private chain of thought');
-    // The pointer-styled row is the hit target, not just the label button.
     act(() => chevron.click());
     expect(container.textContent).toContain('private chain of thought');
   });
@@ -1959,6 +1963,46 @@ describe('thinking rows in the compact summary', () => {
     expect(
       positions.every((v, i) => v >= 0 && (i === 0 || v > positions[i - 1]!)),
     ).toBe(true);
+  });
+
+  it('renders a thought bound to a later parallel agent after the agent group', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'second agent reasoning', beforeToolCallId: 'agent-2' }],
+      true,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const parallelBlock = container.querySelector(
+      '[data-testid="compact-parallel-agents"]',
+    );
+    const thoughtHeader = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(parallelBlock).toBeTruthy();
+    expect(thoughtHeader).toBeTruthy();
+    expect(
+      parallelBlock!.compareDocumentPosition(thoughtHeader) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    expect(container.textContent).not.toContain('second agent reasoning');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('second agent reasoning');
   });
 });
 
