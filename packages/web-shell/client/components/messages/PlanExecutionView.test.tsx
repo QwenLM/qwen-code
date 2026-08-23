@@ -1119,6 +1119,76 @@ describe('PlanExecutionView', () => {
     container.remove();
   });
 
+  it('refreshes edge identities when a revision renumbers steps but preserves geometry', () => {
+    // A re-issued plan can rename/rename step ids while keeping every step's
+    // content, dependencies, and layer geometry. The topology key changes
+    // (so measure re-runs) but the measured path data is identical — the
+    // measure-skip signature must still include edge identity, or the
+    // stale from/to pairs stay wired to steps that no longer exist.
+    const renumberedTodos: TodoItem[] = branchedTodos.map((todo, index) => {
+      const renamed = `step-${index + 1}`;
+      const renamedDependencies = new Map(
+        branchedTodos.map((original, dependencyIndex) => [
+          original.id,
+          `step-${dependencyIndex + 1}`,
+        ]),
+      );
+      return {
+        ...todo,
+        id: renamed,
+        ...(todo.blockedBy
+          ? {
+              blockedBy: todo.blockedBy.map(
+                (dependencyId) => renamedDependencies.get(dependencyId)!,
+              ),
+            }
+          : {}),
+      };
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={branchedTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+    expect(
+      container.querySelector('[data-from="plan"][data-to="build-api"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={renumberedTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+
+    const renumberedEdges = Array.from(
+      container.querySelectorAll('[data-plan-edge]'),
+    )
+      .map((edge) =>
+        JSON.stringify([
+          edge.getAttribute('data-from'),
+          edge.getAttribute('data-to'),
+        ]),
+      )
+      .sort();
+    expect(renumberedEdges).toEqual([
+      JSON.stringify(['step-1', 'step-2']),
+      JSON.stringify(['step-1', 'step-3']),
+      JSON.stringify(['step-2', 'step-4']),
+      JSON.stringify(['step-3', 'step-4']),
+    ]);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('skips SVG edge materialization for an excessively dense plan', () => {
     const denseTodos = Array.from(
       { length: 33 },

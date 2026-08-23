@@ -656,7 +656,12 @@ export function PlanExecutionView({
         edges,
         lanes: spanning.length,
       };
-      const signature = `${next.width}:${next.height}:${next.lanes}:${edges.map((edge) => edge.d).join('|')}`;
+      // Include edge identity in the signature: a re-issued plan revision
+      // that renumbers step ids while preserving every step's geometry
+      // produces identical path data, but the rendered edges carry from/to
+      // for highlighting — skipping the state update would leave stale
+      // identities wired to the wrong steps.
+      const signature = `${next.width}:${next.height}:${next.lanes}:${edges.map((edge) => `${edge.from}>${edge.to}>${edge.d}`).join('|')}`;
       if (signature === graphSignatureRef.current) return;
       graphSignatureRef.current = signature;
       setGraph(next);
