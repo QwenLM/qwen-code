@@ -866,6 +866,24 @@ export const App: React.FC = () => {
             <WebShellTranscriptLazy
               blocks={transcriptBlocks}
               theme={webShellTheme}
+              // WebShellTranscript hardcodes isResponding={false}, so
+              // MessageList's auto-collapse would treat the in-progress
+              // turn as completed and collapse it mid-response. Disable
+              // collapsing until a live isResponding prop is plumbed
+              // through; the pre-PR timeline was always fully expanded.
+              collapseCompletedTurns={false}
+              // The composer is an absolutely-positioned overlay at the
+              // bottom of the chat container; MessageList reserves
+              // clearance through --web-shell-bottom-panel-inset (padding
+              // and scroll-padding bottom). Nothing else in this package
+              // sets the variable, so the transcript tail would be hidden
+              // under the input box. 140px restores the pb-[140px]
+              // clearance the old scroll container provided.
+              style={
+                {
+                  '--web-shell-bottom-panel-inset': '140px',
+                } as React.CSSProperties
+              }
             />
           </React.Suspense>
         )}
