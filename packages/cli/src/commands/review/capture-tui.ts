@@ -1343,25 +1343,57 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let killDirUnusable = false;
     let plantedEntry = false;
     const uid = process.getuid?.();
-    // Whether the socket start bound is still the one at its path: a
-    // goal-state verdict about the start base is about THIS run's server
-    // only while the stamped socket survives unchanged. Computed before the
-    // loop: a kill this loop credits unlinks the socket, and that removal
-    // is this reap's own, not a mid-window destruction.
-    let stampedSocketAlive = false;
-    if (socketStampIno !== undefined && uid !== undefined) {
+    /** Whether the socket start bound is still the one at its path — read
+     * WHERE THE VERDICT IS, never once up front. A goal-state verdict about
+     * the start base is about THIS run's server only while the stamped
+     * socket survives unchanged, and the loop below spans both bases'
+     * attempts, a retry and a 15s belt: a snapshot taken before all of that
+     * is stale by the time anything is credited, so a survivor that renamed
+     * the live socket away mid-reap and left a creditable occupant in its
+     * place passed the check and had its replacement's verdict credited —
+     * and then unlinked. The old justification for hoisting it ("a kill
+     * this loop credits unlinks the socket, and that removal is this reap's
+     * own") does not need the hoist: each base's verdict is evaluated
+     * BEFORE that base's unlink, so a read here can never misread this
+     * reap's own removal. What stays open is the rename between this read
+     * and the unlink that follows it — the same interval the entry guard
+     * documents, and the same reason: Node exposes no `*at()` syscalls. */
+    const stampedSocketAlive = (): boolean => {
+      if (socketStampIno === undefined || uid === undefined) return false;
       try {
-        stampedSocketAlive =
+        return (
           lstatSync(join(startBase, `tmux-${uid}`, server)).ino ===
-          socketStampIno;
+          socketStampIno
+        );
       } catch {
-        stampedSocketAlive = false;
+        return false;
       }
-    }
+    };
     // Untrimmed, matching tmux (a padded value is used verbatim). Same
     // candidate set as before: tmux takes the first USABLE base.
     const envBase = process.env['TMUX_TMPDIR'];
-    for (const base of new Set([envBase || '/tmp', '/tmp'])) {
+    // De-duplicated by the directory a kill would actually REACH, not by the
+    // raw string — the rule cleanup.ts's sweep already states for its own
+    // scan. `/tmp/`, `/tmp/.` and a TMUX_TMPDIR symlinked to /tmp are
+    // different strings naming one base, and visiting it twice matters now
+    // that identity is read at verdict time: the first visit credits and
+    // unlinks, and the second would read the socket it just removed as a
+    // swap and warn about an orphan it had itself reaped.
+    const candidateBases: string[] = [];
+    const seenBases = new Set<string>();
+    for (const base of [envBase || '/tmp', '/tmp']) {
+      let key = base;
+      try {
+        key = realpathSync(base);
+      } catch {
+        // Unresolvable: the raw path is a fine key, and a base that cannot
+        // be resolved is not one another candidate silently aliases.
+      }
+      if (seenBases.has(key)) continue;
+      seenBases.add(key);
+      candidateBases.push(base);
+    }
+    for (const base of candidateBases) {
       // The kill below addresses the socket by NAME, and tmux connects to
       // whatever that name resolves to at connect() time. The captured
       // command is untrusted code running under this uid — that is what a
@@ -1528,7 +1560,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             !(
               onStartBase &&
               socketStampIno !== undefined &&
-              !stampedSocketAlive
+              !stampedSocketAlive()
             );
           // ...and NOT for a refusal the client made before it looked. Those
           // two wordings were briefly folded into isNothingToKill, which made

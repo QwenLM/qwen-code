@@ -737,9 +737,177 @@ exit 0
     expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_WRONLY).toBeTruthy();
     expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_CREAT).toBeTruthy();
     expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_TRUNC).toBeTruthy();
-    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_NOFOLLOW).toBeTruthy();
-    expect(ARTIFACT_OPEN_FLAGS & fsConstants.O_NONBLOCK).toBeTruthy();
+    // Gated the way PRODUCTION degrades, not by skipping the whole test:
+    // Windows exposes neither constant (node documents the eight it has),
+    // and the flag set is built with `?? 0` for exactly that — so asserting
+    // them unconditionally reddens the Windows lane over two flags that
+    // legitimately contribute nothing there, while the three above stay
+    // meaningful on every platform.
+    for (const flag of [fsConstants.O_NOFOLLOW, fsConstants.O_NONBLOCK]) {
+      if (typeof flag !== 'number') continue;
+      expect(ARTIFACT_OPEN_FLAGS & flag).toBeTruthy();
+    }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'visits a base once even when two candidate strings name it',
+    async () => {
+      // The candidates are the env base and `/tmp`, and they were
+      // de-duplicated as STRINGS — so `/tmp/`, `/tmp/.` or a TMUX_TMPDIR
+      // symlinked to /tmp produced two visits to one base. That was
+      // harmless while identity was a pre-loop snapshot; it is not now that
+      // the verdict re-reads it, because the first visit credits and
+      // UNLINKS, and the second would read the socket this reap had just
+      // removed as a swap and warn about an orphan it reaped itself. Same
+      // rule cleanup.ts's sweep already states for its own scan.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-alias-'));
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const killLog = join(dir, 'kills');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+    : > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "$TMUX_TMPDIR" >> '${killLog}'
+    exit 0
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      // A trailing slash: a different string, the same directory. The socket
+      // this creates under the real tmux dir carries this run's own unique
+      // name and the credited kill unlinks it again.
+      process.env['TMUX_TMPDIR'] = '/tmp/';
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        const kills = existsSync(killLog)
+          ? readFileSync(killLog, 'utf8').trim().split('\n')
+          : [];
+        expect(kills).toHaveLength(1);
+        // And the run stays quiet: one visit, credited, nothing left to doubt.
+        expect(stderr).not.toContain('WARNING');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reads the stamped identity at VERDICT time, not once before the loop',
+    async () => {
+      // The identity arm used to read a snapshot taken before the candidate
+      // loop — which spans both bases' attempts, a retry and a 15s belt. A
+      // daemonized survivor of the captured command (this file's documented
+      // same-uid class; it knows the path from `$TMUX`) waits for the reap,
+      // renames the LIVE socket away and leaves a creditable occupant at
+      // the path: the stale snapshot still said "alive", the replacement's
+      // goal-state verdict was credited, and the entry this capture never
+      // wrote was unlinked — exit 0, no WARNING, the real server holding
+      // its pane holder for up to three hours and invisible to the sweep.
+      //
+      // The sibling pin ('a socket that is not the stamped one') cannot
+      // catch this: its own start base is credited either way, and it goes
+      // red only through the fallback base. Here BOTH bases answer a
+      // creditable wording, so the verdict-time read is the only thing
+      // between the swap and a silent orphan.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-verdictid-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+    : > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    p="\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+    # The swap lands DURING the kill — after any pre-loop snapshot, before
+    # the verdict this answer produces.
+    if [ "$TMUX_TMPDIR" = "${envBase}" ]; then rm -f "$p"; : > "$p"; fi
+    echo "no server running on $p" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'a start that THREW still warns — the ENOENT wording buys doubt, not death',
