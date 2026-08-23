@@ -5,6 +5,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
@@ -119,6 +120,8 @@ export interface SessionPrBackfillWorkspaceResult {
 interface BackfillCandidate {
   sessionId: string;
   archiveState: SessionArchiveState;
+  /** Transcript path the candidate was scanned from, in this archive state. */
+  transcriptPath: string;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
   /** Worktree branch plus every `gitBranch` seen in the transcript. */
@@ -194,11 +197,10 @@ export async function backfillWorkspaceSessionPrs(
         } catch {
           worktree = null;
         }
+        const transcriptPath = path.join(dir, `${item.sessionId}.jsonl`);
         const branches = [
           ...(worktree ? [worktree.worktreeBranch] : []),
-          ...(await collectTranscriptBranches(
-            path.join(dir, `${item.sessionId}.jsonl`),
-          )),
+          ...(await collectTranscriptBranches(transcriptPath)),
         ];
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
@@ -209,6 +211,7 @@ export async function backfillWorkspaceSessionPrs(
         candidates.push({
           sessionId: item.sessionId,
           archiveState,
+          transcriptPath,
           conventionNumber,
           branches,
         });
@@ -312,6 +315,11 @@ export async function backfillWorkspaceSessionPrs(
     let added = 0;
     try {
       const persisted = await replaceSessionPrs(prPath, (fresh) => {
+        // Deletion and archive moves unlink or rename the transcript and
+        // this sidecar outside the mutation queue; if the scanned
+        // transcript is gone, a write here would resurrect a sidecar for a
+        // session that no longer exists in this archive state.
+        if (!existsSync(candidate.transcriptPath)) return null;
         const freshNumbers = new Set(fresh.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
         // ones are bindings this run never planned for and must keep.
@@ -347,18 +355,23 @@ export async function backfillWorkspaceSessionPrs(
         const kept = fresh.filter(
           (entry) => planSet.has(entry.number) || !plannedFor(entry),
         );
-        const additions: SessionPr[] = plan
-          .filter((number) => !freshNumbers.has(number))
-          .map((number) => {
-            const state = states.get(number);
-            return {
-              number,
-              // A planned number that is not already bound was resolved above.
-              url: urls.get(number) as string,
-              createdAt,
-              ...(state !== undefined ? { state } : {}),
-            };
+        const additions: SessionPr[] = [];
+        for (const number of plan) {
+          if (freshNumbers.has(number)) continue;
+          const url = urls.get(number);
+          // Snapshot-held numbers were skipped by the URL loop, so one
+          // evicted concurrently has no URL here; re-adding it url-less
+          // would fail isValidSessionPr and void the whole sidecar. Skip
+          // it and let the next run re-bind it.
+          if (url === undefined) continue;
+          const state = states.get(number);
+          additions.push({
+            number,
+            url,
+            createdAt,
+            ...(state !== undefined ? { state } : {}),
           });
+        }
         added = additions.length;
         const next = [...kept, ...additions];
         return next.length === fresh.length &&

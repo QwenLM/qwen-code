@@ -1025,6 +1025,124 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result.bound).toBe(2);
   });
 
+  it('does not re-add a planned number a concurrent upsert evicted at the cap', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 8);
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      [50, 1, 2, 3, 4, 5, 6, 7, 8, 99],
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(50, 'worktree-pr-50'),
+        ...Array.from({ length: 8 }, (_, i) => pr(i + 1, `b-${i + 1}`)),
+      ],
+    });
+    // The dialog binding lands in the seam and evicts 50 — the oldest
+    // entry, a planned number the URL loop skipped because the snapshot
+    // already held it. Re-adding 50 without a URL would persist an entry
+    // isValidSessionPr rejects, voiding the whole sidecar; it must be left
+    // to the next run to re-bind.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 77,
+          url: 'https://github.com/o/r/pull/77',
+        }).then(() => undefined),
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs).not.toBeNull();
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 99, 77,
+    ]);
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 7, overLimit: 1 });
+  });
+
+  it('does not resurrect the sidecar of a session deleted mid-run', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    // removeSession unlinks the sidecar outside the mutation queue; the
+    // queued planner must see the session is gone and skip the write.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: async () => {
+        await sessionService.removeSession(SESSION_A);
+      },
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.bound).toBe(0);
+    expect(await readSessionPrs(prPath)).toBeNull();
+  });
+
+  it('does not resurrect a deleted sidecar over a non-empty snapshot', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 1);
+    // 99 is a dialog binding this run cannot re-resolve, while 1 still has
+    // a URL: without the gone-session abort the write would recreate the
+    // file the delete path just removed.
+    const prPath = await seedPrSidecar(SESSION_A, [99]);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'b-1')],
+    });
+    sidecarReadHook.current = {
+      path: prPath,
+      run: async () => {
+        await sessionService.removeSession(SESSION_A);
+      },
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.bound).toBe(0);
+    expect(await readSessionPrs(prPath)).toBeNull();
+  });
+
+  it('does not write a stray sidecar when the session is archived mid-run', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const activePrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    sidecarReadHook.current = {
+      path: activePrPath,
+      run: async () => {
+        await sessionService.archiveSessions([SESSION_A]);
+      },
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.bound).toBe(0);
+    expect(await readSessionPrs(activePrPath)).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'archived'),
+      ),
+    ).toBeNull();
+  });
+
   it('keeps backfilling other sessions when one sidecar write fails', async () => {
     await seedTranscriptBranches(SESSION_A, 1, 1);
     await seedTranscriptBranches(SESSION_B, 2, 2);
