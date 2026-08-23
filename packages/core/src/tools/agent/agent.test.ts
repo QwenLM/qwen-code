@@ -3148,16 +3148,15 @@ describe('AgentTool', () => {
         vi.mocked(config.getTargetDir).mockReturnValue(repo);
         vi.mocked(config.getCwd).mockReturnValue(repo);
         vi.mocked(config.getWorkingDir).mockReturnValue(repo);
-        vi.mocked(mockAgent.execute).mockImplementation(async () => {
-          const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
-            .mock.calls[0];
-          const agentConfig = createCall[1] as Config;
-          fs.writeFileSync(
-            path.join(agentConfig.getProjectRoot(), 'dirty.txt'),
-            'dirty\n',
-          );
-          throw new Error('subagent boom');
-        });
+        vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+          async (_cfg, agentConfig) => {
+            fs.writeFileSync(
+              path.join(agentConfig.getProjectRoot(), 'dirty.txt'),
+              'dirty\n',
+            );
+            throw new Error('subagent boom');
+          },
+        );
 
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
