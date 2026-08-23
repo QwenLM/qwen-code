@@ -73,6 +73,10 @@ describe('PermissionController', () => {
           {
             subtype: 'can_use_tool',
             tool_name: 'read_file',
+            tool_use_id: `tool-${mode}`,
+            input: {},
+            permission_suggestions: null,
+            blocked_path: null,
           },
           `request-${mode}`,
         ),
