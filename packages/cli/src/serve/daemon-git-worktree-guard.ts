@@ -138,6 +138,14 @@ const GIT_NUMBERED_CONFIG_ENV_PATTERN = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
 const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 
+// Windows shells whose own grammar parses whatever follows them — caret and
+// `%…%`/`!…!` rewriting (cmd.exe), backticks, here-strings, `-EncodedCommand`
+// (PowerShell) — none of which this guard's POSIX text model can read before
+// execution. An invocation of one carries a payload the analysis cannot
+// resolve, so it fails closed on every lane; nested spellings
+// (`bash -c 'cmd /c …'`) reach the same rule through the payload recursion.
+const WINDOWS_SHELL_PROGRAMS = new Set(['cmd', 'powershell', 'pwsh']);
+
 // `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
 // argv entry as the payload. `-o`/`-O` take values, so either one earlier in
 // the bundle consumes the rest of it and `-c` is not present.
@@ -1405,6 +1413,11 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         // relocates subsequent commands in this run's scope.
         propagatesCwd: true,
       };
+    }
+    if (WINDOWS_SHELL_PROGRAMS.has(program)) {
+      // The payload belongs to a grammar this analysis does not model; the
+      // undecidable arm fails closed on the documented reason.
+      return { kind: 'undecidable' };
     }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
       const scan = consumeShellWrapper(run, index);

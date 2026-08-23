@@ -55,6 +55,12 @@ function request(
   } as ExternalToolGuardPrepareRequest;
 }
 
+// Bash-semantics expectations only mean what they say on lanes that execute
+// through bash: on the win32 cmd/PowerShell lanes the divergent-syntax gate
+// denies those shapes before any analysis reads them.
+const bashSemanticsLane =
+  process.platform !== 'win32' || getShellConfiguration().shell === 'bash';
+
 afterAll(async () => {
   await rm(temporaryRoot, { recursive: true, force: true });
 });
@@ -132,9 +138,6 @@ describe('createDaemonToolGuard', () => {
   it.each([
     'git -C `echo /outside/repo` reset --hard',
     'git -C ~/repos/other-checkout reset --hard',
-    "git $'-C' /outside/repo reset --hard",
-    "$'git' -C /outside/repo reset --hard",
-    'git $(echo -C) /outside/repo reset --hard',
     'git -C /outside/repo* reset --hard',
   ])('denies shell-expansion relocation forms %#', async (command) => {
     const guard = createDaemonToolGuard();
@@ -145,9 +148,27 @@ describe('createDaemonToolGuard', () => {
     });
   });
 
+  // `$'…'` ANSI-C quoting and `$(…)` substitution are bash spellings; the
+  // Windows lanes deny them at the divergent-syntax gate before analysis.
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      "git $'-C' /outside/repo reset --hard",
+      "$'git' -C /outside/repo reset --hard",
+      'git $(echo -C) /outside/repo reset --hard',
+    ])(
+    'denies shell-expansion relocation forms on the bash lanes %#',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
+    },
+  );
+
   it.each([
-    // A trailing comment must not hide the relocation from the guard.
-    () => `git -C ${outsideRepo} reset --hard # note`,
     // Git treats an empty `-C` as a no-op and applies the next relocation.
     () => `git -C "" -C ${outsideRepo} reset --hard`,
   ])('denies relocations masked by token edge cases %#', async (command) => {
@@ -158,6 +179,22 @@ describe('createDaemonToolGuard', () => {
       reason: expect.stringContaining(outsideRepo),
     });
   });
+
+  // A trailing `#` comment is a bash construct; on the cmd.exe lane the `#`
+  // is ordinary argv text and the divergent-syntax gate owns the shape.
+  it
+    .runIf(bashSemanticsLane)
+    .each([() => `git -C ${outsideRepo} reset --hard # note`])(
+    'denies relocations masked by token edge cases on the bash lanes %#',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(outsideRepo),
+      });
+    },
+  );
 
   it.each(['git -C', 'git --git-dir', 'git --work-tree='])(
     'fails closed on a dangling relocation option',
@@ -312,19 +349,22 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
-  it('allows command substitutions that stay inside the boundary', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'allows command substitutions that stay inside the boundary',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    await expect(guard(request('echo $(date)'))).resolves.toEqual({
-      allowed: true,
-    });
-    await expect(guard(request('echo $(git rev-parse HEAD)'))).resolves.toEqual(
-      { allowed: true },
-    );
-    await expect(
-      guard(request('echo $(cd nested && git commit -m x)')),
-    ).resolves.toEqual({ allowed: true });
-  });
+      await expect(guard(request('echo $(date)'))).resolves.toEqual({
+        allowed: true,
+      });
+      await expect(
+        guard(request('echo $(git rev-parse HEAD)')),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request('echo $(cd nested && git commit -m x)')),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
@@ -365,19 +405,37 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
-  it('still allows wrapper payloads that stay inside the entry cwd', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'still allows wrapper payloads that stay inside the entry cwd',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    await expect(
-      guard(request(`cd ${effectiveCwd} && sh -c 'git reset --hard'`)),
-    ).resolves.toEqual({ allowed: true });
-  });
+      await expect(
+        guard(request(`cd ${effectiveCwd} && sh -c 'git reset --hard'`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   it.each([
     () => `git -c core.fsmonitor=/tmp/evil.sh -C ${outsideRepo} status`,
-    () => `git -c alias.x='!evil' -C ${outsideRepo} status`,
   ])(
     'inspects command-executing -c config even for read-only subcommands %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
+    },
+  );
+
+  // The quoted config value is a bash quoting shape; the Windows lanes deny
+  // it at the divergent-syntax gate before the config scan.
+  it
+    .runIf(bashSemanticsLane)
+    .each([() => `git -c alias.x='!evil' -C ${outsideRepo} status`])(
+    'inspects command-executing -c config on the bash lanes %#',
     async (buildCommand) => {
       const guard = createDaemonToolGuard();
 
@@ -423,20 +481,24 @@ describe('createDaemonToolGuard', () => {
     ).resolves.toEqual({ allowed: true });
   });
 
-  it('keeps subshell cwd shifts from leaking into later commands', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'keeps subshell cwd shifts from leaking into later commands',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    await expect(
-      guard(request(`sh -c 'cd ${outsideRepo}'; git reset --hard`)),
-    ).resolves.toEqual({ allowed: true });
-    await expect(
-      guard(request(`cd ${effectiveCwd} && git reset --hard`)),
-    ).resolves.toEqual({ allowed: true });
-  });
+      await expect(
+        guard(request(`sh -c 'cd ${outsideRepo}'; git reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`cd ${effectiveCwd} && git reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
-  it.each([
+  it.runIf(bashSemanticsLane).each([
     () => `git -C \\
 ${outsideRepo} reset --hard`,
+
     () => `g\\
 it -C ${outsideRepo} reset --hard`,
   ])(
@@ -487,16 +549,31 @@ it -C ${outsideRepo} reset --hard`,
   );
 
   it.each([
-    `git -c alias.pwn='!git -C ${outsideRepo} branch pwned' pwn`,
     'git -c core.editor=evil-command commit',
     'git --config-env core.pager=evil-command log --follow',
     'git -c filter.evil.clean=evil-command add file',
+  ])(
+    'denies mutating subcommands with command-valued -c config',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
+    },
+  );
+
+  // The quoted config values are bash quoting shapes; the Windows lanes deny
+  // them at the divergent-syntax gate before the config scan.
+  it.runIf(bashSemanticsLane).each([
+    `git -c alias.pwn='!git -C ${outsideRepo} branch pwned' pwn`,
     // Command-executing config families git runs directly.
     "git -c trailer.sign.command='evil-command' interpret-trailers",
     "git -c man.foo.cmd='evil-command' help -m git",
     "git -c sendemail.sendmailcmd='evil-command' send-email",
   ])(
-    'denies mutating subcommands with command-valued -c config',
+    'denies command-valued -c config mutations on the bash lanes %#',
     async (command) => {
       const guard = createDaemonToolGuard();
 
@@ -665,7 +742,12 @@ it -C ${outsideRepo} reset --hard`,
   // where the pre-pass stays off by design — they would exercise a chimera
   // of win32 tokenisation and POSIX path rules.
   describe.runIf(
-    process.platform === 'win32' && getShellConfiguration().shell !== 'bash',
+    process.platform === 'win32' &&
+      getShellConfiguration().shell !== 'bash' &&
+      // The lane-spoof harness (daemon-git-worktree-guard.win32-lane.test.ts)
+      // cannot supply real Windows path semantics; these shapes stay pinned
+      // on the lane that really executes them.
+      process.env['QWEN_DAEMON_GUARD_LANE_SPOOF'] === undefined,
   )('trailing-separator-before-flag shapes (cmd.exe argv)', () => {
     it.each([' ', '\t'])(
       'keeps whitespace after a trailing separator as a word boundary %#',
@@ -902,6 +984,50 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // A Windows shell invocation hands everything after it to a grammar this
+  // analysis does not model, so it fails closed on every lane; nested
+  // spellings re-enter the same rule through the payload recursion.
+  describe('nested Windows shell invocations fail closed', () => {
+    const encoded = Buffer.from(`git -C ${outsideRepo} reset --hard`).toString(
+      'base64',
+    );
+
+    it.each([
+      () => `cmd /c "git ^-C ${outsideRepo} reset --hard"`,
+      () => `CMD.EXE /c "git -C ${outsideRepo} reset --hard"`,
+      () => `powershell -EncodedCommand ${encoded}`,
+    ])(
+      'denies the nested shell payload on its own reason %#',
+      async (build) => {
+        const guard = createDaemonToolGuard();
+
+        await expect(guard(request(build()))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('could not be resolved'),
+        });
+      },
+    );
+
+    it.each([
+      () => `pwsh -Command 'git -C ${outsideRepo} reset --hard'`,
+      () => `bash -c 'cmd /c "git -C ${outsideRepo} reset --hard"'`,
+    ])('denies quoted nested shell shapes %#', async (build) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    });
+
+    it('keeps an ordinary mention of a Windows shell allowed', async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request('echo cmd powershell pwsh'))).resolves.toEqual(
+        { allowed: true },
+      );
+    });
+  });
+
   it('checks work-tree and git-dir targets independently', async () => {
     const guard = createDaemonToolGuard();
 
@@ -1003,13 +1129,36 @@ it -C ${outsideRepo} reset --hard`,
       allowed: false,
       reason: expect.stringContaining(outsideRepo),
     });
-    await expect(
-      guard(localRequest(`GIT_DIR=nested/.git sh -c 'git reset --hard'`)),
-    ).resolves.toMatchObject({
-      allowed: false,
-      reason: expect.stringContaining(outsideRepo),
-    });
   });
+
+  // The `sh -c` wrapper payload is a bash spelling; the Windows lanes deny
+  // it at the divergent-syntax gate before the gitfile redirect is read.
+  it.runIf(bashSemanticsLane)(
+    'follows gitfile redirects inside a wrapper payload',
+    async () => {
+      const localEffectiveCwd = path.join(temporaryRoot, 'gitfile-cwd-bash');
+      const localNested = path.join(localEffectiveCwd, 'nested');
+      await mkdir(localNested, { recursive: true });
+      await writeFile(
+        path.join(localNested, '.git'),
+        `gitdir: ${path.join(outsideRepo, '.git')}\n`,
+      );
+      const localRequest = (
+        command: string,
+      ): ExternalToolGuardPrepareRequest => ({
+        ...request(command),
+        effectiveCwd: localEffectiveCwd,
+      });
+
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(localRequest(`GIT_DIR=nested/.git sh -c 'git reset --hard'`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(outsideRepo),
+      });
+    },
+  );
 
   it('canonicalizes a symlink named .git before stripping the basename', async () => {
     const localEffectiveCwd = path.join(temporaryRoot, 'symgit-cwd');
@@ -1129,16 +1278,6 @@ it -C ${outsideRepo} reset --hard`,
     () => `setsid git -C ${outsideRepo} reset --hard`,
     () => `flock /tmp/daemon-guard-lock git -C ${outsideRepo} reset --hard`,
     () => `xargs -I{} git -C ${outsideRepo} reset --hard`,
-    () => `su -c 'git -C ${outsideRepo} reset --hard'`,
-    () => `find . -exec git -C ${outsideRepo} reset --hard ;`,
-    // `PATH=`/`GIT_EXEC_PATH=` inside an unrecognized wrapper choose which git
-    // binary runs — the direct forms are denied, so the wrapper must be too.
-    () => `find . -exec sh -c 'PATH=/tmp/evil git reset --hard' ';'`,
-    () => `find . -exec sh -c 'GIT_EXEC_PATH=/tmp/evil git reset --hard' ';'`,
-    // A relocation assignment glued to a shell delimiter inside a quoted
-    // payload must still register as a marker, matching the `cd`/`pushd` arm.
-    () => `su -c 'true;GIT_DIR=${outsideRepo}/.git git reset --hard'`,
-    () => `su -c 'x && GIT_WORK_TREE=${outsideRepo} git reset --hard'`,
   ])(
     'fails closed when an unrecognized program may run a relocated Git command %#',
     async (buildCommand) => {
@@ -1151,16 +1290,46 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('allows commands that mention Git without a relocation marker', async () => {
-    const guard = createDaemonToolGuard();
+  // The quoted `su -c`/`find -exec sh -c` payloads are bash quoting shapes;
+  // the Windows lanes deny them at the divergent-syntax gate first.
+  it.runIf(bashSemanticsLane).each([
+    () => `su -c 'git -C ${outsideRepo} reset --hard'`,
+    () => `find . -exec git -C ${outsideRepo} reset --hard ;`,
+    // `PATH=`/`GIT_EXEC_PATH=` inside an unrecognized wrapper choose which git
+    // binary runs — the direct forms are denied, so the wrapper must be too.
+    () => `find . -exec sh -c 'PATH=/tmp/evil git reset --hard' ';'`,
+    () => `find . -exec sh -c 'GIT_EXEC_PATH=/tmp/evil git reset --hard' ';'`,
+    // A relocation assignment glued to a shell delimiter inside a quoted
+    // payload must still register as a marker, matching the `cd`/`pushd` arm.
+    () => `su -c 'true;GIT_DIR=${outsideRepo}/.git git reset --hard'`,
+    () => `su -c 'x && GIT_WORK_TREE=${outsideRepo} git reset --hard'`,
+  ])(
+    'fails closed on quoted-payload wrappers on the bash lanes %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
 
-    await expect(guard(request(`echo 'git status'`))).resolves.toEqual({
-      allowed: true,
-    });
-    await expect(guard(request(`grep -rn 'git reset' src`))).resolves.toEqual({
-      allowed: true,
-    });
-  });
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unrecognized program'),
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'allows commands that mention Git without a relocation marker',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(`echo 'git status'`))).resolves.toEqual({
+        allowed: true,
+      });
+      await expect(guard(request(`grep -rn 'git reset' src`))).resolves.toEqual(
+        {
+          allowed: true,
+        },
+      );
+    },
+  );
 
   // An unrecognized program word hides what runs, so a git mention only
   // survives while the shell is provably still inside the boundary.
@@ -1226,12 +1395,21 @@ it -C ${outsideRepo} reset --hard`,
     await expect(
       guard(request(`export GIT_WORK_TREE=${insideNested} && git commit -m x`)),
     ).resolves.toEqual({ allowed: true });
-    // Without `export` (or `set -a`) the assignment stays shell-local and
-    // never reaches the git process.
-    await expect(
-      guard(request(`GIT_WORK_TREE=${outsideRepo}; echo done`)),
-    ).resolves.toEqual({ allowed: true });
   });
+
+  // Without `export` (or `set -a`) the assignment stays shell-local and
+  // never reaches the git process — a bash scoping rule the `;`-shaped
+  // command only exercises on the bash lanes.
+  it.runIf(bashSemanticsLane)(
+    'keeps an unexported assignment shell-local on the bash lanes',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request(`GIT_WORK_TREE=${outsideRepo}; echo done`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   it.each([
     () => `builtin cd ${outsideRepo} && git reset --hard`,
@@ -1414,16 +1592,19 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('keeps shell-local assignments shell-local', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'keeps shell-local assignments shell-local',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    await expect(
-      guard(request(`GIT_WORK_TREE=${outsideRepo}; echo done`)),
-    ).resolves.toEqual({ allowed: true });
-    await expect(
-      guard(request('FOO=bar; export FOO; git commit -m x')),
-    ).resolves.toEqual({ allowed: true });
-  });
+      await expect(
+        guard(request(`GIT_WORK_TREE=${outsideRepo}; echo done`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request('FOO=bar; export FOO; git commit -m x')),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   // Config keys are case-insensitive and several beyond the alias set run a
   // program of the target repository's choosing.
@@ -1650,18 +1831,21 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('scopes a parenthesized subshell the way the shell does', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'scopes a parenthesized subshell the way the shell does',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    // The subshell's cwd dies with its parentheses...
-    await expect(
-      guard(request(`(cd ${outsideRepo}); git commit -m x`)),
-    ).resolves.toEqual({ allowed: true });
-    // ...but a Git command inside them is still judged against it.
-    await expect(
-      guard(request(`(cd ${outsideRepo} && git reset --hard)`)),
-    ).resolves.toMatchObject({ allowed: false });
-  });
+      // The subshell's cwd dies with its parentheses...
+      await expect(
+        guard(request(`(cd ${outsideRepo}); git commit -m x`)),
+      ).resolves.toEqual({ allowed: true });
+      // ...but a Git command inside them is still judged against it.
+      await expect(
+        guard(request(`(cd ${outsideRepo} && git reset --hard)`)),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
   it('keeps env value flags in their attached forms decidable', async () => {
     const guard = createDaemonToolGuard();
@@ -1758,16 +1942,23 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('keeps a subshell from leaking its environment outward', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'keeps a subshell from leaking its environment outward',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    await expect(
-      guard(request(`(export GIT_WORK_TREE=${outsideRepo}); git commit -m x`)),
-    ).resolves.toEqual({ allowed: true });
-    await expect(
-      guard(request(`(export GIT_WORK_TREE=${outsideRepo}; git reset --hard)`)),
-    ).resolves.toMatchObject({ allowed: false });
-  });
+      await expect(
+        guard(
+          request(`(export GIT_WORK_TREE=${outsideRepo}); git commit -m x`),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(`(export GIT_WORK_TREE=${outsideRepo}; git reset --hard)`),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
   it("leaves a program's own -C flag alone", async () => {
     const guard = createDaemonToolGuard();
@@ -1775,7 +1966,6 @@ it -C ${outsideRepo} reset --hard`,
     for (const command of [
       'grep -C 5 git CHANGELOG.md',
       'tar -C nested -cf out.tar .',
-      'diff -C 3 a.txt b.txt # git',
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
@@ -1784,6 +1974,19 @@ it -C ${outsideRepo} reset --hard`,
       guard(request(`xargs -I{} git -C ${outsideRepo} reset --hard`)),
     ).resolves.toMatchObject({ allowed: false });
   });
+
+  // A trailing `#` comment is a bash construct; the cmd.exe lane reads the
+  // `#` as argv and the divergent-syntax gate owns the shape.
+  it.runIf(bashSemanticsLane)(
+    "leaves a program's own -C flag alone behind a comment",
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request('diff -C 3 a.txt b.txt # git')),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   // Relink state crosses scopes in both directions: the symlink a nested
   // evaluation creates is just as real, and a parent's relink still misleads
@@ -1971,19 +2174,35 @@ it -C ${outsideRepo} reset --hard`,
       'env --null git status',
       // `curl -C -` resumes a download; it is not `git -C`.
       'curl -C - -o pkg.tgz https://git.example.com/pkg.tgz',
-      "env -iS 'git status'",
-      // A `cd` target the guard already knows the value of.
-      `d=${insideNested}; cd $d; git status`,
-      // `set +a` turns allexport back off.
-      `set -a; set +a; GIT_WORK_TREE=${outsideRepo}; echo done`,
-      // Definitions used inside the boundary stay allowed.
-      'f() { git status; }; cd nested; f',
-      "alias g='git status'; cd nested; g",
       'tar -xf a.tar && git commit -m x',
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
   });
+
+  // The quoted/`;`-separated shapes are bash spellings the Windows lanes
+  // deny at the divergent-syntax gate before the round-6 rules read them.
+  it.runIf(bashSemanticsLane)(
+    'keeps bash-shaped ordinary commands out of the round-6 rules',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        "env -iS 'git status'",
+        // A `cd` target the guard already knows the value of.
+        `d=${insideNested}; cd $d; git status`,
+        // `set +a` turns allexport back off.
+        `set -a; set +a; GIT_WORK_TREE=${outsideRepo}; echo done`,
+        // Definitions used inside the boundary stay allowed.
+        'f() { git status; }; cd nested; f',
+        "alias g='git status'; cd nested; g",
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // Round-7. These are the reviewers' exact payloads: the earlier "denies as
   // written" replies were checked with counter-probes that tripped a
@@ -2023,21 +2242,24 @@ it -C ${outsideRepo} reset --hard`,
       });
     });
 
-    it('leaves the equivalent in-boundary shapes alone', async () => {
-      const guard = createDaemonToolGuard();
+    it.runIf(bashSemanticsLane)(
+      'leaves the equivalent in-boundary shapes alone',
+      async () => {
+        const guard = createDaemonToolGuard();
 
-      for (const command of [
-        'echo x | cat; git commit -m x',
-        `cd nested; echo x | cd ${effectiveCwd}; git commit -m x`,
-        "env -S 'git status'",
-        "bash -oc errexit 'git status'",
-        'export GIT_DIR; echo done',
-      ]) {
-        await expect(guard(request(command))).resolves.toEqual({
-          allowed: true,
-        });
-      }
-    });
+        for (const command of [
+          'echo x | cat; git commit -m x',
+          `cd nested; echo x | cd ${effectiveCwd}; git commit -m x`,
+          "env -S 'git status'",
+          "bash -oc errexit 'git status'",
+          'export GIT_DIR; echo done',
+        ]) {
+          await expect(guard(request(command))).resolves.toEqual({
+            allowed: true,
+          });
+        }
+      },
+    );
   });
 
   // Defects the round-7 patch itself introduced. Each was reproduced before
@@ -2070,15 +2292,29 @@ it -C ${outsideRepo} reset --hard`,
   it('leaves backgrounded and redirected in-boundary work alone', async () => {
     const guard = createDaemonToolGuard();
 
-    for (const command of [
-      'sleep 1 & git commit -m x',
-      'git status > out.txt 2> err.txt',
-      "bash -coo x y 'git status'",
-      "env --split-string='git status'",
-    ]) {
+    for (const command of ['git status > out.txt 2> err.txt']) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
   });
+
+  // Backgrounding (`&`) and quoted wrapper payloads are bash spellings the
+  // Windows lanes deny at the divergent-syntax gate first.
+  it.runIf(bashSemanticsLane)(
+    'leaves backgrounded and quoted in-boundary work alone on the bash lanes',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        'sleep 1 & git commit -m x',
+        "bash -coo x y 'git status'",
+        "env --split-string='git status'",
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // Common shell forms an agent may emit — not adversarial exotica. Fixed
   // even under the guard's "reliable against literal forms" promise.
@@ -2105,17 +2341,22 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('leaves the in-boundary equivalents of those forms alone', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'leaves the in-boundary equivalents of those forms alone',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    for (const command of [
-      'git status &> /dev/null',
-      'git commit -m x &>> log.txt',
-      'function g { git status; }; cd nested; g',
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      for (const command of [
+        'git status &> /dev/null',
+        'git commit -m x &>> log.txt',
+        'function g { git status; }; cd nested; g',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // Round-9 Criticals reproduced before fixing (Git-word-free path).
   it.each([
@@ -2151,16 +2392,32 @@ it -C ${outsideRepo} reset --hard`,
     const guard = createDaemonToolGuard();
 
     for (const command of [
-      // A backgrounded `cd` does not move the shell that runs git.
-      'cd nested & git commit -m x',
       // Extract-then-commit is ordinary work, not a relocation.
       'tar -xf a.tar && git commit -m x',
-      'cat <<EOF\nhello\nEOF',
-      'f() { true; git status; }; f',
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
   });
+
+  // Backgrounding, heredocs and function definitions are bash spellings the
+  // Windows lanes deny at the divergent-syntax gate first.
+  it.runIf(bashSemanticsLane)(
+    'keeps the round-9 bash-shaped equivalents alone on the bash lanes',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        // A backgrounded `cd` does not move the shell that runs git.
+        'cd nested & git commit -m x',
+        'cat <<EOF\nhello\nEOF',
+        'f() { true; git status; }; f',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // An alias replaces its name with its body and keeps the trailing argv, so
   // the relocation an invocation appends is part of what runs.
@@ -2176,17 +2433,22 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('leaves an alias used inside the boundary alone', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'leaves an alias used inside the boundary alone',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    for (const command of [
-      "alias gg='git'; gg status",
-      "alias gg='git commit'; gg -m x",
-      "alias gg='git status'; cd nested; gg",
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      for (const command of [
+        "alias gg='git'; gg status",
+        "alias gg='git commit'; gg -m x",
+        "alias gg='git status'; cd nested; gg",
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // A function/alias runs in the current shell, so a `cd` or export in its
   // body survives the call and a later path-free Git mutation is judged
@@ -2205,16 +2467,21 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('keeps an in-boundary body cwd shift allowed', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'keeps an in-boundary body cwd shift allowed',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    for (const command of [
-      'f() { cd nested; }; f; git status',
-      'f() { echo hi; }; f; git commit -m x',
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      for (const command of [
+        'f() { cd nested; }; f; git status',
+        'f() { echo hi; }; f; git commit -m x',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // A body run in the current shell inherits the caller's `set -a`, so a
   // plain assignment there is exported to the following git.
@@ -2235,18 +2502,23 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('leaves an unexported body assignment alone', async () => {
-    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'leaves an unexported body assignment alone',
+    async () => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
 
-    // No `export`, no `set -a`: bash does not put it in git's environment.
-    for (const command of [
-      `GIT_WORK_TREE=${plainOutsidePath}; git status`,
-      `f() { GIT_WORK_TREE=${plainOutsidePath}; }; f; git status`,
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      // No `export`, no `set -a`: bash does not put it in git's environment.
+      for (const command of [
+        `GIT_WORK_TREE=${plainOutsidePath}; git status`,
+        `f() { GIT_WORK_TREE=${plainOutsidePath}; }; f; git status`,
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   it.each([
     // A command substitution inherits the caller's `set -a`.
@@ -2266,20 +2538,25 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('lets a same-shell body turn allexport back off', async () => {
-    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'lets a same-shell body turn allexport back off',
+    async () => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
 
-    // `set +a` in the body persists, so the later assignment is unexported.
-    for (const command of [
-      `set -a; f() { set +a; }; f; GIT_WORK_TREE=${plainOutsidePath}; git status`,
-      `set -a; eval 'set +a'; GIT_WORK_TREE=${plainOutsidePath}; git status`,
-      // A substitution's own changes die with it.
-      `echo $(GIT_WORK_TREE=${plainOutsidePath}; git status)`,
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      // `set +a` in the body persists, so the later assignment is unexported.
+      for (const command of [
+        `set -a; f() { set +a; }; f; GIT_WORK_TREE=${plainOutsidePath}; git status`,
+        `set -a; eval 'set +a'; GIT_WORK_TREE=${plainOutsidePath}; git status`,
+        // A substitution's own changes die with it.
+        `echo $(GIT_WORK_TREE=${plainOutsidePath}; git status)`,
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   it.each([
     // A function/alias shadows the git program or a builtin; bash resolves it
@@ -2305,16 +2582,25 @@ it -C ${outsideRepo} reset --hard`,
   it('does not import an unexported function into a subprocess', async () => {
     const guard = createDaemonToolGuard();
 
-    // Without `export -f`, `bash -c` does not see `f`, so this is an ordinary
-    // (path-free) git run inside the boundary.
-    await expect(
-      guard(request(`f() { cd ${plainOutsidePath}; }; bash -c 'git status'`)),
-    ).resolves.toEqual({ allowed: true });
     // `command git` explicitly bypasses a shadowing function.
     await expect(guard(request('command git status'))).resolves.toEqual({
       allowed: true,
     });
   });
+
+  // Without `export -f`, `bash -c` does not see `f`, so this is an ordinary
+  // (path-free) git run inside the boundary — pinned on the bash lanes,
+  // where the definition/payload spellings execute as written.
+  it.runIf(bashSemanticsLane)(
+    'keeps an unexported function out of a subprocess on the bash lanes',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request(`f() { cd ${plainOutsidePath}; }; bash -c 'git status'`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
 
   // Gaps in the function-model work of the preceding commits.
   it.each([
@@ -2333,7 +2619,7 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('rolls back a pipe subshell fully', async () => {
+  it.runIf(bashSemanticsLane)('rolls back a pipe subshell fully', async () => {
     await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
     const guard = createDaemonToolGuard();
 
@@ -2364,14 +2650,28 @@ it -C ${outsideRepo} reset --hard`,
   it('leaves an ordinary redirection alone', async () => {
     const guard = createDaemonToolGuard();
 
-    for (const command of [
-      'cd nested >&2; git status',
-      'git status 2>/dev/null',
-      'git -C nested reset --hard 2>&1',
-    ]) {
+    for (const command of ['git status 2>/dev/null']) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
   });
+
+  // `>&N`/`2>&1` carry a lone `&`, which the Windows lanes deny at the
+  // divergent-syntax gate; `;` is bash command separation.
+  it.runIf(bashSemanticsLane)(
+    'leaves bash-shaped redirections alone on the bash lanes',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        'cd nested >&2; git status',
+        'git -C nested reset --hard 2>&1',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   it.each([
     // A redirection before an alias/function invocation must not hide it.
@@ -2388,18 +2688,23 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
-  it('keeps foreground/background boundaries correct', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'keeps foreground/background boundaries correct',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    for (const command of [
-      // The backgrounded `cd` is a subshell; the foreground git stays inside.
-      `cd ${outsideRepo} & git status`,
-      'true & cd nested; git status',
-      "2>/dev/null alias gg='git status'; gg",
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
-  });
+      for (const command of [
+        // The backgrounded `cd` is a subshell; the foreground git stays inside.
+        `cd ${outsideRepo} & git status`,
+        'true & cd nested; git status',
+        "2>/dev/null alias gg='git status'; gg",
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
 
   // A harmless recorded body must not mask a relocation the real interpreter
   // would run: only bash imports `export -f`, and removals retract a shadow.
