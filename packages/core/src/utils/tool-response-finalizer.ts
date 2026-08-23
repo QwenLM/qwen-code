@@ -275,11 +275,19 @@ function fitText(
     // consecutive_identical_tool_calls under a small configured
     // toolOutputBatchBudget (issue #9450). Slice the digest line itself
     // instead so any allocation reaching past the label carries
-    // content-dependent digest characters.
-    return sliceStartWithoutBrokenSurrogate(
-      maxChars >= minimalHeader.length ? header : digestLine,
-      maxChars,
-    );
+    // content-dependent digest characters. The band at or below the label
+    // length is degenerate one notch further: slicing the digest line there
+    // yields only (a prefix of) the constant label itself — budget 240 over
+    // 12 oversized slots gives exactly FULL_OUTPUT_DIGEST_LABEL.length chars
+    // per slot — so carry the digest's own characters instead and every
+    // non-zero allocation stays content-dependent (issue #9450).
+    if (maxChars >= minimalHeader.length) {
+      return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    }
+    if (maxChars > FULL_OUTPUT_DIGEST_LABEL.length) {
+      return sliceStartWithoutBrokenSurrogate(digestLine, maxChars);
+    }
+    return sliceStartWithoutBrokenSurrogate(digest, maxChars);
   }
 
   const separator = '\n\n';

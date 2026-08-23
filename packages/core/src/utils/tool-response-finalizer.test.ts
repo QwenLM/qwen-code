@@ -1020,5 +1020,56 @@ describe('tool response finalization', () => {
       );
       expect(new Set(fitted).size).toBe(12);
     });
+
+    it('fingerprints distinct boards distinctly at sub-label allocations', () => {
+      // Allocations <= FULL_OUTPUT_DIGEST_LABEL.length (20 chars) sliced
+      // only constant label text pre-fix (the digest starts AFTER the
+      // label), so every oversized result fingerprinted identically no
+      // matter its content — the degenerate band one notch below the band
+      // the digest-line slice covers (21..107).
+      const boardA = '#1 [in_progress] @peer-a — ship it';
+      const boardB = '#2 [completed] @peer-b — totally different board';
+
+      for (const budget of [1, 5, 12, 20]) {
+        const fitA = fittedOutput(
+          enforceFunctionResponseBudget([oversizedEntry('a', boardA)], budget),
+        ) as string;
+        const fitB = fittedOutput(
+          enforceFunctionResponseBudget([oversizedEntry('b', boardB)], budget),
+        ) as string;
+        expect(fitA.length).toBeLessThanOrEqual(budget);
+        expect(fitA).not.toBe('');
+        expect(fitA).not.toBe(fitB);
+      }
+    });
+
+    it('does not collapse many distinct boards at the label-length allocation', () => {
+      // Reviewer witness shape: budget 240 over 12 oversized slots gives
+      // EXACTLY FULL_OUTPUT_DIGEST_LABEL.length (20) chars per slot —
+      // pre-fix every fit was the identical constant label text, so
+      // repeated oversized polls of a CHANGING board fingerprinted
+      // identically and false-halted on consecutive_identical_tool_calls.
+      const entries = Array.from({ length: 12 }, (_, index) =>
+        oversizedEntry(`call-${index}`, `board variant ${index} — distinct`),
+      );
+      const fitted = enforceFunctionResponseBudget(entries, 240).map(
+        (fittedEntry) =>
+          fittedEntry.responseParts[0].functionResponse?.response?.[
+            'output'
+          ] as string,
+      );
+      expect(new Set(fitted).size).toBe(12);
+    });
+
+    it('keeps identical content fingerprint-stable at sub-label allocations', () => {
+      const board = '#3 [in_progress] @peer-c — frozen board';
+      const fitOne = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('a', board)], 12),
+      ) as string;
+      const fitTwo = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('b', board)], 12),
+      ) as string;
+      expect(fitOne).toBe(fitTwo);
+    });
   });
 });
