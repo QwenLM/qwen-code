@@ -264,24 +264,29 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
   });
 
-  it('maps custom-slug worktree branches through gh headRefName', async () => {
+  it('binds the reviewed PR from a /review command, archived included', async () => {
     await seedSession(SESSION_C);
-    await seedWorktreeSidecar(
-      SESSION_C,
-      'my-thing',
-      'worktree-my-thing',
-      'active',
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_C}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_C}-review`,
+        parentUuid: `${SESSION_C}-user-1`,
+        sessionId: SESSION_C,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: '/review 55 --comment' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
     );
     await archiveSession(SESSION_C);
-    await seedWorktreeSidecar(
-      SESSION_C,
-      'my-thing',
-      'worktree-my-thing',
-      'archived',
-    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
-      pullRequests: [pr(55, 'worktree-my-thing')],
+      pullRequests: [pr(55, 'fix/55')],
     });
 
     const result = await backfillWorkspaceSessionPrs(runtime);
@@ -290,7 +295,10 @@ describe('backfillWorkspaceSessionPrs', () => {
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_C, 'archived'),
     );
-    expect(prs?.[0]).toMatchObject({ number: 55 });
+    expect(prs?.[0]).toMatchObject({
+      number: 55,
+      url: 'https://github.com/o/r/pull/55',
+    });
   });
 
   it('counts already-bound sessions without rewriting the sidecar', async () => {
@@ -359,7 +367,43 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result).toMatchObject({ scanned: 1, bound: 0, unresolved: 0 });
   });
 
-  it('binds PRs whose head branch appears in the transcript gitBranch', async () => {
+  it('binds the URL form of /review', async () => {
+    await seedSession(SESSION_G);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_G}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_G}-review`,
+        parentUuid: `${SESSION_G}-user-1`,
+        sessionId: SESSION_G,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: '/review https://github.com/o/r/pull/43 --comment' }],
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(43, 'fix/43')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({ number: 43 });
+  });
+
+  it('does not bind the session git branch (noise source removed)', async () => {
     await seedSession(SESSION_G, 'fix/thing');
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
@@ -368,48 +412,7 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ scanned: 1, bound: 1 });
-    const prs = await readSessionPrs(
-      sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
-    );
-    expect(prs?.[0]).toMatchObject({
-      number: 42,
-      url: 'https://github.com/o/r/pull/42',
-    });
-  });
-
-  it('binds one session to several PRs from multiple branches', async () => {
-    await seedSession(SESSION_G, 'fix/a');
-    const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.appendFile(
-      path.join(chatsDir, `${SESSION_G}.jsonl`),
-      `${JSON.stringify({
-        uuid: `${SESSION_G}-user-2`,
-        parentUuid: `${SESSION_G}-user-1`,
-        sessionId: SESSION_G,
-        timestamp: '2026-08-02T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'more' }] },
-        cwd: workspaceCwd,
-        gitBranch: 'fix/b',
-      })}\n`,
-      'utf8',
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'fix/a'), pr(43, 'fix/b')],
-    });
-
-    const result = await backfillWorkspaceSessionPrs(runtime);
-
-    expect(result).toMatchObject({ bound: 2 });
-    const prs = await readSessionPrs(
-      sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
-    );
-    expect(prs?.map((pr) => pr.number).sort()).toEqual([42, 43]);
+    expect(result).toMatchObject({ scanned: 1, bound: 0 });
   });
 
   it('recovers PRs created via gh pr create in the session shell', async () => {

@@ -58,13 +58,13 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 
 新增 daemon 路由 `POST /sessions/backfill-prs`（进程级、按需触发，启动不自动扫描），实现见 `packages/cli/src/serve/routes/session-pr-backfill.ts`：
 
-- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），候选分支 = worktree sidecar branch ∪ transcript 各记录的 `gitBranch`（正则提取，distinct 上限 64），解析三源：
-  1. **约定**：slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
-  2. **gh 批量**：每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})`，把候选分支与 headRefName 交集映射到 number + url。实测存量里 `pr-<N>` slug 与 worktree branch 几乎零命中（PR 基本不从 worktree 分支提交），`gitBranch` 是主力来源（主 workspace 342 会话命中 272）；
-  3. **transcript `gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding` 提取创建时打印的 URL——gh 不可用时也能绑（URL 兜底链：gh 映射 → 创建时打印的 URL → remote 推导仅约定号）。
-- `slim` 只取 number/url/headRefName：带 CI rollup 的全字段查询在 `--state all --limit 500` 下触发 GitHub GraphQL 504；slim 约 4s/60KB。
-- URL 优先取 gh 映射；gh 不可用时由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host，仅约定号）；解析不到号的会话原样跳过。
-- 已知副作用：曾 checkout/review 他人 PR 分支的会话也会被绑定（多 PR 列表可容纳，搜索语义上属于"相关会话"）。
+- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），解析三源：
+  1. **约定**：worktree sidecar slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
+  2. **`gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding`（命令段首匹配 + 成功输出 URL）提取创建时打印的 URL；
+  3. **`/review <N|url>` 显式指令**：transcript 用户消息解析（`#N` 与 `pull/N` 两种形态），review 会话绑到**被 review 的 PR**——搜索"PR N 的 review 会话"的正确语义。
+- **明确不用裸 `gitBranch`**：首版曾把会话 transcript 的 gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理了前两轮写入的 596 条错误绑定后重跑。
+- 每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})` 提供 number→url/state 映射；`slim` 只取 number/url/headRefName（全字段 + 500 触发 GitHub GraphQL 504，slim 约 4s/60KB）。
+- URL 兜底链：gh 映射 → 创建时打印的 URL → git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host；仅约定号与 review 号）；解析不到号的会话原样跳过。
 - 已绑定同一 number 的会话跳过（不刷新 createdAt），重复调用幂等；写入复用 `upsertSessionPr`。
 - 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`；untrusted workspace 跳过。
 

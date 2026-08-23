@@ -101,24 +101,26 @@ interface BackfillCandidate {
   archiveState: SessionArchiveState;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** Worktree branch plus every `gitBranch` seen in the transcript. */
-  branches: readonly string[];
   /** PRs the session created via `gh pr create` (number → printed URL). */
   direct: ReadonlyMap<number, string>;
+  /** PR numbers the session was asked to review (`/review <N|url>`). */
+  reviewed: readonly number[];
 }
 
-// Transcript records carry the branch the session was on; the set is small
-// per session and only ever compared against PR head branches.
-const GIT_BRANCH_PATTERN = /"gitBranch":"([^"]+)"/g;
-const MAX_DISTINCT_BRANCHES = 64;
+// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`. Bare
+// session git branches are NOT a source: they bind the workspace's current
+// branch PR onto every session (including unrelated chats and reviews of
+// other PRs), which is noise, not signal.
+const REVIEW_COMMAND_PATTERN =
+  /\/review\b[^\n"\\]*?(?:pull\/|#)(\d{1,9})|\/review\s+(\d{1,9})/g;
 
-function collectTranscriptBranches(raw: string): readonly string[] {
-  const branches = new Set<string>();
-  for (const match of raw.matchAll(GIT_BRANCH_PATTERN)) {
-    branches.add(match[1]);
-    if (branches.size >= MAX_DISTINCT_BRANCHES) break;
+function collectReviewedPrNumbers(raw: string): readonly number[] {
+  const numbers = new Set<number>();
+  for (const match of raw.matchAll(REVIEW_COMMAND_PATTERN)) {
+    const value = match[1] ?? match[2];
+    if (value !== undefined) numbers.add(Number(value));
   }
-  return [...branches];
+  return [...numbers];
 }
 
 interface TranscriptToolPart {
@@ -184,13 +186,14 @@ function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
 }
 
 /**
- * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * priority order: the worktree slug/branch convention (names the number
- * without any network); and one batched `gh pr list --state all` per
- * workspace mapping head branches — the worktree branch and every
- * `gitBranch` recorded in the session's transcript — to PR numbers and URLs.
- * The URL comes from `gh` when available, else from the git remote web URL
- * (convention numbers only). A session may bind several PRs.
+ * Backfills PR bindings onto a workspace's persisted sessions. Sources: the
+ * worktree slug/branch convention (`pr-<N>`, zero network), `gh pr create`
+ * traces in the transcript (number + printed URL), and explicit `/review
+ * <N|url>` requests (the reviewed PR). Bare session git branches are NOT a
+ * source — they bind the workspace's current branch PR onto every session.
+ * URLs resolve from the batched slim `gh pr list --state all`, then the
+ * printed create URL, then the git remote web URL (convention/review
+ * numbers). A session may bind several PRs.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -238,18 +241,15 @@ export async function backfillWorkspaceSessionPrs(
         } catch {
           transcriptRaw = '';
         }
-        const branches = [
-          ...(worktree ? [worktree.worktreeBranch] : []),
-          ...collectTranscriptBranches(transcriptRaw),
-        ];
         const direct = collectGhPrCreateBindings(transcriptRaw);
+        const reviewed = collectReviewedPrNumbers(transcriptRaw);
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
           : undefined;
         if (
-          branches.length === 0 &&
           conventionNumber === undefined &&
-          direct.size === 0
+          direct.size === 0 &&
+          reviewed.length === 0
         ) {
           continue;
         }
@@ -257,8 +257,8 @@ export async function backfillWorkspaceSessionPrs(
           sessionId: item.sessionId,
           archiveState,
           conventionNumber,
-          branches,
           direct,
+          reviewed,
         });
       }
       cursor = page.nextCursor;
@@ -268,7 +268,6 @@ export async function backfillWorkspaceSessionPrs(
 
   const numberToUrl = new Map<number, string>();
   const numberToState = new Map<number, 'open' | 'merged' | 'closed'>();
-  const branchToNumber = new Map<string, number>();
   const prs = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -279,7 +278,6 @@ export async function backfillWorkspaceSessionPrs(
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-      if (pr.headRefName) branchToNumber.set(pr.headRefName, pr.number);
     }
   }
 
@@ -289,14 +287,11 @@ export async function backfillWorkspaceSessionPrs(
     if (candidate.conventionNumber !== undefined) {
       numbers.push(candidate.conventionNumber);
     }
-    for (const branch of candidate.branches) {
-      const mapped = branchToNumber.get(branch);
-      if (mapped !== undefined && !numbers.includes(mapped)) {
-        numbers.push(mapped);
-      }
-    }
     for (const directNumber of candidate.direct.keys()) {
       if (!numbers.includes(directNumber)) numbers.push(directNumber);
+    }
+    for (const reviewedNumber of candidate.reviewed) {
+      if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
     }
     if (numbers.length === 0) continue;
     const prPath = sessionService.getPrSessionPathForArchiveState(
@@ -316,7 +311,11 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       let url = numberToUrl.get(number) ?? candidate.direct.get(number);
-      if (url === undefined && number === candidate.conventionNumber) {
+      if (
+        url === undefined &&
+        (number === candidate.conventionNumber ||
+          candidate.reviewed.includes(number))
+      ) {
         remoteWebUrl ??= getRemoteWebUrl(runtime.workspaceCwd);
         if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;
       }
