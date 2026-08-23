@@ -26,6 +26,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import {
   ARTIFACT_OPEN_FLAGS,
+  isSameSocket,
   captureTuiCommand,
   freezeRender,
   hostStateFor,
@@ -725,6 +726,28 @@ exit 0
     },
   );
 
+  it('identifies the stamped socket by more than its inode', () => {
+    // An inode is not a durable name for a file: ext-family allocators hand
+    // the freed number straight back on an immediate same-directory
+    // recreate (measured 5/5 on a review host), so `rm` + recreate at the
+    // socket path read as "still ours" and a verdict about the REPLACEMENT
+    // was credited — the reap crediting a goal state about a socket this
+    // run never owned. Pinned here rather than through a capture, because a
+    // test cannot ask a filesystem to reuse an inode on demand: every one
+    // a fixture can rely on hands out a fresh one, so the widened
+    // comparison has no behavioural arm to reach it.
+    const stamp = { ino: 7214321, mode: 0o140700, mtimeMs: 1_700_000_000_000 };
+    expect(isSameSocket(stamp, { ...stamp })).toBe(true);
+    // The inode-reuse shape: same number, different file.
+    expect(isSameSocket(stamp, { ...stamp, mtimeMs: stamp.mtimeMs + 1 })).toBe(
+      false,
+    );
+    // A regular file recreated where a socket stood keeps neither.
+    expect(isSameSocket(stamp, { ...stamp, mode: 0o100644 })).toBe(false);
+    // And the inode alone still counts.
+    expect(isSameSocket(stamp, { ...stamp, ino: stamp.ino + 1 })).toBe(false);
+  });
+
   it('opens artifact writes non-blocking — a FIFO must refuse, not wedge', () => {
     // The one flag here that a behavioural test cannot reach: O_NONBLOCK
     // only decides the outcome when a FIFO lands in the microseconds
@@ -868,7 +891,12 @@ for a in "$@"; do
     p="\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
     # The swap lands DURING the kill — after any pre-loop snapshot, before
     # the verdict this answer produces.
-    if [ "$TMUX_TMPDIR" = "${envBase}" ]; then rm -f "$p"; : > "$p"; fi
+    # By RENAME, not rm-then-create: an inode is not a durable file name —
+    # ext-family allocators hand the freed number straight back on an
+    # immediate same-directory recreate, so rm+create can land the swap on
+    # the SAME inode and the fixture would then be pinning nothing on those
+    # filesystems while passing on tmpfs/APFS.
+    if [ "$TMUX_TMPDIR" = "${envBase}" ]; then q="$p.swap"; : > "$q"; rm -f "$p"; mv -f "$q" "$p"; fi
     echo "no server running on $p" >&2
     exit 1
   fi
@@ -2485,8 +2513,12 @@ for a in "$@"; do
     for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
     if [ "$TMUX_TMPDIR" = "${envBase}" ]; then
       p="$TMUX_TMPDIR/tmux-$(id -u)/$SRV"
+      # Same reason as the sibling fixture: swap by rename so the
+      # replacement cannot inherit the freed inode.
+      q="$p.swap"
+      : > "$q"
       rm -f "$p"
-      : > "$p"
+      mv -f "$q" "$p"
       echo "no server running on $p" >&2
       exit 1
     fi

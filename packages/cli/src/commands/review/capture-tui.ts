@@ -250,6 +250,34 @@ export const probes = {
   sleepBin: (): string | undefined => resolveOnPath('sleep'),
 };
 
+/** What a capture's own socket looked like at start, by identity. */
+export interface SocketStamp {
+  ino: number;
+  mode: number;
+  mtimeMs: number;
+}
+
+/** Whether an lstat reading is still the FILE a stamp named.
+ *
+ * Exported so the comparison can be pinned directly: it cannot be reached
+ * behaviourally on a filesystem that hands out a fresh inode per create,
+ * which is every filesystem a test can rely on. An inode is not a durable
+ * name for a file — ext-family allocators return the freed number on an
+ * immediate same-directory recreate (measured 5/5 on a review host) — so an
+ * inode-only comparison read `rm` + recreate at the socket path as "still
+ * ours" and credited a verdict about the replacement. Mode and mtime are
+ * the same two the rest of this PR already compares: the sweep's post-kill
+ * re-check takes mode, `changed()` takes size and mtime, and this was the
+ * narrowest of the three.
+ */
+export function isSameSocket(stamp: SocketStamp, st: SocketStamp): boolean {
+  return (
+    st.ino === stamp.ino &&
+    st.mode === stamp.mode &&
+    st.mtimeMs === stamp.mtimeMs
+  );
+}
+
 /** The flags every artifact write opens with.
  *
  * Named and exported because the one that matters most cannot be reached by
@@ -1297,7 +1325,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // The inode of the socket start bound under the start base, when start
   // produced one: the reap trusts goal-state kill verdicts about that base
   // only while this identity survives (see the reap below).
-  let socketStampIno: number | undefined;
+  // What start's socket looked like, by identity — see isSameSocket for why
+  // the comparison is wider than an inode.
+  let socketStamp: SocketStamp | undefined;
+  const isStampedSocket = (st: SocketStamp): boolean =>
+    socketStamp !== undefined && isSameSocket(socketStamp, st);
   // Whether the start call itself threw: the reap admits the
   // socket-directory-never-created wording on the start base only under
   // this flag (see the reap below) — the stamp cannot carry the
@@ -1359,11 +1391,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
      * and the unlink that follows it — the same interval the entry guard
      * documents, and the same reason: Node exposes no `*at()` syscalls. */
     const stampedSocketAlive = (): boolean => {
-      if (socketStampIno === undefined || uid === undefined) return false;
+      if (socketStamp === undefined || uid === undefined) return false;
       try {
-        return (
-          lstatSync(join(startBase, `tmux-${uid}`, server)).ino ===
-          socketStampIno
+        return isStampedSocket(
+          lstatSync(join(startBase, `tmux-${uid}`, server)),
         );
       } catch {
         return false;
@@ -1442,7 +1473,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // own is not connected to; the WARNING carries the manual
             // command, which is the disclosed cost of that choice.
             (resolve(base) === startBase &&
-              (socketStampIno === undefined || entry.ino !== socketStampIno));
+              (socketStamp === undefined || !isStampedSocket(entry)));
         } catch {
           // Absent or unstattable: there is nothing planted to connect
           // through, and the kill's own goal-state wordings already answer
@@ -1490,7 +1521,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // ours; with no stamp the bind site is unknown and any base's
           // success is the best evidence there is — which is the fallback
           // shape this inference was written for.
-          if (resolve(base) === startBase || socketStampIno === undefined) {
+          if (resolve(base) === startBase || socketStamp === undefined) {
             confirmedDead = true;
           }
         } catch (e) {
@@ -1559,7 +1590,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             ) &&
             !(
               onStartBase &&
-              socketStampIno !== undefined &&
+              socketStamp !== undefined &&
               !stampedSocketAlive()
             );
           // ...and NOT for a refusal the client made before it looked. Those
@@ -1704,9 +1735,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       const uidAtStart = process.getuid?.();
       if (uidAtStart !== undefined) {
         try {
-          socketStampIno = lstatSync(
-            join(startBase, `tmux-${uidAtStart}`, server),
-          ).ino;
+          const st = lstatSync(join(startBase, `tmux-${uidAtStart}`, server));
+          socketStamp = { ino: st.ino, mode: st.mode, mtimeMs: st.mtimeMs };
         } catch {
           // Start can bind under the OTHER base when the env base turns
           // unusable between the gate and the start; the reap's per-base
