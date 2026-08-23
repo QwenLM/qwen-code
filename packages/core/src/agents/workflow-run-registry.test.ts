@@ -817,6 +817,32 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.notified).toBe(false);
   });
 
+  it('removes only terminal entries without live handles', () => {
+    const r = new WorkflowRunRegistry();
+    const running = r.register(reg('wf_running'));
+    const terminal = r.register(reg('wf_terminal'));
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.fail(terminal.runId, 'failed', 2_000);
+    r.fail(held.runId, 'failed', 2_000);
+    const callback = vi.fn();
+    r.setStatusChangeCallback(callback);
+
+    expect(r.removeTerminal(running.runId)).toBe(false);
+    expect(r.removeTerminal(held.runId)).toBe(false);
+    expect(r.removeTerminal(terminal.runId)).toBe(true);
+
+    expect(r.get(running.runId)).toBe(running);
+    expect(r.get(held.runId)).toBe(held);
+    expect(r.get(terminal.runId)).toBeUndefined();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(undefined);
+  });
+
   it('rejects a duplicate run id until its owner handle is released', () => {
     const r = new WorkflowRunRegistry();
     const runId = 'wf_collision';

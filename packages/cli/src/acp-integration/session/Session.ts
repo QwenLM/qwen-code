@@ -1888,6 +1888,10 @@ export class Session implements SessionContext {
   #statusChangeCallback: (() => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
+  private readonly unpersistedWorkflowHistory = new Map<
+    string,
+    WorkflowSnapshot
+  >();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
@@ -3170,26 +3174,46 @@ export class Session implements SessionContext {
   async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
     const persisted = await listWorkflowSnapshots(this.config);
     const byRunId = new Map(
-      this.workflowHistory.map((snapshot) => [snapshot.runId, snapshot]),
+      persisted.map((snapshot) => [snapshot.runId, snapshot]),
     );
-    for (const snapshot of persisted) byRunId.set(snapshot.runId, snapshot);
+    for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
+      const stored = byRunId.get(runId);
+      if (
+        stored?.startTime === snapshot.startTime &&
+        stored.endTime === snapshot.endTime
+      ) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      } else {
+        byRunId.set(runId, snapshot);
+      }
+    }
     this.workflowHistory = [...byRunId.values()]
       .sort((a, b) => b.startTime - a.startTime)
       .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
     return this.workflowHistory;
   }
 
   async deleteWorkflowHistory(runId: string): Promise<boolean> {
     const registry = this.config.getWorkflowRunRegistry();
-    const entry = registry.get(runId);
-    if (entry && !isTerminalWorkflowStatus(entry.status)) return false;
+    const isDeletable = (): boolean => {
+      const current = registry.get(runId);
+      return !current || isTerminalWorkflowStatus(current.status);
+    };
+    if (!isDeletable()) return false;
     const handle = registry.getHandle(runId);
-    if (handle) await handle.completion;
+    if (handle) {
+      await handle.completion;
+      if (!isDeletable()) return false;
+    }
     await this.refreshWorkflowHistory();
+    if (!isDeletable()) return false;
     if (!this.workflowHistory.some((item) => item.runId === runId)) {
       return false;
     }
     if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    registry.removeTerminal(runId);
+    this.unpersistedWorkflowHistory.delete(runId);
     this.workflowHistory = this.workflowHistory.filter(
       (item) => item.runId !== runId,
     );
@@ -3200,12 +3224,25 @@ export class Session implements SessionContext {
   #rememberWorkflowHistory(entry: WorkflowTask): void {
     if (!isTerminalWorkflowStatus(entry.status)) return;
     const snapshot = toSnapshot(entry);
+    this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
     this.workflowHistory = [
       snapshot,
       ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
     ]
       .sort((a, b) => b.startTime - a.startTime)
       .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+  }
+
+  #pruneUnpersistedWorkflowHistory(): void {
+    const retainedRunIds = new Set(
+      this.workflowHistory.map((item) => item.runId),
+    );
+    for (const runId of this.unpersistedWorkflowHistory.keys()) {
+      if (!retainedRunIds.has(runId)) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
   }
 
   shouldHintAskUserQuestionRestore(): boolean {

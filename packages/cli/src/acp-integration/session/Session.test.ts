@@ -495,6 +495,7 @@ describe('Session', () => {
     resolvePendingApproval: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
+    removeTerminal: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
@@ -716,6 +717,7 @@ describe('Session', () => {
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
       get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
+      removeTerminal: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
     };
 
@@ -2378,6 +2380,53 @@ describe('Session', () => {
     ]);
   });
 
+  it('drops persisted workflow history deleted by another session', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+  });
+
   it('keeps cached history on disk failure and removes it after deletion', async () => {
     session.dispose();
     const onActiveWorkChanged = vi.fn();
@@ -2475,6 +2524,42 @@ describe('Session', () => {
       mockConfig,
       snapshot.runId,
     );
+  });
+
+  it('stops deletion when a retry activates the run during refresh', async () => {
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishRefresh!: () => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = () => resolve([snapshot]);
+        }),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(listWorkflowSnapshotsSpy).toHaveBeenCalledOnce(),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'running' });
+    finishRefresh();
+
+    await expect(deletion).resolves.toBe(false);
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
   });
 
   it('rejects history deletion while the workflow is active', async () => {

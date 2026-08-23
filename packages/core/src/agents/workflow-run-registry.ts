@@ -1164,6 +1164,21 @@ export class WorkflowRunRegistry {
     return this.entries.get(runId);
   }
 
+  removeTerminal(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      !isTerminalWorkflowStatus(entry.status) ||
+      this.handles.has(runId)
+    ) {
+      return false;
+    }
+    this.rejectPendingApprovals(runId);
+    this.entries.delete(runId);
+    this.emitStatusChange();
+    return true;
+  }
+
   setLineage(
     runId: string,
     sourceRunId: string,
@@ -1352,7 +1367,7 @@ export class WorkflowRunRegistry {
     }
   }
 
-  private emitStatusChange(entry: WorkflowTask): void {
+  private emitStatusChange(entry?: WorkflowTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);

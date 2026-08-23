@@ -3967,7 +3967,7 @@ class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
-  private readonly startingWorkflowTaskIds = new Set<string>();
+  private readonly mutatingWorkflowTaskIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -11339,8 +11339,17 @@ class QwenAgent implements Agent {
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
+        const mutationClaim = `${sessionId}\0${taskId}`;
         if (action === 'delete-history') {
-          return { changed: await session.deleteWorkflowHistory(taskId) };
+          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
+            return { changed: false };
+          }
+          this.mutatingWorkflowTaskIds.add(mutationClaim);
+          try {
+            return { changed: await session.deleteWorkflowHistory(taskId) };
+          } finally {
+            this.mutatingWorkflowTaskIds.delete(mutationClaim);
+          }
         }
         const registry = config.getWorkflowRunRegistry();
         if (action === 'run-saved') {
@@ -11385,11 +11394,10 @@ class QwenAgent implements Agent {
           if (!canStart || !task.script) {
             return { changed: false, status: task.status };
           }
-          const startClaim = `${sessionId}\0${taskId}`;
-          if (this.startingWorkflowTaskIds.has(startClaim)) {
+          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
             return { changed: false, status: task.status };
           }
-          this.startingWorkflowTaskIds.add(startClaim);
+          this.mutatingWorkflowTaskIds.add(mutationClaim);
           try {
             const workflowTool = config
               .getToolRegistry()
@@ -11428,7 +11436,7 @@ class QwenAgent implements Agent {
               status: registry.get(taskId)?.status,
             };
           } finally {
-            this.startingWorkflowTaskIds.delete(startClaim);
+            this.mutatingWorkflowTaskIds.delete(mutationClaim);
           }
         }
         const changed =
