@@ -951,6 +951,17 @@ describe('bundled review skill', () => {
     expect(body).toContain('<YYYY-MM-DD>-<HHMMSS>-<target>.md');
     expect(body).not.toContain('<YYYY-MM-DD>-<HHMMSS>-<filename>.md');
   });
+  it('makes the file review remove its own chosen plan name', () => {
+    // The plan's `--out` is the ONE name the orchestrator chooses — unique
+    // per run, because a file review takes no lease — so Step 9's
+    // `qwen-review-<target>-*` sweep can never match it, and a cleanup that
+    // globbed the family would delete a concurrent file review's live plan.
+    // The run that wrote it removes it: name the duty, and the glob that
+    // must not exist.
+    const body = skillBody();
+    expect(body).toContain('Remove the plan `--out` you wrote');
+    expect(body).toContain('the glob would delete a concurrent file review');
+  });
   it('never asks the orchestrator to derive the file-review target', () => {
     // Two derivations of one name is how `qwen review run` came to poll for
     // an artifact no child ever wrote. The parent canonicalises through

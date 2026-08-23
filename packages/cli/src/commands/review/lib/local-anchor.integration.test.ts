@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashWorktreeFiles } from './local-anchor.js';
+import { hashWorktreeFiles, revisionIdentities } from './local-anchor.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
@@ -272,5 +272,46 @@ describe('hashWorktreeFiles — an undecodable driver name unhashes the WHOLE id
     const after = hashWorktreeFiles(repo, ['data.bin']);
 
     expect(changedSince(before, after)).toContain('data.bin');
+  });
+});
+
+describe('hashWorktreeFiles — a path listed twice is hashed once', () => {
+  it('dedups repeated input paths at the module boundary', () => {
+    // Two open Criticals citing the SAME file is an ordinary ledger shape,
+    // and the blocker date passes its file list straight through.
+    // `check-attr` answers once per input OCCURRENCE, so a duplicate used to
+    // append the rendering suffix once per listing — an identity that never
+    // matches the cache's single-suffix one, read as "moved" under every
+    // possible tree state, for ever.
+    writeFileSync(join(repo, 'f.ts'), 'export const a = 1;\n');
+
+    const single = hashWorktreeFiles(repo, ['f.ts']);
+    const dup = hashWorktreeFiles(repo, ['f.ts', 'f.ts']);
+
+    expect(dup['f.ts']).toBe(single['f.ts']);
+    expect(Object.keys(dup)).toEqual(['f.ts']);
+  });
+});
+
+describe('revisionIdentities — ledger paths are read literally', () => {
+  it('survives a path beginning with pathspec magic', () => {
+    // The paths come from the model-written ledger, an untrusted-input
+    // boundary: a name beginning `:(` is pathspec magic, and known-but-
+    // unsupported magic fatals `ls-tree` with exit 128 — the WHOLE batch.
+    // The catch then answered `{}`, reading every datable sibling in the
+    // call undatable too, so one hostile or malformed ledger path cleared
+    // the entire `--fail-on` gate.
+    writeFileSync(join(repo, 'sib.md'), 'sib\n');
+    git('config', 'commit.gpgsign', 'false');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const ids = revisionIdentities(repo, head, [':(glob)notes.md', 'sib.md']);
+
+    // The sibling is dated normally; the magic name is simply absent from
+    // the tree — undatable, not fatal.
+    expect(ids['sib.md']).toMatch(/^100644:[0-9a-f]{40}:/);
+    expect(ids[':(glob)notes.md']).toBeUndefined();
   });
 });

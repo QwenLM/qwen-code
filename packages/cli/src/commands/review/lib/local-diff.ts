@@ -312,7 +312,7 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
  * Segment-exact matters for the same reason `toRepoPathspec` records: a
  * directory named `.qwen-notes` or `tmpfiles` is the user's, not ours.
  */
-function isReviewPlumbing(repoRelPath: string): boolean {
+export function isReviewPlumbing(repoRelPath: string): boolean {
   return /(?:^|\/)\.qwen\/(?:tmp|review-cache|reviews)(?:\/|$)/.test(
     repoRelPath,
   );

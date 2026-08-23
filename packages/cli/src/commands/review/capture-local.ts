@@ -37,7 +37,11 @@ import {
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
-import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
+import {
+  captureLocalDiff,
+  isReviewPlumbing,
+  type SkippedFile,
+} from './lib/local-diff.js';
 import {
   buildDiffPlan,
   sliceDiffByLines,
@@ -61,6 +65,7 @@ import {
   readLocalCache,
   revisionIdentities,
   stateIdOf,
+  UNHASHABLE,
   type LocalCacheCandidate,
   type LocalReviewCache,
 } from './lib/local-anchor.js';
@@ -137,14 +142,21 @@ function display(path: string): string {
  * and the scope-emptied stop fires over bytes no round captured — decided,
  * and repeated every round, because a stop never advances the cache.
  *
- * The discriminator is the base HEAD: a TRACKED path that left the diff did
- * so because its bytes now equal the tree the diff is taken against — HEAD
- * itself certifies it, and its vanishing is the designed discarded-change
- * shape the scope-emptied stop decides. What is NOT in HEAD's tree is
- * untracked invisible content — refused, at the cost of a full round.
+ * The discriminator is the base HEAD, asked of BYTES, not of names: a
+ * TRACKED path left the diff because its bytes now equal the tree the diff
+ * is taken against, and only that equality certifies it — the designed
+ * discarded-change shape the scope-emptied stop decides. Naming the path in
+ * HEAD's tree is not the same fact: under
+ * `git update-index --assume-unchanged` (and `--skip-worktree`) git hides
+ * the edited tracked file from `git diff HEAD` while `ls-tree HEAD` still
+ * names it, so a name check certified a divergence no round ever read. A
+ * path whose worktree bytes do not byte-compare equal to its HEAD identity
+ * — or that either side cannot hash — is refused, at the cost of a full
+ * round.
  */
 function vanishedStillOnDisk(
   repoRoot: string,
+  headSha: string | null,
   cachedFiles: Record<string, string>,
   currentHashes: Record<string, string>,
 ): string[] {
@@ -159,27 +171,16 @@ function vanishedStillOnDisk(
     onDisk.push(p);
   }
   if (onDisk.length === 0) return [];
-  // RAW, like every other listing in this module: a name may legally begin
-  // or end with whitespace, which the trimming wrappers eat.
-  let listing: string;
-  try {
-    listing = gitRaw(
-      '-C',
-      repoRoot,
-      'ls-tree',
-      '-r',
-      '-z',
-      '--name-only',
-      'HEAD',
-    ).toString('utf8');
-  } catch {
-    // An unborn HEAD has no tree: nothing is certified, and everything
-    // still on disk is invisible content. A failed listing refuses the same
-    // way — over-review is the affordable direction.
-    listing = '';
-  }
-  const inHead = new Set(listing.split('\0'));
-  return onDisk.filter((path) => !inHead.has(path));
+  // Both identities in the one format this module compares
+  // (`revisionIdentities` mirrors the worktree hasher exactly). An unborn
+  // HEAD has no tree and answers nothing: no certification, so everything
+  // still on disk refuses — over-review is the affordable direction, same
+  // as a failed listing.
+  const worktree = hashWorktreeFiles(repoRoot, onDisk);
+  const head = revisionIdentities(repoRoot, headSha, onDisk);
+  return onDisk.filter(
+    (path) => worktree[path] !== head[path] || worktree[path] === UNHASHABLE,
+  );
 }
 
 /**
@@ -378,19 +379,36 @@ function openCriticalsInCache(
  * while one cached path unhashable on both sides, or an empty files map,
  * withheld every blocker for ever with the blocker's own file byte-equal.
  *
- * A blocker stands when its own file still byte-compares equal to the
+ * A blocker stands when its own file still BYTE-compares equal to the
  * identity the cached round recorded for it — or, for a file that round
  * never hashed (a no-diff whole-file review promotes an empty map), to its
  * identity in the cached round's HEAD tree, where a no-diff capture's bytes
- * stood. UNHASHABLE on both sides is "still unreadable", not "moved"
- * (`movedSince` semantics). A blocker with no file, or one no baseline can
- * date, is undatable and does not stand.
+ * stood. Byte equality is the contract this is wired to (`run`:
+ * "blockersStand is true only where they byte-compare equal"), so the
+ * comparison is mode-plus-blob, never the full rendering-qualified
+ * identity: a rendering-only move — a `.gitattributes` normalisation commit
+ * touching the file, an `.git/info/attributes` edit, a repo-local
+ * `diff.<driver>.binary` flip — changes none of the file's bytes and
+ * appears in no `git diff HEAD`, yet dating on the suffix read the blocker
+ * as "moved" and passed `--fail-on` while the stop still rendered the
+ * Critical as open. Rendering moves keep their consequence where it
+ * belongs — the incremental scope re-reviews them already.
+ *
+ * A blocker whose recorded identity is UNHASHABLE is undatable and does not
+ * stand: no user action ever changes an UNHASHABLE↔UNHASHABLE comparison —
+ * the committed deletion is still absent, the reverted bump still a
+ * gitlink — so letting it stand failed the gate for ever over a fix nothing
+ * clears. A blocker with no file, or one no baseline can date, is undatable
+ * the same way. The residual is a false PASS beside the rendered blocker
+ * list, which still names it; never a false failure no action clears.
  *
  * A file ADDED to the captured population since the cached round withholds
  * every blocker: a fix can land in a brand-new file no cached byte records,
- * and a stop cannot attribute it. The residual is therefore a false PASS —
- * an unrelated new file clears standing blockers — beside the rendered
- * blocker list; never a false failure no action clears.
+ * and a stop cannot attribute it. The veto runs only when the cached round
+ * enumerated the WHOLE population — a scoped capture cannot reconstruct a
+ * population it only partially saw (see `filesAddedSince`). The residual is
+ * therefore a false PASS — an unrelated new file clears standing blockers —
+ * beside the rendered blocker list; never a false failure no action clears.
  */
 function blockerStateStillMatchesTree(
   repoRoot: string,
@@ -403,8 +421,19 @@ function blockerStateStillMatchesTree(
     .map((b) => b.file)
     .filter((f): f is string => f !== undefined);
   if (blockers.length === 0) return false;
-  const added = filesAddedSince(repoRoot, cache);
-  if (added === null || added.length > 0) return false;
+  // The added-file veto keys on the population the cached round could
+  // ENUMERATE: a `--file` capture pathspec-scopes both halves of the capture
+  // to the single subject, and a `--no-untracked` round never lists the
+  // untracked half, so either cache records only what it saw — and files
+  // already present at cache time would read as "added", permanently
+  // disarming every blocker. Skip the veto there; the date falls back to
+  // the blocker's own file, which still moves the moment a fix touches it.
+  const populationScoped =
+    cache.source !== undefined || cache.untracked === false;
+  if (!populationScoped) {
+    const added = filesAddedSince(repoRoot, cache);
+    if (added === null || added.length > 0) return false;
+  }
   // A file the cached round never hashed — the no-diff whole-file review
   // shape — dates against that round's HEAD tree instead.
   const missing = blockers.filter((p) => !Object.hasOwn(cache.files, p));
@@ -416,26 +445,34 @@ function blockerStateStillMatchesTree(
       : Object.hasOwn(atRevision, p)
         ? atRevision[p]
         : undefined;
-    if (before === undefined) return false; // undatable: does not stand
-    const then: Record<string, string> = Object.create(null) as Record<
-      string,
-      string
-    >;
-    const now: Record<string, string> = Object.create(null) as Record<
-      string,
-      string
-    >;
-    then[p] = before;
-    now[p] = current[p];
-    return movedSince(then, now).length === 0;
+    // Undatable: does not stand — see the docstring's UNHASHABLE half.
+    if (before === undefined || before === UNHASHABLE) return false;
+    return byteIdentity(before) === byteIdentity(current[p]);
   });
+}
+
+/**
+ * `<mode>:<blob>` — the byte-and-mode half of an identity, the rendering
+ * suffix dropped. Both sides of the blocker date are shaped
+ * `<mode>:<oid>[:<rendering attrs>]`; the mode is one of three fixed
+ * spellings and the oid is hex, so neither holds a colon and the first two
+ * components are exactly the byte equality. `UNHASHABLE` holds no colon and
+ * returns unchanged — it never equals a real identity.
+ */
+function byteIdentity(id: string): string {
+  return id.split(':', 3).slice(0, 2).join(':');
 }
 
 /**
  * Files in the captured population now that were not there when the cache
  * was written: tracked or untracked-but-not-ignored now, minus the cached
  * HEAD's tree and every path the cache hashed. `.gitignore`d names are not
- * subjects and never count.
+ * subjects and never count, and neither is the review's own plumbing: the
+ * capture excludes it from the hashed population, so the reconstruction of
+ * "what was there at cache time" must too — in a repo that does not
+ * gitignore `.qwen/` the review's artifacts (the cache file Step 8 wrote
+ * among them) are untracked-and-not-ignored, and counting them as "added"
+ * disarmed every blocker in every round.
  *
  * Null when the population cannot be listed — an undatable stop leans the
  * same way an undatable blocker does (pass), never into a failure no action
@@ -463,7 +500,7 @@ function filesAddedSince(
     listing
       .toString('utf8')
       .split('\0')
-      .filter((p) => p !== ''),
+      .filter((p) => p !== '' && !isReviewPlumbing(p)),
   );
   let treePaths: string[] = [];
   if (cache.headSha !== null) {
@@ -739,7 +776,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       args.untracked !== false,
       cache === null
         ? []
-        : vanishedStillOnDisk(capture.repoRoot, cache.files, hashes),
+        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes),
     );
     if (refusal !== null) {
       writeStderrLine(
