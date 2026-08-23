@@ -18,6 +18,7 @@ const {
   mockCloseCompletion,
   mockMessageState,
   mockMessages,
+  mockInsightState,
   mockAddMessage,
   mockEndStreaming,
   mockWebShellTranscriptProps,
@@ -35,6 +36,14 @@ const {
     timestamp: number;
     localOnly?: boolean;
   }>,
+  mockInsightState: {
+    progress: null as null | {
+      stage: string;
+      progress: number;
+      detail?: string;
+    },
+    reportPath: null as null | string,
+  },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
   mockWebShellTranscriptProps: {
@@ -134,6 +143,8 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
       setIsAuthenticated,
       setAvailableCommands,
       setAvailableSkills,
+      setInsightProgress,
+      setInsightReportPath,
     }: {
       setIsAuthenticated: (value: boolean) => void;
       setAvailableCommands: (
@@ -144,6 +155,10 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         }>,
       ) => void;
       setAvailableSkills: (value: string[]) => void;
+      setInsightProgress?: (
+        value: { stage: string; progress: number; detail?: string } | null,
+      ) => void;
+      setInsightReportPath?: (value: string | null) => void;
     }) => {
       const initializedRef = React.useRef(false);
 
@@ -153,6 +168,12 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         }
         initializedRef.current = true;
         setIsAuthenticated(true);
+        if (mockInsightState.progress) {
+          setInsightProgress?.(mockInsightState.progress);
+        }
+        if (mockInsightState.reportPath) {
+          setInsightReportPath?.(mockInsightState.reportPath);
+        }
         setAvailableCommands([
           {
             name: 'skills',
@@ -171,7 +192,13 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
           },
         ]);
         setAvailableSkills(['code-review']);
-      }, [setAvailableCommands, setAvailableSkills, setIsAuthenticated]);
+      }, [
+        setAvailableCommands,
+        setAvailableSkills,
+        setIsAuthenticated,
+        setInsightProgress,
+        setInsightReportPath,
+      ]);
     },
   };
 });
@@ -243,6 +270,14 @@ vi.mock('@qwen-code/webui', () => ({
   EmptyState: () => null,
   ChatHeader: () => null,
   SessionSelector: () => null,
+  InsightProgressCard: ({
+    stage,
+    progress,
+  }: {
+    stage: string;
+    progress: number;
+    detail?: string;
+  }) => `${stage} ${Math.round(progress)}%`,
   ZERO_WIDTH_SPACE: '\u200B',
   CloseSmallIcon: () => null,
   stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
@@ -394,6 +429,8 @@ describe('App /skills secondary picker', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockMessages.length = 0;
+    mockInsightState.progress = null;
+    mockInsightState.reportPath = null;
     mockMessageState.isStreaming = false;
     mockMessageState.isWaitingForResponse = false;
     (
@@ -882,6 +919,51 @@ describe('App /skills secondary picker', () => {
     expect(mockPostMessage).toHaveBeenCalledWith({
       type: 'copyToClipboard',
       data: { text: 'reply text' },
+    });
+  });
+
+  it('renders /insight progress updates from the insightProgress setter', async () => {
+    mockInsightState.progress = { stage: 'Analyzing', progress: 40 };
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const card = rendered.container.querySelector(
+      '[data-testid="insight-progress"]',
+    );
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('Analyzing');
+    expect(card?.textContent).toContain('40%');
+  });
+
+  it('surfaces the generated insight report path and opens it on click', async () => {
+    mockInsightState.reportPath = '/tmp/insight-report.md';
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const link = rendered.container.querySelector(
+      '[data-testid="insight-report-link"]',
+    ) as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.textContent).toBe('/tmp/insight-report.md');
+
+    mockPostMessage.mockClear();
+    act(() => {
+      link.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'openInsightReport',
+      data: { path: '/tmp/insight-report.md' },
     });
   });
 
