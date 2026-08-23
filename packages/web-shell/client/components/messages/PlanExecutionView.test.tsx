@@ -649,10 +649,16 @@ describe('PlanExecutionView', () => {
       });
       expect(scrollTo).toHaveBeenCalledTimes(1);
 
+      const locateButton = Array.from(
+        container.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Locate current step');
+      // Host keyboard handlers (ToolApproval's approval card, the Tasks
+      // panel) early-return only for [data-plan-interactive]; without the
+      // marker, keypresses on the focused locate button would resolve the
+      // surrounding approval request or navigate the task list.
+      expect(locateButton?.hasAttribute('data-plan-interactive')).toBe(true);
       act(() => {
-        Array.from(container.querySelectorAll('button'))
-          .find((button) => button.textContent === 'Locate current step')
-          ?.click();
+        locateButton?.click();
       });
       expect(scrollTo).toHaveBeenLastCalledWith({
         left: 550,
