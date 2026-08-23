@@ -996,19 +996,18 @@ describe('bundled review skill', () => {
     // when; a gate that moved into the file it gates would be unreadable.
     const core = coreBody();
     expect(core).toContain('**Reference files, gated by this verdict.**');
-    expect(core).toContain('`references/posting.md` — Step 7');
-    expect(core).toContain('`references/persistence.md` — Step 8');
-    expect(core).toContain('`references/aone.md` — the Aone paths');
-    // The enumeration prefixes alone do not pin WHEN a file loads:
-    // rewriting a load-condition clause with its prefix intact ships
-    // green. Pin the clauses themselves — the gating is the mechanism
-    // this split introduces.
-    expect(core).toContain('Load it when, and only when, posting is live');
+    // Pin each enumeration prefix together with its load-condition clause
+    // as ONE contiguous substring: checked separately, a rewrite that swaps
+    // two clauses between bullets ships green while a report-only run loads
+    // the wrong file. The gating is the mechanism this split introduces.
     expect(core).toContain(
-      'Load it before Step 8 on every run except cross-repo lightweight mode',
+      '`references/posting.md` — Step 7 (authorisation, anchors, presubmit, `submit`, the 422/head-drift recovery, `publish-assets`). Load it when, and only when, posting is live',
     );
     expect(core).toContain(
-      'Load it before `match-remote` when the target is Aone',
+      '`references/persistence.md` — Step 8 (report, artifact registration, incremental cache). Load it before Step 8 on every run except cross-repo lightweight mode',
+    );
+    expect(core).toContain(
+      '`references/aone.md` — the Aone paths (see the Aone note below). Load it before `match-remote` when the target is Aone',
     );
   });
 

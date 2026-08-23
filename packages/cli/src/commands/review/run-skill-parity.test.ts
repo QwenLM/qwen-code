@@ -58,13 +58,16 @@ describe('run pins match the bundled skill templates', () => {
     const persistence = join(SKILL_DIR, 'references', 'persistence.md');
     return existsSync(persistence)
       ? `${coreSkill}\n${readFileSync(persistence, 'utf8').replace(/\r\n/g, '\n')}`
-      : coreSkill;
+      : null;
   })();
 
   // A sparse or partial checkout has no skill to read; the pins are still
   // covered by run.test.ts's own cases. Failing here would report a checkout
   // shape as a contract drift.
   const itWithSkill = coreSkill === null ? it.skip : it;
+  // The stems oracle additionally reads references/persistence.md, so a
+  // checkout that has SKILL.md but not that file must skip it too.
+  const itWithStep8 = step8Corpus === null ? it.skip : it;
 
   itWithSkill('composedNameFor renders Step 6’s --out template', () => {
     // The template as the skill writes it, e.g.
@@ -89,7 +92,7 @@ describe('run pins match the bundled skill templates', () => {
     }
   });
 
-  itWithSkill('reportPatternFor accepts Step 8’s report stems', () => {
+  itWithStep8('reportPatternFor accepts Step 8’s report stems', () => {
     // The stems as the skill lists them, e.g.
     //   `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
     const stems = [
