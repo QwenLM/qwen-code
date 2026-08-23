@@ -22,6 +22,12 @@ function streamEndToDoneReason(reason: unknown): string {
   if (reason === 'user_cancelled') {
     return 'cancelled';
   }
+  // Timeouts and expired sessions terminate the turn at the application
+  // layer; map them onto the reducer's abnormal-reason set so in-flight
+  // tool blocks are force-finalized instead of spinning forever.
+  if (reason === 'timeout' || reason === 'session_expired') {
+    return 'error';
+  }
   return typeof reason === 'string' && reason.length > 0 ? reason : 'end_turn';
 }
 

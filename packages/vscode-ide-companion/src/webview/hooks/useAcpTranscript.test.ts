@@ -38,6 +38,22 @@ function assistantTextNotification(
   };
 }
 
+function toolCallNotification(
+  sessionId: string,
+  toolCallId: string,
+): SessionNotification {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      status: 'in_progress',
+      title: 'Running command',
+      kind: 'execute',
+    },
+  } as SessionNotification;
+}
+
 function postToWebview(message: unknown): void {
   window.dispatchEvent(new MessageEvent('message', { data: message }));
 }
@@ -384,5 +400,134 @@ describe('useAcpTranscript', () => {
       });
     });
     expect(captured.blocks[0]).toMatchObject({ streaming: false });
+  });
+
+  it.each(['timeout', 'session_expired'] as const)(
+    'force-finalizes an in-flight tool block when the stream ends with %s',
+    (reason) => {
+      act(() => {
+        postToWebview({
+          type: 'transcriptUpdate',
+          data: toolCallNotification('session-a', 'call-1'),
+        });
+      });
+      expect(captured.blocks[0]).toMatchObject({
+        kind: 'tool',
+        status: 'in_progress',
+      });
+
+      act(() => {
+        postToWebview({
+          type: 'streamEnd',
+          data: { timestamp: Date.now(), reason },
+        });
+      });
+
+      // The reducer only propagates abnormal termination for the
+      // cancelled/error reasons; without the mapping the tool block would
+      // keep its in-flight status and spin forever.
+      expect(captured.blocks[0]).toMatchObject({
+        kind: 'tool',
+        status: 'cancelled',
+      });
+    },
+  );
+
+  it('force-finalizes an in-flight tool block when the user cancels', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: toolCallNotification('session-a', 'call-1'),
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'in_progress',
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'user_cancelled' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'cancelled',
+    });
+  });
+
+  it('leaves an in-flight tool block running on a normal end_turn stream end', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: toolCallNotification('session-a', 'call-1'),
+      });
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn' },
+      });
+    });
+
+    // Transport-layer-style endings must not cancel in-flight tools; the
+    // daemon still delivers the real terminal status via tool_call_update.
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'in_progress',
+    });
+  });
+
+  it('does not seed the transcript when qwenSessionSwitched carries no messages field', () => {
+    const errors: Event[] = [];
+    const onError = (event: Event) => {
+      errors.push(event);
+    };
+    window.addEventListener('error', onError);
+    try {
+      act(() => {
+        postToWebview({
+          type: 'qwenSessionSwitched',
+          data: { sessionId: 'session-no-messages' },
+        });
+      });
+
+      // The boundary still resets the transcript, but nothing is seeded
+      // and the handler must not crash on the missing cache array.
+      expect(captured.blocks).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+    } finally {
+      window.removeEventListener('error', onError);
+    }
+  });
+
+  it('does not clobber the fresh transcript when qwenSessionSwitched carries an empty messages array', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-a', 'alpha'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+
+    act(() => {
+      postToWebview({
+        type: 'qwenSessionSwitched',
+        data: { sessionId: 'session-empty-cache', messages: [] },
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // Live frames of the switched session render after the boundary.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-empty-cache', 'live'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'live' });
   });
 });
