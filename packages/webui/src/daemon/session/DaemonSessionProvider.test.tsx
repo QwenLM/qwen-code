@@ -3345,6 +3345,161 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('deduplicates skill toggle settings events from the generic settings signal', async () => {
+    const mutation = {
+      id: 'skill-toggle-1',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'applied' as const,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const laterMutation = {
+      id: 'skill-toggle-2',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'partial' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const session = createMockSession({
+      events: async function* skillToggleEvents() {
+        yield {
+          id: 27,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.disabled',
+            scope: 'workspace',
+            value: ['web-search'],
+            mutation,
+          },
+        };
+        yield {
+          id: 28,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.enabled',
+            scope: 'workspace',
+            value: undefined,
+            mutation,
+          },
+        };
+        yield {
+          id: 29,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'ui.theme',
+            scope: 'workspace',
+            value: 'Qwen Dark',
+          },
+        };
+        yield {
+          id: 30,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.disabled',
+            scope: 'workspace',
+            value: ['web-search', 'review'],
+            mutation: laterMutation,
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals).toMatchObject({
+      settingsVersion: 1,
+      skillsVersion: 2,
+      lastSkillMutation: laterMutation,
+      skillMutationsByCwd: {
+        '/mock-workspace': [mutation, laterMutation],
+      },
+    });
+  });
+
+  it('retains every distinct skill mutation from one replay batch', async () => {
+    const partialMutation = {
+      id: 'replay-skill-toggle-1',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'partial' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const appliedMutation = {
+      id: 'replay-skill-toggle-2',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'applied' as const,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 27,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'skills.disabled',
+              scope: 'workspace',
+              value: ['web-search'],
+              mutation: partialMutation,
+            },
+          },
+          {
+            id: 28,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'skills.disabled',
+              scope: 'workspace',
+              value: ['web-search', 'review'],
+              mutation: appliedMutation,
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals).toMatchObject({
+      skillsVersion: 2,
+      lastSkillMutation: appliedMutation,
+      skillMutationsByCwd: {
+        '/mock-workspace': [partialMutation, appliedMutation],
+      },
+    });
+  });
+
   it('logs settings reloads without inserting daemon debug blocks', async () => {
     const debug = vi
       .spyOn(console, 'debug')

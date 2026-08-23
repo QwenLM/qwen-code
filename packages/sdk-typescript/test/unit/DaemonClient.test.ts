@@ -583,6 +583,30 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('reads raw bytes with a relative base URL', async () => {
+      const payload = {
+        kind: 'file_bytes' as const,
+        path: 'reports/report.pdf',
+        offset: 0,
+        sizeBytes: 2,
+        returnedBytes: 2,
+        truncated: false,
+        contentBase64: Buffer.from([1, 2]).toString('base64'),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.readWorkspaceFileBytes('reports/report.pdf', {
+          offset: 0,
+          maxBytes: 2,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        '/daemon/file/bytes?path=reports%2Freport.pdf&offset=0&maxBytes=2',
+      );
+    });
+
     it('writes and edits files with JSON bodies and client identity', async () => {
       const writeResult = {
         kind: 'file_write',
@@ -3705,6 +3729,48 @@ describe('DaemonClient', () => {
       await expect(
         client.updateSessionMetadata('s-1', { displayName: 'test' }),
       ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('sends a pr binding and parses the returned prs list', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(result.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
+    });
+
+    it('drops prs entries that fail the shape gate', async () => {
+      // A buggy or hostile daemon response must not surface a javascript:
+      // url or a non-integer number downstream (the tooltip renders these
+      // as links).
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          prs: [
+            { number: 1, url: 'javascript:alert(1)' },
+            { number: 1.5, url: 'https://github.com/o/r/pull/1' },
+            { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(result.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
     });
   });
 

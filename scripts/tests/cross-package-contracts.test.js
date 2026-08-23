@@ -55,7 +55,7 @@ const imports = [
   ],
   [
     'LIVE_TASK_TOOL_NAMES',
-    'packages/cli/src/serve/live/live-task-tools.ts',
+    'packages/cli/src/acp-integration/live/live-task-tools.ts',
     '@qwen-code/acp-bridge/bridgeOptions',
   ],
   [
@@ -65,7 +65,7 @@ const imports = [
   ],
   [
     'LiveTaskToolName',
-    'packages/cli/src/serve/live/live-task-tools.ts',
+    'packages/cli/src/acp-integration/live/live-task-tools.ts',
     '@qwen-code/acp-bridge/bridgeOptions',
   ],
   [

@@ -132,11 +132,9 @@ const WORKFLOW_PARAM_SCHEMA = {
         '`stallMs` (number, ms): a no-progress watchdog, not a wall-clock cap. ' +
         'The dispatch is aborted and retried (up to ' +
         `${MAX_STALL_ATTEMPTS} attempts total) after this many milliseconds ` +
-        'with no observable subagent progress once progress has begun ' +
-        '(a dispatch that produces no first response is bounded by the ' +
-        'subagent time cap, not this watchdog); the timer is suspended ' +
-        'while a tool is in flight, so a legitimately slow tool is not ' +
-        'a stall. ' +
+        'with no observable subagent progress — including before the first ' +
+        'response arrives; the timer is suspended while a tool is in flight, ' +
+        'so a legitimately slow tool is not a stall. ' +
         `Default ${DEFAULT_STALL_MS} (override via \`${MAX_WORKFLOW_STALL_MS_ENV}\`, whole seconds); \`0\` disables the watchdog. Wall time ` +
         'per attempt is bounded separately. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
