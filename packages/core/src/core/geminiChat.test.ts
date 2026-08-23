@@ -24,7 +24,11 @@ import {
   type StreamEvent,
 } from './geminiChat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
-import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+  collectToolCallIdsFromHistory,
+} from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
@@ -6034,6 +6038,104 @@ describe('GeminiChat', async () => {
           name: 'deferred_target',
           arguments: { x: 1 },
         }),
+      );
+    });
+  });
+
+  describe('R26-1: gate-rejection release does not orphan the instructed retry result (dedup id keying)', () => {
+    // R26-1 alleged that R24-1 excludes error responses from the admission
+    // gate (getHistoryToolCallFingerprints) but not from the sibling
+    // getHistoryFunctionResponseIds consumed by the TUI handleCompletedTools
+    // dedup — so the admitted retry's completed result would be dropped as
+    // "already responded" and a synthetic error placeholder planted instead.
+    //
+    // The premise conflates the reused PROVIDER tool-call id with the
+    // INTERNAL callId the dedup actually keys on. The rejection response is
+    // shipped under the wrapper call's internal callId (createErrorResponse
+    // uses request.callId), while the instructed re-issue is a fresh call
+    // that the production stream path (processStreamResponse →
+    // normalizeModelToolCallIds) suffixes to a brand-new internal id. The
+    // provider id ({name}_{index}) restarts and collides, but the internal
+    // callId never does. Gate B and the handleCompletedTools dedup predicate
+    // (historyCallIdsWithResponse.has(tc.request.callId)) both key on the
+    // internal callId, so the re-issue's result never collides with the
+    // rejection response and is delivered — not dropped.
+    const wrapperHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'go' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'tool_call_0',
+              name: 'tool_call',
+              args: { name: 'deferred_target', arguments: { x: 1 } },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool_call_0',
+              name: 'tool_call',
+              response: {
+                error:
+                  'Deferred tool "deferred_target" has no presented schema in this session',
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+    it('keeps the rejection id in gate B (Race-A) yet does not mark it handled in gate A (R24-1)', () => {
+      chat.setHistory(wrapperHistory);
+      // Gate B DOES contain the rejection's id — correct and required:
+      // applyRepair's synthetic placeholders are themselves error responses
+      // and the Race-A protection depends on matching them. This is why gate
+      // B must NOT mirror R24-1's error exclusion.
+      expect(chat.getHistoryFunctionResponseIds().has('tool_call_0')).toBe(
+        true,
+      );
+      // Gate A (admission) does NOT mark the call handled, so the instructed
+      // re-issue is admitted (pinned by the R24-1 tests above).
+      expect(chat.getHistoryToolCallFingerprints().has('tool_call_0')).toBe(
+        false,
+      );
+    });
+
+    it('suffixes the instructed re-issue to a fresh internal id that gate B does not contain', () => {
+      chat.setHistory(wrapperHistory);
+      // The re-issue arrives reusing the provider id `tool_call_0`. The
+      // production stream path normalizes it against the ids already used in
+      // history — exactly what this reproduces (processStreamResponse passes
+      // collectToolCallIdsFromHistory(this.history) as the used set).
+      const usedIds = collectToolCallIdsFromHistory(chat.getHistory());
+      const [normalized] = normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'tool_call_0',
+              name: 'tool_call',
+              args: { name: 'deferred_target', arguments: { x: 1 } },
+            },
+          },
+        ],
+        usedIds,
+        new Set<string>(),
+      );
+      const reissuedCallId = normalized.functionCall!.id!;
+      // The internal callId is suffixed away from the collision...
+      expect(reissuedCallId).toBe('tool_call_0__qwen_dup_2');
+      // ...so the exact dedup predicate handleCompletedTools applies is
+      // FALSE for the executed retry: its completed result is delivered, not
+      // dropped as "already responded". This is the witness that refutes
+      // R26-1's "shipped results for the executed re-issue: []".
+      expect(chat.getHistoryFunctionResponseIds().has(reissuedCallId)).toBe(
+        false,
       );
     });
   });
