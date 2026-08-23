@@ -6,6 +6,7 @@
 
 import {
   ApprovalMode,
+  APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
   Config,
@@ -132,6 +133,10 @@ function parseApprovalModeValue(value: string): ApprovalMode {
   }
   return approvalMode;
 }
+
+const APPROVAL_MODE_DESCRIPTION = APPROVAL_MODES.map(
+  (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
+).join(', ');
 
 export interface CliArgs {
   query: string | undefined;
@@ -702,7 +707,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('approval-mode', {
           type: 'string',
           choices: APPROVAL_MODES,
-          description: `Set the approval mode: ${APPROVAL_MODES.join(', ')}`,
+          description: `Set the approval mode: ${APPROVAL_MODE_DESCRIPTION}`,
         })
         .option('acp', {
           type: 'boolean',

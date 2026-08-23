@@ -643,6 +643,33 @@ describe('serve-bridge', () => {
       expect(result.content[0].text).toContain('restricted for security');
     });
 
+    it('should allow local approval mode changes without allowGlobalScope', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'plan', session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBeUndefined();
+      expect(calls[0]?.url).toBe(
+        'http://127.0.0.1:4170/sessions/test-session/approval-mode',
+      );
+      expect(JSON.parse(calls[0]?.body ?? '{}')).toMatchObject({
+        mode: 'plan',
+      });
+    });
+
     it('should allow read-only agents_manage actions with global scope', async () => {
       const { state } = makeMockState({
         defaultSessionId: 'test-session',

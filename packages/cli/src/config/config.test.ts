@@ -4478,9 +4478,19 @@ describe('loadCliConfig approval mode', () => {
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const settings: Settings = {
+    const settings = {
       tools: { approvalMode: 'auto_edit' },
-    };
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should normalize legacy autoedit approval mode from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'autoedit' },
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });
