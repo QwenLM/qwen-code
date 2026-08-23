@@ -488,9 +488,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       try {
         const newConv = await this.conversationStore.createConversation();
         this.updateCurrentConversationId(newConv.id);
+        // Carry the live ACP session id so this boundary re-pins the
+        // transcript guard instead of re-opening the adopt-on-null window
+        // to stale frames of the abandoned session on a first send.
         this.sendToWebView({
           type: 'conversationLoaded',
-          data: newConv,
+          data: {
+            ...newConv,
+            ...(this.agentManager.currentSessionId
+              ? { sessionId: this.agentManager.currentSessionId }
+              : {}),
+          },
         });
       } catch (error) {
         const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
@@ -867,9 +875,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.updateCurrentConversationId(null);
 
+      // Publish the fresh ACP session id with the boundary so the
+      // transcript guard drops trailing frames from the abandoned session
+      // (which may still be streaming) instead of adopting them into the
+      // new conversation.
       this.sendToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
 
       // Reset title flag when creating a new session

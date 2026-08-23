@@ -172,6 +172,98 @@ describe('useAcpTranscript', () => {
     expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'beta' });
   });
 
+  it('drops frames of the abandoned session after conversationCleared publishes the fresh id', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'old turn'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+
+    // New-session flow: the extension creates the fresh ACP session first
+    // and publishes its id with the boundary.
+    act(() => {
+      postToWebview({
+        type: 'conversationCleared',
+        data: { sessionId: 'session-b' },
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // The abandoned session may still be streaming on the CLI; its
+    // trailing frames must not be adopted into the fresh conversation.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification(
+          'session-a',
+          'STALE tail of old session',
+        ),
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'fresh'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'fresh' });
+  });
+
+  it('keeps the guard pinned when conversationLoaded carries the session id', () => {
+    act(() => {
+      postToWebview({
+        type: 'conversationCleared',
+        data: { sessionId: 'session-b' },
+      });
+    });
+
+    // First send of the new session: conversationLoaded resets the state
+    // but re-pins the guard via the carried session id, so a stale frame
+    // racing the boundary is still dropped.
+    act(() => {
+      postToWebview({
+        type: 'conversationLoaded',
+        data: { id: 'conv_1', messages: [], sessionId: 'session-b' },
+      });
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification(
+          'session-a',
+          'STALE tail of old session',
+        ),
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // The new session's echo and reply render normally.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'hello'),
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-b', 'reply'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(2);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'hello' });
+    expect(captured.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'reply',
+    });
+  });
+
   it('resets transcript state when conversationLoaded arrives on reconnect', () => {
     act(() => {
       postToWebview({

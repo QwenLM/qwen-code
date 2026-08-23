@@ -2530,10 +2530,17 @@ export class WebViewProvider {
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.messageHandler.setCurrentConversationId(null);
 
-      // Clear current conversation UI
+      // Clear current conversation UI. Publish the fresh ACP session id so
+      // the transcript guard drops trailing frames from the abandoned
+      // session (which may still be streaming) instead of adopting them
+      // into the new conversation.
       this.sendMessageToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
     } catch (_error) {
       logger.error('[WebViewProvider] Failed to create new session:', _error);

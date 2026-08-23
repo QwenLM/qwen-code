@@ -734,10 +734,16 @@ describe('SessionMessageHandler', () => {
   });
 
   it('forces a fresh ACP session when the webview requests a new session', async () => {
+    let liveSessionId: string | null = 'session-1';
     const agentManager = {
       isConnected: true,
-      currentSessionId: 'session-1',
-      createNewSession: vi.fn().mockResolvedValue('session-2'),
+      get currentSessionId() {
+        return liveSessionId;
+      },
+      createNewSession: vi.fn().mockImplementation(async () => {
+        liveSessionId = 'session-2';
+        return 'session-2';
+      }),
     };
     const conversationStore = {
       createConversation: vi.fn(),
@@ -761,9 +767,59 @@ describe('SessionMessageHandler', () => {
     expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
       forceNew: true,
     });
+    // The boundary publishes the fresh session id so the transcript guard
+    // drops trailing frames from the abandoned session instead of
+    // adopting them into the new conversation.
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'conversationCleared',
-      data: {},
+      data: { sessionId: 'session-2' },
+    });
+  });
+
+  it('publishes the live session id on the first-send conversationLoaded boundary', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi
+        .fn()
+        .mockResolvedValue({ id: 'conversation-1', messages: [] }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    // The boundary re-pins the transcript guard; without the session id
+    // the adopt-on-null window reopens for stale frames on every first
+    // send of a fresh conversation.
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationLoaded',
+      data: expect.objectContaining({
+        id: 'conversation-1',
+        sessionId: 'session-1',
+      }),
     });
   });
 
