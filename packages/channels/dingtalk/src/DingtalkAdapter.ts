@@ -220,7 +220,15 @@ function startOfLineSafeChatRecordField(value: string): string {
     ) {
       next += 1;
     }
-    if (next >= sanitized.length) break;
+    if (next >= sanitized.length) {
+      // No `]` to pair with: delete the `[` anyway. Keeping it is what lets
+      // `capChatRecordLines`' ` [truncated]` marker (appended past 500 units)
+      // supply the closing bracket and complete a third-party bracket span at
+      // start-of-line.
+      deleted[open] = 1;
+      open += 1;
+      continue;
+    }
     deleted[open] = 1;
     deleted[next] = 1;
     open += 1;
