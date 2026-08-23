@@ -648,6 +648,22 @@ export async function createApprovalModeOverride(
       }
     }
   };
+  // Session Workflow plan-revision state is session-global and lives on the
+  // base Config. The prototype implementations assign
+  // `this.sessionWorkflowPlanRevision`, which would land as an OWN property
+  // on this wrapper and shadow the base value — e.g. a subagent's divergent
+  // todo_write clearing the approved revision only for itself while the
+  // parent keeps rejecting Agent launches against a plan that no longer
+  // exists. Forward mutations through to the base (same write-through
+  // pattern as setApprovalMode above); reads keep walking the prototype.
+  override.setSessionWorkflowPlanRevision = (
+    revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+  ): void => {
+    base.setSessionWorkflowPlanRevision(revision);
+  };
+  override.clearSessionWorkflowPlanRevision = (): void => {
+    base.clearSessionWorkflowPlanRevision();
+  };
   applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
