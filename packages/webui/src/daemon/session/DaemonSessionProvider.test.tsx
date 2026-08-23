@@ -9141,6 +9141,9 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears stale sessions on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
       mode: 'http-bridge',
@@ -9154,6 +9157,7 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(
       createMockSession({
         heartbeat,
+        context: vi.fn(async () => sessionContextWithModels('session-1')),
         events: createIdleEvents(),
       }),
     );
@@ -9189,6 +9193,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
     expect(connection?.context).toBeUndefined();
     expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
   });
 
   it('uses recent HTTP status when heartbeat threshold ends with transport failure', async () => {
@@ -10529,7 +10538,11 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears stale sessions on terminal HTTP stream errors', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
       events: async function* terminalErrorEvents() {
         await Promise.resolve();
         yield* [];
@@ -10564,10 +10577,59 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
     expect(connection?.context).toBeUndefined();
     expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
         'Daemon session is not connected',
       );
+    });
+  });
+
+  it('restores the workspace reasoning preview after an auth failure clears the stream', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
+      events: async function* authErrorEvents() {
+        await Promise.resolve();
+        yield* [];
+        throw Object.assign(new Error('Unauthorized'), { status: 401 });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'Unauthorized',
+      errorStatus: 401,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
     });
   });
 
@@ -12109,7 +12171,11 @@ describe('DaemonSessionProvider', () => {
     // When the user deletes a running session, the server publishes
     // session_closed on SSE. The provider must NOT auto-reconnect and
     // create a new session — that would undo the user's delete action.
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
       events: async function* sessionClosedEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -12156,6 +12222,14 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
     expect(connection?.context).toBeUndefined();
     expect(connection?.reasoning).toBeUndefined();
+    // The close must re-project models from the retained provider snapshot:
+    // the attached context's models carry no reasoningPreview, so keeping
+    // them would drop the welcome preview.
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
   });
 
   it('aborts in-flight prompt when session_closed arrives mid-stream', async () => {
@@ -14821,6 +14895,27 @@ function workspaceProvidersWithReasoningPreview() {
         ],
       },
     ],
+  };
+}
+
+function sessionContextWithModels(sessionId: string) {
+  return {
+    v: 1 as const,
+    sessionId,
+    workspaceCwd: '/mock-workspace',
+    state: {
+      models: {
+        currentModelId: 'qwen3.8-max',
+        availableModels: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            contextLimit: 131_072,
+          },
+        ],
+      },
+    },
   };
 }
 

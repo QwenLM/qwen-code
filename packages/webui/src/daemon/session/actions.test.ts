@@ -152,6 +152,30 @@ describe('getConnectionAfterSessionClear', () => {
     });
   });
 
+  it('keeps the prior model list when no workspace providers are loaded', () => {
+    // Older daemons without workspaceProviders support (or a rejected fetch)
+    // leave `providers` undefined; the pre-clear list must survive the clear.
+    const models = [
+      {
+        id: 'qwen3.8-max',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+      },
+    ];
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models,
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models).toEqual(models);
+  });
+
   it('preserves a concurrently loaded session', () => {
     const next = getConnectionAfterSessionClear(
       {
