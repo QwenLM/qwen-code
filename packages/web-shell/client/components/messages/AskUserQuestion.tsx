@@ -98,8 +98,9 @@ export function AskUserQuestion({
     setSubmitting(false);
     setCollapsed(false);
     setCurrentIdx(0);
-    // Sync the ref too so the focus effect (which runs in this same commit on a
-    // new request) reads the fresh index, not the previous request's selection.
+    // Keep the ref in sync for keyboard navigation and non-request-changed
+    // focus paths. Request changes select index 0 explicitly in the layout
+    // effect before this passive reset runs.
     const firstSelectedIdx = firstQuestion ? 0 : null;
     selectedIdxByQuestionRef.current = { 0: firstSelectedIdx };
     selectedIdxRef.current = firstSelectedIdx;

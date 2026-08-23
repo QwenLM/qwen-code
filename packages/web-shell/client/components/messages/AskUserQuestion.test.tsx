@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useLayoutEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
@@ -135,6 +135,13 @@ function renderInShadowRoot(
   container = shadowHost.attachShadow({ mode: 'open' });
   root = createRoot(container);
   rerender(keyboardActive, req);
+}
+
+function BlurActiveElementInLayoutEffect(): null {
+  useLayoutEffect(() => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  }, []);
+  return null;
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -355,7 +362,35 @@ describe('AskUserQuestion accessibility', () => {
 
     rerender(true);
 
+    expect(document.activeElement).toBe(shadowHost);
     expect((container as ShadowRoot).activeElement).toBe(editor);
+  });
+
+  it('checks the typing target before sibling layout effects can blur it', () => {
+    const editor = document.createElement('textarea');
+    document.body.appendChild(editor);
+    editor.focus();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <>
+            <AskUserQuestion
+              request={request}
+              onConfirm={onConfirm}
+              onError={onError}
+            />
+            <BlurActiveElementInLayoutEffect />
+          </>
+        </I18nProvider>,
+      );
+    });
+
+    expect(document.activeElement).toBe(document.body);
+    editor.remove();
   });
 
   it('moves focus between options with arrow keys', () => {
