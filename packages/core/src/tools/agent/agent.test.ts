@@ -3166,6 +3166,7 @@ describe('AgentTool', () => {
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
           isolation: 'worktree',
+          run_in_background: false,
         });
         const result = await invocation.execute();
 
