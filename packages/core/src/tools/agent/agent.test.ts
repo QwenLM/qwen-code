@@ -7302,6 +7302,29 @@ describe('findBackgroundedAncestorAgentId', () => {
     expect(findBackgroundedAncestorAgentId(registry, 'leaf-fg')).toBe('fork-1');
   });
 
+  it('reaches the backgrounded ancestor on deep supported lineages', () => {
+    // maxSubagentDepth is user-configurable up to MAX_SUBAGENT_DEPTH_LIMIT
+    // (100), so the walk must not encode a smaller depth assumption: on a
+    // lineage deeper than the cap it used to carry, it walked off the end
+    // and returned undefined — no bridge, and the nested call hung on an
+    // approval nobody could see. Cycle protection comes from a visited set,
+    // not a hop budget.
+    const entries: Record<string, Entry> = {
+      'bg-root': { isBackgrounded: true, status: 'running' },
+    };
+    const depth = 20;
+    for (let i = 0; i < depth; i++) {
+      entries[`fg-${i}`] = {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: i === 0 ? 'bg-root' : `fg-${i - 1}`,
+      };
+    }
+    expect(
+      findBackgroundedAncestorAgentId(registryOf(entries), `fg-${depth - 1}`),
+    ).toBe('bg-root');
+  });
+
   it('returns undefined for a terminal backgrounded ancestor', () => {
     const registry = registryOf({
       'fork-1': { isBackgrounded: true, status: 'completed' },
@@ -7322,7 +7345,7 @@ describe('findBackgroundedAncestorAgentId', () => {
     );
   });
 
-  it('caps the walk on a corrupt (cyclic) lineage', () => {
+  it('terminates on a corrupt (cyclic) lineage', () => {
     const registry = registryOf({
       a: { isBackgrounded: false, status: 'running', parentAgentId: 'b' },
       b: { isBackgrounded: false, status: 'running', parentAgentId: 'a' },

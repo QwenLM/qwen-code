@@ -2784,6 +2784,55 @@ describe('BackgroundTaskRegistry', () => {
       cleanup();
     });
 
+    it('drops a re-emitted waiting event for an already-parked call silently', async () => {
+      // The scheduler re-notifies the whole batch on every status
+      // transition, and agent-core re-emits TOOL_WAITING_APPROVAL for every
+      // still-awaiting call without dedup — so while one call is parked, a
+      // sibling's transition re-emits the parked call's event. That
+      // duplicate must be dropped silently: auto-rejecting it cancels the
+      // waiting call while its prompt is still visible in the dialog, and
+      // the runtime's responded set then no-ops the user's real answer.
+      const emitter = new AgentEventEmitter();
+      registry.register(makeRegistration('bg-appr-reemit'));
+      registry.bridgeApprovalEvents('bg-appr-reemit', emitter);
+
+      const respond = vi.fn(async () => {});
+      const waiting = {
+        subagentId: 'bg-appr-reemit',
+        round: 1,
+        callId: 'c1',
+        name: 'Shell',
+        description: 'run c1',
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond,
+        timestamp: Date.now(),
+      };
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, waiting);
+      expect(registry.getPendingApprovals('bg-appr-reemit')).toHaveLength(1);
+
+      // A batch-mate status transition re-emits the parked call's event.
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        ...waiting,
+        timestamp: Date.now(),
+      });
+
+      expect(respond).not.toHaveBeenCalled();
+      expect(registry.getPendingApprovals('bg-appr-reemit')).toHaveLength(1);
+      // The user's dialog answer still reaches the parked call.
+      await registry.resolvePendingApproval(
+        'bg-appr-reemit',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+    });
+
     it('auto-rejects a bridged approval that arrives after termination', () => {
       const emitter = new AgentEventEmitter();
       registry.register(makeRegistration('bg-appr-10'));

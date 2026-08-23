@@ -1170,12 +1170,26 @@ export class BackgroundTaskRegistry {
         at: event.timestamp,
         ...(options?.nestedSource ? { subagentId: event.subagentId } : {}),
       });
-      // If the entry is already gone/terminal we couldn't park it — reject
-      // so the agent's reasoning loop doesn't block forever on this call.
-      // `.catch()` rather than try/catch: respond is async and a late
-      // rejection (frames torn down post-termination) must not escape as
-      // an unhandledRejection.
       if (!parked) {
+        // Expected duplicate: the scheduler re-notifies the whole batch on
+        // every status transition and agent-core re-emits
+        // TOOL_WAITING_APPROVAL for every still-awaiting call, so an
+        // already-parked call's event can arrive again. Leave the parked
+        // prompt untouched — rejecting here would cancel the waiting call
+        // while its dialog is still visible, and the runtime's responded
+        // set would then no-op the user's real answer.
+        if (
+          this.getPendingApprovals(agentId).some(
+            (a) => a.callId === event.callId,
+          )
+        ) {
+          return;
+        }
+        // Otherwise the entry is already gone/terminal and we couldn't
+        // park it — reject so the agent's reasoning loop doesn't block
+        // forever on this call. `.catch()` rather than try/catch: respond
+        // is async and a late rejection (frames torn down
+        // post-termination) must not escape as an unhandledRejection.
         void event.respond(REJECTED_OUTCOME).catch((error) => {
           debugLogger.error(
             `Failed to reject unparkable approval ${agentId}/${event.callId}:`,

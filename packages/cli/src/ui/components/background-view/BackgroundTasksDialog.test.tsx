@@ -871,6 +871,75 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
+  it('names the nested agent a bridged approval came from', () => {
+    // Approvals bridged from a NESTED agent onto a backgrounded ancestor's
+    // entry are stamped with the nested runtime id (subagentId); the detail
+    // view must name it so the user can tell which descendant is blocked.
+    const bridgedApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'nested-1',
+      name: 'Shell',
+      description: 'run nested-1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo nested',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+      subagentId: 'review-agent-abc123',
+    };
+    const bg = entry({
+      agentId: 'bg-bridged',
+      pendingApprovals: [bridgedApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.lastFrame()).toContain('from nested agent: review-agent-abc123');
+  });
+
+  it('omits the nested-agent line for an unstamped approval', () => {
+    // The entry's OWN parked approvals carry no subagentId — the line must
+    // not render for them.
+    const ownApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'own-1',
+      name: 'Shell',
+      description: 'run own-1',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Allow execution',
+        command: 'echo own',
+        rootCommand: 'echo',
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-own',
+      pendingApprovals: [ownApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.lastFrame()).toContain('Background agent needs approval');
+    expect(h.lastFrame()).not.toContain('from nested agent');
+  });
+
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
     const fg = entry({
       agentId: 'fg-1',

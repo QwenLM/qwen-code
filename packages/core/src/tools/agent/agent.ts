@@ -322,40 +322,6 @@ function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
  * - Otherwise, the agent definition's mode applies if set
  * - Default fallback is auto-edit (sub-agents need autonomy)
  */
-/**
- * Walks a foreground launch's registry lineage (parentAgentId links) to the
- * nearest BACKGROUNDED, still-running ancestor entry.
- *
- * Why: a nested foreground agent has no inline UI. Its scheduler's
- * TOOL_WAITING_APPROVAL fires on the invocation's own emitter, which nothing
- * bridges — the call would wait forever (the batch promise only resolves on
- * completion or abort). When such an ancestor exists, the launch path bridges
- * the nested emitter to that ancestor's Background-tasks entry, parking the
- * approval exactly where the ancestor's own approvals go. No ancestor (a
- * top-level foreground launch from the main session) → undefined → no bridge,
- * and the existing inline confirmation path applies unchanged.
- *
- * Foreground entries stay registered while running and carry parentAgentId
- * (register() in the launch path), so the chain is walkable mid-execution.
- * The hop cap is defensive: lineage is acyclic by construction, but a corrupt
- * entry must not spin.
- */
-export function findBackgroundedAncestorAgentId(
-  registry: { get(agentId: string): AgentTask | undefined },
-  startAgentId: string | null | undefined,
-): string | undefined {
-  let id = startAgentId ?? undefined;
-  for (let hops = 0; id !== undefined && hops < 16; hops++) {
-    const entry = registry.get(id);
-    if (!entry) return undefined;
-    if (entry.isBackgrounded) {
-      return entry.status === 'running' ? id : undefined;
-    }
-    id = entry.parentAgentId ?? undefined;
-  }
-  return undefined;
-}
-
 export function resolveSubagentApprovalMode(
   parentApprovalMode: ApprovalMode,
   agentApprovalMode?: string,
@@ -413,6 +379,43 @@ export function resolveSubagentApprovalMode(
     return PermissionMode.AutoEdit;
   }
   return approvalModeToPermissionMode(parentApprovalMode);
+}
+
+/**
+ * Walks a foreground launch's registry lineage (parentAgentId links) to the
+ * nearest BACKGROUNDED, still-running ancestor entry.
+ *
+ * Why: a nested foreground agent has no inline UI. Its scheduler's
+ * TOOL_WAITING_APPROVAL fires on the invocation's own emitter, which nothing
+ * bridges — the call would wait forever (the batch promise only resolves on
+ * completion or abort). When such an ancestor exists, the launch path bridges
+ * the nested emitter to that ancestor's Background-tasks entry, parking the
+ * approval exactly where the ancestor's own approvals go. No ancestor (a
+ * top-level foreground launch from the main session) → undefined → no bridge,
+ * and the existing inline confirmation path applies unchanged.
+ *
+ * Foreground entries stay registered while running and carry parentAgentId
+ * (register() in the launch path), so the chain is walkable mid-execution.
+ * The walk must reach the ancestor on ANY supported lineage depth
+ * (maxSubagentDepth is configurable up to MAX_SUBAGENT_DEPTH_LIMIT), so
+ * cycle protection comes from a visited set rather than a hop budget.
+ */
+export function findBackgroundedAncestorAgentId(
+  registry: { get(agentId: string): AgentTask | undefined },
+  startAgentId: string | null | undefined,
+): string | undefined {
+  const seen = new Set<string>();
+  let id = startAgentId ?? undefined;
+  while (id !== undefined && !seen.has(id)) {
+    seen.add(id);
+    const entry = registry.get(id);
+    if (!entry) return undefined;
+    if (entry.isBackgrounded) {
+      return entry.status === 'running' ? id : undefined;
+    }
+    id = entry.parentAgentId ?? undefined;
+  }
+  return undefined;
 }
 
 /**

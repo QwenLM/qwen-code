@@ -89,6 +89,7 @@ describe('BackgroundAgentResumeService', () => {
               name: 'researcher',
               color: 'cyan',
               model: undefined as string | undefined,
+              approvalMode: undefined as string | undefined,
             }
           : null,
       ),
@@ -776,6 +777,98 @@ describe('BackgroundAgentResumeService', () => {
     expect(
       (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
     ).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('keeps prompts allowed through the chain for a resumed bubble-mode agent in an interactive session', async () => {
+    // Mirror of the launch-path bubble test (agent.ts): a resumed agent of
+    // a `bubble` definition in an INTERACTIVE session surfaces
+    // confirmations to the Background-tasks dialog instead of auto-denying
+    // them, and nested launches under it must inherit the same policy
+    // through their config prototype chains.
+    const sessionId = 'session-bubble';
+    const agentId = 'agent-bubble';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume bubble policy',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume bubble policy' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume bubble policy',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume bubble policy',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager, config } = createService();
+    config.isInteractive = () => true;
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: undefined,
+      approvalMode: 'bubble',
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    // Bubbling: prompts stay allowed (they park on the entry), and nested
+    // launches inherit the same policy through the prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(false);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(false);
 
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
@@ -1605,6 +1698,7 @@ describe('BackgroundAgentResumeService', () => {
       name: 'researcher',
       color: 'cyan',
       model: 'configured-model',
+      approvalMode: undefined,
     });
     subagentManager.createAgentHeadless = createAgentHeadless;
 
