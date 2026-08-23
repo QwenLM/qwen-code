@@ -327,6 +327,8 @@ export default tseslint.config(
       './scripts/**/*.mjs',
       'esbuild.config.js',
       'packages/*/scripts/**/*.js',
+      'packages/*/scripts/**/*.mjs',
+      'packages/*/build.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
