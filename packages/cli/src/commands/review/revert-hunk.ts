@@ -42,10 +42,12 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -55,7 +57,7 @@ import { parseDiff } from './lib/diff-plan.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import { assertWritableOutPath } from './lib/paths.js';
 import {
-  writeStdoutLine,
+  writeStdoutLineSafe,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 
@@ -152,16 +154,32 @@ export function extractHunkPatch(
   let header = lines
     .slice(file.diffStart - 1, file.hunks[0].diffStart - 1)
     .filter((l) => !FILE_LEVEL_METADATA_RE.test(l));
-  if (file.renameFrom !== undefined) {
-    // A rename-with-edits section names the OLD path in `diff --git`'s first
-    // token and in `---`. With the rename lines stripped those tokens would
-    // send git to a path the tree no longer has, so both are rewritten from
-    // the `+++` token — taken verbatim, quoting and all, because re-quoting
-    // a C-quoted path by hand is exactly the transcription this command
-    // exists to avoid.
-    const plusLine = header.find((l) => l.startsWith('+++ '));
-    if (plusLine !== undefined) {
-      const bTok = plusLine.slice(4);
+  // A rename-with-edits OR copy-with-edits section names the OLD path in
+  // `diff --git`'s first token and in `---`. With the rename/copy lines
+  // stripped those tokens would send `git apply -R` to move the file back —
+  // a mutation different from the one the report names. So whenever the two
+  // sides genuinely disagree, both old-side tokens are rewritten from the
+  // `+++` token — taken verbatim, quoting and all, because re-quoting a
+  // C-quoted path by hand is exactly the transcription this command exists
+  // to avoid. Keyed on the TOKENS disagreeing, not on `renameFrom`: parseDiff
+  // sets that from `rename from` lines only, and a copy section (git emits
+  // them under copy detection, which arbitrary --diff inputs may carry) has
+  // the same two-path shape with `copy from`/`copy to` instead. Creations
+  // and deletions keep their `/dev/null` side untouched — neither token
+  // carries an a/-and-b/ pair there, so the guard below skips them.
+  const plusLine = header.find((l) => l.startsWith('+++ '));
+  const minusLine = header.find((l) => l.startsWith('--- '));
+  if (plusLine !== undefined && minusLine !== undefined) {
+    const bTok = plusLine.slice(4);
+    const aTokOld = minusLine.slice(4);
+    const stripSide = (tok: string): string | null => {
+      if (tok.startsWith('"')) return tok.slice(3);
+      if (/^[ab]\//.test(tok)) return tok.slice(2);
+      return null; // /dev/null, or an unprefixed shape we must not touch
+    };
+    const oldPath = stripSide(aTokOld);
+    const newPath = stripSide(bTok);
+    if (oldPath !== null && newPath !== null && oldPath !== newPath) {
       const aTok = bTok.startsWith('"')
         ? `"a/${bTok.slice(3)}`
         : `a/${bTok.slice(2)}`;
@@ -226,7 +244,14 @@ function gitApply(cwd: string, args: string[]): GitApplyResult {
 }
 
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
-  const diffText = readFileSync(resolve(args.diff), 'utf8');
+  // 'latin1', not 'utf8', end to end: the pipeline's diff files are byte
+  // streams (fetch-diff writes latin1 so "a Latin-1/Shift-JIS diff survives
+  // intact"), and a utf8 round-trip mangles any non-UTF-8 byte to U+FFFD —
+  // git then either refuses a valid patch (a fabricated coupling fact) or
+  // reverse-applies replacement characters into the "reverted" tree (a
+  // fabricated witness pair). latin1 is a 1:1 byte<->char map and all diff
+  // syntax is ASCII, so parsing is unaffected.
+  const diffText = readFileSync(resolve(args.diff), 'latin1');
   const sel = parseHunkId(args.hunk);
   if (!sel) {
     return {
@@ -262,7 +287,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // nothing else can have claimed.
   const dir = mkdtempSync(join(tmpdir(), 'qwen-review-revert-hunk-'));
   const patchPath = join(dir, 'hunk.patch');
-  writeFileSync(patchPath, patch, 'utf8');
+  writeFileSync(patchPath, patch, 'latin1');
   const exec = args.exec ?? gitApply;
   try {
     // `--check` first: a refused revert must leave the tree byte-identical,
@@ -284,6 +309,17 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       };
     }
     const apply = exec(tree, ['apply', '-R', patchPath]);
+    if (apply.error !== undefined || apply.signal !== undefined) {
+      // Same misclassification the --check guard above closes, one call
+      // later — with one difference the note must carry: a git killed
+      // MID-apply may have left the tree partially written, so the caller
+      // must reset before trusting any probe.
+      return {
+        applied: false,
+        hunk: entry,
+        note: `git apply was ${apply.error !== undefined ? `not runnable (${apply.error})` : `killed by ${apply.signal}`} after --check passed — a harness failure, not a fact about the hunk, and the tree may be PARTIALLY modified: reset the scratch tree before the next probe.`,
+      };
+    }
     if (apply.status !== 0) {
       // --check passed and the apply did not: something raced the tree
       // between the two calls. Report it as the harness fact it is.
@@ -340,10 +376,24 @@ export const revertHunkCommand: CommandModule = {
     const out = argv['out'] as string | undefined;
     try {
       if (out !== undefined) assertWritableOutPath(out);
+      // A mistyped --diff must exit 2 (repair the invocation) with the
+      // reason named — an ENOENT escaping readFileSync would exit 1, the
+      // refused-revert class, and a calling script would record a coupling
+      // fact for a typo.
+      const diffPath = resolve(String(argv['diff']));
+      if (!existsSync(diffPath) || !statSync(diffPath).isFile()) {
+        writeStderrLineSafe(
+          `revert-hunk: --diff ${JSON.stringify(String(argv['diff']))} is not a readable file — check the path.`,
+        );
+        process.exitCode = 2;
+        return;
+      }
       let report: object;
       if (argv['list']) {
         report = {
-          hunks: listHunks(readFileSync(resolve(String(argv['diff'])), 'utf8')),
+          hunks: listHunks(
+            readFileSync(resolve(String(argv['diff'])), 'latin1'),
+          ),
         };
       } else {
         const hunk = argv['hunk'] as string | undefined;
@@ -362,11 +412,12 @@ export const revertHunkCommand: CommandModule = {
         report = r;
       }
       const text = JSON.stringify(report, null, 2);
-      // stdout first: the exit code already carries `applied`'s semantics,
-      // and an fs failure on --out AFTER a successful reverse-apply must not
-      // swallow the report and flip the code — the caller would then treat a
-      // mutated tree as untouched.
-      writeStdoutLine(text);
+      // stdout first — and the SAFE variant: the exit code already carries
+      // `applied`'s semantics, and by this line the tree may already be
+      // mutated, so neither an --out failure nor stdout's reader having gone
+      // away (EPIPE from `qwen … | head`) may crash the process into the
+      // refused class over a revert that happened.
+      writeStdoutLineSafe(text);
       if (out !== undefined) {
         try {
           mkdirSync(dirname(resolve(out)), { recursive: true });

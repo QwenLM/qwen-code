@@ -18,7 +18,9 @@ import yargs from 'yargs';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -35,12 +37,13 @@ import {
 } from './revert-hunk.js';
 import { parseDiff } from './lib/diff-plan.js';
 import {
-  writeStdoutLine,
+  writeStdoutLineSafe,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStdoutLineSafe: vi.fn(),
   writeStderrLine: vi.fn(),
   writeStderrLineSafe: vi.fn(),
 }));
@@ -99,6 +102,24 @@ describe('listHunks', () => {
     expect(hunks.map((h) => h.id)).toEqual(['f.txt:1', 'f.txt:2']);
     expect(hunks[0].header).toMatch(/^@@ /);
     expect(hunks[0].addedLines).toBe(1);
+    expect(hunks[0].removedLines).toBe(1);
+  });
+
+  it('keeps added and removed on their own counters — an asymmetric hunk tells them apart', () => {
+    // Every 1+/1- fixture is blind to a counter transposition; the verifier
+    // sizes mutations off these numbers.
+    const dir = tempDir('rh-cnt-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'c.txt'), 'one\ntwo\nthree\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'c.txt'), 'one\nTWO\n2.5\nthree\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const hunks = listHunks(git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    expect(hunks[0].addedLines).toBe(2);
     expect(hunks[0].removedLines).toBe(1);
   });
 });
@@ -274,6 +295,227 @@ describe('runRevertHunk', () => {
     expect(r.note).not.toContain('coupling');
   });
 
+  it('reverts a created file’s only hunk by removing the file — and restores a deleted one', () => {
+    // `new file mode` / `deleted file mode` are deliberately KEPT by the
+    // header filter: they ARE the content semantics of those sections.
+    // "Is this new file dead weight?" is a primary use of the command.
+    const dir = tempDir('rh-cd-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'stays.txt'), 'anchor\n');
+    writeFileSync(join(dir, 'doomed.txt'), 'old content\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'born.txt'), 'new content\n');
+    rmSync(join(dir, 'doomed.txt'));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'create+delete');
+    const diffPath = join(dir, 'cd.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+
+    const created = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'born.txt:1',
+    });
+    expect(created.applied).toBe(true);
+    expect(existsSync(join(dir, 'born.txt'))).toBe(false);
+
+    const deleted = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'doomed.txt:1',
+    });
+    expect(deleted.applied).toBe(true);
+    expect(readFileSync(join(dir, 'doomed.txt'), 'utf8')).toBe('old content\n');
+  });
+
+  it('reverts a COPIED file’s content hunk without rewinding the copy', () => {
+    // A copy-with-edits section has the same two-path header shape as a
+    // rename but under `copy from`/`copy to` — which parseDiff does not
+    // surface as renameFrom. The rewrite keys on the header TOKENS
+    // disagreeing, so copies take the same content-only path.
+    const dir = tempDir('rh-copy-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
+    writeFileSync(join(dir, 'orig.txt'), `top-old\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'copy.txt'), `top-new\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'copy+edit');
+    // -C -C finds copies against unmodified files; the section carries
+    // `copy from`/`copy to`.
+    const diffText = git(dir, 'diff', '-C', '-C', 'HEAD~1', 'HEAD');
+    expect(diffText).toContain('copy from');
+    const diffPath = join(dir, 'copy.diff');
+    writeFileSync(diffPath, diffText);
+
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'copy.txt:1' });
+    expect(r.applied).toBe(true);
+    // The copy stays; only its content hunk reverted. The source file is
+    // untouched either way.
+    expect(readFileSync(join(dir, 'copy.txt'), 'utf8')).toContain('top-old');
+    expect(readFileSync(join(dir, 'orig.txt'), 'utf8')).toContain('top-old');
+  });
+
+  it('reverts through a C-QUOTED rename — the quoted-token surgery is load-bearing', () => {
+    // With core.quotepath on (the default) git C-quotes non-ASCII paths in
+    // the `+++` header, and the rewrite must rebuild the a/ token from the
+    // quoted form without dropping a byte.
+    const dir = tempDir('rh-cq-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
+    writeFileSync(join(dir, 'plain.txt'), `top-old\n${body}\n`);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    git(dir, 'mv', 'plain.txt', 'caf\u00e9.txt');
+    writeFileSync(join(dir, 'caf\u00e9.txt'), `top-new\n${body}\n`);
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'rename+edit');
+    const diffText = git(dir, 'diff', '-M', 'HEAD~1', 'HEAD');
+    const diffPath = join(dir, 'cq.diff');
+    writeFileSync(diffPath, diffText);
+    const { files } = parseDiff(diffText);
+    expect(files[0].path).toBe('caf\u00e9.txt');
+
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'caf\u00e9.txt:1',
+    });
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toContain(
+      'top-old',
+    );
+    expect(existsSync(join(dir, 'plain.txt'))).toBe(false);
+  });
+
+  it('round-trips non-UTF-8 bytes — the diff is a byte stream, not text', () => {
+    // A utf8 read mangles a lone 0xE9 (Latin-1 é) to U+FFFD before git ever
+    // sees the patch: context lines then mismatch (a fabricated coupling
+    // fact) or replacement bytes land in the "reverted" tree. latin1 is the
+    // pipeline's byte-fidelity convention (fetch-diff writes it).
+    const dir = tempDir('rh-l1-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    const mid = Buffer.from('caf\xe9 latin1 line\n', 'latin1');
+    writeFileSync(
+      join(dir, 'legacy.txt'),
+      Buffer.concat([Buffer.from('top-old\n'), mid]),
+    );
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(
+      join(dir, 'legacy.txt'),
+      Buffer.concat([Buffer.from('top-new\n'), mid]),
+    );
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'l1.diff');
+    writeFileSync(
+      diffPath,
+      execFileSync('git', ['diff', 'HEAD~1', 'HEAD'], { cwd: dir }),
+    );
+
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'legacy.txt:1',
+    });
+    expect(r.applied).toBe(true);
+    const bytes = readFileSync(join(dir, 'legacy.txt'));
+    expect(bytes.includes(Buffer.from('top-old'))).toBe(true);
+    // The 0xE9 byte survived — no U+FFFD (EF BF BD) anywhere.
+    expect(bytes.includes(0xe9)).toBe(true);
+    expect(bytes.includes(Buffer.from([0xef, 0xbf, 0xbd]))).toBe(false);
+  });
+
+  it('numbers hunks PER FILE on a multi-file diff, and reverts only the addressed file', () => {
+    const dir = tempDir('rh-multi-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'a.txt'), 'a-old\n');
+    writeFileSync(join(dir, 'b.txt'), 'b-old\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'a.txt'), 'a-new\n');
+    writeFileSync(join(dir, 'b.txt'), 'b-new\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'multi.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+
+    const diffText = readFileSync(diffPath, 'utf8');
+    // Per-file numbering: the second file's first hunk is :1, not :2.
+    expect(listHunks(diffText).map((h) => h.id)).toEqual([
+      'a.txt:1',
+      'b.txt:1',
+    ]);
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'b.txt:1' });
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(dir, 'b.txt'), 'utf8')).toBe('b-old\n');
+    expect(readFileSync(join(dir, 'a.txt'), 'utf8')).toBe('a-new\n');
+  });
+
+  it('reports a git KILLED during --check as a harness fact too', () => {
+    // The signal arm of the guard: a timeout or OOM kill returns
+    // {status: null, signal} — falling through to `status !== 0` would
+    // record a phantom coupling fact.
+    const { dir, diffPath } = twoHunkFixture();
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+      exec: () => ({ status: null, stderr: '', signal: 'SIGTERM' }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.conflict).toBeUndefined();
+    expect(r.note).toContain('could not run git');
+    expect(r.note).toContain('SIGTERM');
+  });
+
+  it('a git killed MID-APPLY warns that the tree may be partially modified', () => {
+    // After --check passes the apply can still be killed; unlike the check
+    // stage, writes may already have landed, and the note must send the
+    // caller to reset before the next probe.
+    const { dir, diffPath } = twoHunkFixture();
+    const calls: string[][] = [];
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+      exec: (_cwd, args) => {
+        calls.push(args);
+        return args.includes('--check')
+          ? { status: 0, stderr: '' }
+          : { status: null, stderr: '', signal: 'SIGKILL' };
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(r.applied).toBe(false);
+    expect(r.note).toContain('PARTIALLY modified');
+  });
+
+  it('cleans its patch staging directory up, applied or refused', () => {
+    const countStaging = () =>
+      readdirSync(tmpdir()).filter((d) =>
+        d.startsWith('qwen-review-revert-hunk-'),
+      ).length;
+    const before = countStaging();
+    const { dir, diffPath } = twoHunkFixture();
+    runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' });
+    runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' }); // refused
+    expect(countStaging()).toBe(before);
+  });
+
   it('names the check-passed-but-apply-failed race as a tree change, via the exec seam', () => {
     // Unreachable deterministically through real git — the whole point of
     // the seam. `--check` passes, the apply then fails: something raced the
@@ -298,17 +540,23 @@ describe('runRevertHunk', () => {
 });
 
 describe('the command wiring', () => {
-  it('--list prints the enumeration without touching any tree', () => {
+  it('--list prints the enumeration without touching any tree, exit 0', () => {
     const { diffPath } = twoHunkFixture();
+    process.exitCode = 0;
     (revertHunkCommand.handler as (a: unknown) => void)({
       diff: diffPath,
       list: true,
     });
-    const printed = vi.mocked(writeStdoutLine).mock.calls.at(-1)?.[0] as string;
+    const printed = vi
+      .mocked(writeStdoutLineSafe)
+      .mock.calls.at(-1)?.[0] as string;
     const parsed = JSON.parse(printed) as {
       hunks: Array<{ id: string }>;
     };
     expect(parsed.hunks.map((h) => h.id)).toEqual(['f.txt:1', 'f.txt:2']);
+    // The enumeration is step one of every calling script; a stray non-zero
+    // here aborts hunk selection with a perfectly good listing on stdout.
+    expect(process.exitCode).toBe(0);
   });
 
   it('demands both --hunk and --tree when not listing, and says so', () => {
@@ -346,6 +594,61 @@ describe('the command wiring', () => {
       tree: dir,
     });
     expect(process.exitCode).toBe(1);
+    // The refusal REPORT still reaches stdout — exit 1 tells the script
+    // which branch to take, the JSON tells it why (coupling vs mutated tree
+    // vs harness race), and losing the second half strands the caller.
+    const printed = vi
+      .mocked(writeStdoutLineSafe)
+      .mock.calls.at(-1)?.[0] as string;
+    expect((JSON.parse(printed) as { applied: boolean }).applied).toBe(false);
+    process.exitCode = 0;
+  });
+
+  it('--out carries the same report stdout did, and an unusable --out refuses BEFORE mutating', () => {
+    const { dir, diffPath } = twoHunkFixture();
+    const out = join(tempDir('rh-out-'), 'report.json');
+    process.exitCode = 0;
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: diffPath,
+      hunk: 'f.txt:1',
+      tree: dir,
+      out,
+    });
+    expect(process.exitCode).toBe(0);
+    const printed = vi
+      .mocked(writeStdoutLineSafe)
+      .mock.calls.at(-1)?.[0] as string;
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual(JSON.parse(printed));
+
+    // A directory --out must be classified before the reverse-apply runs —
+    // discovering EISDIR after it would leave a mutated tree behind a
+    // failure exit nothing distinguishes.
+    const fresh = twoHunkFixture();
+    const before = readFileSync(join(fresh.dir, 'f.txt'), 'utf8');
+    process.exitCode = 0;
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: fresh.diffPath,
+      hunk: 'f.txt:1',
+      tree: fresh.dir,
+      out: tempDir('rh-outdir-'),
+    });
+    expect(process.exitCode).toBe(2);
+    expect(readFileSync(join(fresh.dir, 'f.txt'), 'utf8')).toBe(before);
+    process.exitCode = 0;
+  });
+
+  it('a mistyped --diff exits 2 with the reason named — never the refused-revert class', () => {
+    const { dir } = twoHunkFixture();
+    process.exitCode = 0;
+    (revertHunkCommand.handler as (a: unknown) => void)({
+      diff: '/no/such/place/pr.diff',
+      hunk: 'f.txt:1',
+      tree: dir,
+    });
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('not a readable file'),
+    );
     process.exitCode = 0;
   });
 

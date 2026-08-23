@@ -813,6 +813,10 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].severity).toBe('Suggestion');
     expect(report.counts.bySeverity['Critical']).toBe(0);
     expect(report.findings[0].failureScenario).toContain('failed there too');
+    // The measurement hold must run BEFORE the witness hold, or the held
+    // Suggestion (review-source, no witness) would be demoted to low
+    // confidence and silently lose the PR surface the hold promises.
+    expect(report.findings[0].confidence).toBe('high');
   });
 
   it('--to-anchors writes the resolver input beside the artifact, and names it on stderr', () => {
@@ -1636,6 +1640,9 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
       'not run \u2212',
       'not run \uFF0D',
       'not run —— …',
+      // The phrase's own word-continuations carry no reason either.
+      'not runnable',
+      'not running —',
     ]) {
       const { unwitnessed } = holdUnwitnessedFindings([
         { ...critical, witness },
@@ -1647,6 +1654,7 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     for (const witness of [
       'not run — timing window no probe can pin',
       'not run — 需要生产环境才能触发',
+      'not runnable — needs a prod-only token',
     ]) {
       const { unwitnessed } = holdUnwitnessedFindings([
         { ...critical, witness },

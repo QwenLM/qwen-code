@@ -46,7 +46,9 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -214,13 +216,46 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       );
     }
   }
+  // The identity of each tree is PINNED here, by realpath, and re-checked at
+  // every use site below. Two reasons, one per check. Equality: a path passed
+  // as both arms (a copy-pasted flag, two symlinks to one tree) runs a
+  // self-comparison and returns `observed: true, identicalOutput: true` — a
+  // "the PR changes nothing" verdict manufactured from nothing. Re-check: the
+  // guard runs before arm a's whole drive window, and the driven code is the
+  // PR's own — untrusted by this command's threat model — so a directory
+  // swapped for a symlink between validation and use would send arm b to a
+  // tree the report never names (check-then-use, with the attacker inside
+  // the window).
+  const realpathOf = (p: string): string | null => {
+    try {
+      return realpathSync(resolve(p));
+    } catch {
+      return null;
+    }
+  };
+  const realA = realpathOf(args.armA);
+  const realB = realpathOf(args.armB);
+  const realShared =
+    args.sharedCwd !== undefined ? realpathOf(args.sharedCwd) : null;
+  if (realA !== null && realA === realB) {
+    return fail(
+      `--arm-a and --arm-b resolve to the same directory (${realA}) — an A/B needs two trees, and a self-comparison licenses "the PR changes nothing" from nothing.`,
+    );
+  }
 
   const tmux = (...a: string[]) => exec('tmux', ['-L', args.server, ...a]);
   const killedStale = tmux('kill-server').status === 0;
 
-  const dir = join(tmpdir(), `qwen-review-ab-drive-${args.server}`);
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
+  // mkdtemp at BOTH levels, not a server-keyed fixed path. The run dir: a
+  // predictable name in the shared temp dir is the symlink-planting vector
+  // revert-hunk documents, and a pre-planted .rc/.log pair would fabricate an
+  // arm's outcome outright. The per-phase dirs (created inside `start`, right
+  // before each session): the driven code is the PR's own, and with fixed
+  // sibling names arm a's script could learn the layout and pre-write ARM
+  // B'S sentinel — forging the other tree's outcome, exit code and
+  // `observed: true`. A phase's directory does not exist until the moment
+  // that phase starts, so there is nothing for earlier code to aim at.
+  const runDir = mkdtempSync(join(tmpdir(), 'qwen-review-ab-drive-'));
 
   // A tmux server exits with its LAST session — and this command, unlike
   // `drive`, starts sessions sequentially, so a phase whose script exits
@@ -240,7 +275,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     '/dev/null',
   );
   if (keeper.status !== 0) {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
     return fail(
       `tmux could not start a session: ${keeper.stderr.trim() || 'no error text'} — an environment gap, not a finding`,
       { killedStale },
@@ -248,10 +283,12 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   }
 
   /**
-   * Start a wrapped script in its own tmux session. Sessions rather than
-   * windows: each phase is killable by name, and one leaked phase cannot be
-   * captured as another. The wrapper's sentinel file doubles as the liveness
-   * probe — present means exited.
+   * Start a wrapped script in its own tmux session, with its own directory
+   * created HERE — see the runDir comment for why the layout must not exist
+   * before the phase does. Sessions rather than windows: each phase is
+   * killable by name, and one leaked phase cannot be captured as another.
+   * The wrapper's sentinel file is half of the liveness probe — present
+   * means exited (`sharedAlive` supplies the other half).
    */
   const start = (
     name: string,
@@ -259,29 +296,50 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     prefix: string,
     script: string,
   ): { logPath: string; rcPath: string; error?: string } => {
-    const scriptPath = join(dir, `${name}.sh`);
-    const logPath = join(dir, `${name}.log`);
-    const rcPath = join(dir, `${name}.rc`);
-    writeFileSync(scriptPath, wrapScript(prefix + script, rcPath), 'utf8');
-    const create = tmux(
-      'new-session',
-      '-d',
-      '-s',
-      name,
-      '-c',
-      cwd,
-      'bash',
-      '-lc',
-      `bash ${shellQuote(scriptPath)} > ${shellQuote(logPath)} 2>&1`,
-    );
-    if (create.status !== 0) {
-      return {
-        logPath,
-        rcPath,
-        error: create.stderr.trim() || 'no error text',
-      };
+    // The fs work is guarded: a disk-full or fd-exhaustion throw while
+    // standing arm b up must degrade to this phase's error — the handler's
+    // generic catch would discard arm a's already-completed capture, the
+    // evidence this command exists to preserve.
+    let phaseDir: string;
+    let logPath = '';
+    let rcPath = '';
+    try {
+      phaseDir = mkdtempSync(join(runDir, `${name}-`));
+      logPath = join(phaseDir, `${name}.log`);
+      rcPath = join(phaseDir, `${name}.rc`);
+      const scriptPath = join(phaseDir, `${name}.sh`);
+      writeFileSync(scriptPath, wrapScript(prefix + script, rcPath), 'utf8');
+      const create = tmux(
+        'new-session',
+        '-d',
+        '-s',
+        name,
+        '-c',
+        cwd,
+        'bash',
+        '-lc',
+        `bash ${shellQuote(scriptPath)} > ${shellQuote(logPath)} 2>&1`,
+      );
+      if (create.status !== 0) {
+        return {
+          logPath,
+          rcPath,
+          error: create.stderr.trim() || 'no error text',
+        };
+      }
+      return { logPath, rcPath };
+    } catch (err) {
+      return { logPath, rcPath, error: (err as Error).message };
     }
-    return { logPath, rcPath };
+  };
+
+  /** Read a file the driven code may be racing us on; absent reads as ''. */
+  const readIfThere = (p: string): string => {
+    try {
+      return readFileSync(p, 'utf8');
+    } catch {
+      return '';
+    }
   };
 
   /**
@@ -315,7 +373,21 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     a: null,
     b: null,
   };
-  let sharedRc: string | null = null; // liveness probe of the CURRENT instance
+  /** The CURRENT shared instance — its session name and sentinel path. */
+  let shared: { name: string; rcPath: string } | null = null;
+  /**
+   * Alive means BOTH signals agree: no exit sentinel AND the session still
+   * exists. The sentinel is one-directional — its presence proves an exit,
+   * but its absence proves nothing, because the wrapper's EXIT trap never
+   * fires under SIGKILL and an `exec`'d daemon (an idiomatic shared script)
+   * replaces the shell that holds the trap. Reading "no sentinel" as
+   * "alive" reported a crashed upstream as having outlived its arm — and
+   * `observed: true` then licensed captures taken against a corpse.
+   */
+  const sharedAlive = (): boolean =>
+    shared !== null &&
+    !existsSync(shared.rcPath) &&
+    tmux('has-session', '-t', shared.name).status === 0;
   let note = '';
 
   try {
@@ -328,15 +400,14 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         // Liveness is read BEFORE the teardown below, same as the completed
         // path: "alive at end" means "outlived the arm", never "survived our
         // own kill".
-        const sharedAliveAtEnd =
-          sharedRc === null ? null : !existsSync(sharedRc);
+        const sharedAliveAtEnd = shared === null ? null : sharedAlive();
         // "Killed unconditionally" has to include the bail exits: a per-arm
         // shared instance leaked past a not-ready bail holds its port through
         // arm b's whole window, kills shared-b at birth, and the note then
         // sends the verifier to fix the wrong component.
-        if (args.shared && mode === 'per-arm' && sharedRc !== null) {
-          tmux('kill-session', '-t', `shared-${arm}`);
-          sharedRc = null;
+        if (args.shared && mode === 'per-arm' && shared !== null) {
+          tmux('kill-session', '-t', shared.name);
+          shared = null;
         }
         return {
           arm,
@@ -360,11 +431,23 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         args.shared &&
         mode === 'once' &&
         arm === 'b' &&
-        sharedRc !== null &&
-        existsSync(sharedRc)
+        shared !== null &&
+        !sharedAlive()
       ) {
         note = `the shared process exited before arm b was driven — nothing was driven for arm b, and its run would have watched a dead upstream. Fix the shared script (or raise its TTL) and re-run.`;
         return bail('not-ready', null);
+      }
+
+      // Check-then-use closed: the pre-flight pinned each tree's realpath,
+      // and the pins are re-checked HERE — after arm a's whole drive window,
+      // during which the PR's own code ran. A root that vanished (tmux -c
+      // would fall back to $HOME) or now resolves elsewhere (a symlink swap)
+      // is a harness fact, and the arm must not be attributed to a tree it
+      // never ran in.
+      const expectedRoot = arm === 'a' ? realA : realB;
+      if (realpathOf(root) !== expectedRoot) {
+        note = `arm ${arm}'s root ${JSON.stringify(root)} no longer resolves to the directory validated at start (${expectedRoot ?? 'gone'}) — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
+        return bail('unavailable', null);
       }
 
       // Shared upstream: one fresh instance per arm unless --shared-once, in
@@ -373,6 +456,13 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         const sharedCwd = resolve(
           args.sharedCwd ?? (mode === 'once' ? args.armA : root),
         );
+        if (
+          args.sharedCwd !== undefined &&
+          realpathOf(sharedCwd) !== realShared
+        ) {
+          note = `--shared-cwd ${JSON.stringify(args.sharedCwd)} no longer resolves to the directory validated at start — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
+          return mode === 'once' ? 'stop' : bail('unavailable', null);
+        }
         const s = start(
           `shared-${arm}`,
           sharedCwd,
@@ -386,7 +476,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           // against nothing.
           return mode === 'once' ? 'stop' : bail('unavailable', null);
         }
-        sharedRc = s.rcPath;
+        shared = { name: `shared-${arm}`, rcPath: s.rcPath };
         if (args.sharedReady) {
           const ms = pollReady(
             args.sharedReady,
@@ -428,10 +518,9 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       let exitCode: number | null = null;
       let output = '';
       for (;;) {
-        output = existsSync(a.logPath) ? readFileSync(a.logPath, 'utf8') : '';
-        exitCode = existsSync(a.rcPath)
-          ? sentinelExitCode(readFileSync(a.rcPath, 'utf8'))
-          : null;
+        output = readIfThere(a.logPath);
+        const rcText = readIfThere(a.rcPath);
+        exitCode = rcText === '' ? null : sentinelExitCode(rcText);
         if (exitCode !== null) {
           // Re-read the log now that the sentinel is there: the read above
           // happened BEFORE it, and the wrapper writes the sentinel from an
@@ -441,7 +530,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           // near-cap logs). Here the stake is doubled: one arm hitting the
           // race and the other not turns two identical runs into
           // `identicalOutput: false` — a harness-fabricated difference.
-          output = existsSync(a.logPath) ? readFileSync(a.logPath, 'utf8') : '';
+          output = readIfThere(a.logPath);
           outcome = 'completed';
           break;
         }
@@ -462,10 +551,10 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       tmux('kill-session', '-t', `arm-${arm}`);
       // Liveness is read BEFORE the per-arm teardown, so "alive at end" means
       // "outlived the arm", not "survived our own kill".
-      const sharedAliveAtEnd = sharedRc === null ? null : !existsSync(sharedRc);
-      if (args.shared && mode === 'per-arm') {
-        tmux('kill-session', '-t', `shared-${arm}`);
-        sharedRc = null;
+      const sharedAliveAtEnd = shared === null ? null : sharedAlive();
+      if (args.shared && mode === 'per-arm' && shared !== null) {
+        tmux('kill-session', '-t', shared.name);
+        shared = null;
       }
       const { text, truncated } = trimCapture(output);
       return {
@@ -492,7 +581,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     if (b !== 'stop') armReports.b = b;
   } finally {
     tmux('kill-server');
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
   }
 
   const { a, b } = armReports;
@@ -634,7 +723,11 @@ export const abDriveCommand: CommandModule = {
       if (!report.observed) process.exitCode = 1;
     } catch (err) {
       writeStderrLine((err as Error).message);
-      process.exitCode = 1;
+      // TypeError is the repairable-invocation class (`assertWritableOutPath`
+      // and the numeric coercions throw it); exit 2 matches revert-hunk and
+      // the other five callers of the same helper, so a calling script can
+      // tell "fix the flags" from "a run failed".
+      process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
 };

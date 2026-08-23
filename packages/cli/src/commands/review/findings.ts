@@ -581,7 +581,13 @@ export function holdCriticalsFailingOnBase(
  * a letter or a number; punctuation alone contributes neither.
  */
 export function isEmptyNotRunWitness(witness: string): boolean {
-  const m = /^\s*(?:witness:\s*)?not run(?<rest>[\s\S]*)$/i.exec(witness);
+  // The phrase's own word-continuation is consumed before the remainder is
+  // tested: `not runnable` and `not running —` are the brief's reason-less
+  // forms too, and counting their `nable`/`ning` letters as reason content
+  // was the same fail-open one suffix over.
+  const m = /^\s*(?:witness:\s*)?not run[\p{L}\p{N}]*(?<rest>[\s\S]*)$/iu.exec(
+    witness,
+  );
   if (!m) return false;
   return !/[\p{L}\p{N}]/u.test(m.groups!['rest']!);
 }
