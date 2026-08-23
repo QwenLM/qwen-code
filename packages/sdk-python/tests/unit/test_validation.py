@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 
 import pytest
@@ -74,8 +75,22 @@ def test_accepts_canonical_session_id_in_either_case() -> None:
     validate_query_options(QueryOptions(session_id=VALID_UUID.upper()))
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ["default", "plan", "auto-edit", "auto", "yolo"],
+)
+def test_accepts_valid_permission_modes(mode: str) -> None:
+    validate_query_options(QueryOptions.from_mapping({"permission_mode": mode}))
+
+
 def test_rejects_invalid_permission_mode() -> None:
-    with pytest.raises(ValidationError, match="Invalid permission_mode"):
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Invalid permission_mode: 'unsafe-mode'. "
+            "Expected one of: default, plan, auto-edit, auto, yolo."
+        ),
+    ):
         validate_query_options(
             QueryOptions.from_mapping({"permission_mode": "unsafe-mode"})
         )
