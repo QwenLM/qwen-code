@@ -162,6 +162,65 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     ]);
   });
 
+  it('preserves a findings_list result as structured output', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-findings',
+          kind: 'think',
+          title: 'ReportFindings',
+          status: 'completed',
+          rawOutput: {
+            type: 'findings_list',
+            level: 'high',
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical',
+                confidence: 'high',
+                file: 'src/foo.ts',
+                line: 42,
+                summary: 'wrong return value on cold cache',
+                shortSummary: 'wrong return value on cold cache',
+                failureScenario: 'first call after start returns undefined',
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          tools: [
+            {
+              resultDisplay: {
+                type: 'findings_list',
+                level: 'high',
+                findings: [
+                  {
+                    id: 'R1-1',
+                    severity: 'Critical',
+                    file: 'src/foo.ts',
+                    line: 42,
+                    shortSummary: 'wrong return value on cold cache',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({

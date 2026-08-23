@@ -281,6 +281,7 @@ function formatToolResultDisplay(
     (typeof value['fileDiff'] === 'string' ||
       'ansiOutput' in value ||
       value['type'] === 'todo_list' ||
+      value['type'] === 'findings_list' ||
       value['type'] === 'plan_summary' ||
       value['type'] === 'task_execution' ||
       value['type'] === 'mcp_tool_progress')

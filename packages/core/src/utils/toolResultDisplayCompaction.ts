@@ -8,6 +8,7 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  FindingsResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -381,6 +382,46 @@ function compactTodoResultDisplay(
   };
 }
 
+function isFindingsResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is FindingsResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'findings_list'
+  );
+}
+
+function compactFindingsResultDisplay(
+  display: FindingsResultDisplay,
+  purpose: CompactionPurpose,
+): FindingsResultDisplay {
+  return {
+    ...display,
+    findings: display.findings.map((finding) => ({
+      ...finding,
+      summary: compactString(
+        finding.summary,
+        purpose,
+        MAX_RETAINED_AGENT_FIELD_CHARS,
+      ),
+      failureScenario: compactString(
+        finding.failureScenario,
+        purpose,
+        MAX_RETAINED_AGENT_FIELD_CHARS,
+      ),
+      ...(finding.outcomeNote !== undefined && {
+        outcomeNote: compactString(
+          finding.outcomeNote,
+          purpose,
+          MAX_RETAINED_AGENT_FIELD_CHARS,
+        ),
+      }),
+    })),
+  };
+}
+
 function isPlanResultDisplay(
   resultDisplay: unknown,
 ): resultDisplay is PlanResultDisplay {
@@ -524,6 +565,10 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
 
   if (isTodoResultDisplay(resultDisplay)) {
     return compactTodoResultDisplay(resultDisplay, purpose) as T;
+  }
+
+  if (isFindingsResultDisplay(resultDisplay)) {
+    return compactFindingsResultDisplay(resultDisplay, purpose) as T;
   }
 
   if (isPlanResultDisplay(resultDisplay)) {

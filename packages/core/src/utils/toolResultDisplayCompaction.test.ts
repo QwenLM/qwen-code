@@ -9,6 +9,7 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  FindingsResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -353,6 +354,37 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedPlan.message).toContain('truncated from');
     expect(compactedPlan.plan).toContain('truncated from');
     expect(compactedProgress.message).toContain('truncated from');
+  });
+
+  it('compacts findings displays without touching their typed fields', () => {
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          confidence: 'high',
+          file: 'src/foo.ts',
+          line: 42,
+          summary: `summary-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          shortSummary: 'short',
+          failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          outcome: 'skipped',
+          outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+        },
+      ],
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.findings[0].summary).toContain('truncated from');
+    expect(compacted.findings[0].failureScenario).toContain('truncated from');
+    expect(compacted.findings[0].outcomeNote).toContain('truncated from');
+    expect(compacted.findings[0].severity).toBe('Critical');
+    expect(compacted.findings[0].outcome).toBe('skipped');
+    expect(compacted.findings[0].shortSummary).toBe('short');
+    expect(compacted.level).toBe('high');
   });
 
   it('compacts task list and team result displays', () => {

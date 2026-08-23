@@ -231,6 +231,24 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export {
+  ReportFindingsTool,
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  REPORT_FINDINGS_LEVELS,
+  compressFindingSummary,
+} from './tools/report-findings.js';
+export type {
+  ReportFindingsParams,
+  ReportFindingsFindingParams,
+  FindingSeverity,
+  FindingConfidence,
+  FindingOutcome,
+  FindingSource,
+  ReportFindingsLevel,
+} from './tools/report-findings.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
