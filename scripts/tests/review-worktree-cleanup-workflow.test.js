@@ -157,12 +157,24 @@ const bashAvailable = spawnSync('bash', ['-c', 'exit 0']).status === 0;
 // and root ignores the bits entirely.
 const permissionFixturesAvailable =
   bashAvailable && process.platform !== 'win32' && process.geteuid?.() !== 0;
+// The ladder's failure path resolves the leftover with `realpath --`; on a
+// host without it (the merge_group macOS lane ships none) the function
+// refuses as `path could not be resolved` instead, so the test asserting
+// the removal-failure warning gates on it separately — the plain-leftover
+// fixture returns before resolution, and the symlink fixture's refusal
+// branch fires before the resolved value is consumed.
+const realpathAvailable =
+  spawnSync('realpath', ['--', '/'], { stdio: 'ignore' }).status === 0;
 const runRemoveReviewTree = (workspace, ...args) =>
   spawnSync(
     'bash',
     [
       '-c',
-      `set -uo pipefail\n${removeReviewTreeFn}\nremove_review_tree "$@"`,
+      // Mirror the runner's flags: Actions runs the step under errexit, and
+      // the step's own `set -uo pipefail` first line does not turn it back
+      // off — an unguarded failing command inside the function must fail
+      // these tests exactly as it fails the `if: always()` step.
+      `set -euo pipefail\n${removeReviewTreeFn}\nremove_review_tree "$@"`,
       'remove_review_tree',
       ...args,
     ],
@@ -221,6 +233,11 @@ describe('review worktree cleanup steps', () => {
     expectHardenedGit(reviewCleanStep);
     // Fallback for worktree directories Git no longer knows about.
     expect(reviewCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
+    // The leftover loop's glob is the only call site that feeds surviving
+    // permission-poisoned trees into the ladder: a rename here matches
+    // nothing, and every pin and fixture stays green while the sweep
+    // silently skips the trees it exists to heal.
+    expect(reviewCleanStep).toContain(`for leftover in ${worktreePrefix}*; do`);
     // Leases are session+prompt scoped so a stale one is inert, but the glob
     // must stay in sync with LEASE_PREFIX or it silently never matches.
     expect(reviewCleanStep).toContain(
@@ -238,10 +255,33 @@ describe('review worktree cleanup steps', () => {
     // Three removal attempts: the initial rm plus one retry after EACH
     // repair rung, so a chmod-repaired tree never escalates to sudo.
     expect(reviewCleanCode.match(/rm -rf "\$abs"/g)).toHaveLength(3);
+    // The first rm must run BEFORE the refusal guard: a guard-first rewrite
+    // refuses a symlinked leftover that the plain rm would simply have
+    // unlinked (measured: one spurious refusal, documented behavior gone).
+    const guardPos = reviewCleanCode.indexOf('if [ -n "$reason" ]');
+    expect(reviewCleanCode.indexOf('rm -rf "$abs"')).toBeLessThan(guardPos);
     // The non-sudo rung must exist as its own command, not just inside the
-    // sudo line.
-    expect(reviewCleanCode).toMatch(/^\s*chmod -R u\+rwX "\$abs"/m);
-    expect(reviewCleanCode).toContain('sudo -n chown -R');
+    // sudo line, with its errexit guard intact: the leftover loop calls the
+    // function bare under the runner's -e, so an unguarded failing rung
+    // would kill the `if: always()` step mid-ladder.
+    expect(reviewCleanCode).toMatch(
+      /^\s*chmod -R u\+rwX "\$abs" 2>\/dev\/null \|\| true$/m,
+    );
+    // The rung's retry rm must sit directly under it: hoisting the sudo
+    // block between the two escalates every chmod-repaired tree to sudo,
+    // breaking the never-escalates ordering the rm count pins above.
+    expect(reviewCleanCode).toMatch(
+      /^\s*chmod -R u\+rwX "\$abs"[^\n]*\n\s*rm -rf "\$abs"/m,
+    );
+    // Both sudo rungs pinned in full: dropping the chmod leg or chowning to
+    // root leaves a foreign-owned tree owned-but-locked, so the retry rm
+    // still fails and the leftover survives the ladder built to heal it.
+    expect(reviewCleanCode).toContain(
+      'sudo -n chown -R "$(id -u):$(id -g)" "$abs" 2>/dev/null || true',
+    );
+    expect(reviewCleanCode).toContain(
+      'sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true',
+    );
     expect(reviewCleanCode).toContain('remove_review_tree "$leftover"');
     // The symlink-refusal guard must survive, including the direction of
     // its comparison and the deciding reason it now carries.
@@ -249,13 +289,22 @@ describe('review worktree cleanup steps', () => {
       'refusing to repair review worktree path (${reason})',
     );
     expect(reviewCleanCode).toContain('!= "$ws_real/$rel"');
+    // The realpath fallbacks keep the assignments errexit-safe: a leftover
+    // realpath cannot resolve (a symlink loop, or a dangling link with
+    // missing target ancestry, under a locked parent) must warn and
+    // continue, not die at the assignment and skip the trailing sweeps.
+    expect(reviewCleanCode).toContain(
+      'abs_real="$(realpath -- "$abs" 2>/dev/null)" || abs_real=\'\'',
+    );
+    expect(reviewCleanCode).toMatch(
+      /ws_real="\$\(realpath -- "\$GITHUB_WORKSPACE" 2>\/dev\/null\)" \|\|\n\s*ws_real="\$GITHUB_WORKSPACE"/,
+    );
     // Order and derivation are load-bearing too, not just presence
     // (mutation-probed): with the refusal guard below the rungs, a rewrite
     // chmod/chowns through a planted link before the check runs; with the
     // sudo block above the chmod rung, a chmod-repaired tree escalates to
     // sudo anyway; with rel blanked, every leftover refuses as "outside the
     // workspace" and the incident this PR exists for recurs.
-    const guardPos = reviewCleanCode.indexOf('if [ -n "$reason" ]');
     const chmodPos = reviewCleanCode.indexOf('chmod -R u+rwX "$abs"');
     const sudoPos = reviewCleanCode.indexOf('sudo -n chown -R');
     expect(guardPos).toBeGreaterThan(-1);
@@ -268,12 +317,7 @@ describe('review worktree cleanup steps', () => {
     // stdout on bare CR too — and the owner enrichment must read only ls's
     // first line, or a newline-bearing name's later lines are emitted
     // standalone and a `::` among them parses as a workflow command.
-    const fnStart = reviewCleanCode.indexOf('remove_review_tree() {');
-    const reviewTreeFn = reviewCleanCode.slice(
-      fnStart,
-      reviewCleanCode.indexOf('\n}\n', fnStart),
-    );
-    const warningLines = reviewTreeFn
+    const warningLines = removeReviewTreeFn
       .split('\n')
       .filter((line) => line.includes('::warning::'));
     expect(warningLines).toHaveLength(2);
@@ -305,6 +349,12 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanCode).toContain("local sudo_probe='password-gated'");
     expect(reviewCleanCode).toContain(
       "command -v sudo >/dev/null 2>&1 || sudo_probe='absent'",
+    );
+    // The ok/password-gated split lives in the `sudo -n true` predicate:
+    // dropping it reports `sudo: ok` on exactly the NOPASSWD-less runners
+    // this ladder exists for, and mis-triages the on-call.
+    expect(reviewCleanCode).toContain(
+      'command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null',
     );
     expect(reviewCleanCode).toContain("sudo_probe='ok'");
   });
@@ -395,7 +445,7 @@ describe('review worktree cleanup steps', () => {
     },
   );
 
-  it.skipIf(!permissionFixturesAvailable)(
+  it.skipIf(!permissionFixturesAvailable || !realpathAvailable)(
     'remove_review_tree keeps a newline-bearing leftover name on one warning line',
     () => {
       const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
