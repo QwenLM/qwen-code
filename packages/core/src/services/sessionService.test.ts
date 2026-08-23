@@ -1778,7 +1778,7 @@ describe('SessionService', () => {
       expect(
         vi.mocked(commitUsageBeforeTranscriptDeletion).mock
           .invocationCallOrder[0]!,
-      ).toBeLessThan(unlinkSyncSpy.mock.invocationCallOrder[0]!);
+      ).toBeGreaterThan(unlinkSyncSpy.mock.invocationCallOrder[0]!);
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
@@ -1813,6 +1813,23 @@ describe('SessionService', () => {
       expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not commit usage when transcript deletion fails', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const unlinkError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      unlinkSyncSpy.mockImplementationOnce(() => {
+        throw unlinkError;
+      });
+
+      await expect(sessionService.removeSession(sessionIdA)).rejects.toBe(
+        unlinkError,
+      );
+
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
 
     it('should clear session organization when removing a session', async () => {
@@ -2180,6 +2197,32 @@ describe('SessionService', () => {
       );
     });
 
+    it('rechecks the generation before moving the active worktree sidecar', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const generationChanged = new Error('generation changed');
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw generationChanged;
+        });
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.anything(),
+      );
+    });
+
     it('should move the prompt ledger alongside the archived session', async () => {
       mockActiveSessionOnly();
       existsSyncSpy.mockImplementation((filePath) => {
@@ -2354,7 +2397,9 @@ describe('SessionService', () => {
       });
 
       expect(result.errors).toHaveLength(1);
-      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
@@ -2495,7 +2540,9 @@ describe('SessionService', () => {
       });
 
       expect(result.errors).toHaveLength(1);
-      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
@@ -2583,6 +2630,32 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('rechecks the generation before moving the archived worktree sidecar', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const generationChanged = new Error('generation changed');
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw generationChanged;
+        });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.anything(),
       );
     });
 

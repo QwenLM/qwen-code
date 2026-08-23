@@ -33,6 +33,7 @@ import { SessionService, SessionStorageEntryError } from './sessionService.js';
 import { SessionTranscriptIdentityUnavailableError } from './session-writer-lease.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
+import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
 
 let tmpRoot: string;
 
@@ -333,6 +334,10 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
 describe('SessionService lifecycle maintenance', () => {
   type Privates = {
     getSessionFilePath: (id: string, state: 'active' | 'archived') => string;
+    getPrSessionPathForState: (
+      id: string,
+      state: 'active' | 'archived',
+    ) => string;
     sessionBelongsToCurrentProject: (
       sessionId: string,
       cwd: string,
@@ -478,6 +483,57 @@ describe('SessionService lifecycle maintenance', () => {
     expect(fs.existsSync(paths.active)).toBe(false);
     expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
   });
+
+  it.each(['archive', 'unarchive'] as const)(
+    'merges pr bindings into the retained copy during %s conflict repair',
+    async (action) => {
+      const { service, sessionId, paths, cwd } = createHarness('', 'active');
+      const activeContent = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      const archivedContent = `${JSON.stringify({
+        ...recordFor('u2', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      fs.writeFileSync(paths.active, activeContent);
+      fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+      fs.writeFileSync(paths.archived, archivedContent);
+      const internals = service as unknown as Privates;
+      const activePr = internals.getPrSessionPathForState(sessionId, 'active');
+      const archivedPr = internals.getPrSessionPathForState(
+        sessionId,
+        'archived',
+      );
+      const activeEntry = {
+        number: 1,
+        url: 'https://github.com/o/r/pull/1',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      const archivedEntry = {
+        number: 2,
+        url: 'https://github.com/o/r/pull/2',
+        createdAt: '2026-08-20T01:00:00.000Z',
+      };
+      await writeSessionPrs(activePr, [activeEntry]);
+      await writeSessionPrs(archivedPr, [archivedEntry]);
+
+      const result = await service[`${action}Sessions`]([sessionId], {
+        resolveConflicts: true,
+      });
+
+      expect(result.errors).toEqual([]);
+      const retainedPr = action === 'archive' ? archivedPr : activePr;
+      const losingPr = action === 'archive' ? activePr : archivedPr;
+      await expect(readSessionPrs(retainedPr)).resolves.toEqual([
+        activeEntry,
+        archivedEntry,
+      ]);
+      expect(fs.existsSync(losingPr)).toBe(false);
+    },
+  );
 
   it('preserves default unarchive conflicts and explicitly keeps the active copy', async () => {
     const { service, sessionId, paths } = createHarness('active', 'active');
@@ -752,7 +808,7 @@ describe('SessionService lifecycle maintenance', () => {
   it.each([
     ['missing cwd', undefined],
     ['non-string cwd', 42],
-  ] as const)('maintains a damaged record with %s', async (_name, cwdValue) => {
+  ] as const)('fails closed on a record with %s', async (_name, cwdValue) => {
     for (const action of ['delete', 'archive', 'unarchive'] as const) {
       const state = action === 'unarchive' ? 'archived' : 'active';
       const { service, sessionId, paths } = createHarness('', state);
@@ -769,25 +825,87 @@ describe('SessionService lifecycle maintenance', () => {
       fs.writeFileSync(sourcePath, `${JSON.stringify(record)}\n`);
 
       if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).resolves.toBe(true);
-        expect(fs.existsSync(sourcePath)).toBe(false);
+        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
+          reason: 'unknown_project',
+        });
       } else {
         const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result).toMatchObject({
-          [action === 'archive' ? 'archived' : 'unarchived']: [sessionId],
-          notFound: [],
-          errors: [],
+        expect(result.errors[0]?.error).toMatchObject({
+          reason: 'unknown_project',
         });
-        expect(fs.existsSync(sourcePath)).toBe(false);
+      }
+      expect(fs.existsSync(sourcePath)).toBe(true);
+      if (action !== 'delete') {
         expect(
           fs.existsSync(action === 'archive' ? paths.archived : paths.active),
-        ).toBe(true);
+        ).toBe(false);
       }
     }
   });
 
+  it.each([
+    ['missing session id', undefined],
+    ['non-string session id', 42],
+  ] as const)(
+    'fails closed on a foreign record with %s',
+    async (_name, sessionIdValue) => {
+      const { service, sessionId, paths } = createHarness('', 'active');
+      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
+      const record = {
+        ...recordFor('u1', 'user', null),
+        cwd: foreignCwd,
+      } as Record<string, unknown>;
+      if (sessionIdValue === undefined) {
+        delete record['sessionId'];
+      } else {
+        record['sessionId'] = sessionIdValue;
+      }
+      const content = `${JSON.stringify(record)}\n`;
+      fs.writeFileSync(paths.active, content);
+
+      await expect(service.removeSession(sessionId)).rejects.toMatchObject({
+        reason: 'unknown_project',
+      });
+      expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
+    },
+  );
+
   it.each(['delete', 'archive', 'unarchive'] as const)(
-    'does not %s a record naming another session when cwd is missing',
+    'fails closed on mixed foreign and local storage during %s',
+    async (action) => {
+      const { service, sessionId, paths, cwd } = createHarness('', 'active');
+      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
+      const activeContent = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd: foreignCwd,
+      })}\n`;
+      const archivedContent = `${JSON.stringify({
+        ...recordFor('u2', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      fs.writeFileSync(paths.active, activeContent);
+      fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+      fs.writeFileSync(paths.archived, archivedContent);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
+          reason: 'ambiguous_project',
+        });
+      } else {
+        const result = await service[`${action}Sessions`]([sessionId]);
+        expect(result.errors[0]?.error).toMatchObject({
+          reason: 'ambiguous_project',
+        });
+      }
+      expect(fs.readFileSync(paths.active, 'utf8')).toBe(activeContent);
+      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(archivedContent);
+    },
+  );
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'fails closed when %s sees another session id without cwd ownership',
     async (action) => {
       const state = action === 'unarchive' ? 'archived' : 'active';
       const { service, sessionId, paths } = createHarness('', state);
@@ -801,11 +919,14 @@ describe('SessionService lifecycle maintenance', () => {
       fs.writeFileSync(sourcePath, content);
 
       if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).resolves.toBe(false);
+        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
+          reason: 'unknown_project',
+        });
       } else {
-        await expect(
-          service[`${action}Sessions`]([sessionId]),
-        ).resolves.toMatchObject({ notFound: [sessionId], errors: [] });
+        const result = await service[`${action}Sessions`]([sessionId]);
+        expect(result.errors[0]?.error).toMatchObject({
+          reason: 'unknown_project',
+        });
       }
       expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
     },

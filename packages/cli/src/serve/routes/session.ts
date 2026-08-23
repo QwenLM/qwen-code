@@ -14,6 +14,7 @@ import {
   GitWorktreeService,
   SessionOrganizationError,
   SessionStorageEntryError,
+  SessionTranscriptIdentityUnavailableError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -1154,10 +1155,10 @@ export function registerSessionRoutes(
         (await service.getMaintainableSessionLocation(sessionId)) !== undefined
       );
     } catch (error) {
-      if (
-        error instanceof SessionStorageEntryError &&
-        error.reason !== 'foreign_project'
-      ) {
+      if (error instanceof SessionStorageEntryError) {
+        return error.reason !== 'foreign_project';
+      }
+      if (error instanceof SessionTranscriptIdentityUnavailableError) {
         return true;
       }
       throw error;
@@ -2021,34 +2022,23 @@ export function registerSessionRoutes(
       for (const entry of workspaceRegistry.listAllEntries()) {
         const generation = entry.current;
         if (entry.internal || !generation) continue;
-        const wasCurrent =
-          entry.state === 'active' &&
-          entry.current === generation &&
-          !generation.guard.closed;
-        if (wasCurrent) generation.guard.assertOpen();
-        let exists: boolean;
-        try {
-          exists = await hasLifecycleStorageEvidence(
-            createWorkspaceRuntimeSessionService(generation.runtime),
-            sessionId,
-          );
-        } catch (error) {
-          if (
-            wasCurrent &&
-            (entry.state !== 'active' ||
-              entry.current !== generation ||
-              generation.guard.closed)
-          ) {
-            sendWorkspaceRuntimeUnavailable(res);
-            return undefined;
-          }
-          throw error;
-        }
         if (
-          (wasCurrent || exists) &&
-          (entry.state !== 'active' ||
-            entry.current !== generation ||
-            generation.guard.closed)
+          entry.state !== 'active' ||
+          entry.current !== generation ||
+          generation.guard.closed
+        ) {
+          sendWorkspaceRuntimeUnavailable(res);
+          return undefined;
+        }
+        generation.guard.assertOpen();
+        const exists = await hasLifecycleStorageEvidence(
+          createWorkspaceRuntimeSessionService(generation.runtime),
+          sessionId,
+        );
+        if (
+          entry.state !== 'active' ||
+          entry.current !== generation ||
+          generation.guard.closed
         ) {
           sendWorkspaceRuntimeUnavailable(res);
           return undefined;

@@ -2291,6 +2291,112 @@ describe('multi-workspace session dispatch', () => {
     },
   );
 
+  it('does not fall back to primary for mixed foreign and local internal storage', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440215';
+      const fixture = await writeLifecycleFixture({
+        sessionId,
+        shape: 'orphan',
+        state: 'archived',
+      });
+      const foreignActive = `${JSON.stringify({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        uuid: 'foreign-u1',
+        parentUuid: null,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'foreign' }] },
+      })}\n`;
+      await fsp.writeFile(fixture.activePath, foreignActive);
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        secondarySummaries: [],
+      });
+
+      const response = await request(app)
+        .post('/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId], resolveConflicts: true });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        archived: [],
+        notFound: [],
+        errors: [
+          {
+            sessionId,
+            error: 'Session operation failed.',
+          },
+        ],
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+      await expect(fsp.readFile(fixture.activePath, 'utf8')).resolves.toBe(
+        foreignActive,
+      );
+      await expect(fsp.readFile(fixture.archivedPath)).resolves.toEqual(
+        fixture.contents,
+      );
+    });
+  });
+
+  it.each([
+    ['qualified', '/workspaces/secondary-id/sessions/archive'],
+    ['owner-routed', '/sessions/archive'],
+  ])(
+    'keeps indeterminate lifecycle ownership scoped to its %s batch item',
+    async (_kind, route) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440213';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440214';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalidPath = path.join(
+          path.dirname(healthy.activePath),
+          `${invalidId}.jsonl`,
+        );
+        await fsp.writeFile(
+          invalidPath,
+          `{"sessionId":"${invalidId}","filler":"${'x'.repeat(2 * 1024 * 1024)}`,
+        );
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await request(app)
+          .post(route)
+          .set('Host', host())
+          .send({ sessionIds: [healthyId, invalidId] });
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        await expect(fsp.stat(invalidPath)).resolves.toBeDefined();
+      });
+    },
+  );
+
   it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
     const storageSessionId = LIVE_PROJECTLESS_TASK_ID.toUpperCase();
     await withStoredProjectlessLiveTasks(

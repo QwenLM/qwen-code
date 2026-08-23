@@ -177,12 +177,18 @@ export class SessionStorageEntryError extends Error {
 
   constructor(
     readonly sessionId: string,
-    readonly reason: 'non_regular' | 'foreign_project',
+    readonly reason:
+      | 'non_regular'
+      | 'foreign_project'
+      | 'unknown_project'
+      | 'ambiguous_project',
   ) {
     super(
       reason === 'non_regular'
         ? `Session storage entry for "${sessionId}" is not a regular file.`
-        : `Session "${sessionId}" belongs to a different workspace.`,
+        : reason === 'foreign_project'
+          ? `Session "${sessionId}" belongs to a different workspace.`
+          : `Session "${sessionId}" does not have unambiguous workspace ownership.`,
     );
   }
 }
@@ -915,13 +921,31 @@ export class SessionService {
     }
 
     const identities: MaintainableSessionFileIdentity[] = [];
+    let hasForeignState = false;
     for (const state of ['active', 'archived'] as const) {
-      const identity = await this.readMaintainableSessionIdentity(
-        sessionId,
-        state,
-        captureIdentity,
-      );
-      if (identity) identities.push(identity);
+      try {
+        const identity = await this.readMaintainableSessionIdentity(
+          sessionId,
+          state,
+          captureIdentity,
+        );
+        if (identity) identities.push(identity);
+      } catch (error) {
+        if (
+          error instanceof SessionStorageEntryError &&
+          error.reason === 'foreign_project'
+        ) {
+          hasForeignState = true;
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (hasForeignState) {
+      if (identities.length === 0) {
+        throw new SessionStorageEntryError(sessionId, 'foreign_project');
+      }
+      throw new SessionStorageEntryError(sessionId, 'ambiguous_project');
     }
     const active = identities.some((identity) => identity.state === 'active');
     const archived = identities.some(
@@ -975,12 +999,17 @@ export class SessionService {
         fileHandle,
         filePath,
       );
-      if (firstRecord && typeof firstRecord.sessionId === 'string') {
+      if (firstRecord) {
+        if (
+          typeof firstRecord.sessionId !== 'string' ||
+          typeof firstRecord.cwd !== 'string'
+        ) {
+          throw new SessionStorageEntryError(sessionId, 'unknown_project');
+        }
         if (firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase()) {
           throw new SessionStorageEntryError(sessionId, 'foreign_project');
         }
         if (
-          typeof firstRecord.cwd === 'string' &&
           !(await this.sessionBelongsToCurrentProject(
             firstRecord.sessionId,
             firstRecord.cwd,
@@ -1296,19 +1325,6 @@ export class SessionService {
       if (fs.existsSync(ledger)) {
         this.removeFileIfExists(ledger);
       }
-    }
-  }
-
-  private removeStateSidecars(
-    sessionId: string,
-    state: SessionArchiveState,
-  ): void {
-    for (const filePath of [
-      this.getWorktreeSessionPathForState(sessionId, state),
-      this.getPrSessionPathForState(sessionId, state),
-      this.getPromptLedgerPathForState(sessionId, state),
-    ]) {
-      this.removeFileIfExists(filePath);
     }
   }
 
@@ -2276,15 +2292,19 @@ export class SessionService {
       await options.assertStorageUnchanged?.();
       options.assertCanMutate?.();
       this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
-      for (const prepared of preparedUsage) {
-        this.commitUsageSalvageBestEffort(prepared);
-      }
       for (const identity of physicalSnapshot.identities) {
         this.removeFileIfExists(identity.filePath);
       }
+      for (const prepared of preparedUsage) {
+        this.commitUsageSalvageBestEffort(prepared);
+      }
+      options.assertCanMutate?.();
       this.removeWorktreeSidecars(sessionId);
+      options.assertCanMutate?.();
       this.removePrSidecars(sessionId);
+      options.assertCanMutate?.();
       this.removePromptLedgers(sessionId);
+      options.assertCanMutate?.();
       this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
@@ -2332,24 +2352,41 @@ export class SessionService {
           if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
+          const retained = snapshot.identities.find(
+            (identity) => identity.state === 'archived',
+          )!;
+          const preparedUsage = await this.prepareUsageSalvageBestEffort(
+            retained.filePath,
+          );
           const active = snapshot.identities.find(
             (identity) => identity.state === 'active',
           )!;
-          const preparedUsage = await this.prepareUsageSalvageBestEffort(
-            active.filePath,
-          );
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
-          this.commitUsageSalvageBestEffort(preparedUsage);
           this.removeFileIfExists(active.filePath);
+          this.commitUsageSalvageBestEffort(preparedUsage);
           try {
-            this.removeStateSidecars(sessionId, 'active');
+            options.assertCanMutate?.();
+            await this.movePrSidecar(
+              this.getPrSessionPathForState(sessionId, 'active'),
+              this.getPrSessionPathForState(sessionId, 'archived'),
+              options.assertCanMutate,
+            );
           } catch (sidecarError) {
+            options.assertCanMutate?.();
             this.warn(
-              `archiveSessions: failed to remove active sidecars for ${sessionId}: ${sidecarError}`,
+              `archiveSessions: failed to merge active pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          options.assertCanMutate?.();
+          this.removeFileIfExists(
+            this.getWorktreeSessionPathForState(sessionId, 'active'),
+          );
+          options.assertCanMutate?.();
+          this.removeFileIfExists(
+            this.getPromptLedgerPathForState(sessionId, 'active'),
+          );
           archived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -2382,6 +2419,7 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('archive', error);
         }
+        options.assertCanMutate?.();
         try {
           this.moveOptionalFile(activeSidecar, archivedSidecar);
         } catch (sidecarError) {
@@ -2462,24 +2500,41 @@ export class SessionService {
           if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
+          const retained = snapshot.identities.find(
+            (identity) => identity.state === 'active',
+          )!;
+          const preparedUsage = await this.prepareUsageSalvageBestEffort(
+            retained.filePath,
+          );
           const archived = snapshot.identities.find(
             (identity) => identity.state === 'archived',
           )!;
-          const preparedUsage = await this.prepareUsageSalvageBestEffort(
-            archived.filePath,
-          );
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
-          this.commitUsageSalvageBestEffort(preparedUsage);
           this.removeFileIfExists(archived.filePath);
+          this.commitUsageSalvageBestEffort(preparedUsage);
           try {
-            this.removeStateSidecars(sessionId, 'archived');
+            options.assertCanMutate?.();
+            await this.movePrSidecar(
+              this.getPrSessionPathForState(sessionId, 'archived'),
+              this.getPrSessionPathForState(sessionId, 'active'),
+              options.assertCanMutate,
+            );
           } catch (sidecarError) {
+            options.assertCanMutate?.();
             this.warn(
-              `unarchiveSessions: failed to remove archived sidecars for ${sessionId}: ${sidecarError}`,
+              `unarchiveSessions: failed to merge archived pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          options.assertCanMutate?.();
+          this.removeFileIfExists(
+            this.getWorktreeSessionPathForState(sessionId, 'archived'),
+          );
+          options.assertCanMutate?.();
+          this.removeFileIfExists(
+            this.getPromptLedgerPathForState(sessionId, 'archived'),
+          );
           unarchived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -2504,6 +2559,7 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('unarchive', error);
         }
+        options.assertCanMutate?.();
         try {
           this.moveOptionalFile(archivedSidecar, activeSidecar);
         } catch (sidecarError) {

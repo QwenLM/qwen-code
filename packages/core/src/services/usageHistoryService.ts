@@ -310,6 +310,24 @@ export function commitUsageBeforeTranscriptDeletion(
   prepared: PreparedUsageBeforeTranscriptDeletion,
 ): boolean {
   try {
+    if (fs.existsSync(prepared.usagePath)) {
+      const alreadyPersisted = fs
+        .readFileSync(prepared.usagePath, 'utf8')
+        .split(/\r?\n/)
+        .some((line) => {
+          const trimmed = line.trim();
+          return (
+            trimmed.length > 0 &&
+            jsonl
+              .parseLineTolerant<UsageSummaryRecord>(
+                trimmed,
+                prepared.usagePath,
+              )
+              .some((record) => record.sessionId === prepared.record.sessionId)
+          );
+        });
+      if (alreadyPersisted) return false;
+    }
     jsonl.writeLineSync(prepared.usagePath, prepared.record);
     return true;
   } catch (e) {

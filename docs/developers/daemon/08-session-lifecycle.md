@@ -252,14 +252,15 @@ fails with `SessionTranscriptChangedError` until the operator resolves the
 sealed lock and changed bytes. A JSON-shaped first physical record that exceeds
 the bounded ownership-read window fails with
 `SessionTranscriptIdentityUnavailableError` until the record is repaired or
-reduced; oversized damaged records with a non-object prefix remain eligible.
-When `session_storage_conflict_repair` is advertised, archive and unarchive
-accept `resolveConflicts: true`: archive keeps the archived copy, while
-unarchive keeps the active copy. Without that option, active/archive conflicts
-do not move, remove, or overwrite either persisted copy and are returned in the
-batch `errors` array. Archive still strictly closes a live session before
-classifying the conflict, which may flush queued records to the active
-transcript.
+reduced; oversized damaged records with a non-object prefix remain eligible. A
+parseable recovered record must contain string `sessionId` and `cwd` ownership
+fields, and mixed local/foreign archive states also fail closed. When
+`session_storage_conflict_repair` is advertised, archive and unarchive accept
+`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
+the active copy. Without that option, active/archive conflicts do not move,
+remove, or overwrite either persisted copy and are returned in the batch
+`errors` array. Archive still strictly closes a live session before classifying
+the conflict, which may flush queued records to the active transcript.
 Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
 instead of their earlier HTTP `409 session_conflict` response.
 
