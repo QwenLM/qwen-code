@@ -3610,11 +3610,13 @@ jobs:
           (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
-          # so nothing else ever reclaims them. The rm above also removes a
-          # crashed prior round's heartbeat.pid — the heartbeat loop ends
-          # itself at the next self-check when that file disappears; no
-          # cross-run kill here, because a pid read from a WORKDIR file is
-          # an untrusted kill target (WORKDIR is sandbox-writable).
+          # so nothing else ever reclaims them. WHEN a crashed prior round
+          # ran on THIS host, the rm above also removes its heartbeat.pid
+          # and that loop ends itself at the next identity self-check;
+          # cross-host the orphan keeps its own pid file and pulses until
+          # its age cap (accepted residual risk). No cross-run kill here,
+          # because a pid read from a WORKDIR file is an untrusted kill
+          # target (WORKDIR is sandbox-writable).
           # Full rationale → qwen-autofix.md#af-148
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects

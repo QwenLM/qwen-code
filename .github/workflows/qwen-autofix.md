@@ -3793,7 +3793,15 @@ This is an identity check, not an existence check — WORKDIR
 is PR-scoped, so after a crashed round's reset the next
 round recreates heartbeat.pid at the SAME path; existence
 alone would let the orphaned old loop pass and keep PATCHing
-its stale body onto the comment. Reading the file to
+its stale body onto the comment. Reclamation by rewrite is
+HOST-LOCAL: it fires only when the next same-PR round reuses
+the orphan's host. Cross-host — the fleet's general case,
+no per-PR runner affinity — nothing rewrites the file, the
+orphan keeps passing its own identity check, and it pulses
+its stale body onto the shared comment until the 12h age cap
+(accepted residual risk: liveness-text corruption only,
+bounded by the cap; a cross-run kill keyed on a WORKDIR pid
+would reopen the untrusted-kill-target hole). Reading the file to
 self-identify is safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other

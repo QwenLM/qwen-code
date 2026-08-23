@@ -88,10 +88,14 @@ orphan loops unacceptable):
 4. `Clean up autofix workdir` (`always()`) kills again as belt-and-braces.
 5. `Reset autofix workspace` does NOT kill: a cross-run pid would have to
    come from the untrusted file class. Wiping `WORKDIR` removes the pid
-   file, and the loop self-exits at its next identity self-check; a
-   crash-leftover orphan therefore dies within one interval (worst case:
-   one stale "working" tick already past its identity check, re-PATCHed
-   by the new round).
+   file, and the loop self-exits at its next identity self-check when
+   the next round reuses the orphan's host; cross-host, nothing rewrites
+   the pid file, so a crash-leftover orphan keeps pulsing its stale body
+   until the 12h age cap — alternating with the live round's bodies and
+   overwriting later rounds' terminal text within one interval of
+   finalize. Worst same-host case: one stale "working" tick already past
+   its identity check, re-PATCHed by the new round. The cross-host
+   window is an accepted residual risk (below), bounded by the age cap.
 6. Self-exit bounds inside the loop: stop if the pid file no longer holds
    the loop's OWN pid — an identity check, not an existence check,
    because `WORKDIR` is PR-scoped and the next round recreates
@@ -216,6 +220,17 @@ comment is never worse than today.
 - **Post-gate silence.** After the gate kills the loop, the comment holds
   its last tick until finalize. A round deep in gate/repair looks quieter
   than it is; the run link stays live, which is the recourse.
+- **Cross-host orphan pulsing.** The identity self-check only reclaims a
+  crash-leftover orphan when the next same-PR round reuses the orphan's
+  host; the pool is multi-host with no per-PR runner affinity, so the
+  general case leaves the orphan passing its own check and re-PATCHing
+  its stale body onto the shared status comment until the 12h age cap —
+  alternating with live rounds' bodies and overwriting terminal text
+  within one interval of finalize. Accepted: the damage is confined to
+  the comment's liveness text (no kill or token reach), it is bounded by
+  the age cap, and the alternative — a cross-run kill keyed on a WORKDIR
+  pid — reopens the untrusted-kill-target hole. Tightening the age cap
+  toward the 330-minute job timeout would shrink every orphan window.
 
 ## Open questions
 

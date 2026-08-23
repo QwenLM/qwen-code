@@ -80,6 +80,13 @@ run_loop() {
   # that never pulses — the exact "healthy round looks dead" failure this
   # feature eliminates. Fail fast instead.
   require HB_REPO HB_COMMENT_ID HB_WORKDIR HB_ROUND HB_CAP HB_URL HB_START_EPOCH
+  # gh auth rides on GITHUB_TOKEN (or GH_TOKEN): a launch without it must
+  # fail fast like any other missing input, not degrade to an immortal
+  # loop that logs "PATCH failed" every tick and never pulses.
+  [[ -n "${GITHUB_TOKEN:-}${GH_TOKEN:-}" ]] || {
+    echo "autofix-status-heartbeat: GITHUB_TOKEN (or GH_TOKEN) is required" >&2
+    exit 2
+  }
   # Self-detach from the launching step: log to WORKDIR and never hold the
   # step's pipes, or the step would never report completion.
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null

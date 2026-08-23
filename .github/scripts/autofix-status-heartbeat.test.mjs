@@ -192,6 +192,7 @@ describe('autofix-status-heartbeat loop', () => {
         ...process.env,
         PATH: `${gh.bin}:${process.env.PATH}`,
         GH_RECORD_DIR: gh.records,
+        GITHUB_TOKEN: 'fake',
         HB_REPO: 'octo/repo',
         HB_COMMENT_ID: '777',
         HB_ROUND: '2',
@@ -411,6 +412,33 @@ describe('autofix-status-heartbeat loop', () => {
     const code = await awaitExit(child, 8000);
     assert.equal(code, 2);
     assert.match(stderr, /HB_COMMENT_ID is required/);
+  });
+
+  it('refuses to loop without a gh token — no immortal never-pulsing loop', async () => {
+    // The header contract names GITHUB_TOKEN among the loop's needs: a
+    // launch without it must fail fast like any other missing input, not
+    // live to the age cap logging "PATCH failed" every tick while the
+    // status comment freezes.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    delete env.GITHUB_TOKEN;
+    delete env.GH_TOKEN;
+    const child = spawn('bash', [script, 'loop'], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    const code = await awaitExit(child, 8000);
+    assert.equal(code, 2);
+    assert.match(stderr, /GITHUB_TOKEN \(or GH_TOKEN\) is required/);
+    // Fail fast BEFORE registering anything: no pid file, no log.
+    assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
+    assert.ok(!existsSync(join(workdir, 'heartbeat.log')));
   });
 
   it('refuses to loop when a BODY var is missing — no immortal unpulsing loop', async () => {
