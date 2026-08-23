@@ -3021,17 +3021,40 @@ describe('the chunk ledger', () => {
     // The CLI built good(2); the orchestrator delivered a prompt that
     // ALTERED one of its lines (adding lines is delivery, not rewrite —
     // `wasDeliveredVerbatim` permits it). The record worked but never read
-    // the diff, so the cause is the rewrite. What pins that is the
-    // unconditional rewritten-prompt cause note recorded ahead of the
-    // unopened branch, plus `classify()` ordering rewritten-prompt above
-    // unopened: the ternary inside that branch re-notes the same cause, so
-    // a mutant replacing it with plain `'unopened'` keeps this test green,
-    // while deleting the earlier unconditional note flips it red.
+    // the diff, so the cause is the rewrite. What pins that is `classify()`
+    // ordering rewritten-prompt above unopened: the ternary inside the
+    // unopened branch re-notes the same cause, so a mutant replacing it with
+    // plain `'unopened'` keeps this test green — and so does deleting the
+    // unconditional note ahead of the branch, because this fixture enters
+    // that branch and the ternary re-notes. The unconditional note is pinned
+    // by the next test, whose rewrite opened the diff and skips the branch.
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
       good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
       { calls: 2, toolPath: '/abs/other-file.ts' },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'rewritten-prompt',
+    });
+  });
+
+  it('pins the unconditional rewritten-prompt note on a rewrite that opened the diff', () => {
+    // The fixture above never opens the diff, so it enters the unopened
+    // branch, whose ternary re-notes the same cause — deleting the
+    // unconditional note ahead of the branch keeps it green. This launch
+    // opened the diff but read lines that do not span its chunk, so it
+    // skips that branch, and the unconditional note is the only record of
+    // the cause. Deleting it hands the operator `'unknown'` — a cause with
+    // no repair — instead of "rebuild the prompt".
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      { calls: 1, range: [0, 50], opens: [] },
     );
 
     const r = coverageFromTranscripts(plan(), ENV);

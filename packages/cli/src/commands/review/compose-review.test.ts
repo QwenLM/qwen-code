@@ -11619,4 +11619,25 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.coverage).toEqual([]);
     expect(r.capAxes.verification).toContain('unreviewed-dimension');
   });
+
+  it('keeps a floor-only cap on the verification axis when the echo is the bare subject', () => {
+    // The exact-match half of the subject-echo dedup: stderr relays can
+    // carry the structural entry's subject ALONE, without the reason tail
+    // the prefix match covers. Deleting `entry === e.subject` leaves this
+    // echo unfiltered, flips `dimensionGapsAreDepthOnly`, and routes the
+    // cap to the coverage axis — relaunching Step 3 agents that read
+    // everything for a run whose only doubt is the verification floor.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
 });

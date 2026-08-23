@@ -740,6 +740,16 @@ describe('saveReviewArtifact', () => {
         { ...chunkLedger[1], classification: 42 },
         /classification must be one of/,
       ],
+      [
+        'non-array files',
+        { ...chunkLedger[1], files: 'src/b.ts' },
+        /files must be an array of strings/,
+      ],
+      [
+        'a non-string agents entry',
+        { ...chunkLedger[1], agents: ['chunk 2', 42] },
+        /agents must be an array of strings/,
+      ],
     ])('refuses a ledger entry carrying %s', (_label, badEntry, message) => {
       const paths = fixture();
       writeJson(paths.composed, {
