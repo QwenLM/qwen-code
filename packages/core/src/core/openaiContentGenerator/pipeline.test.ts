@@ -1774,6 +1774,41 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.reasoning).toEqual({ enabled: false });
     });
 
+    it('does NOT emit reasoning.enabled=false on OpenRouter when thinking is enabled', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        model: 'qwen/qwen3.8-27b',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen/qwen3.8-27b',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'main');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning).toBeUndefined();
+    });
+
     it('emits reasoning.enabled=false on OpenRouter hostname when reasoning is configured to false', async () => {
       // Config-level opt-out (`reasoning: false`) must also land OpenRouter's
       // native disable shape, matching the DeepSeek hostname branch.
