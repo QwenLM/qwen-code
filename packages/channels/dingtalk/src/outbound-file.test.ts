@@ -21,8 +21,10 @@ import {
   sanitizeStreamingFileMarkers,
   stripPartialFileMarker,
   stripPartialFileMarkerBeforeBake,
+  stripPartialMediaMarkersBeforeBake,
   uploadDingTalkFile,
 } from './outbound-file.js';
+import { findImageMarkers } from './outbound-image.js';
 
 // R7-2: the swap-injection point. A directory component replaced between the
 // containment check and the open is invisible to every check that merely
@@ -475,5 +477,65 @@ describe('stripPartialFileMarkerBeforeBake (R16-5)', () => {
   it('leaves clean text and complete markers untouched', () => {
     const clean = 'intro [FILE: /ws/a.pdf] mid [FILE: /ws/b.pdf] outro';
     expect(stripPartialFileMarkerBeforeBake(clean)).toBe(clean);
+  });
+});
+
+describe('stripPartialMediaMarkersBeforeBake (R19-x / R6-3)', () => {
+  // R19-x (R6-3 closure): a removal splices its surroundings across the
+  // deleted span. A single pass minted a deliverable marker the model never
+  // emitted and handed it to the uploader; the joint strip iterates to a
+  // fixed point with both expected lists locked at the entry text.
+  it('does not bake a FILE marker fabricated by its own removal', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      '[FIL[FILE:\n/x]E: /ws/secret.pdf]',
+    );
+    expect(findFileMarkers(out)).toHaveLength(0);
+    expect(out).not.toContain('/ws/secret.pdf');
+  });
+
+  it('does not bake an IMAGE marker fabricated by a FILE removal', () => {
+    // The FILE residue strip splices `[IMAG` + `E: /ws/chart.png]` into a
+    // complete IMAGE marker; reconciling against the entry list drops it.
+    const out = stripPartialMediaMarkersBeforeBake(
+      '[IMAG[FILE:\n/x]E: /ws/chart.png]',
+    );
+    expect(findImageMarkers(out)).toHaveLength(0);
+    expect(out).not.toContain('/ws/chart.png');
+  });
+
+  it('keeps the model markers while reconciling splice artifacts', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      'keep [FILE: /ws/real.pdf] and [FIL[FILE:\n/x]E: /ws/secret.pdf]',
+    );
+    expect(findFileMarkers(out).map((m) => m.path)).toEqual(['/ws/real.pdf']);
+    expect(out).not.toContain('/ws/secret.pdf');
+  });
+
+  // The R16-5 IMAGE mirror: an ill-formed `[IMAGE: …` sharing a line with a
+  // deliverable marker is stripped BEFORE the bake instead of eating the
+  // baked receipt afterwards.
+  it('strips IMAGE residue confined to the gaps around deliverable markers', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      'x [IMAGE: /leak/img-a [IMAGE: /workspace/b.png] y',
+    );
+    expect(out).not.toContain('/leak/img-a');
+    expect(findImageMarkers(out).map((m) => m.path)).toEqual([
+      '/workspace/b.png',
+    ]);
+  });
+
+  // A nested outer marker delivers its inner one; the outer's bracket-less
+  // tail fragment must not survive the gap the inner marker leaves behind.
+  it('drops the unbalanced tail after a delivered nested marker', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      '[FILE: [FILE: /ws/inner.pdf] /etc/shadow]',
+    );
+    expect(findFileMarkers(out).map((m) => m.path)).toEqual(['/ws/inner.pdf']);
+    expect(out).not.toContain('/etc/shadow');
+  });
+
+  it('leaves clean mixed text and complete markers untouched', () => {
+    const clean = 'intro [FILE: /ws/a.pdf] mid [IMAGE: /ws/b.png] outro';
+    expect(stripPartialMediaMarkersBeforeBake(clean)).toBe(clean);
   });
 });

@@ -18,8 +18,8 @@ import { marked, type Token } from 'marked';
  *   tail can re-open it and keep fence parity ({@link openFenceAt}).
  *
  * Both used to be answered by re-deriving fence pairing, indented-code
- * eligibility, blockquote prefixes and codespan runs by hand. Each rule was a
- * separate approximation of CommonMark, each drifted from the renderer that
+ * eligibility, blockquote prefixes and codespan runs by hand. Each rule was
+ * a separate approximation of CommonMark, each drifted from the renderer that
  * ultimately displays the text, and every drift leaked an absolute path or
  * swallowed a real marker. `marked` already implements the grammar and is
  * already a dependency of `@qwen-code/core`, so these ask it instead.
@@ -96,12 +96,13 @@ function lines(text: string): Array<{ start: number; length: number }> {
 type OffsetMap = (offset: number) => number;
 
 /**
- * A blockquote's children are lexed from the quote-stripped body, so their
- * offsets are not a shift of the parent's. The strip removes only a per-line
- * prefix and preserves the line count, so child line `i` is a suffix of parent
- * line `i` — enough to map every child offset back exactly.
+ * A blockquote's children are lexed from the quote-stripped body, and a list
+ * item's children from the bullet- and indent-stripped body, so their offsets
+ * are not a shift of the parent's. The strip removes only a per-line prefix
+ * and preserves the line count, so child line `i` is a suffix of parent line
+ * `i` — enough to map every child offset back exactly.
  */
-function blockquoteMap(
+function suffixMap(
   parentRaw: string,
   parentStart: number,
   childRaw: string,
@@ -133,6 +134,13 @@ function childRawOf(token: Token): string {
  * Marks every normalised offset covered by a fenced block, an indented block
  * or an inline codespan. Fence and codespan delimiters are marked with the
  * body they enclose, matching what the delimiters hide from a reader.
+ *
+ * R19-x (R6-3 closure): the descent follows marked v15's REAL token shapes —
+ * list items live on `.items`, table cells on `.header`/`.rows`, and inline
+ * children of headings/emphasis/links start AFTER the token's own prefix or
+ * delimiters. A blind shift of the parent's start misplaces every mask those
+ * tokens carry; each container maps its children with the exact strip the
+ * lexer applied.
  */
 function markCode(tokens: Token[], map: OffsetMap, codeFlags: boolean[]): void {
   let cursor = 0;
@@ -154,17 +162,81 @@ function markCode(tokens: Token[], map: OffsetMap, codeFlags: boolean[]): void {
       for (let i = from; i < to; i++) codeFlags[i] = true;
       continue;
     }
+    if (token.type === 'list') {
+      const items = (token as { items?: Token[] }).items ?? [];
+      let itemCursor = 0;
+      for (const item of items) {
+        const itemRaw = item.raw ?? '';
+        const found = Math.max(0, raw.indexOf(itemRaw, itemCursor));
+        itemCursor = found + itemRaw.length;
+        const children = (item as { tokens?: Token[] }).tokens ?? [];
+        if (children.length > 0) {
+          markCode(
+            children,
+            suffixMap(itemRaw, map(start + found), childRawOf(item)),
+            codeFlags,
+          );
+        }
+      }
+      continue;
+    }
+    if (token.type === 'table') {
+      markTableCells(token, map(start), raw, codeFlags);
+      continue;
+    }
     const children = (token as { tokens?: Token[] }).tokens;
     if (!children?.length) continue;
     if (token.type === 'blockquote') {
       markCode(
         children,
-        blockquoteMap(raw, map(start), childRawOf(token)),
+        suffixMap(raw, map(start), childRawOf(token)),
         codeFlags,
       );
       continue;
     }
-    markCode(children, (offset) => map(start + offset), codeFlags);
+    // Inline children are lexed from the token's own content — after a
+    // heading's `#…` prefix, an emphasis delimiter, a link's `[`. Locate that
+    // content inside the raw instead of assuming it starts at offset 0.
+    const joined = children.map((child) => child.raw ?? '').join('');
+    const contentStart = Math.max(0, raw.indexOf(joined));
+    markCode(
+      children,
+      (offset) => map(start + contentStart + offset),
+      codeFlags,
+    );
+  }
+}
+
+/**
+ * Table cells are lexed from their pipe-stripped text, so a cell's offsets
+ * map into the table raw at the cell's own position. Cells appear in reading
+ * order (header left-to-right, then rows), so each cell's joined content is
+ * found at or after the previous cell's end.
+ */
+function markTableCells(
+  token: Token,
+  tableStart: number,
+  tableRaw: string,
+  codeFlags: boolean[],
+): void {
+  const table = token as {
+    header?: Array<{ tokens?: Token[] }>;
+    rows?: Array<Array<{ tokens?: Token[] }>>;
+  };
+  const cells = [...(table.header ?? []), ...(table.rows ?? []).flat()];
+  let cursor = 0;
+  for (const cell of cells) {
+    const children = cell.tokens ?? [];
+    if (children.length === 0) continue;
+    const joined = children.map((child) => child.raw ?? '').join('');
+    const found = tableRaw.indexOf(joined, cursor);
+    if (found === -1) return;
+    cursor = found + joined.length;
+    markCode(
+      children as Token[],
+      (offset) => tableStart + found + offset,
+      codeFlags,
+    );
   }
 }
 
@@ -195,8 +267,16 @@ export function maskCode(text: string): string {
   return masked.join('');
 }
 
+/**
+ * marked v15's closing-fence rule, mirrored exactly: same delimiter character
+ * as the opener, at least as long, and nothing but spaces after it — a
+ * trailing tab or any other text keeps the fence OPEN (probed against
+ * `marked.lexer` directly). The previous closer accepted tabs, so a fence the
+ * renderer keeps open read as closed here and every code region after it lost
+ * its masking.
+ */
 const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})/u;
-const FENCE_CLOSER = /^ {0,3}(`+|~+)[\t ]*$/u;
+const FENCE_CLOSER = /^ {0,3}(`+|~+) *$/u;
 
 /** The delimiter of a fenced token that never closed, else undefined. */
 function unclosedFenceDelimiter(raw: string): string | undefined {
@@ -214,25 +294,26 @@ function unclosedFenceDelimiter(raw: string): string | undefined {
   return opener;
 }
 
-/** A fence left open by a cut, and whether it sits inside a blockquote. */
+/** A fence left open by a cut, and how deep it sits inside blockquotes. */
 export interface OpenFence {
   delimiter: string;
-  quoted: boolean;
+  /** Number of enclosing blockquote levels (0 = unquoted). */
+  quoteDepth: number;
 }
 
 function trailingOpenFence(
   tokens: Token[],
-  quoted: boolean,
+  quoteDepth: number,
 ): OpenFence | undefined {
   const last = tokens[tokens.length - 1];
   if (!last) return undefined;
   if (last.type === 'code') {
     const delimiter = unclosedFenceDelimiter(last.raw ?? '');
-    return delimiter ? { delimiter, quoted } : undefined;
+    return delimiter ? { delimiter, quoteDepth } : undefined;
   }
   if (last.type === 'blockquote') {
     const children = (last as { tokens?: Token[] }).tokens ?? [];
-    return trailingOpenFence(children, true);
+    return trailingOpenFence(children, quoteDepth + 1);
   }
   return undefined;
 }
@@ -257,5 +338,5 @@ export function openFenceAt(
   // re-opener — instead of throwing.
   const tokens = lex(normalised);
   if (!tokens) return undefined;
-  return trailingOpenFence(tokens, false);
+  return trailingOpenFence(tokens, 0);
 }

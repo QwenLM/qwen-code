@@ -32,7 +32,7 @@ import {
   readValidatedFile,
   safeFileName,
   sanitizeMediaMarkersToStable,
-  stripPartialFileMarkerBeforeBake,
+  stripPartialMediaMarkersBeforeBake,
   uploadDingTalkFile,
 } from './outbound-file.js';
 import {
@@ -315,8 +315,25 @@ export class DingtalkChannel extends ChannelBase {
    * throw there cannot fail the turn. Undelivered-notice failures record
    * here keyed by session; `onResponseComplete` rethrows them at the turn's
    * next awaited hook, and `onPromptEnd`/`onSessionDied` sweep leftovers.
+   * R19-x (R19-24): entries carry the token of the turn that recorded
+   * them, and each turn's consumer removes only its own — a session-keyed
+   * entry with no attribution let one turn's deferred drain consume (and
+   * apologise for) the NEXT turn's failure, and the old first-wins guard
+   * dropped a later turn's record while an earlier entry stood.
    */
-  private readonly pendingBoundaryFailures = new Map<string, unknown>();
+  private readonly pendingBoundaryFailures = new Map<
+    string,
+    Array<{ error: unknown; turn: object }>
+  >();
+  /**
+   * R19-x (R19-24): the turn token current per session — a fresh object at
+   * each `onPromptStart`. `closeSegmentWithFiles` captures it at DISPATCH
+   * time (a close can still be in flight when the next turn starts, and a
+   * late record must belong to the turn that dispatched the close);
+   * `sendResponseMessage` reads it at record time (streamed blocks only
+   * ever send inside their own turn's flush).
+   */
+  private readonly boundaryFailureTurns = new Map<string, object>();
   /**
    * R15-1: ChannelBase dispatches boundary closes fire-and-forget, so one
    * can still be in flight when `onResponseComplete` consults
@@ -807,9 +824,12 @@ export class DingtalkChannel extends ChannelBase {
     // `![image](mediaId)` markdown sharing the line — quota billed, never
     // rendered, no receipt or notice. Pre-bake, an image marker inside a
     // genuine residue span simply shares the span's fail-closed removal and
-    // is never uploaded.
+    // is never uploaded. R19-x (R6-3 closure): the IMAGE mirror runs for
+    // the same reason — an IMAGE residue sharing a line with a baked
+    // receipt would eat it after the bake, billing the upload while the
+    // text claims the image is still pending.
     const imageText = await this.prepareOutgoingImages(
-      stripPartialFileMarkerBeforeBake(text),
+      stripPartialMediaMarkersBeforeBake(text),
     );
     const markers = findFileMarkers(imageText);
     const files: PreparedDingTalkFile[] = [];
@@ -1848,6 +1868,7 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.sessionMentionTargets.delete(sessionId);
     this.pendingBoundaryFailures.delete(sessionId);
+    this.boundaryFailureTurns.delete(sessionId);
     this.segmentDeliveryText.delete(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
@@ -1980,6 +2001,8 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    // R19-x (R19-24): a fresh attribution token for the starting turn.
+    this.boundaryFailureTurns.set(sessionId, {});
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -2070,10 +2093,24 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     sessionId: string,
   ): void {
+    // R19-x (R19-24): captured at registration — when the callback fires
+    // (after the tracked chain settles) the session's current token may
+    // already belong to a later turn, and that turn's failures must stay
+    // in the queue for their own consumers.
+    const turn = this.boundaryFailureTurns.get(sessionId);
     const surface = () => {
-      const failure = this.pendingBoundaryFailures.get(sessionId);
-      if (failure === undefined) return;
-      this.pendingBoundaryFailures.delete(sessionId);
+      if (turn === undefined) return;
+      const queue = this.pendingBoundaryFailures.get(sessionId);
+      if (!queue) return;
+      const owned = queue.filter((entry) => entry.turn === turn);
+      if (owned.length === 0) return;
+      const remaining = queue.filter((entry) => entry.turn !== turn);
+      if (remaining.length === 0) {
+        this.pendingBoundaryFailures.delete(sessionId);
+      } else {
+        this.pendingBoundaryFailures.set(sessionId, remaining);
+      }
+      const failure = owned[0]!.error;
       process.stderr.write(
         `[DingTalk:${this.name}] boundary failure after turn end: ${sanitizeLogText(
           failure instanceof Error ? failure.message : String(failure),
@@ -2091,6 +2128,34 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (this.config.blockStreaming !== 'on') {
+      await this.deliverResponseMessage(chatId, text, sessionId);
+      return;
+    }
+    // R19-x (R19-4): with block streaming on this runs as BlockStreamer's
+    // `send` callback, whose serialized chain ends in `.catch(() => {})` —
+    // a rejection would be dropped there and the turn would book completed
+    // with every streamed block's delivery failure invisible. Record it on
+    // the turn's pending-failure queue instead; the turn-end sweep logs it
+    // and sends best-effort the apology a rethrow would otherwise have
+    // earned. Non-streaming callers keep the throw — their rejection fails
+    // the turn directly.
+    try {
+      await this.deliverResponseMessage(chatId, text, sessionId);
+    } catch (error) {
+      this.recordPendingBoundaryFailure(
+        sessionId,
+        error,
+        this.boundaryFailureTurns.get(sessionId),
+      );
+    }
+  }
+
+  private async deliverResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
@@ -2155,10 +2220,21 @@ export class DingtalkChannel extends ChannelBase {
     // below is swept by `onPromptEnd` and lost, or poisons the next turn.
     const boundaryClose = this.boundaryClosesInFlight.get(sessionId);
     if (boundaryClose) await boundaryClose;
-    const boundaryFailure = this.pendingBoundaryFailures.get(sessionId);
-    if (boundaryFailure !== undefined) {
-      this.pendingBoundaryFailures.delete(sessionId);
-      throw boundaryFailure;
+    // R19-x (R19-24): consume only THIS turn's entries — an entry recorded
+    // by a close another turn dispatched belongs to that turn's consumers.
+    const turn = this.boundaryFailureTurns.get(sessionId);
+    if (turn !== undefined) {
+      const queue = this.pendingBoundaryFailures.get(sessionId);
+      const owned = queue?.filter((entry) => entry.turn === turn);
+      if (owned && owned.length > 0) {
+        const remaining = queue!.filter((entry) => entry.turn !== turn);
+        if (remaining.length === 0) {
+          this.pendingBoundaryFailures.delete(sessionId);
+        } else {
+          this.pendingBoundaryFailures.set(sessionId, remaining);
+        }
+        throw owned[0]!.error;
+      }
     }
     if (segment && this.interactionPresenter) {
       // R17-1: the final segment's delivery copy has no boundary consumer —
@@ -2286,14 +2362,23 @@ export class DingtalkChannel extends ChannelBase {
   /**
    * R17-3/R18-3: the FIRST recorded failure stays the turn's verdict — a
    * later display-close or fallback rejection must not displace the more
-   * specific delivery error it follows.
+   * specific delivery error it follows. Queue order preserves it: each
+   * consumer surfaces the first of its OWN entries. R19-x (R19-24): entries
+   * are tagged with the recording turn, so one turn's failures can no
+   * longer block or displace another turn's record.
    */
   private recordPendingBoundaryFailure(
     sessionId: string,
     error: unknown,
+    turn: object | undefined,
   ): void {
-    if (!this.pendingBoundaryFailures.has(sessionId)) {
-      this.pendingBoundaryFailures.set(sessionId, error);
+    if (turn === undefined) return;
+    const entry = { error, turn };
+    const queue = this.pendingBoundaryFailures.get(sessionId);
+    if (queue) {
+      queue.push(entry);
+    } else {
+      this.pendingBoundaryFailures.set(sessionId, [entry]);
     }
   }
 
@@ -2337,6 +2422,10 @@ export class DingtalkChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): Promise<void> {
     const presenter = this.interactionPresenter!;
+    // R19-x (R19-24): captured at dispatch — this close can still be
+    // recording after the next turn has started, and its failures belong
+    // to the turn dispatching it.
+    const turn = this.boundaryFailureTurns.get(sessionId);
     try {
       // R7-1: with block streaming on, every block of this segment was already
       // delivered (and its markers uploaded) through `sendResponseMessage`. The
@@ -2413,7 +2502,7 @@ export class DingtalkChannel extends ChannelBase {
         // and a rejection escaping there is swallowed by ChannelBase's
         // catch-and-log: the turn would book completed with the file and
         // the notice both lost.
-        this.recordPendingBoundaryFailure(sessionId, error);
+        this.recordPendingBoundaryFailure(sessionId, error, turn);
         try {
           await presenter.closeOutput(segment.segmentId, '', reason, segment);
         } catch (closeError) {
@@ -2425,7 +2514,7 @@ export class DingtalkChannel extends ChannelBase {
       // throwable display-close and fallback awaits below — the same
       // masking hazard as the catch arm.
       if (deliveryError) {
-        this.recordPendingBoundaryFailure(sessionId, deliveryError);
+        this.recordPendingBoundaryFailure(sessionId, deliveryError, turn);
       }
       let delivered = false;
       let closeRejected = false;
@@ -2445,7 +2534,7 @@ export class DingtalkChannel extends ChannelBase {
         // text never reached the recipient.
         closeRejected = true;
         this.logBoundaryCloseFailure(closeError);
-        this.recordPendingBoundaryFailure(sessionId, closeError);
+        this.recordPendingBoundaryFailure(sessionId, closeError, turn);
       }
       if (!delivered && !closeRejected) {
         // R9-1: the run can still terminalize as cancelled or failed DURING
@@ -2476,7 +2565,7 @@ export class DingtalkChannel extends ChannelBase {
               // R18-3: the display close AND the plain delivery both failed —
               // recorded, or the turn books completed while the recipient got
               // no file, no failure notice, and no apology.
-              this.recordPendingBoundaryFailure(sessionId, fallbackError);
+              this.recordPendingBoundaryFailure(sessionId, fallbackError, turn);
               this.logBoundaryCloseFailure(fallbackError);
             }
           }

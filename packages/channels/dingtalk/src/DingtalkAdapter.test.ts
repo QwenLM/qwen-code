@@ -6461,6 +6461,9 @@ describe('DingtalkChannel outbound file delivery', () => {
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
+      // ChannelBase starts the turn before its segments close; the recorded
+      // failure carries this turn's attribution token.
+      getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'msg-1');
       // No webhook seeded: uploads succeed, delivery has no endpoint.
       const { uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(true);
@@ -6531,6 +6534,9 @@ describe('DingtalkChannel outbound file delivery', () => {
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
+      // ChannelBase starts the turn before its segments close; the recorded
+      // failure carries this turn's attribution token.
+      getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'msg-1');
       seedWebhook(channel, 'cid-1');
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       stubFileReplyFetch({

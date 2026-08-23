@@ -991,3 +991,123 @@ describe('round-17/18 boundary delivery fixes', () => {
     }
   });
 });
+
+describe('round-19 attribution and streaming delivery failures', () => {
+  it('attributes a fast-failing boundary close to its own turn (R19-24)', async () => {
+    // R19-x (R19-24): the pending-failure map is keyed by session alone, so
+    // turn 1's deferred turn-end drain consumed whatever occupied the map
+    // when ITS close settled — turn 2's freshly recorded failure. Turn 2
+    // then booked completed with its file and notice both lost, and turn 1
+    // apologised for a failure that was not its own. Each turn's consumers
+    // must remove only the entries recorded under that turn's token.
+    const file2 = createTempFile('report2.txt');
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, { cwd: file2.dir });
+      stubOutboundFetch();
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let releaseTurn1Close: () => void = () => {};
+      let boundaryCloseCalls = 0;
+      installPresenter(channel, 'unused', (_s, _t, reason) => {
+        if (reason !== 'response_boundary') return Promise.resolve(true);
+        boundaryCloseCalls++;
+        if (boundaryCloseCalls === 1) {
+          // Turn 1's boundary close stays in flight past its turn's end.
+          return new Promise<boolean>((resolve) => {
+            releaseTurn1Close = () => resolve(true);
+          });
+        }
+        return Promise.resolve(true);
+      });
+
+      // Turn 1: a plain segment whose close hangs; an EMPTY final response
+      // ends the turn without onResponseComplete (the R17-3 shape), so the
+      // turn-end sweep registers on the still-in-flight close.
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, 'plain segment');
+        bridge.emit('responseBoundary', sessionId);
+        return '';
+      };
+      await channel.handleInbound(envelopeWith('msg-r1924-1'));
+
+      // Turn 2 on the same session: its boundary close fails fast while
+      // turn 1's close still hangs.
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, `[FILE: ${file2.path}]`);
+        bridge.emit('responseBoundary', sessionId);
+        return 'final answer';
+      };
+      const turn2 = channel.handleInbound(envelopeWith('msg-r1924-2'));
+
+      // Turn 2's close records and display-closes; its onResponseComplete
+      // then waits for the session's in-flight chain — turn 1's hung close.
+      await vi.waitFor(() => expect(boundaryCloseCalls).toBe(2));
+      releaseTurn1Close();
+
+      // Turn 2 fails with ITS OWN failure — pre-fix turn 1's sweep drained
+      // it first and turn 2 booked completed.
+      await expect(turn2).rejects.toThrow(/no delivered notice: report2\.txt/);
+      // Turn 1's sweep surfaced nothing: the failure was never its own.
+      expect(stderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('boundary failure after turn end'),
+      );
+    } finally {
+      rmSync(file2.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces streamed-block delivery failures the streamer swallows (R19-4)', async () => {
+    // R19-x (R19-4): under blockStreaming, ChannelBase delivers each block
+    // through BlockStreamer, whose serialized chain ends in a swallowed
+    // catch — every DingTalkDeliveryError the block send raises is dropped
+    // and the turn books completed. The adapter records the failure
+    // instead; the turn-end sweep logs it and sends best-effort the apology
+    // a rethrow would otherwise have earned.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r194-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 1, maxChars: 4 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // Every markdown POST rejects with a non-zero errcode (quota dead).
+      stubWebhookFetch(postBodies, () => 310000);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installPresenter(channel, 'streamed');
+
+      (bridge as unknown as { prompt: unknown }).prompt = async () =>
+        'final answer';
+
+      // The turn still completes — streaming failures surface at turn end.
+      await channel.handleInbound(envelopeWith('msg-r194'));
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('boundary failure after turn end'),
+      );
+      // The apology POST follows the rejected block POSTs.
+      expect(postBodies.length).toBeGreaterThanOrEqual(4);
+      expect(postBodies.at(-1)).toMatchObject({
+        markdown: {
+          text: expect.stringContaining('Sorry, something went wrong'),
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

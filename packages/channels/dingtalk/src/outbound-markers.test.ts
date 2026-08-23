@@ -6,9 +6,15 @@ import {
 } from './outbound-markers.js';
 import {
   sanitizeFileMarkersToFixedPoint,
+  sanitizeMediaMarkersToStable,
   sanitizeStreamingFileMarkers,
+  stripPartialMediaMarkersBeforeBake,
 } from './outbound-file.js';
-import { sanitizeStreamingImageMarkers } from './outbound-image.js';
+import {
+  sanitizeStreamingImageMarkers,
+  stripPartialImageMarker,
+} from './outbound-image.js';
+import { maskCode, openFenceAt } from './markdown-state.js';
 
 const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
@@ -833,5 +839,189 @@ describe('R16 round-16 Critical regressions', () => {
     expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
     expect(truncated.length).toBeLessThanOrEqual(20000);
     expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+  });
+});
+
+describe('R19-x round-19 Critical regressions (R6-3 closure)', () => {
+  // (A) The walker follows marked v15's real token shapes.
+  it('masks code inside list items and table cells', () => {
+    expect(
+      findOutboundMediaMarkers('- item `[FILE: /secret/list.pdf]` end', 'FILE'),
+    ).toEqual([]);
+    expect(
+      findOutboundMediaMarkers(
+        '| col |\n| --- |\n| cell `[FILE: /secret/table.pdf]` end |',
+        'FILE',
+      ),
+    ).toEqual([]);
+    // A prose marker right after a list still delivers — the descent must
+    // not overmask past the list.
+    expect(
+      findOutboundMediaMarkers(
+        '- item `[FILE: /secret/a.pdf]`\n[FILE: /ws/real.pdf]',
+        'FILE',
+      ).map((m) => m.path),
+    ).toEqual(['/ws/real.pdf']);
+  });
+
+  it('masks a heading codespan at its real offset', () => {
+    const text = '## title `[FILE: /secret/head.pdf]` tail';
+    expect(findOutboundMediaMarkers(text, 'FILE')).toEqual([]);
+    const masked = maskCode(text);
+    // The pre-fix mask was shifted by the heading depth: it blanked part of
+    // the title and left part of the codespan visible.
+    expect(masked).toContain('## title');
+    expect(masked).toContain('tail');
+    expect(masked).not.toContain('/secret/head.pdf');
+  });
+
+  it('re-opens a depth-2 quoted fence with both quote prefixes', () => {
+    const text = '> > ```\n> > code body';
+    expect(openFenceAt(text, text.length)).toEqual({
+      delimiter: '```',
+      quoteDepth: 2,
+    });
+  });
+
+  it('reports a fence still open when its closer line carries a tab', () => {
+    // marked keeps the fence open across a tab-followed closer; openFenceAt
+    // (the truncation re-opener) must agree, or truncation re-opens nothing
+    // and the retained tail's parity inverts.
+    const text = '```\nbody\n```\t\nmore';
+    expect(openFenceAt(text, text.length)).toEqual({
+      delimiter: '```',
+      quoteDepth: 0,
+    });
+  });
+
+  it('keeps a fence open across a tab-followed closer line', () => {
+    // marked rejects a closing fence followed by a tab — the masker must
+    // mirror the renderer or everything after the false closer flips parity.
+    const text = '```\nbody\n```\t\n[FILE: /secret/after-tab.pdf]';
+    expect(findOutboundMediaMarkers(text, 'FILE')).toEqual([]);
+    expect(maskCode(text)).not.toContain('[FILE: /secret/after-tab.pdf]');
+  });
+
+  // (C) One visibility-aware deliverability predicate across all layers.
+  it('strips a marker whose opening bracket alone is masked', () => {
+    expect(
+      stripPartialOutboundMediaMarker('`[FILE:` /etc/passwd]', 'FILE', ''),
+    ).not.toContain('/etc/passwd');
+  });
+
+  it('neither delivers nor keeps a marker whose body dips into code', () => {
+    const text = '[FILE: `x`/secret]';
+    expect(findOutboundMediaMarkers(text, 'FILE')).toEqual([]);
+    expect(stripPartialOutboundMediaMarker(text, 'FILE', '')).not.toContain(
+      '/secret',
+    );
+  });
+
+  // What actually ships: truncation output runs through the pre-bake strip
+  // and the joint display sanitizer before it reaches a surface. A path is a
+  // leak only when it survives that pipeline visible (not masked) and not
+  // inside a deliverable marker span.
+  function shipped(truncated: string): string {
+    return sanitizeMediaMarkersToStable(
+      stripPartialMediaMarkersBeforeBake(truncated),
+      stripPartialImageMarker,
+    );
+  }
+  function leaks(text: string, path: string): boolean {
+    const masked = maskCode(text);
+    const markers = [
+      ...findOutboundMediaMarkers(text, 'FILE'),
+      ...findOutboundMediaMarkers(text, 'IMAGE'),
+    ];
+    let idx = masked.indexOf(path);
+    while (idx !== -1) {
+      let visible = true;
+      for (let i = idx; i < idx + path.length; i++) {
+        if (masked[i] !== text[i]) {
+          visible = false;
+          break;
+        }
+      }
+      const covered = markers.some(
+        (m) => idx >= m.start && idx + path.length <= m.end,
+      );
+      if (visible && !covered) return true;
+      idx = masked.indexOf(path, idx + path.length);
+    }
+    return false;
+  }
+
+  it('does not skip a mixed-visibility span as complete past a cut', () => {
+    const text = `${'a'.repeat(30)}[FILE: /etc/shadow \`x\`]${'y'.repeat(60)}`;
+    for (let limit = 40; limit <= 100; limit++) {
+      const truncated = truncateOutboundMediaText(text, limit, '…');
+      expect(truncated.length).toBeLessThanOrEqual(limit);
+      expect(leaks(shipped(truncated), '/etc/shadow')).toBe(false);
+    }
+  });
+
+  // (D) Balance-aware residue extents.
+  it('strips the path line after an inner bracket closed on the marker line', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        '[FILE: [draft]\n/Users/ben/private/report.pdf]',
+        'FILE',
+        '',
+      ),
+    ).not.toContain('/Users/ben/private/report.pdf');
+  });
+
+  it('walks blank and decoy lines to the path line', () => {
+    expect(
+      stripPartialOutboundMediaMarker('[FILE:\n\n/etc/passwd', 'FILE', ''),
+    ).not.toContain('/etc/passwd');
+    expect(
+      stripPartialOutboundMediaMarker(
+        '[FILE:\n[decoy]\n/etc/passwd',
+        'FILE',
+        '',
+      ),
+    ).not.toContain('/etc/passwd');
+  });
+
+  it('covers only the bracket-free prefix of a bracketed path line', () => {
+    const stripped = stripPartialOutboundMediaMarker(
+      '[FILE:\n/etc/passwd [draft] notes',
+      'FILE',
+      '',
+    );
+    expect(stripped).not.toContain('/etc/passwd');
+    expect(stripped).toContain('[draft] notes');
+  });
+
+  // (F) Nested markers: the outer span is not ignored once the inner one
+  // resolves — its bracket-less tail fragment must not survive the pipeline.
+  it('advances the cut past the outer span of a nested marker', () => {
+    const text = `pre [FILE: [FILE: /inner/x] /etc/shadow]${' pad'.repeat(30)}`;
+    for (let limit = 60; limit <= text.length; limit++) {
+      const truncated = truncateOutboundMediaText(text, limit, '…');
+      expect(truncated.length).toBeLessThanOrEqual(limit);
+      expect(leaks(shipped(truncated), '/etc/shadow')).toBe(false);
+    }
+  });
+
+  // (B) Truncation parity: a fenced marker survives every cut position
+  // either masked inside a re-opened fence, delivered as a complete marker,
+  // or removed — never shipped as a visible path fragment.
+  it('keeps a fenced marker masked or dropped across every cut position', () => {
+    for (let pad = 0; pad < 60; pad++) {
+      const text =
+        'x'.repeat(pad) +
+        '\n' +
+        'word '.repeat(20) +
+        '\n```\n[FILE: /secret/snap.pdf]\n```\n' +
+        'tail '.repeat(10);
+      for (const limit of [40 + pad, 70 + pad, 100 + pad]) {
+        if (text.length <= limit) continue;
+        const truncated = truncateOutboundMediaText(text, limit, '…\n');
+        expect(truncated.length).toBeLessThanOrEqual(limit);
+        expect(leaks(shipped(truncated), '/secret/snap.pdf')).toBe(false);
+      }
+    }
   });
 });

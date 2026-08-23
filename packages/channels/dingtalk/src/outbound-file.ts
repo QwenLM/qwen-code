@@ -1,12 +1,16 @@
 import { basename, extname } from 'node:path';
 import { readValidatedLocalFile } from './outbound-local-file.js';
 import {
+  bracketDepth,
+  dropUnbalancedGapPrefix,
   findOutboundMediaMarkers,
+  neutralizeMediaMarkerOpenings,
   replaceOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
   type OutboundMediaMarker,
 } from './outbound-markers.js';
 import { uploadDingTalkMedia } from './outbound-media.js';
+import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 export const MAX_FILES_PER_RESPONSE = 5;
 
@@ -83,56 +87,7 @@ export function sanitizeFileMarkersToFixedPoint(text: string): string {
     if (next === sanitized) return sanitized;
     sanitized = next;
   }
-  return neutralizeFileMarkerOpenings(sanitized);
-}
-
-/**
- * Whether the `[` at `open` opens a FILE-shaped residue, confined to the
- * line ending at `lineEnd`: the full name immediately after the bracket or
- * after horizontal spaces, folded through `toUpperCase` exactly as the
- * recognition gates do (R6-2) — an `iu` regex is not a substitute.
- */
-function opensFileMarkerName(
-  text: string,
-  open: number,
-  lineEnd: number,
-): boolean {
-  let index = open + 1;
-  while (index < lineEnd && /[^\S\r\n]/u.test(text[index]!)) index++;
-  let upper = '';
-  while (index < lineEnd && upper.length < 'FILE:'.length) {
-    upper += text[index]!.toUpperCase();
-    index++;
-  }
-  return upper === 'FILE:';
-}
-
-/**
- * Cut every line at its first FILE-shaped opening. A removal can only create
- * a new marker across the boundary it made, which the budgeted loop above has
- * already failed to settle, so the residue is cut where it stands. Lines the
- * sweep does not touch survive byte-for-byte — including code quotes — this
- * runs only when the budget is exhausted.
- */
-function neutralizeFileMarkerOpenings(text: string): string {
-  let result = '';
-  let lineStart = 0;
-  while (lineStart < text.length) {
-    const newline = text.indexOf('\n', lineStart);
-    const lineEnd = newline === -1 ? text.length : newline;
-    let cut = -1;
-    for (let index = lineStart; index < lineEnd; index++) {
-      if (text[index] === '[' && opensFileMarkerName(text, index, lineEnd)) {
-        cut = index;
-        break;
-      }
-    }
-    result += text.slice(lineStart, cut === -1 ? lineEnd : cut);
-    if (newline === -1) break;
-    result += '\n';
-    lineStart = newline + 1;
-  }
-  return result;
+  return neutralizeMediaMarkerOpenings(sanitized, 'FILE');
 }
 
 /**
@@ -166,6 +121,51 @@ export function sanitizeMediaMarkersToStable(
 }
 
 /**
+ * One residue pass over the gaps between the markers of `markerName` that
+ * align — by path, in order — with the `expected` list locked at the
+ * pipeline's entry. Unaligned markers stay in their gap, where the gap
+ * sanitizer removes them along with the residue: they are splice artifacts
+ * a removal minted, or a surplus past the entry list, and a gap sanitizer
+ * never touches a marker the alignment kept.
+ */
+function stripAlignedMarkers(
+  text: string,
+  markerName: 'IMAGE' | 'FILE',
+  expected: readonly string[],
+): string {
+  const markers = findOutboundMediaMarkers(text, markerName);
+  // R19-x (R6-3 closure): the gap residue strip is balance-aware. The depth
+  // counts the ORIGINAL text before the gap — an ill-formed outer opening
+  // keeps its balance obligation even after its own residue is stripped, so
+  // the gap after a delivered inner marker loses the outer's bracket-less
+  // path fragment instead of shipping it.
+  const sanitizeGap = (gap: string, depth: number): string => {
+    const remainder = dropUnbalancedGapPrefix(gap, depth);
+    return markerName === 'FILE'
+      ? sanitizeFileMarkersToFixedPoint(remainder)
+      : sanitizeStreamingImageMarkers(remainder);
+  };
+  let sanitized = '';
+  let previousEnd = 0;
+  let matched = 0;
+  for (const marker of markers) {
+    if (matched < expected.length && marker.path === expected[matched]) {
+      sanitized += sanitizeGap(
+        text.slice(previousEnd, marker.start),
+        bracketDepth(text, 0, previousEnd),
+      );
+      sanitized += text.slice(marker.start, marker.end);
+      previousEnd = marker.end;
+      matched++;
+    }
+  }
+  return (
+    sanitized +
+    sanitizeGap(text.slice(previousEnd), bracketDepth(text, 0, previousEnd))
+  );
+}
+
+/**
  * R16-5: strip FILE residue off the MODEL text, before images bake. Residue
  * stripping extends an ill-formed `[FILE:` opening to END OF LINE; run over
  * baked text it deletes an already-uploaded image's `![image](mediaId)`
@@ -174,18 +174,54 @@ export function sanitizeMediaMarkersToStable(
  * R9-3 receipt pass, so a residue line that also carries a deliverable
  * marker keeps it; an image marker inside a genuine residue span simply
  * shares the span's fail-closed removal and is never uploaded.
+ *
+ * R19-x (R6-3 closure): iterate to a fixed point and reconcile against the
+ * marker list found at entry. A single pass's removal splices the
+ * surroundings across the deleted span — `[FIL[FILE:\n/x]E: /ws/secret.pdf]`
+ * becomes the deliverable marker `[FILE: /ws/secret.pdf]`, one the model
+ * never emitted, which a single pass then handed to the uploader. Each pass
+ * only deletes, so the loop terminates on its own.
  */
 export function stripPartialFileMarkerBeforeBake(text: string): string {
-  const markers = findFileMarkers(text);
-  if (markers.length === 0) return stripPartialFileMarker(text);
-  let sanitized = '';
-  let previousEnd = 0;
-  for (const marker of markers) {
-    sanitized += stripPartialFileMarker(text.slice(previousEnd, marker.start));
-    sanitized += text.slice(marker.start, marker.end);
-    previousEnd = marker.end;
+  return stripAlignedMarkers(
+    text,
+    'FILE',
+    findFileMarkers(text).map((marker) => marker.path),
+  );
+}
+
+/**
+ * R19-x (R6-3 closure): the JOINT pre-bake strip — the R16-5 treatment for
+ * BOTH marker kinds with both expected lists locked at the entry text. A
+ * FILE removal can splice its surroundings into an IMAGE marker the model
+ * never emitted (`[IMAG[FILE:\n/x]E: /ws/chart.png]` →
+ * `[IMAGE: /ws/chart.png]`), which an IMAGE pass run afterwards would
+ * reconcile against its OWN input and upload; locking both lists at the
+ * entry makes the artifact fail alignment and get removed instead. The
+ * IMAGE mirror of the residue hazard itself — an ill-formed `[IMAGE: …`
+ * sharing a line with a baked receipt eats it after the bake, billing the
+ * upload while the text claims the image is still pending — closes here
+ * too: IMAGE residue is stripped before any bake as well.
+ */
+export function stripPartialMediaMarkersBeforeBake(text: string): string {
+  const expectedFile = findFileMarkers(text).map((marker) => marker.path);
+  const expectedImage = findOutboundMediaMarkers(text, 'IMAGE').map(
+    (marker) => marker.path,
+  );
+  let current = text;
+  for (let pass = 0; pass < FILE_FIXED_POINT_PASS_BUDGET; pass++) {
+    const next = stripAlignedMarkers(
+      stripAlignedMarkers(current, 'FILE', expectedFile),
+      'IMAGE',
+      expectedImage,
+    );
+    if (next === current) return next;
+    current = next;
   }
-  return sanitized + stripPartialFileMarker(text.slice(previousEnd));
+  return neutralizeMediaMarkerOpenings(
+    neutralizeMediaMarkerOpenings(current, 'FILE'),
+    'IMAGE',
+  );
 }
 
 export function safeFileName(filePath: string): string {
