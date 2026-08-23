@@ -493,6 +493,7 @@ describe('Session', () => {
     clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
@@ -712,6 +713,7 @@ describe('Session', () => {
       clearStatusChangeCallback: vi.fn(),
       setApprovalRequestCallback: vi.fn(),
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
+      get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
     };
 
@@ -2380,6 +2382,18 @@ describe('Session', () => {
       mockConfig,
       snapshot.runId,
     );
+  });
+
+  it('rejects history deletion while the workflow is active', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'paused' });
+
+    await expect(session.deleteWorkflowHistory('wf_active')).resolves.toBe(
+      false,
+    );
+
+    expect(mockWorkflowRunRegistry.getHandle).not.toHaveBeenCalled();
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
   });
 
   it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
