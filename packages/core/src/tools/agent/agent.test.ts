@@ -2301,6 +2301,37 @@ describe('AgentTool', () => {
       expect(registry.bridgeApprovalEvents).not.toHaveBeenCalled();
     });
 
+    it('does not bridge nested approvals when the inherited policy auto-denies', async () => {
+      // Under a non-bubble ancestor the nested launch inherits
+      // prompt-avoidance through its config chain, so its scheduler
+      // auto-denies and no TOOL_WAITING_APPROVAL can fire — the wiring is
+      // gated like the sibling bridges instead of leaving a dead
+      // subscription on the emitter.
+      (config as unknown as Record<string, unknown>)[
+        'getShouldAvoidPermissionPrompts'
+      ] = vi.fn().mockReturnValue(true);
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        get: ReturnType<typeof vi.fn>;
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+      registry.get.mockImplementation((id: string) =>
+        id === 'fork-entry'
+          ? { isBackgrounded: true, status: 'running' }
+          : undefined,
+      );
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await runWithAgentContext('fork-entry', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(registry.bridgeApprovalEvents).not.toHaveBeenCalled();
+    });
+
     it('strips internal analysis and summary tags from subagent result', async () => {
       vi.mocked(mockAgent.getFinalText).mockReturnValue(
         [

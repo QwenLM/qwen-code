@@ -28,6 +28,17 @@ import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 function makeApproval(
   callId: string,
   respond: BackgroundApproval['respond'] = vi.fn(async () => {}),
@@ -2438,9 +2449,12 @@ describe('BackgroundTaskRegistry', () => {
       registry.setApprovalChangeCallback(onChange);
       registry.register(makeRegistration('bg-appr-1'));
 
-      const ok = registry.addPendingApproval('bg-appr-1', makeApproval('c1'));
+      const parked = registry.addPendingApproval(
+        'bg-appr-1',
+        makeApproval('c1'),
+      );
 
-      expect(ok).toBe(true);
+      expect(parked).toBe('parked');
       expect(registry.getPendingApprovals('bg-appr-1')).toHaveLength(1);
       expect(registry.get('bg-appr-1')?.pendingApprovals?.[0].callId).toBe(
         'c1',
@@ -2453,10 +2467,10 @@ describe('BackgroundTaskRegistry', () => {
       registry.complete('bg-appr-2', 'done');
 
       expect(registry.addPendingApproval('bg-appr-2', makeApproval('c1'))).toBe(
-        false,
+        'unavailable',
       );
       expect(registry.addPendingApproval('missing', makeApproval('c1'))).toBe(
-        false,
+        'unavailable',
       );
     });
 
@@ -2465,7 +2479,7 @@ describe('BackgroundTaskRegistry', () => {
       registry.addPendingApproval('bg-appr-3', makeApproval('c1'));
 
       expect(registry.addPendingApproval('bg-appr-3', makeApproval('c1'))).toBe(
-        false,
+        'duplicate',
       );
       expect(registry.getPendingApprovals('bg-appr-3')).toHaveLength(1);
     });
@@ -2821,6 +2835,11 @@ describe('BackgroundTaskRegistry', () => {
 
       expect(respond).not.toHaveBeenCalled();
       expect(registry.getPendingApprovals('bg-appr-reemit')).toHaveLength(1);
+      // The drop is logged at debug level so a session where "the approval
+      // never appeared" can tell a re-emission drop from a lost event.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('bg-appr-reemit/c1'),
+      );
       // The user's dialog answer still reaches the parked call.
       await registry.resolvePendingApproval(
         'bg-appr-reemit',

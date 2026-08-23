@@ -458,8 +458,8 @@ export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
  *
  * Used by spawn sites that may be called with a wrapper-on-wrapper
  * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
- * receiving `bgConfig = Object.create(agentConfig)` from the
- * background-agent path) to skip a redundant rebuild.
+ * receiving the stamped `createApprovalModeOverride` override passed
+ * directly from the background-agent path) to skip a redundant rebuild.
  */
 export function hasRebuiltToolRegistry(config: Config): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -716,6 +716,30 @@ export async function createApprovalModeOverride(
   }
 
   return { config: override as Config, cleanup };
+}
+
+/**
+ * Stamps a background agent's prompt-avoidance policy onto its per-launch /
+ * per-resume override config. Background agents have no inline UI, so their
+ * scheduler auto-denies calls that still need confirmation — unless the
+ * agent opts into permission bubbling (`shouldBubble`), in which case
+ * prompts surface in the parent session's Background-tasks UI instead.
+ *
+ * The stamp MUST land on the config the rebuilt tool registry's tools
+ * (including any nested AgentTool) are bound to — not on a wrapper above
+ * it. Nested launches branch their own configs off that config via
+ * Object.create, so the policy must sit where their prototype chains can
+ * reach it: stamped only on a wrapper, a nested scheduler resolved
+ * Config.prototype's `false`, believed it could prompt, and waited forever
+ * on a TOOL_WAITING_APPROVAL nobody could see or answer. Both callers pass
+ * a config freshly created by {@link createApprovalModeOverride}, so the
+ * stamp leaks nowhere.
+ */
+export function stampBackgroundPromptPolicy(
+  config: Config,
+  shouldBubble: boolean,
+): void {
+  config.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 }
 
 /**
@@ -3027,23 +3051,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // Background agents have no inline UI. Preserve the resolved approval
-      // mode while overriding only the prompt-avoidance policy used by their
-      // scheduler.
-      //
-      // Stamp the policy on agentConfig itself — the config the rebuilt tool
-      // registry's tools (including any nested AgentTool) are bound to — not
-      // on a wrapper above it. Nested launches branch their own configs off
-      // agentConfig via Object.create, so the policy must sit where their
-      // prototype chains can reach it: stamped only on a wrapper, a nested
-      // scheduler resolved Config.prototype's `false`, believed it could
-      // prompt, and waited forever on a TOOL_WAITING_APPROVAL nobody could
-      // see or answer. agentConfig is created per-launch by
-      // createApprovalModeOverride, so the stamp leaks nowhere.
-      const subagentRuntimeConfig = agentConfig;
       if (shouldRunInBackground) {
-        subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
-          !shouldBubble;
+        stampBackgroundPromptPolicy(agentConfig, shouldBubble);
       }
 
       // Background agents need a dedicated emitter so their transcript never
@@ -3072,7 +3081,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
         const fork = await this.createForkSubagent(
-          subagentRuntimeConfig as Config,
+          agentConfig,
           backgroundEventEmitter,
         );
         subagent = fork.subagent;
@@ -3082,7 +3091,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
-          subagentRuntimeConfig as Config,
+          agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
             ...(shouldRunInBackground && subagentModelId
@@ -4071,11 +4080,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         registry,
         getCurrentAgentId(),
       );
-      const cleanupNestedApprovalBridge = approvalAncestorId
-        ? registry.bridgeApprovalEvents(approvalAncestorId, this.eventEmitter, {
-            nestedSource: true,
-          })
-        : undefined;
+      // Gated like the sibling bridges: under an auto-denying ancestor
+      // this launch inherits prompt-avoidance through its config chain, so
+      // no TOOL_WAITING_APPROVAL can fire and the subscription would be
+      // dead.
+      const cleanupNestedApprovalBridge =
+        approvalAncestorId && !this.config.getShouldAvoidPermissionPrompts?.()
+          ? registry.bridgeApprovalEvents(
+              approvalAncestorId,
+              this.eventEmitter,
+              { nestedSource: true },
+            )
+          : undefined;
 
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(

@@ -1050,26 +1050,33 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Park a tool call awaiting user approval ("permission bubbling"). No-op
-   * (and the call is auto-rejected by the caller) if the entry is not a
-   * running background agent — late approvals after cancellation must not
-   * resurrect a parked prompt. Duplicate callIds are ignored so a
-   * re-emitted event can't double-list the same call.
+   * Park a tool call awaiting user approval ("permission bubbling").
+   * Returns a discriminated result — mirroring the workflow registry's
+   * `parkPendingApproval` — so the bridge can tell an expected duplicate
+   * (an already-parked call whose event the scheduler re-emitted) apart
+   * from an unparkable entry (gone or terminal), which the caller
+   * auto-rejects so the agent's reasoning loop doesn't block forever.
+   * Late approvals after cancellation must not resurrect a parked prompt;
+   * duplicate callIds are ignored so a re-emitted event can't double-list
+   * the same call.
    */
-  addPendingApproval(agentId: string, approval: BackgroundApproval): boolean {
+  addPendingApproval(
+    agentId: string,
+    approval: BackgroundApproval,
+  ): 'parked' | 'duplicate' | 'unavailable' {
     const entry = this.agents.get(agentId);
     if (!entry || !entry.isBackgrounded || entry.status !== 'running') {
-      return false;
+      return 'unavailable';
     }
     const prior = entry.pendingApprovals ?? [];
-    if (prior.some((a) => a.callId === approval.callId)) return false;
+    if (prior.some((a) => a.callId === approval.callId)) return 'duplicate';
     entry.pendingApprovals = [...prior, approval];
     debugLogger.info(
       `Parked approval for background agent ${agentId} ` +
         `(call ${approval.callId}, ${entry.pendingApprovals.length} pending)`,
     );
     this.emitApprovalChange(entry);
-    return true;
+    return 'parked';
   }
 
   /**
@@ -1170,26 +1177,26 @@ export class BackgroundTaskRegistry {
         at: event.timestamp,
         ...(options?.nestedSource ? { subagentId: event.subagentId } : {}),
       });
-      if (!parked) {
-        // Expected duplicate: the scheduler re-notifies the whole batch on
-        // every status transition and agent-core re-emits
-        // TOOL_WAITING_APPROVAL for every still-awaiting call, so an
-        // already-parked call's event can arrive again. Leave the parked
-        // prompt untouched — rejecting here would cancel the waiting call
-        // while its dialog is still visible, and the runtime's responded
-        // set would then no-op the user's real answer.
-        if (
-          this.getPendingApprovals(agentId).some(
-            (a) => a.callId === event.callId,
-          )
-        ) {
-          return;
-        }
-        // Otherwise the entry is already gone/terminal and we couldn't
-        // park it — reject so the agent's reasoning loop doesn't block
-        // forever on this call. `.catch()` rather than try/catch: respond
-        // is async and a late rejection (frames torn down
-        // post-termination) must not escape as an unhandledRejection.
+      if (parked === 'duplicate') {
+        // Expected: the scheduler re-notifies the whole batch on every
+        // status transition and agent-core re-emits TOOL_WAITING_APPROVAL
+        // for every still-awaiting call, so an already-parked call's event
+        // can arrive again. Leave the parked prompt untouched — rejecting
+        // here would cancel the waiting call while its dialog is still
+        // visible, and the runtime's responded set would then no-op the
+        // user's real answer. Debug level because re-emissions are
+        // frequent while any approval is parked.
+        debugLogger.debug(
+          `Dropped re-emitted approval event for already-parked call ${agentId}/${event.callId}`,
+        );
+        return;
+      }
+      if (parked === 'unavailable') {
+        // The entry is already gone/terminal — reject so the agent's
+        // reasoning loop doesn't block forever on this call. `.catch()`
+        // rather than try/catch: respond is async and a late rejection
+        // (frames torn down post-termination) must not escape as an
+        // unhandledRejection.
         void event.respond(REJECTED_OUTCOME).catch((error) => {
           debugLogger.error(
             `Failed to reject unparkable approval ${agentId}/${event.callId}:`,

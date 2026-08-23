@@ -44,7 +44,10 @@ import {
 } from '../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
-import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import {
+  createApprovalModeOverride,
+  stampBackgroundPromptPolicy,
+} from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
@@ -922,16 +925,7 @@ export class BackgroundAgentResumeService {
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // Stamp the policy on activeAgentConfig itself — the config whose
-      // rebuilt tool registry a nested AgentTool binds to — so nested
-      // launches under the resumed agent inherit it through their own
-      // config prototype chains. Mirrors the launch path (agent.ts); a
-      // wrapper-only stamp left nested schedulers resolving
-      // Config.prototype's `false` and hanging on unanswerable approvals.
-      // activeAgentConfig is created per-resume by
-      // createApprovalModeOverride, so the stamp leaks nowhere.
-      const bgConfig = activeAgentConfig;
-      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
+      stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -946,7 +940,7 @@ export class BackgroundAgentResumeService {
           ]
         : [
             ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
+              await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
@@ -992,7 +986,7 @@ export class BackgroundAgentResumeService {
       let subagent: AgentHeadless;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
-          bgConfig as Config,
+          activeAgentConfig,
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
@@ -1005,7 +999,7 @@ export class BackgroundAgentResumeService {
             : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(resumeSubagentConfig, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
