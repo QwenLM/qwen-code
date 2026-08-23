@@ -10,8 +10,6 @@ import {
   buildSessionRecoveryPlan,
   type Config,
   type SessionListItem,
-  uiTelemetryService,
-  type UiTelemetryReplaySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -26,7 +24,6 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import { restoreTelemetryReplay } from '../utils/telemetry-rollback.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -131,7 +128,6 @@ export function useResumeCommand(
       // The service has no subtraction API, so a resume abandoned after that
       // point would leave the whole abandoned history in the aggregate that
       // `persistSessionUsage` writes out. Hold a snapshot to restore from.
-      let telemetryReplaySnapshot: UiTelemetryReplaySnapshot | undefined;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
@@ -188,19 +184,8 @@ export function useResumeCommand(
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-        const resumingCurrentSession = sessionId === oldSessionId;
-        telemetryReplaySnapshot =
-          uiTelemetryService.snapshotForReplay(sessionId);
         clientInitializationAttempted = true;
         await config.getGeminiClient()?.initialize?.();
-        // A same-session resume normally initializes nothing. If client and
-        // config state were desynchronized, initialize() replayed history that
-        // is already in the live aggregate, so undo that duplicate even though
-        // the resume itself can still commit.
-        if (resumingCurrentSession) {
-          uiTelemetryService.restoreFromReplaySnapshot(telemetryReplaySnapshot);
-          telemetryReplaySnapshot = undefined;
-        }
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
@@ -229,7 +214,7 @@ export function useResumeCommand(
         uiSwapped = true;
         // The swap committed; the replayed history belongs to the session the
         // user is now on. Drop the undo.
-        telemetryReplaySnapshot = undefined;
+        config.getGeminiClient()?.settleTelemetryReplay?.();
 
         // SessionStart hook is handled during chat initialization so its
         // additionalContext can be injected into the resumed model context.
@@ -267,13 +252,10 @@ export function useResumeCommand(
                 `Rollback after failed /resume init failed: ${rollbackErr}`,
               );
           }
-          // Restore after the rollback re-initializes: that initialize may
-          // replay the old session, and restoring first would leave that
-          // duplicate in the aggregate.
-          if (telemetryReplaySnapshot) {
-            restoreTelemetryReplay(telemetryReplaySnapshot, config, '/resume');
-            telemetryReplaySnapshot = undefined;
-          }
+          // Undo after the rollback re-initializes: that initialize can
+          // replay the old session, and undoing first would leave the
+          // duplicate it adds in the aggregate.
+          config.getGeminiClient()?.undoTelemetryReplay?.();
         }
         addItem(
           {

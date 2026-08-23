@@ -12,8 +12,6 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
-  uiTelemetryService,
-  type UiTelemetryReplaySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -28,7 +26,6 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import { restoreTelemetryReplay } from '../utils/telemetry-rollback.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
@@ -136,7 +133,6 @@ export function useBranchCommand(
       // no subtraction API, so a branch abandoned after that point would leave
       // the abandoned fork's whole history in the aggregate that
       // `persistSessionUsage` writes out. Hold a snapshot to restore from.
-      let telemetryReplaySnapshot: UiTelemetryReplaySnapshot | undefined;
       let forkCreated = false;
       let prevSessionData: ResumedSessionData | undefined;
 
@@ -209,8 +205,6 @@ export function useBranchCommand(
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
-        telemetryReplaySnapshot =
-          uiTelemetryService.snapshotForReplay(newSessionId);
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
@@ -236,7 +230,7 @@ export function useBranchCommand(
         uiSwapped = true;
         // The swap committed; the replayed history belongs to the session the
         // user is now on. Drop the undo.
-        telemetryReplaySnapshot = undefined;
+        config.getGeminiClient()?.settleTelemetryReplay?.();
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.
@@ -300,10 +294,7 @@ export function useBranchCommand(
           // so a restore placed before it would be immediately undone and the
           // parent would still end up double-counted. Restoring afterwards
           // discards both the abandoned fork's replay and that duplicate.
-          if (telemetryReplaySnapshot) {
-            restoreTelemetryReplay(telemetryReplaySnapshot, config, '/branch');
-            telemetryReplaySnapshot = undefined;
-          }
+          config.getGeminiClient()?.undoTelemetryReplay?.();
         }
         if (forkCreated && !uiSwapped) {
           try {

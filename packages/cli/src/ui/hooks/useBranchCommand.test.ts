@@ -7,7 +7,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mockSettings = {
@@ -571,56 +570,50 @@ describe('useBranchCommand', () => {
     // re-initializes the parent, adding a second copy of the parent's history
     // on top — so persistSessionUsage writes the parent out at roughly double
     // its real usage for the rest of the process.
-    const snapshot = { sessionId: 'fork' } as never;
-    const snapshotForReplay = vi
-      .spyOn(uiTelemetryService, 'snapshotForReplay')
-      .mockReturnValue(snapshot);
-    const restoreFromReplaySnapshot = vi
-      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
-      .mockImplementation(() => {});
     clearItems.mockImplementationOnce(() => {
       throw new Error('history swap boom');
     });
     // Fork init succeeds; the rollback re-init succeeds too.
     const initialize = vi.fn().mockResolvedValue(undefined);
-    config.getGeminiClient = () => ({ initialize });
+    const undoTelemetryReplay = vi.fn().mockReturnValue(true);
+    const settleTelemetryReplay = vi.fn();
+    config.getGeminiClient = () => ({
+      initialize,
+      undoTelemetryReplay,
+      settleTelemetryReplay,
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('x');
     });
 
-    expect(snapshotForReplay).toHaveBeenCalledTimes(1);
-    expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(snapshot);
+    expect(undoTelemetryReplay).toHaveBeenCalledTimes(1);
     // Ordering is load-bearing: the rollback's re-initialize() replays the
     // parent's history into the aggregate again, so restoring before it would
     // be undone and leave the parent double-counted.
-    const restoreOrder = restoreFromReplaySnapshot.mock.invocationCallOrder[0];
+    const restoreOrder = undoTelemetryReplay.mock.invocationCallOrder[0];
     const rollbackInitOrder = initialize.mock.invocationCallOrder.at(-1);
     expect(restoreOrder).toBeGreaterThan(rollbackInitOrder!);
-
-    snapshotForReplay.mockRestore();
-    restoreFromReplaySnapshot.mockRestore();
   });
 
   it('keeps the replayed usage when the branch commits', async () => {
-    const snapshotForReplay = vi
-      .spyOn(uiTelemetryService, 'snapshotForReplay')
-      .mockReturnValue({ sessionId: 'fork' } as never);
-    const restoreFromReplaySnapshot = vi
-      .spyOn(uiTelemetryService, 'restoreFromReplaySnapshot')
-      .mockImplementation(() => {});
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    const undoTelemetryReplay = vi.fn().mockReturnValue(true);
+    const settleTelemetryReplay = vi.fn();
+    config.getGeminiClient = () => ({
+      initialize,
+      undoTelemetryReplay,
+      settleTelemetryReplay,
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('x');
     });
 
-    expect(snapshotForReplay).toHaveBeenCalledTimes(1);
-    expect(restoreFromReplaySnapshot).not.toHaveBeenCalled();
-
-    snapshotForReplay.mockRestore();
-    restoreFromReplaySnapshot.mockRestore();
+    expect(settleTelemetryReplay).toHaveBeenCalledTimes(1);
+    expect(undoTelemetryReplay).not.toHaveBeenCalled();
   });
 
   it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {

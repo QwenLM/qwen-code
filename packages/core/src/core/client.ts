@@ -106,6 +106,7 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
 import {
@@ -349,6 +350,11 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 export class GeminiClient {
   private chat?: GeminiChat;
   private initializedSessionId: string | undefined;
+  /** Outstanding undo for the telemetry the last `initialize()` replayed. */
+  private telemetryReplayUndo?: {
+    sessionId: string;
+    snapshot: UiTelemetryReplaySnapshot;
+  };
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -460,6 +466,22 @@ export class GeminiClient {
     if (this.isInitialized() && this.initializedSessionId === sessionId) {
       return;
     }
+
+    // Past the early return, so this call WILL replay stored telemetry into
+    // the process-wide usage aggregate — either the restore-runtime events
+    // below or `replayUiTelemetryFromConversation`. Capture the undo here
+    // rather than in the caller: whether a replay happens is decided by
+    // `initializedSessionId`, which the caller cannot see, so a caller that
+    // guessed from its own session id would snapshot when nothing replays and
+    // skip the snapshot when something does.
+    //
+    // `??=`, not `=`: a rollback's own re-initialize runs while the failed
+    // swap's undo is still outstanding, and the undo that matters is the
+    // outermost one — the state before the swap began.
+    this.telemetryReplayUndo ??= {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId),
+    };
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -575,6 +597,33 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Undo the telemetry replay this session's `initialize()` performed.
+   *
+   * Restores the usage aggregate to the state it held before the replay and
+   * forgets that the session was initialized, so retrying the swap replays
+   * again instead of early-returning into a permanently under-counted
+   * session. Returns whether anything was undone.
+   */
+  undoTelemetryReplay(): boolean {
+    const undo = this.telemetryReplayUndo;
+    if (!undo) return false;
+    this.telemetryReplayUndo = undefined;
+    uiTelemetryService.restoreFromReplaySnapshot(undo.snapshot);
+    if (this.initializedSessionId === undo.sessionId) {
+      this.initializedSessionId = undefined;
+    }
+    return true;
+  }
+
+  /**
+   * Drop the pending undo because the swap committed: the replayed history
+   * now belongs to the session the user is on.
+   */
+  settleTelemetryReplay(): void {
+    this.telemetryReplayUndo = undefined;
   }
 
   getHistory(curated: boolean = false): Content[] {

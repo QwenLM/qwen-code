@@ -321,6 +321,8 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   reset: vi.fn(),
   resetSession: vi.fn(),
   addEvent: vi.fn(),
+  snapshotForReplay: vi.fn(() => ({ sessionId: 'snapshot' })),
+  restoreFromReplaySnapshot: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
@@ -779,6 +781,122 @@ describe('Gemini Client (client.ts)', () => {
         'test-session-id',
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+    });
+
+    it('snapshots the aggregate only when it is actually going to replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      snapshotForReplay.mockClear();
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      expect(snapshotForReplay).toHaveBeenCalledTimes(1);
+
+      // Second call early-returns for the same session, so it replays nothing
+      // and must not overwrite the outstanding undo with a post-replay state.
+      await resumedClient.initialize();
+      expect(snapshotForReplay).toHaveBeenCalledTimes(1);
+    });
+
+    it('undoes the replay and lets a retry replay again', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      const restore = vi.mocked(uiTelemetryService.restoreFromReplaySnapshot);
+      snapshotForReplay.mockClear();
+      restore.mockClear();
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.undoTelemetryReplay()).toBe(true);
+      expect(restore).toHaveBeenCalledTimes(1);
+      // Forgetting the initialized session is what makes a retry replay
+      // again; without it the retry early-returns and the session's usage is
+      // permanently missing from the aggregate.
+      await resumedClient.initialize();
+      expect(snapshotForReplay).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the outermost undo when a rollback re-initializes', async () => {
+      // The rollback's own initialize() runs while the failed swap's undo is
+      // still outstanding. Overwriting it there would capture a state that
+      // already contains the abandoned session's replay, so undoing would
+      // leave that replay in the aggregate.
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const snapshotForReplay = vi.mocked(uiTelemetryService.snapshotForReplay);
+      const restore = vi.mocked(uiTelemetryService.restoreFromReplaySnapshot);
+      snapshotForReplay.mockClear();
+      restore.mockClear();
+      snapshotForReplay.mockImplementation(
+        (sessionId: string) => ({ sessionId }) as never,
+      );
+
+      const resumedClient = new GeminiClient(mockConfig);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('incoming-session');
+      await resumedClient.initialize();
+      // Rollback swaps core back and re-initializes against the old session.
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('old-session');
+      await resumedClient.initialize();
+
+      resumedClient.undoTelemetryReplay();
+
+      expect(restore).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'incoming-session' }),
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('test-session-id');
+    });
+
+    it('undoes nothing once the swap has settled', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+      const restore = vi.mocked(uiTelemetryService.restoreFromReplaySnapshot);
+      restore.mockClear();
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      resumedClient.settleTelemetryReplay();
+
+      expect(resumedClient.undoTelemetryReplay()).toBe(false);
+      expect(restore).not.toHaveBeenCalled();
     });
 
     it('seeds resumed chat with replayed prompt token count', async () => {
