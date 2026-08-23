@@ -7,33 +7,21 @@
 import { describe, it, expect } from 'vitest';
 import {
   // Schema utilities
-  getSettingsByCategory,
   getSettingDefinition,
   requiresRestart,
   getDefaultValue,
   getRestartRequiredSettings,
   getEffectiveValue,
   getAllSettingKeys,
-  getSettingsByType,
-  getSettingsRequiringRestart,
-  isValidSettingKey,
-  getSettingCategory,
-  shouldShowInDialog,
-  getDialogSettingsByCategory,
-  getDialogSettingsByType,
   getDialogSettingKeys,
+  WORKSPACE_RESTRICTED_SETTING_KEYS,
   // Business logic utilities
-  getSettingValue,
-  isSettingModified,
   TEST_ONLY,
   settingExistsInScope,
   setPendingSettingValue,
-  hasRestartRequiredSettings,
   getRestartRequiredFromModified,
   getDisplayValue,
   isDefaultValue,
-  isValueInherited,
-  getEffectiveDisplayValue,
   setNestedPropertySafe,
   setNestedPropertyForce,
   validateSettingValue,
@@ -212,24 +200,6 @@ describe('SettingsUtils', () => {
   });
 
   describe('Schema Utilities', () => {
-    describe('getSettingsByCategory', () => {
-      it('should group settings by category', () => {
-        const categories = getSettingsByCategory();
-        expect(categories).toHaveProperty('Advanced');
-        expect(categories).toHaveProperty('Basic');
-      });
-
-      it('should include key property in grouped settings', () => {
-        const categories = getSettingsByCategory();
-
-        Object.entries(categories).forEach(([_category, settings]) => {
-          settings.forEach((setting) => {
-            expect(setting.key).toBeDefined();
-          });
-        });
-      });
-    });
-
     describe('getSettingDefinition', () => {
       it('should return definition for valid setting', () => {
         const definition = getSettingDefinition('ui.theme');
@@ -397,134 +367,69 @@ describe('SettingsUtils', () => {
       });
     });
 
-    describe('getSettingsByType', () => {
-      it('should return only boolean settings', () => {
-        const booleanSettings = getSettingsByType('boolean');
-        expect(booleanSettings.length).toBeGreaterThan(0);
-        booleanSettings.forEach((setting) => {
-          expect(setting.type).toBe('boolean');
-        });
-      });
-    });
-
-    describe('getSettingsRequiringRestart', () => {
-      it('should return only settings that require restart', () => {
-        const restartSettings = getSettingsRequiringRestart();
-        expect(restartSettings.length).toBeGreaterThan(0);
-        restartSettings.forEach((setting) => {
-          expect(setting.requiresRestart).toBe(true);
-        });
-      });
-    });
-
-    describe('isValidSettingKey', () => {
-      it('should return true for valid setting keys', () => {
-        expect(isValidSettingKey('ui.requiresRestart')).toBe(true);
-        expect(isValidSettingKey('ui.accessibility.enableLoadingPhrases')).toBe(
-          true,
-        );
-      });
-
-      it('should return false for invalid setting keys', () => {
-        expect(isValidSettingKey('invalidSetting')).toBe(false);
-        expect(isValidSettingKey('')).toBe(false);
-      });
-    });
-
-    describe('getSettingCategory', () => {
-      it('should return correct category for valid settings', () => {
-        expect(getSettingCategory('ui.requiresRestart')).toBe('UI');
-        expect(
-          getSettingCategory('ui.accessibility.enableLoadingPhrases'),
-        ).toBe('UI');
-      });
-
-      it('should return undefined for invalid settings', () => {
-        expect(getSettingCategory('invalidSetting')).toBeUndefined();
-      });
-    });
-
-    describe('shouldShowInDialog', () => {
-      it('should return true for settings marked to show in dialog', () => {
-        expect(shouldShowInDialog('ui.requiresRestart')).toBe(true);
-        expect(shouldShowInDialog('general.vimMode')).toBe(true);
-        expect(shouldShowInDialog('ui.hideWindowTitle')).toBe(true);
-      });
-
-      it('should return false for settings marked to hide from dialog', () => {
-        expect(shouldShowInDialog('ui.theme')).toBe(false);
-      });
-
-      it('should return true for invalid settings (default behavior)', () => {
-        expect(shouldShowInDialog('invalidSetting')).toBe(true);
-      });
-    });
-
-    describe('getDialogSettingsByCategory', () => {
-      it('should only return settings marked for dialog display', async () => {
-        const categories = getDialogSettingsByCategory();
-
-        // Should include UI settings that are marked for dialog
-        expect(categories['UI']).toBeDefined();
-        const uiSettings = categories['UI'];
-        const uiKeys = uiSettings.map((s) => s.key);
-        expect(uiKeys).toContain('ui.requiresRestart');
-        expect(uiKeys).toContain('ui.accessibility.enableLoadingPhrases');
-        expect(uiKeys).not.toContain('ui.theme'); // This is now marked false
-      });
-
-      it('should not include Advanced category settings', () => {
-        const categories = getDialogSettingsByCategory();
-
-        // Advanced settings should be filtered out
-        expect(categories['Advanced']).toBeUndefined();
-      });
-
-      it('should include settings with showInDialog=true', () => {
-        const categories = getDialogSettingsByCategory();
-
-        const allSettings = Object.values(categories).flat();
-        const allKeys = allSettings.map((s) => s.key);
-
-        expect(allKeys).toContain('test');
-        expect(allKeys).toContain('ui.requiresRestart');
-        expect(allKeys).not.toContain('ui.theme'); // Now hidden
-        expect(allKeys).not.toContain('general.preferredEditor'); // Now hidden
-      });
-    });
-
-    describe('getDialogSettingsByType', () => {
-      it('should return only boolean dialog settings', () => {
-        const booleanSettings = getDialogSettingsByType('boolean');
-
-        const keys = booleanSettings.map((s) => s.key);
-        expect(keys).toContain('ui.requiresRestart');
-        expect(keys).toContain('ui.accessibility.enableLoadingPhrases');
-        expect(keys).not.toContain('privacy.usageStatisticsEnabled');
-        expect(keys).not.toContain('security.auth.selectedType'); // Advanced setting
-        expect(keys).not.toContain('security.auth.useExternal'); // Advanced setting
-      });
-
-      it('should return only string dialog settings', () => {
-        const stringSettings = getDialogSettingsByType('string');
-
-        const keys = stringSettings.map((s) => s.key);
-        // Note: theme and preferredEditor are now hidden from dialog
-        expect(keys).not.toContain('ui.theme'); // Now marked false
-        expect(keys).not.toContain('general.preferredEditor'); // Now marked false
-        expect(keys).not.toContain('security.auth.selectedType'); // Advanced setting
-
-        // Check that user-facing tool settings are included
-        expect(keys).toContain('tools.shell.pager');
-
-        // Check that advanced/hidden tool settings are excluded
-        expect(keys).not.toContain('tools.discoveryCommand');
-        expect(keys).not.toContain('tools.callCommand');
-        expect(keys.every((key) => !key.startsWith('advanced.'))).toBe(true);
-      });
-    });
-
     describe('getDialogSettingKeys', () => {
+      // R4-2: Workspace scope strips these before the merge, so listing them
+      // there lets a user toggle a setting that silently never takes effect
+      // and writes a dead entry into the repo's .qwen/settings.json.
+      describe('workspace-restricted filtering', () => {
+        const restrictedKey = WORKSPACE_RESTRICTED_SETTING_KEYS[0]!;
+        const [section, leaf] = restrictedKey.split('.') as [string, string];
+
+        beforeEach(() => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            [section]: {
+              type: 'object',
+              label: section,
+              category: 'General',
+              requiresRestart: false,
+              default: {},
+              description: 'section',
+              showInDialog: false,
+              properties: {
+                [leaf]: {
+                  type: 'boolean',
+                  label: leaf,
+                  category: 'General',
+                  requiresRestart: true,
+                  default: false,
+                  description: 'restricted',
+                  showInDialog: true,
+                },
+                unrestricted: {
+                  type: 'boolean',
+                  label: 'Unrestricted',
+                  category: 'General',
+                  requiresRestart: false,
+                  default: false,
+                  description: 'plain',
+                  showInDialog: true,
+                },
+              },
+            },
+          } as unknown as ReturnType<typeof getSettingsSchema>);
+        });
+
+        it('drops the restricted key when asked to, and nothing else', () => {
+          // Guard against a vacuous pass: it must be dialog-visible first.
+          expect(getDialogSettingKeys()).toContain(restrictedKey);
+
+          const workspaceKeys = getDialogSettingKeys({
+            excludeWorkspaceRestricted: true,
+          });
+          expect(workspaceKeys).not.toContain(restrictedKey);
+          expect(workspaceKeys).toContain(`${section}.unrestricted`);
+        });
+
+        it('keeps it when the option is absent or false', () => {
+          const allKeys = getDialogSettingKeys();
+          expect(getDialogSettingKeys({})).toEqual(allKeys);
+          expect(
+            getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+          ).toEqual(allKeys);
+          expect(allKeys).toContain(restrictedKey);
+        });
+      });
+
       it('should return only settings marked for dialog display', () => {
         const dialogKeys = getDialogSettingKeys();
 
@@ -601,7 +506,7 @@ describe('SettingsUtils', () => {
         expect(existsInPending).toBe(true);
 
         // Get the value from pending settings
-        const valueFromPending = getSettingValue(
+        const valueFromPending = getEffectiveValue(
           key,
           updatedPendingSettings,
           {},
@@ -633,64 +538,6 @@ describe('SettingsUtils', () => {
   });
 
   describe('Business Logic Utilities', () => {
-    describe('getSettingValue', () => {
-      it('should return value from settings when set', () => {
-        const settings = makeMockSettings({ ui: { requiresRestart: true } });
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: false },
-        });
-
-        const value = getSettingValue(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(value).toBe(true);
-      });
-
-      it('should return value from merged settings when not set in current scope', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: true },
-        });
-
-        const value = getSettingValue(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(value).toBe(true);
-      });
-
-      it('should return default value for invalid setting', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({});
-
-        const value = getSettingValue(
-          'invalidSetting',
-          settings,
-          mergedSettings,
-        );
-        expect(value).toBe(false); // Default fallback
-      });
-    });
-
-    describe('isSettingModified', () => {
-      it('should return true when value differs from default', () => {
-        expect(isSettingModified('ui.requiresRestart', true)).toBe(true);
-        expect(
-          isSettingModified('ui.accessibility.enableLoadingPhrases', true),
-        ).toBe(true);
-      });
-
-      it('should return false when value matches default', () => {
-        expect(isSettingModified('ui.requiresRestart', false)).toBe(false);
-        expect(
-          isSettingModified('ui.accessibility.enableLoadingPhrases', false),
-        ).toBe(false);
-      });
-    });
-
     describe('settingExistsInScope', () => {
       it('should return true for top-level settings that exist', () => {
         const settings = makeMockSettings({ ui: { requiresRestart: true } });
@@ -778,26 +625,6 @@ describe('SettingsUtils', () => {
         setPendingSettingValue('ui.requiresRestart', true, pendingSettings);
 
         expect(pendingSettings).toEqual({});
-      });
-    });
-
-    describe('hasRestartRequiredSettings', () => {
-      it('should return true when modified settings require restart', () => {
-        const modifiedSettings = new Set<string>([
-          'advanced.autoConfigureMemory',
-          'ui.requiresRestart',
-        ]);
-        expect(hasRestartRequiredSettings(modifiedSettings)).toBe(true);
-      });
-
-      it('should return false when no modified settings require restart', () => {
-        const modifiedSettings = new Set<string>(['test']);
-        expect(hasRestartRequiredSettings(modifiedSettings)).toBe(false);
-      });
-
-      it('should return false for empty set', () => {
-        const modifiedSettings = new Set<string>();
-        expect(hasRestartRequiredSettings(modifiedSettings)).toBe(false);
       });
     });
 
@@ -1157,108 +984,6 @@ describe('SettingsUtils', () => {
           settings,
         );
         expect(result).toBe(false);
-      });
-    });
-
-    describe('isValueInherited', () => {
-      it('should return false for top-level settings that exist in scope', () => {
-        const settings = makeMockSettings({ ui: { requiresRestart: true } });
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: true },
-        });
-
-        const result = isValueInherited(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(false);
-      });
-
-      it('should return true for top-level settings that do not exist in scope', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: true },
-        });
-
-        const result = isValueInherited(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(true);
-      });
-
-      it('should return false for nested settings that exist in scope', () => {
-        const settings = makeMockSettings({
-          ui: { accessibility: { enableLoadingPhrases: true } },
-        });
-        const mergedSettings = makeMockSettings({
-          ui: { accessibility: { enableLoadingPhrases: true } },
-        });
-
-        const result = isValueInherited(
-          'ui.accessibility.enableLoadingPhrases',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(false);
-      });
-
-      it('should return true for nested settings that do not exist in scope', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({
-          ui: { accessibility: { enableLoadingPhrases: true } },
-        });
-
-        const result = isValueInherited(
-          'ui.accessibility.enableLoadingPhrases',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(true);
-      });
-    });
-
-    describe('getEffectiveDisplayValue', () => {
-      it('should return value from settings when available', () => {
-        const settings = makeMockSettings({ ui: { requiresRestart: true } });
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: false },
-        });
-
-        const result = getEffectiveDisplayValue(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(true);
-      });
-
-      it('should return value from merged settings when not in scope', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({
-          ui: { requiresRestart: true },
-        });
-
-        const result = getEffectiveDisplayValue(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(true);
-      });
-
-      it('should return default value for undefined values', () => {
-        const settings = makeMockSettings({});
-        const mergedSettings = makeMockSettings({});
-
-        const result = getEffectiveDisplayValue(
-          'ui.requiresRestart',
-          settings,
-          mergedSettings,
-        );
-        expect(result).toBe(false); // Default value
       });
     });
   });

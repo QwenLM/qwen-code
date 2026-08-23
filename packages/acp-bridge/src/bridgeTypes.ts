@@ -6,7 +6,9 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
   GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
   TurnResultCode,
   TurnResultErrorPayload,
@@ -37,7 +39,7 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
-import type { SessionMediaReference } from './sessionMedia.js';
+import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -60,7 +62,48 @@ export interface RewindSnapshotInfo {
   diffStats: { filesChanged: number; insertions: number; deletions: number };
 }
 
-export type BridgePromptContentBlock = ContentBlock | SessionMediaReference;
+/**
+ * An ACP child's lifetime V8 old-generation high-water marks, self-reported
+ * through the `workspaceResource` extMethod.
+ *
+ * Observational. Nothing here sizes a child, refuses a spawn, or widens
+ * `limits.memory.enforced` — these exist so a future child-heap policy can be
+ * judged against real workloads instead of against a refusal count that cannot
+ * answer whether a child would survive a smaller ceiling.
+ *
+ * Every figure covers the **old generation**, the thing
+ * `--max-old-space-size` actually bounds, and not `old_space` alone: a child
+ * can OOM against its ceiling with `old_space` at 3 MB while
+ * `large_object_space` holds everything.
+ */
+export interface ChildHeapReport {
+  /** High-water committed old-generation bytes. Rises with the ceiling the
+   *  child was given, so read it as an upper bound on what the workload needs
+   *  rather than as its requirement. */
+  peakOldGenerationBytes: number;
+  /** High-water old-generation bytes still live after a major GC, i.e. what
+   *  the workload retains. Independent of the ceiling, which is what makes it
+   *  the figure able to say a child cannot fit one. An upper bound rather than
+   *  an exact live set: GC entries arrive asynchronously, so allocation
+   *  between the collection and the read is counted. 0 when no major GC has
+   *  been observed — not a measured zero. */
+  peakLiveSetBytes: number;
+  /** High-water `total_heap_size`. A cross-check needing no space name; it
+   *  includes the young generation, so it cannot localise a missing space. */
+  peakTotalHeapBytes: number;
+  /** Major collections over the child's lifetime. */
+  majorGcCount: number;
+  /** Total major-GC pause time in ms — the cost side of a smaller ceiling. */
+  majorGcMs: number;
+  /** Heap spaces the child could classify as neither old- nor young-
+   *  generation. Non-empty means the sums above are incomplete and must not be
+   *  read as a full measurement. */
+  unclassifiedSpaceNames: string[];
+}
+
+export type BridgePromptContentBlock =
+  | ContentBlock
+  | SessionAttachmentReference;
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
@@ -644,6 +687,11 @@ export interface BridgeSessionSummary {
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * GitHub PRs bound to the session, in binding order (last = latest). A
+   * session can produce several PRs (stacked or follow-up work).
+   */
+  prs?: SessionPrInfo[];
 }
 
 /**
@@ -674,8 +722,16 @@ export interface BridgeSessionGoal {
   } | null;
 }
 
+export interface SessionPrInfo {
+  number: number;
+  url: string;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
+  pr?: SessionPrInfo;
+  /** Full binding list after the update (return value only; ignored on input). */
+  prs?: SessionPrInfo[];
 }
 
 export interface CloseSessionOpts {
@@ -767,6 +823,12 @@ export interface BridgeClientRequestContext {
    */
   continue?: boolean;
   /**
+   * Internal: set ONLY after load/resume when the child hinted that a trailing
+   * ask_user_question should be re-hung. HTTP routes never populate this from
+   * request input.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
    * Absolute wallclock budget (ms) for this prompt, measured from admission
    * (the 202 semantic point) and covering queue wait. When exceeded, the
    * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
@@ -777,7 +839,29 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
-export const DAEMON_MEDIA_REFERENCES_META_KEY = 'qwen.daemon.mediaReferences';
+export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.restoreAskUserQuestion';
+/**
+ * Response `_meta` key on `session/request_permission` cancellations telling
+ * the child WHY the bridge resolved a cancel (`timeout` / `agent_cancelled`
+ * / `session_closed`). The ACP wire frame itself only carries
+ * `{outcome:'cancelled'}`; the child uses this to avoid persisting a
+ * fabricated "canceled by the user" tool result when an unattended restore
+ * prompt's permission wait timed out or the session closed.
+ */
+export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
+  'qwen.daemon.permissionCancelReason';
+/**
+ * Request `_meta` key on the child-bound `session/load` / `session/resume`
+ * telling the child NOT to emit the restore hint and NOT to skip finalizing
+ * the trailing ask_user_question during replay. The daemon sets it when it
+ * already knows it will decline the re-hang (no attached client, fork
+ * restore) — keeping the replay skip and the re-hang decision in lockstep.
+ */
+export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.suppressRestoreAskUserQuestion';
+export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
+  'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -1371,7 +1455,7 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Update mutable session metadata. Currently supports `displayName` only.
+   * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   updateSessionMetadata(
@@ -1379,6 +1463,16 @@ export interface AcpSessionBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /**
+   * Re-hydrate the in-memory PR binding list of a live session from the
+   * persisted sidecar after the entry was re-created empty (daemon
+   * restart, close/reload, archive/restore). No-op when the entry is
+   * unknown or already holds bindings, so this-daemon-lifetime state
+   * always wins. Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
    * List the structured artifacts registered for a live session. Throws
@@ -1619,6 +1713,13 @@ export interface AcpSessionBridge {
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
+
   /**
    * Read a live session's Goal state. Throws `SessionNotFoundError` when the
    * session is not resident because this route addresses the selected runtime.
@@ -1807,9 +1908,12 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
-   * With `options.queueOnly` an idle session rejects instead of promoting. If
-   * a busy session settles before draining the message,
-   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
+   * With `options.rejectIfIdle` an idle session rejects instead of taking
+   * ownership. A message accepted while busy keeps the ordinary public queue
+   * semantics: it is echoed when drained and promoted if the turn settles
+   * first. `options.queueOnly` is reserved for internal live steering; if a
+   * busy session settles before draining one of those messages,
+   * `onSettledWithoutDrain` lets that internal caller drive the next turn.
    * `options.content` carries image blocks with the message;
    * an empty `message` is admitted when media blocks are present.
    */
@@ -1819,30 +1923,35 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
     messageId?: string,
     options?: {
+      rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string };
 
-  storeSessionMedia(
+  storeSessionAttachment(
     sessionId: string,
     data: Uint8Array,
     mimeType: string,
     context?: BridgeClientRequestContext,
-  ): Promise<SessionMediaReference>;
+    name?: string,
+  ): Promise<SessionAttachmentReference>;
 
-  readSessionMedia(
+  readSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ data: Buffer; mimeType: string } | undefined>;
 
-  removeSessionMedia(
+  removeSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<boolean>;
+
+  /** Delete all persisted attachments after the session itself is deleted. */
+  deleteSessionAttachments(sessionId: string): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(
@@ -2084,6 +2193,12 @@ export interface AcpSessionBridge {
          *  field — see {@link pendingPromptTotal} — so a caller aggregating
          *  several children must treat it as unknown rather than as fresh. */
         ageMs?: number;
+        /** The child's lifetime old-generation high-water marks. Absent when
+         *  the child does not report them — a child predating the fields, or
+         *  one spawned outside the daemon. Never substituted with zeros: a
+         *  measured zero and an unmeasured child are different claims, and
+         *  only the first may be read as "this child needed no heap". */
+        heap?: ChildHeapReport;
       }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that

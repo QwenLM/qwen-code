@@ -223,6 +223,7 @@ interface ServeArgs {
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
+  restoreAskUserQuestion?: boolean;
   channel?: string[];
 }
 
@@ -336,6 +337,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Forward the experimental LSP opt-in to spawned agent sessions.',
+      })
+      .option('restore-ask-user-question', {
+        type: 'boolean',
+        default: false,
+        description:
+          'On session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result.',
       })
       .option('channel', {
         type: 'string',
@@ -899,6 +906,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
         ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
+        ...(argv.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         ...(channelSelection !== undefined ? { channelSelection } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;

@@ -99,6 +99,7 @@ import {
   GoalPersistenceUnavailableError,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -188,6 +189,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
+    contextFilePaths: [],
     ruleCount: 0,
     conditionalRules: [],
     projectRoot: '/tmp',
@@ -671,6 +673,33 @@ describe('Server Config (config.ts)', () => {
           memoryAgentMaxTurns: 2.5,
         }).getMemoryAgentMaxTurns(),
       ).toBeUndefined();
+    });
+  });
+
+  describe('restorable ask_user_question preservation', () => {
+    it('defaults to off when the restore switch is unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getRestoreAskUserQuestion()).toBe(false);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+    });
+
+    it('preserves by default when the restore switch is on', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(true);
+    });
+
+    it('stops preserving after suppression, without touching the restore switch', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      config.suppressRestorableAskUserQuestionPreservation();
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
     });
   });
 
@@ -2396,6 +2425,7 @@ describe('Server Config (config.ts)', () => {
               evidenceCursor: { recordId: 'goal-active' },
               turnCount: 1,
               activeTimeMs: 10,
+              tokensUsed: 0,
               createdAt: 1,
               updatedAt: 2,
             },
@@ -2632,6 +2662,29 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('bills Goal turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const permit = started[0]!;
+
+      config.getChatRecordingService()!.recordAssistantTurn({
+        model: 'test-model',
+        tokens: { totalTokenCount: 4_500 },
+        goalContext: permit,
+      });
+      await runtime.finishTurn(permit);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
@@ -3200,6 +3253,51 @@ describe('Server Config (config.ts)', () => {
         acquire.mockRestore();
       },
     );
+
+    it('adopts the active transcript when writer activation sees both states', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440099';
+      const sessionData = {
+        conversation: {
+          sessionId,
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: `/tmp/${sessionId}.jsonl`,
+        lastCompletedUuid: null,
+      } as ResumedSessionData;
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const service = config.getSessionService();
+      vi.spyOn(service, 'getSessionLocation').mockResolvedValue('conflict');
+      const loadSession = vi
+        .spyOn(service, 'loadSession')
+        .mockResolvedValue(sessionData);
+      const lease = {
+        sessionId,
+        transcriptExistedAtAcquire: true,
+        isReleased: false,
+        assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+        release: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(lease);
+
+      await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      ).activateChatRecording();
+
+      expect(loadSession).toHaveBeenCalledWith(sessionId);
+      expect(config.hasSessionWriteOwnership()).toBe(true);
+      acquire.mockRestore();
+    });
 
     it('releases a pending lease while a real baseline read is gated', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
@@ -4059,7 +4157,39 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers image_gen when an image-only model route is selected', async () => {
+    it('registers image_gen when a dual-role model is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'dual-role-model',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+        imageModel: `openai:dual-role-model\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getModel()).toBe('dual-role-model');
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'dual-role-model',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('registers image_gen for a legacy image-and-vision-only route', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
         ...baseParams,
@@ -4070,6 +4200,7 @@ describe('Server Config (config.ts)', () => {
               baseUrl,
               envKey: 'TEST_IMAGE_GENERATION_KEY',
               imageOnly: true,
+              visionOnly: true,
             },
           ],
         },
@@ -4126,6 +4257,102 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('rejects a route without image generation capability', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'chat-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(`openai:chat-model\0${baseUrl}`),
+      ).toBeUndefined();
+    });
+
+    it('resolves a vision-only image generation route with explicit capability', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'vision-only-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              visionOnly: true,
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(
+          `openai:vision-only-model\0${baseUrl}`,
+        ),
+      ).toEqual({
+        model: 'vision-only-model',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('rejects an image generation route without an environment key', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl,
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(
+          `openai:dual-role-model\0${baseUrl}`,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('rejects an ambiguous image generation route', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl: 'https://images-a.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+            {
+              id: 'dual-role-model',
+              baseUrl: 'https://images-b.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel('openai:dual-role-model'),
+      ).toBeUndefined();
     });
 
     it('registers image_gen immediately when the image model changes at runtime', async () => {
@@ -5655,6 +5882,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -5705,6 +5933,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
+        contextFilePaths: [],
         ruleCount: 0,
         conditionalRules: [],
         projectRoot,
@@ -5774,6 +6003,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
+        contextFilePaths: [],
         ruleCount: 0,
         conditionalRules: [],
         projectRoot,
@@ -5812,6 +6042,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -5845,6 +6076,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
+        contextFilePaths: [],
         ruleCount: 0,
         conditionalRules: [],
         projectRoot: '/tmp',
@@ -5890,6 +6122,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
+        contextFilePaths: [],
         ruleCount: 0,
         conditionalRules: [],
         projectRoot: '/tmp',
@@ -5935,6 +6168,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
+        contextFilePaths: [],
         ruleCount: 0,
         conditionalRules: [],
         projectRoot: '/tmp',
@@ -5962,6 +6196,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -5980,6 +6215,34 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
+    const config = new Config(baseParams);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      contextFilePaths: ['QWEN.md'],
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    expect(config.getContextFilePaths()).toEqual(['QWEN.md']);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    expect(config.getContextFilePaths()).toEqual([]);
+  });
+
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
     const config = new Config({
       ...baseParams,
@@ -5989,6 +6252,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: 'short project rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6017,6 +6281,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
       memoryContent: 'a'.repeat(800),
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6076,6 +6341,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
       memoryContent: 'short project context',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6303,6 +6569,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const oldPrSessionPath = path.join(oldChatsDir, `${sessionId}.pr.json`);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -6312,6 +6579,7 @@ describe('Server Config (config.ts)', () => {
       newChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const newPrSessionPath = path.join(newChatsDir, `${sessionId}.pr.json`);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -6320,6 +6588,7 @@ describe('Server Config (config.ts)', () => {
       oldTranscriptPath,
       oldRuntimeStatusPath,
       oldWorktreeSessionPath,
+      oldPrSessionPath,
     ];
     vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
       const checked = pathToCheck.toString();
@@ -6342,6 +6611,10 @@ describe('Server Config (config.ts)', () => {
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldWorktreeSessionPath,
       newWorktreeSessionPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldPrSessionPath,
+      newPrSessionPath,
     );
     expect(config.getTranscriptPath()).toBe(newTranscriptPath);
 
@@ -6856,6 +7129,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6881,6 +7155,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6904,6 +7179,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6952,6 +7228,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -6974,6 +7251,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      contextFilePaths: [],
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -7620,6 +7898,58 @@ describe('Server Config (config.ts)', () => {
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
       ).toContain(ToolNames.ZOOM_IMAGE);
     });
+
+    it('does not register list_directory by default (opt-in tool)', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when lsToolEnabled is true', async () => {
+      const config = new Config({ ...baseParams, lsToolEnabled: true });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it.each([
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+    ])(
+      'registers list_directory when listed in coreTools via $label',
+      async ({ entry }) => {
+        const config = new Config({
+          ...baseParams,
+          coreTools: [ToolNames.READ_FILE, entry],
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
 
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({

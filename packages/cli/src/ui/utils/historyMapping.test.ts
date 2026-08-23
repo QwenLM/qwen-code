@@ -63,6 +63,7 @@ function geminiItem(id: number): HistoryItem {
 function compressionItem(
   id: number,
   compressionStatus = CompressionStatus.COMPRESSED,
+  compressionKind: 'summarize' | 'fast' = 'summarize',
 ): HistoryItem {
   return {
     type: 'compression',
@@ -72,6 +73,7 @@ function compressionItem(
       originalTokenCount: 100,
       newTokenCount: 40,
       compressionStatus,
+      compressionKind,
     },
   } as HistoryItem;
 }
@@ -347,6 +349,340 @@ describe('computeApiTruncationIndex', () => {
       ];
 
       expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
+    });
+
+    it('fails loud when marker-less auto-compaction left a compressed prefix', () => {
+      // Auto-compaction adds no UI compression marker, but leaves the API
+      // history with a [summary, ack] prefix. Rewinding to the first turn
+      // must abort (-1) rather than silently truncate to the compressed
+      // prefix and drop every real turn (R5-1 entrance 3).
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        userItem(3, 'pre 2'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+      ];
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+  });
+
+  describe('with fast (non-summarizing) compression markers', () => {
+    // /compress-fast keeps every user prompt in the API history and inserts
+    // no summary prefix, so its marker must not act as a rewind boundary.
+    // Shaped after the report in #9320: rewinding to the first post-marker
+    // turn used to collapse the anchor to the startup entry and silently
+    // drop the entire pre-marker conversation.
+    const fastCompressedHistory = () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        userItem(3, 'pre 2'),
+        geminiItem(4),
+        userItem(5, 'pre 3'),
+        geminiItem(6),
+        compressionItem(7, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(8, 'post 1'),
+        geminiItem(9),
+        userItem(10, 'post 2'),
+        geminiItem(11),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('pre 1'),
+        modelContent('response 1'),
+        userContent('pre 2'),
+        modelContent('response 2'),
+        userContent('pre 3'),
+        modelContent('response 3'),
+        userContent('post 1'),
+        modelContent('response post 1'),
+        userContent('post 2'),
+        modelContent('response post 2'),
+      ];
+      return { ui, api };
+    };
+
+    it('keeps the full pre-marker history when rewinding to the first post-marker turn', () => {
+      const { ui, api } = fastCompressedHistory();
+      // Keep startup + all three pre-marker turns, truncate before 'post 1'.
+      expect(computeApiTruncationIndex(ui, 8, api)).toBe(7);
+    });
+
+    it('maps later post-marker turns against the full history', () => {
+      const { ui, api } = fastCompressedHistory();
+      // 4 real user turns precede 'post 2' → truncate before idx 9.
+      expect(computeApiTruncationIndex(ui, 10, api)).toBe(9);
+    });
+
+    it('allows rewinding to turns before a fast-compression marker', () => {
+      const { ui, api } = fastCompressedHistory();
+      // Fast compression absorbs no prompts, so pre-marker turns stay
+      // reachable (summarizing compression would return -1 here).
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('still blocks turns absorbed by a later summarizing compression', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre fast'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(4, 'between compressions'),
+        geminiItem(5),
+        compressionItem(6, CompressionStatus.COMPRESSED, 'summarize'),
+        userItem(7, 'post summarize'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post summarize'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 7, api)).toBe(3);
+    });
+
+    it('treats legacy markers without a kind as summarizing', () => {
+      const legacyMarker: HistoryItem = {
+        type: 'compression',
+        id: 3,
+        compression: {
+          isPending: false,
+          originalTokenCount: 100,
+          newTokenCount: 40,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      } as HistoryItem;
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        legacyMarker,
+        userItem(4, 'post compression'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post compression'),
+      ];
+
+      // Pre-marker turns stay unreachable, matching pre-fix behavior for
+      // sessions persisted before compressionKind existed.
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
+    });
+  });
+
+  describe('with microcompaction media-clear placeholders', () => {
+    // /compress-fast's forced microcompaction replaces the top-level
+    // inlineData/fileData parts of user entries with text placeholders
+    // ('[Old inline media cleared: <mime>]'). A media-only user entry
+    // (e.g. an image-only ACP prompt) never produced a UI user turn, but
+    // once cleared it satisfies a naive 'text' in part check — counting it
+    // desynchronizes the API prompt count from the UI turn count and makes
+    // the walk truncate one turn early, silently dropping a turn the UI
+    // still shows (the same hazard this PR's fast-marker change addresses,
+    // newly reachable through cross-fast-marker rewinds).
+
+    function clearedMediaContent(mime = 'image/png'): Content {
+      return {
+        role: 'user',
+        parts: [{ text: `[Old inline media cleared: ${mime}]` } as Part],
+      };
+    }
+
+    function inlineMediaContent(): Content {
+      return {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'abc' } } as Part],
+      };
+    }
+
+    it('does not count a cleared media-only entry as a user prompt', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        clearedMediaContent(), // media-only entry, cleared; NOT a UI turn
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Witness: with the uncleared inlineData entry the index is 4; the
+      // cleared placeholder must land on the same index, not one turn early.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+
+      const apiUncleared: Content[] = [
+        startupEntry(),
+        inlineMediaContent(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      expect(computeApiTruncationIndex(ui, 3, apiUncleared)).toBe(4);
+    });
+
+    it('keeps the full pre-marker history when a cleared entry precedes a fast marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(4, 'post 1'),
+        geminiItem(5),
+        userItem(6, 'post 2'),
+        geminiItem(7),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        clearedMediaContent(), // cleared by /compress-fast microcompaction
+        userContent('pre 1'),
+        modelContent('response pre 1'),
+        userContent('post 1'),
+        modelContent('response post 1'),
+        userContent('post 2'),
+        modelContent('response post 2'),
+      ];
+      // 2 real turns precede 'post 2'; the cleared entry must not shift the
+      // count. Without the exclusion the walk stops at 'post 1' (idx 4).
+      expect(computeApiTruncationIndex(ui, 6, api)).toBe(6);
+    });
+
+    it('still counts an entry mixing a placeholder with real prompt text', () => {
+      const mixedTurn: Content = {
+        role: 'user',
+        parts: [
+          { text: '[Old inline media cleared: image/png]' } as Part,
+          { text: 'check this image' } as Part,
+        ],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, 'check this image'),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        mixedTurn,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('still counts a genuine prompt that merely begins with the placeholder prefix', () => {
+      // Microcompaction never rewrites text parts, so a user prompt that
+      // starts with '[Old inline media cleared:' (e.g. a pasted
+      // placeholder) is genuine. A bare-prefix match would drop it from
+      // the API prompt count: rewinding to a later turn truncated one
+      // prompt LATE (index 4 instead of 3) and rewinding to the prefix
+      // turn itself returned -1 with a spurious "compressed" error.
+      const prefixPromptText =
+        '[Old inline media cleared: image/png] why is this in my history?';
+      const prefixPrompt: Content = {
+        role: 'user',
+        parts: [{ text: prefixPromptText } as Part],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, prefixPromptText),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        prefixPrompt,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Prefix turn AS the rewind target lands on its own entry…
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
+      // …and a later rewind target is not shifted one turn late.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('pins the exact-match collision corner as a loud block, not silent loss', () => {
+      // Known limitation, documented next to the exclusion in
+      // historyMapping.ts: microcompaction never rewrites text parts, so a
+      // genuine prompt whose entire text equals a generated placeholder is
+      // indistinguishable from a cleared media-only entry. It is excluded
+      // from the API prompt count, so every later rewind target returns
+      // -1 — AppContainer turns that into a loud "Cannot rewind to a turn
+      // that was compressed" abort. This pins the fail-safe shape: a
+      // visible error, never silent history loss. A durable fix needs a
+      // structural sentinel on cleared parts (persisted-format change, out
+      // of scope here) and would update this expectation.
+      const exactPlaceholderText = '[Old inline media cleared: image/png]';
+      const collidingPrompt: Content = {
+        role: 'user',
+        parts: [{ text: exactPlaceholderText } as Part],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, exactPlaceholderText),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        collidingPrompt,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Rewinding to the colliding turn itself still works via the
+      // uiUserTurnCount === 0 shortcut…
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
+      // …while every later target fails loud (-1) instead of truncating
+      // against a misaligned prompt count.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    });
+
+    it('pins the mid-history exact-match collision: own turn one-late, later turns loud', () => {
+      // Same known limitation as the test above, with the colliding turn in
+      // a mid-history position (uiUserTurnCount >= 1): the shortcut does
+      // not apply, so rewinding TO the colliding turn lands on the next
+      // counted prompt and truncates one turn LATE — the colliding turn's
+      // prompt+response stays in model context while the UI removes the
+      // turn (under-deletion, not loss of context the UI keeps). Every
+      // later target still fails loud (-1). Pinned so a structural fix
+      // (sentinel on cleared parts) updates both expectations.
+      const exactPlaceholderText = '[Old inline media cleared: image/png]';
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, exactPlaceholderText),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent(exactPlaceholderText),
+        modelContent('response colliding'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Rewinding TO the colliding turn keeps its prompt+response (index 5,
+      // one turn late)…
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(5);
+      // …while every later target fails loud (-1).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
     });
   });
 

@@ -18,6 +18,9 @@
 # Review local changes and apply the findings to your working tree
 /review --fix
 
+# Continue a review of the same PR that was interrupted, instead of starting over
+/review 123 --resume
+
 # Review a specific file
 /review src/utils/auth.ts
 
@@ -148,6 +151,7 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh. If the interrupted session still leaves its lease behind — a hard kill that skips this, or a multi-prompt review interrupted during a later prompt — `/review` refuses and names the lease file to delete. Clean stops release it: a finished review and the early stops (empty diff, no new changes since the last review) all run `cleanup`, which releases the lease
 - The worktree is leased to its session: a second `/review` of a PR that is already under review refuses to start (naming the holder) rather than tear down the running review's worktree
 - Review reports and cache are saved to the main project directory (not the worktree)
+- Steps that **modify** code to measure something — the test-efficacy probe's mutants, and a verifier's probe of a specific finding — each run in their own throwaway worktree beside it (`…-probe`, `…-scratch-<agent>`), so one agent's experiment is not visible to the others reading the shared tree. As a backstop, every agent in each wave is also told which paths (if any) differ from the commit under review at the moment it was launched, and that a failure confined to those paths is not a finding. All of these trees are swept along with the worktree at the end of the review.
 
 ## Cross-repo PR Review
 
@@ -184,7 +188,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — note this also withholds the model from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in your user or system `settings.json` (the workspace `.qwen/settings.json` is ignored for `review.*` settings) to post without it — comments and body lists then also lose the `**[Critical]**`/`**[Suggestion]**` severity markers, and the model is withheld from the review's machine-ledger marker, so in fresh environments (no review cache) the recovered incremental anchor fails the same-model check and the re-review falls back to full-range
 
 **What stays terminal-only:**
 
@@ -221,6 +225,18 @@ After the review, each finding is applied with the `edit` tool and then **accoun
 A finding is skipped when its fix would change intended behavior, would need changes well outside the reviewed diff, or turns out on a second look to be a false positive.
 
 **Every finding gets an outcome, and this is enforced rather than requested.** The ledger goes through `qwen review findings --outcomes`, which refuses a set that does not cover all of them — a fixer that applies six of nine findings and reports six has not lied about any one of them, it has silently shortened the list, and you would have no way to see the three that fell off.
+
+## Resuming an interrupted review (`--resume`)
+
+A long review that dies part-way — a dropped connection, a timeout, a killed terminal — leaves everything it had done on disk: the worktree, the captured diff, and the harness's own record of every agent that ran. `--resume` continues from there instead of starting over:
+
+```bash
+/review 123 --resume
+```
+
+It applies to **PR targets only** (a local review's diff comes from a live working tree, which has no stable interrupted state to continue), and it is safe to pass whenever you are unsure: the review rules on the on-disk state itself — the worktree still at the fetched commit and clean, the captured diff unchanged byte for byte, the PR head unmoved, the resume limit unspent — and silently starts fresh whenever anything no longer matches, telling you which check refused. A continuation reuses the earlier attempt's certified agent results, so the report says how many were recovered; it is disclosed, never a coverage gap.
+
+Two things to know. A continuation keeps the interrupted run's **effort**: passing a different `--effort` refuses the resume and runs fresh at the level you asked for, because different effort is different work. And if the PR head moved while the review was down, the resume refuses (`head-moved`) and the fresh run reviews the new commits — which is what you want, and it counts as this review's one restart.
 
 ## Findings as Data
 
@@ -347,7 +363,7 @@ If you switch models (via `/model`) and re-review the same PR, `/review` detects
 
 The model match also gates incremental scoping, not just the skip: "clean up to the cached commit" is the previous model's verdict, so when new commits have landed since the cached review, a model mismatch never scopes to `lastCommitSha..HEAD` — the range is the full diff, noting "Previous round was reviewed by qwen3-coder. Running full review with gpt-4o." — unless an anchor certified by the model now running is recovered from the last posted review (below), which scopes the range instead. The previous round's findings still carry over to be re-ruled; only the anchor does not. The same gate binds the anchor recovered from the last posted review's machine-ledger marker when the cache is absent or its anchor is unusable (CI, another clone): it scopes the incremental range only if the model now running certified it — a marker certified by a different model, or carrying no model (a review posted with `review.attribution` off, or one from before the field), falls back to the full diff.
 
-Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and model ID. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review. Only high-effort reviews consult or write the cache — a `--effort low|medium` quick pass never counts as "already reviewed".
+Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and model ID. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). On GitHub, if the cached commit was rebased or force-pushed away, it falls back to a full review; Aone rules the cached anchor differently — see its paragraph below. Only high-effort reviews consult or write the cache — a `--effort low|medium` quick pass never counts as "already reviewed".
 
 ## Review Reports
 
@@ -366,7 +382,7 @@ The deterministic halves of the pipeline — argument parsing (`qwen review pars
 
 **GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`match-remote`, `meta`, `fetch-pr`, `pr-context`, `comment-status`, `issue-context`, `fetch-diff`, `comment-body`, `plan-diff`, `test-plan`, `presubmit`, `compose-review`, `submit`, `publish-assets`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
 
-**Aone Code:** for a clone whose origin is on `gitlab.alibaba-inc.com`, run `/review` from inside that clone — the platform is detected from the remote and the read subcommands work, backed by the `a1` CLI — the target number is the global MR id. `fetch-pr` fetches `refs/merge-requests/<id>/head` and builds the worktree + diff, so the agent review of the worktree is unchanged. In this phase every Aone run is context-unavailable and several flows are skipped (rather than hitting github.com's same-named repo): `pr-context`/`comment-status`/`presubmit` have no Aone backing (verdict caps at `COMMENT`), `test-plan` is unbacked, Agent 0 is skipped, and the `publish-assets` write is skipped — with `--comment` also refused, an Aone run is read-only toward the platform in this phase; findings land in the terminal output and the saved report. See `docs/design/2026-08-15-review-aone-provider.md`.
+**Aone Code:** for a clone whose origin is on `gitlab.alibaba-inc.com`, run `/review` from inside that clone — the platform is detected from the remote and the subcommands work, backed by the `a1` CLI (at least 0.1.90 — an older install is refused at authentication time with an upgrade message) — the target number is the global MR id. `fetch-pr` fetches `refs/merge-requests/<id>/head` and builds the worktree + diff, so the agent review of the worktree is unchanged, and `test-plan` works too — it reads the MR description through the same reader. `pr-context` is backed too: it reads the MR's metadata, discussion threads, and previously posted qwen summaries (the machine ledger recovers from them), so an Aone run sees the MR's existing discussion exactly as a GitHub run sees a PR's. `comment-status` and `presubmit` are a1-backed too (presubmit fully: self-PR detection, head drift, merge-gate CI, and existing-comment dedup), so repeat `--comment` rounds dedup against the MR's existing comments instead of re-posting them (a thread the platform marks outdated — its line no longer maps after an amend — stays re-postable), and self-PR detection works too. The `publish-assets` write is skipped. `--comment` **posts** the review through the `a1` CLI: one comment per inline finding, then the summary comment. Aone has no native request-changes state — on that verdict the summary comment carries a blocking header, and any inline Criticals that were actually posted block the merge through the discussion gate while their discussions stay unresolved (when no inline Critical posted, the header is advisory and nothing mechanically blocks the merge). The posted comments carry no AI-comment flag — `a1` cannot set one — so a repo's dedicated `ai_comment` merge gate does not track them. The native `a1 repo mr approve` fires for an Approve verdict when the run read the MR's context (the same gate as GitHub; a context-unavailable run stays capped at Comment). Incremental re-review follows the AGit-Flow update model: an update AMENDS the single CR commit in place, orphaning the head the previous round reviewed — so the cached anchor is ruled WITHOUT ancestry (the anchor-behind-head test would fail for every update), and the re-review scopes the PR's own diff to the files the update touched instead of falling back to a full review; an update that also rebased onto newer master keeps that scope only while the rebase's drift stays within the CR's files — drift touching any other file falls back to the full review, and no drift byte enters the published scope either way. See `docs/design/2026-08-15-review-aone-provider.md`.
 
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
 
@@ -375,7 +391,7 @@ Every run ends with one machine-readable line (`Review complete: <target> — <d
 `/review` is interactive. When a script or CI job needs to run a review and act on its outcome, use the headless wrapper:
 
 ```bash
-qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--quiet]
+qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--resume] [--quiet]
 ```
 
 `target` is a PR number, a PR URL, or a file path; omit it to review the local working tree. The command runs this build's own CLI non-interactively (with stdin closed, so slash-command detection survives), streams the child's progress to **stderr**, and prints the verdict to **stdout** — or, with `--json`, the full result object. The verdict is read from the artifact `compose-review` writes (the same JSON the skill treats as the verdict authority), never parsed from the model's prose.
@@ -389,6 +405,8 @@ The exit code is the contract a gate should read:
 | `3`  | It completed with `REQUEST_CHANGES` **and** `--fail-on request-changes` was set (opt-in blocking) |
 
 `3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
+
+`--resume` continues an interrupted review of the same PR instead of starting over — when a long local run dies part-way (a dropped connection, a timeout, a killed terminal), the retry would otherwise re-fetch, re-chunk and re-launch agents whose work is already on disk. It is safe to pass unconditionally on a retry: `fetch-pr` rules on the on-disk state itself (worktree still at the fetched SHA and clean, diff bytes unchanged, PR head unmoved, resume cap unspent) and silently falls back to a fresh review whenever anything no longer matches, so the flag never fails a run that could start over. A continuation is pinned to the interrupted run's recorded effort — an explicitly different `--effort` refuses the resume and runs fresh at the requested level. PR targets only (a local review's diff is captured from a live working tree, which has no stable interrupted state to continue). Resume is a **local convenience**: the repository's own CI review workflow does **not** resume — each retry re-runs fresh, because a CI attempt runs no-sandbox and its worktree is deleted on exit, leaving no interrupted state to continue.
 
 A time-budgeted run can also export a **soft** deadline so the review stops its open-ended reverse-audit loop while there is still time to verify, compose and post: `QWEN_REVIEW_DEADLINE_EPOCH` is the Unix-seconds moment the run will be killed, and `QWEN_REVIEW_DEADLINE_RESERVE_SECONDS` (default 3600; `0` keeps only the round estimate) is the tail that must remain for the last round's verification, `compose-review` and submission. When the remaining budget no longer fits another round plus that tail, the round builder refuses to build it, and the composed verdict discloses the truncated audit (an otherwise-Approve verdict is capped at Comment). A missing or malformed deadline leaves the review ungated — the outer timeout still bounds the run.
 
