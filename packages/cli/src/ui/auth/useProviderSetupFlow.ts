@@ -208,11 +208,23 @@ export function useProviderSetupFlow(
   // emptied the selection. It is the wizard's pick, so it is stripped back out
   // of any edit before that edit becomes the authored baseline.
   const injectedModelIdRef = useRef<string | null>(null);
-  // The id the keep clause shielded during an in-flight edit. The shield
-  // freezes it into the authorship reference point; when typing continues
-  // past it, the commit delta must not read that as a removal — so exactly
-  // this id is exempt from the removed set, and only until the commit.
-  const frozenTokenRef = useRef<string | null>(null);
+  // The id the keep clause shielded during an in-flight edit, plus the
+  // custom-input segment owning it when the step reported one. The shield
+  // freezes it into the authorship reference point; typing on past it drops
+  // it from the committed selection, and the commit delta must not read
+  // that as a removal. The user can also DELETE the shielded token though,
+  // which is one — so the exemption is limited to growth evidence at
+  // commit, keyed to this pinned occurrence.
+  const frozenTokenRef = useRef<{
+    id: string;
+    segment: number | undefined;
+  } | null>(null);
+  // Ids the user deleted from the screen during an edit a resolve then
+  // advanced the reference point over. Such a deletion carries no
+  // removedRecommendationId, and the commit delta cannot see it either —
+  // `before` moves with the reference point — so the capture folds it into
+  // the next commit's removed set instead.
+  const pendingRemovalRef = useRef<string[]>([]);
 
   const setDisplayedModelIds = useCallback((value: string) => {
     displayedModelIdsRef.current = value;
@@ -298,14 +310,43 @@ export function useProviderSetupFlow(
     // A token the keep clause shielded during an in-flight edit was frozen
     // into the reference point; typing on past it drops it from the
     // committed selection. That is growth, not a removal — the user never
-    // unchecked anything — so exactly the shielded id is exempt. Provenance,
-    // not string shape: a removed id that merely prefixes a surviving one is
-    // a rename or a deleted prefix twin, and both are genuine removals.
+    // unchecked anything. The shielded token can also be deleted outright,
+    // though, and that IS a removal — so the exemption needs growth
+    // evidence: the custom input at commit must still carry what the frozen
+    // occurrence grew into, at the pinned segment when the freeze knows it
+    // (a surviving prefix twin elsewhere is a different token), anywhere
+    // when it does not. Provenance, not string shape: a removed id that
+    // merely prefixes a surviving one is a rename or a deleted prefix twin,
+    // and both are genuine removals.
+    const frozen = frozenTokenRef.current;
+    let exemptFrozenId: string | null = null;
+    if (frozen !== null) {
+      const customs = customModelIdsRef.current;
+      const grown =
+        frozen.segment === undefined
+          ? customs.find(
+              (custom) => custom !== frozen.id && custom.startsWith(frozen.id),
+            )
+          : customs[frozen.segment];
+      if (
+        grown !== undefined &&
+        grown !== frozen.id &&
+        grown.startsWith(frozen.id)
+      ) {
+        exemptFrozenId = frozen.id;
+      }
+    }
     const removed = new Set(
-      before.filter(
-        (id) => !after.includes(id) && id !== frozenTokenRef.current,
-      ),
+      before.filter((id) => !after.includes(id) && id !== exemptFrozenId),
     );
+    // An edit overtaken by a resolve loses its deletion half when the
+    // reference point advances over it; fold the capture in, unless the
+    // committed selection re-endorses an id since.
+    for (const id of pendingRemovalRef.current) {
+      if (!after.includes(id)) {
+        removed.add(id);
+      }
+    }
     const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
       (id) => !removed.has(id),
     );
@@ -324,6 +365,7 @@ export function useProviderSetupFlow(
     activeTokenEditTouchedRef.current = false;
     editedTokenRef.current = null;
     frozenTokenRef.current = null;
+    pendingRemovalRef.current = [];
   }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
@@ -386,6 +428,15 @@ export function useProviderSetupFlow(
       const editInProgress = modelIdsEditInProgressRef.current;
       if (!editInProgress) {
         recordAuthoredModelIds();
+      } else {
+        // The resolve below installs a new reference point over the
+        // uncommitted edit. Capture what the edit already deleted from the
+        // screen first: once the reference point moves, the commit delta
+        // reads `before === after` and the deletion has no other channel.
+        const liveIds = normalizeModelIds(liveModelIdsRef.current);
+        pendingRemovalRef.current = normalizeModelIds(
+          displayedModelIdsRef.current,
+        ).filter((id) => !liveIds.includes(id));
       }
       const served = new Set(models.map((model) => model.id));
       const builtIn = new Set(getDefaultModelIds(config));
@@ -413,7 +464,10 @@ export function useProviderSetupFlow(
           activeTokenEditTouchedRef.current &&
           id === activeCustomModelIdRef.current
         ) {
-          frozenTokenRef.current = id;
+          frozenTokenRef.current = {
+            id,
+            segment: editedTokenRef.current?.segment,
+          };
           kept.push(id);
         }
       }
@@ -600,6 +654,8 @@ export function useProviderSetupFlow(
       const initialModelIds = [...defaultIds, ...customIds].join(', ');
       authoredModelIdsRef.current = initialModelIds;
       injectedModelIdRef.current = null;
+      frozenTokenRef.current = null;
+      pendingRemovalRef.current = [];
       setDisplayedModelIds(initialModelIds);
       setModelIdsError(null);
       setThinkingEnabled(false);
@@ -760,6 +816,14 @@ export function useProviderSetupFlow(
   const changeActiveCustomModelId = useCallback(
     (value?: string, segment?: number) => {
       activeCustomModelIdRef.current = value;
+      // Focus leaving (the undefined report) drops the edited-occurrence
+      // marker for good: the tab/up paths back into the input re-report the
+      // id at the unchanged caret offset, and a marker that survived the
+      // leave would let that pure navigation re-arm the latch below. The
+      // next real edit sets the marker again.
+      if (value === undefined) {
+        editedTokenRef.current = null;
+      }
       // Navigation is not editing — except inside the very occurrence the
       // last text edit touched: that edit is still alive, and a lookup
       // landing before the next keystroke must keep shielding the token.

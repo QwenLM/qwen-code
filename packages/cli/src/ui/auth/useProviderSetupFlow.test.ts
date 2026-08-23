@@ -1433,4 +1433,218 @@ describe('useProviderSetupFlow model discovery', () => {
       'my-private-deploy',
     );
   });
+
+  it('banks the committed deletion of a shielded token, not just its growth', async () => {
+    // R20-1. The keep clause freezes the unserved built-in being typed into
+    // the authorship reference point, and the exemption assumed its later
+    // disappearance at commit is always the token growing. The user can
+    // delete the shielded token instead: nothing cleared the freeze before
+    // that commit, so the exemption kept the id out of `removed`, the
+    // baseline retained it, and the next pair change restored a selection
+    // the user had committed without it — silently undoing the deletion.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in into the custom input, then resolve on
+    // that keystroke: the keep clause shields and freezes the token.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The user deletes the shielded token and commits with Esc.
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== RETIRED_ID)
+          .join(', '),
+        { customModelIds: [] },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline. The second endpoint serves
+    // the whole built-in list, so a baseline that kept the deleted id
+    // would show it checked again.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      RETIRED_ID,
+    );
+  });
+
+  it('does not re-arm the edit latch when focus returns without an edit', async () => {
+    // R20-2. Focus leaving the custom input clears the latch, but the
+    // marker of the occurrence the last edit touched survived the leave —
+    // so the tab/up paths back into the input re-reported the id at the
+    // unchanged caret offset and re-armed the latch with no edit in
+    // between. A lookup resolving in that window shielded and froze a
+    // token nobody was typing anymore, and Enter installed a model the
+    // endpoint does not serve.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type the unserved built-in; the edit owns its occurrence.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    // Tab/down away: the undefined report clears the latch. Tab/up back:
+    // the step re-reports the id at the unchanged caret offset — a pure
+    // focus move, no edit.
+    act(() => result.current.changeActiveCustomModelId(undefined));
+    act(() => result.current.changeActiveCustomModelId(RETIRED_ID, 0));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      RETIRED_ID,
+    );
+  });
+
+  it('banks a custom-token deletion made while a lookup is in flight', async () => {
+    // R20-3, the deletion twin of R12-1. With an edit in flight the resolve
+    // skips the commit and then installs the pruned selection as the new
+    // reference point — moving it past whatever the user had already
+    // deleted. A custom-token deletion carries no removedRecommendationId,
+    // so the commit delta is its only removal channel, and at that commit
+    // `before === after`: the deleted id stayed in the baseline and the
+    // next pair change restored it.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    // `start()` banks a saved custom id alongside the defaults.
+    act(() =>
+      result.current.start(codingPlanProvider, undefined, undefined, [
+        'my-deploy',
+      ]),
+    );
+    const baseUrls = codingPlanProvider.baseUrl;
+    if (Array.isArray(baseUrls)) {
+      const firstUrl = baseUrls[0]!.url;
+      act(() => result.current.selectBaseUrl(firstUrl));
+    }
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    expect(result.current.state.step).toBe('models');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      'my-deploy',
+    );
+
+    // Mid-lookup the user deletes the saved custom id...
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds(result.current.state.modelIds)
+          .filter((id) => id !== 'my-deploy')
+          .join(', '),
+        { customModelIds: [] },
+      ),
+    );
+
+    // ...and the lookup resolves over the uncommitted edit.
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      'my-deploy',
+    );
+
+    // The commit folds what is on screen into the baseline...
+    act(() => {
+      result.current.goBack();
+    });
+
+    // ...and a pair change restores from it. The second endpoint serves
+    // the whole built-in list, so only the baseline can resurrect the
+    // deleted id.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      'my-deploy',
+    );
+  });
 });
