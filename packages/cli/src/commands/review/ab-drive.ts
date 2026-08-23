@@ -43,12 +43,12 @@
 
 import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -56,10 +56,12 @@ import { dirname, join, resolve } from 'node:path';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import {
   LOG_MAX_BYTES,
+  POLL_MS,
   SERVER_NAME_RE,
   logBytes,
   sentinelExitCode,
   shellQuote,
+  spawnExec,
   trimCapture,
   waitMs,
   wrapScript,
@@ -71,8 +73,7 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-
-const POLL_MS = 250;
+import { assertWritableOutPath } from './lib/paths.js';
 
 export interface AbArmReport {
   arm: 'a' | 'b';
@@ -134,28 +135,13 @@ export interface AbDriveArgs {
   exec?: (cmd: string, args: string[], input?: string) => ExecResult;
 }
 
-function run(cmd: string, args: string[], input?: string): ExecResult {
-  const r = spawnSync(cmd, args, {
-    encoding: 'utf8',
-    input,
-    timeout: 30_000,
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  return {
-    status: r.status ?? null,
-    stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
-  };
-}
-
 /** The arm's identity, as environment — the ONLY variation between the arms. */
 function envPrefix(arm: 'a' | 'b', root: string): string {
   return `export AB_ARM=${arm}; export AB_ARM_ROOT=${shellQuote(root)}; `;
 }
 
 export function runAbDrive(args: AbDriveArgs): AbDriveReport {
-  const exec = args.exec ?? run;
+  const exec = args.exec ?? spawnExec;
   const mode: AbDriveReport['mode'] = !args.shared
     ? 'no-shared'
     : args.sharedOnce
@@ -182,18 +168,49 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       `--server ${JSON.stringify(args.server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
     );
   }
+  // Non-finite or non-positive time budgets disable every deadline below —
+  // `Date.now() >= NaN` is never true — so a hung script would hang this
+  // command forever and the `finally` kill-server would never run. yargs
+  // `type:'number'` happily produces NaN from `--timeout abc`, and the
+  // SERVER_NAME_RE comment's trust model (programmatically built arguments)
+  // applies to the numbers exactly as it does to the name.
+  for (const [flag, v] of [
+    ['--timeout', args.timeout],
+    ['--ready-timeout', args.readyTimeout],
+    ['--shared-ready-timeout', args.sharedReadyTimeout],
+  ] as const) {
+    if (!Number.isFinite(v) || v <= 0) {
+      return fail(
+        `${flag} must be a positive, finite number of seconds (got ${v}) — nothing was started.`,
+      );
+    }
+  }
   if (exec('tmux', ['-V']).status !== 0) {
     return fail(
       'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
     );
   }
+  // Directories, not merely existing paths: `tmux new-session -c <a file>`
+  // succeeds with a silent cwd fallback to $HOME, and the arm then reports
+  // `completed` for a script that never ran in its tree — an A/B verdict
+  // about $HOME with nothing in the report contradicting it.
+  const isDir = (p: string) => {
+    try {
+      return statSync(resolve(p)).isDirectory();
+    } catch {
+      return false;
+    }
+  };
   for (const [flag, p] of [
     ['--arm-a', args.armA],
     ['--arm-b', args.armB],
+    ...(args.sharedCwd !== undefined
+      ? ([['--shared-cwd', args.sharedCwd]] as const)
+      : []),
   ] as const) {
-    if (!existsSync(resolve(p))) {
+    if (!isDir(p)) {
       return fail(
-        `${flag} ${JSON.stringify(p)} does not exist — nothing was started. The PR worktree and the base-tree report's \`path\` are the usual arms.`,
+        `${flag} ${JSON.stringify(p)} is not an existing directory — nothing was started. The PR worktree and the base-tree report's \`path\` are the usual arms.`,
       );
     }
   }
@@ -267,16 +284,26 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     return { logPath, rcPath };
   };
 
-  /** Poll `probe` (bash -lc, cd'd to `root`, arm env exported) until 0. */
+  /**
+   * Poll `probe` (bash -lc) until it exits 0. `cdDir` is where the probe
+   * runs; `envRoot` is the AB_ARM_ROOT it sees — split on purpose, because
+   * with `--shared-cwd` the shared daemon runs somewhere other than the arm
+   * root while its environment (and therefore any path it derived from
+   * AB_ARM_ROOT) is still the arm's. A probe polled with the daemon's cwd
+   * but a different AB_ARM_ROOT looks for the daemon's readiness file in a
+   * directory the daemon never wrote — an endless poll with a note blaming
+   * the shared script.
+   */
   const pollReady = (
     probe: string,
     arm: 'a' | 'b',
-    root: string,
+    cdDir: string,
+    envRoot: string,
     timeoutS: number,
   ): number | null => {
     const started = Date.now();
     const deadline = started + timeoutS * 1000;
-    const cmd = `${envPrefix(arm, root)}cd ${shellQuote(root)} && (${probe})`;
+    const cmd = `${envPrefix(arm, envRoot)}cd ${shellQuote(cdDir)} && (${probe})`;
     for (;;) {
       if (exec('bash', ['-lc', cmd]).status === 0) return Date.now() - started;
       if (Date.now() >= deadline) return null;
@@ -297,17 +324,48 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       const bail = (
         outcome: DriveOutcome,
         readyAfterMs: number | null,
-      ): AbArmReport => ({
-        arm,
-        root,
-        outcome,
-        exitCode: null,
-        readyAfterMs,
-        droveForMs: 0,
-        output: '',
-        truncated: false,
-        sharedAliveAtEnd: sharedRc === null ? null : !existsSync(sharedRc),
-      });
+      ): AbArmReport => {
+        // Liveness is read BEFORE the teardown below, same as the completed
+        // path: "alive at end" means "outlived the arm", never "survived our
+        // own kill".
+        const sharedAliveAtEnd =
+          sharedRc === null ? null : !existsSync(sharedRc);
+        // "Killed unconditionally" has to include the bail exits: a per-arm
+        // shared instance leaked past a not-ready bail holds its port through
+        // arm b's whole window, kills shared-b at birth, and the note then
+        // sends the verifier to fix the wrong component.
+        if (args.shared && mode === 'per-arm' && sharedRc !== null) {
+          tmux('kill-session', '-t', `shared-${arm}`);
+          sharedRc = null;
+        }
+        return {
+          arm,
+          root,
+          outcome,
+          exitCode: null,
+          readyAfterMs,
+          droveForMs: 0,
+          output: '',
+          truncated: false,
+          sharedAliveAtEnd,
+        };
+      };
+
+      // In `once` mode arm b inherits the one instance — so check it is
+      // still running BEFORE spending readyTimeout + timeout driving against
+      // a corpse. The end-of-arm liveness check keeps correctness either
+      // way; this is the difference between failing in milliseconds with the
+      // true cause and ~6 minutes of polling a dead upstream.
+      if (
+        args.shared &&
+        mode === 'once' &&
+        arm === 'b' &&
+        sharedRc !== null &&
+        existsSync(sharedRc)
+      ) {
+        note = `the shared process exited before arm b was driven — nothing was driven for arm b, and its run would have watched a dead upstream. Fix the shared script (or raise its TTL) and re-run.`;
+        return bail('not-ready', null);
+      }
 
       // Shared upstream: one fresh instance per arm unless --shared-once, in
       // which case only arm `a` starts it and arm `b` inherits it running.
@@ -334,6 +392,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
             args.sharedReady,
             arm,
             sharedCwd,
+            root,
             args.sharedReadyTimeout,
           );
           if (ms === null) {
@@ -345,7 +404,13 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
 
       let readyAfterMs: number | null = null;
       if (args.ready) {
-        readyAfterMs = pollReady(args.ready, arm, root, args.readyTimeout);
+        readyAfterMs = pollReady(
+          args.ready,
+          arm,
+          root,
+          root,
+          args.readyTimeout,
+        );
         if (readyAfterMs === null) {
           note = `arm ${arm}'s readiness probe never succeeded within ${args.readyTimeout}s (\`${args.ready}\`) — the arm was not driven.`;
           return bail('not-ready', null);
@@ -368,6 +433,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           ? sentinelExitCode(readFileSync(a.rcPath, 'utf8'))
           : null;
         if (exitCode !== null) {
+          // Re-read the log now that the sentinel is there: the read above
+          // happened BEFORE it, and the wrapper writes the sentinel from an
+          // EXIT trap strictly after the script's last log write, so a final
+          // write landing between the two reads is in the file but not in
+          // the snapshot (drive.ts measured the window at ~1 in 70 on
+          // near-cap logs). Here the stake is doubled: one arm hitting the
+          // race and the other not turns two identical runs into
+          // `identicalOutput: false` — a harness-fabricated difference.
+          output = existsSync(a.logPath) ? readFileSync(a.logPath, 'utf8') : '';
           outcome = 'completed';
           break;
         }
@@ -379,6 +453,13 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         waitMs(POLL_MS);
       }
       const droveForMs = Date.now() - droveFrom;
+      // A timed-out or overflowed script is still RUNNING — the poll loop
+      // only stopped observing it. Left alive it contends with arm b for the
+      // same ports and files (the same script, by construction) and an
+      // overflowed writer keeps growing its log through arm b's whole
+      // window. Killing a session that already exited on completion is a
+      // no-op, so this is unconditional.
+      tmux('kill-session', '-t', `arm-${arm}`);
       // Liveness is read BEFORE the per-arm teardown, so "alive at end" means
       // "outlived the arm", not "survived our own kill".
       const sharedAliveAtEnd = sharedRc === null ? null : !existsSync(sharedRc);
@@ -527,16 +608,28 @@ export const abDriveCommand: CommandModule = {
         'arm-a': string;
         'arm-b': string;
       };
+      // Classify an unusable --out BEFORE the drives: both arms can take
+      // minutes, and an EISDIR discovered after them throws the whole run's
+      // evidence away.
+      if (a.out) assertWritableOutPath(a.out);
       const report = runAbDrive({
         ...a,
         armA: a['arm-a'],
         armB: a['arm-b'],
       });
-      if (a.out) {
-        mkdirSync(dirname(resolve(a.out)), { recursive: true });
-        writeFileSync(resolve(a.out), JSON.stringify(report, null, 2));
-      }
+      // stdout first: the report is the run's only evidence, and a failed
+      // --out write (ENOSPC mid-write) must not take it down with it.
       writeStdoutLine(JSON.stringify(report, null, 2));
+      if (a.out) {
+        try {
+          mkdirSync(dirname(resolve(a.out)), { recursive: true });
+          writeFileSync(resolve(a.out), JSON.stringify(report, null, 2));
+        } catch (err) {
+          writeStderrLine(
+            `ab-drive: the report was printed above but --out failed: ${(err as Error).message}`,
+          );
+        }
+      }
       writeStderrLine(`ab-drive: ${report.note}`);
       if (!report.observed) process.exitCode = 1;
     } catch (err) {

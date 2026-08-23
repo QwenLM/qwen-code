@@ -1546,6 +1546,7 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     expect(findings[0].confidence).toBe('low');
     expect(findings[0].severity).toBe('Critical');
     expect(findings[0].failureScenario).toContain('witness rule');
+    expect(findings[0].failureScenario).toContain('this confirmed Critical');
     // The original evidence survives — the rule is appended, not substituted.
     expect(findings[0].failureScenario).toContain('fires twice');
     expect(unwitnessed).toEqual(['w1']);
@@ -1581,6 +1582,25 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     expect(twice).toEqual(once);
   });
 
+  it('exempts a measurement-held finding — the two holds must not compose into a silent drop', () => {
+    // test-delta's hold demotes Critical→Suggestion on the promise the
+    // finding STAYS in front of a human as a posted Suggestion whose note
+    // says how to re-raise it. Judging that Suggestion here would drop it to
+    // terminal-only — and it is not the unexecuted claim this rule stops:
+    // the measurement that moved it IS a run's output, riding the finding.
+    const named = {
+      ...critical,
+      failureScenario: 'breaks packages/x/foo.test.ts on main',
+    };
+    const held = holdCriticalsFailingOnBase([named], ['packages/x/foo.test.ts'])
+      .findings[0];
+    expect(held.severity).toBe('Suggestion');
+    expect(held.heldByMeasurement).toEqual({ file: 'packages/x/foo.test.ts' });
+    const { findings, unwitnessed } = holdUnwitnessedFindings([held]);
+    expect(unwitnessed).toEqual([]);
+    expect(findings[0].confidence).toBe('high');
+  });
+
   it('judges Suggestions on the same terms — they post to the PR too', () => {
     // The rule originally targeted Criticals only; an unexecuted claim rides
     // onto the author's screen through the Suggestion door on exactly the
@@ -1591,6 +1611,10 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     ]);
     expect(findings[0].confidence).toBe('low');
     expect(findings[0].failureScenario).toContain('witness rule');
+    // The sentence names the severity it demoted — a hardcoded 'Critical'
+    // here would mislabel every demoted Suggestion in the one sentence a
+    // human reads to understand the demotion.
+    expect(findings[0].failureScenario).toContain('this confirmed Suggestion');
     expect(unwitnessed).toEqual(['w1']);
     expect(
       holdUnwitnessedFindings([{ ...critical, severity: 'Nice to have' }])
@@ -1601,17 +1625,34 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
   it('treats a reason-less `not run` line as no witness at all', () => {
     // The escape hatch is the REASON, not the phrase: `not run —` with
     // nothing after the dash names nothing a human can weigh, so it counts
-    // as absent. A real reason of any length stands.
-    for (const witness of ['not run', 'not run —', 'witness: not run - ']) {
+    // as absent. Emptiness is "no letter or digit", not a dash-glyph list —
+    // the first draft enumerated three dashes and U+2015/U+2212/U+FF0D
+    // slipped through as "reasons".
+    for (const witness of [
+      'not run',
+      'not run —',
+      'witness: not run - ',
+      'not run \u2015',
+      'not run \u2212',
+      'not run \uFF0D',
+      'not run —— …',
+    ]) {
       const { unwitnessed } = holdUnwitnessedFindings([
         { ...critical, witness },
       ]);
       expect(unwitnessed).toEqual(['w1']);
     }
-    const { unwitnessed } = holdUnwitnessedFindings([
-      { ...critical, witness: 'not run — timing window no probe can pin' },
-    ]);
-    expect(unwitnessed).toEqual([]);
+    // A real reason in ANY script stands — JavaScript's \w is ASCII-only,
+    // so the emptiness test must not read a CJK reason as empty.
+    for (const witness of [
+      'not run — timing window no probe can pin',
+      'not run — 需要生产环境才能触发',
+    ]) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual([]);
+    }
   });
 });
 

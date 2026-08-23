@@ -390,7 +390,7 @@ export function extractCaptures(
  */
 export const LOG_MAX_BYTES = 8 * 1024 * 1024;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
-const POLL_MS = 250;
+export const POLL_MS = 250;
 
 /**
  * Wait, without asking the platform for a fractional `sleep`.
@@ -420,7 +420,17 @@ export function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function run(cmd: string, args: string[], input?: string): ExecResult {
+/**
+ * The production exec: 30s hang guard, 64MB buffer, null-status-means-failure.
+ * Exported for `ab-drive`, which owns the same tmux mechanics across two arms
+ * — a second copy of these limits is where the two commands drift apart under
+ * the same failure.
+ */
+export function spawnExec(
+  cmd: string,
+  args: string[],
+  input?: string,
+): ExecResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     input,
@@ -495,7 +505,7 @@ export function trimCapture(s: string): { text: string; truncated: boolean } {
 }
 
 export function runDrive(args: DriveArgs): DriveReport {
-  const exec = args.exec ?? run;
+  const exec = args.exec ?? spawnExec;
   const server = args.server;
   if (!SERVER_NAME_RE.test(server)) {
     return {

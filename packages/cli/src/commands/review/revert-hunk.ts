@@ -41,7 +41,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { DiffFile } from './lib/diff-plan.js';
@@ -114,11 +120,27 @@ export function listHunks(diffText: string): HunkEntry[] {
 }
 
 /**
+ * File-level header metadata that must NOT ride into a single-hunk patch.
+ * `git apply -R` re-executes whatever the header carries alongside the one
+ * selected hunk: rename lines rewind the RENAME (the tree ends with the file
+ * at its old path while the report claims a content revert at the new one),
+ * and mode lines flip the permission bits. Both are mutations different from
+ * the one the report names — the harness-fabricated kind. `deleted file
+ * mode` / `new file mode` stay: they ARE the content semantics of a
+ * deletion/creation section, which cannot also be a rename.
+ */
+const FILE_LEVEL_METADATA_RE =
+  /^(?:similarity index |dissimilarity index |rename from |rename to |copy from |copy to |old mode |new mode )/;
+
+/**
  * Extract hunk `n` (1-based) of `file` as a minimal, self-contained patch:
- * the file's header block verbatim, then the hunk verbatim. Verbatim is the
- * point — the `@@` line numbers, the context, and any `\ No newline at end
- * of file` marker inside the hunk's range all survive, so what git applies
- * is what the diff says, not a transcription of it.
+ * the file's header block, then the hunk verbatim. The HUNK is verbatim on
+ * purpose — the `@@` line numbers, the context, and any `\ No newline at end
+ * of file` marker inside its range all survive, so what git applies is what
+ * the diff says. The HEADER is filtered: file-level rename/mode metadata is
+ * dropped (see `FILE_LEVEL_METADATA_RE`), and for a renamed file the
+ * `diff --git` / `---` lines are rewritten to the new-side path, so the
+ * reverse patch is a pure content revert at the file's current location.
  */
 export function extractHunkPatch(
   diffText: string,
@@ -127,7 +149,29 @@ export function extractHunkPatch(
 ): string {
   const lines = diffText.split('\n');
   const hunk = file.hunks[n - 1];
-  const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  let header = lines
+    .slice(file.diffStart - 1, file.hunks[0].diffStart - 1)
+    .filter((l) => !FILE_LEVEL_METADATA_RE.test(l));
+  if (file.renameFrom !== undefined) {
+    // A rename-with-edits section names the OLD path in `diff --git`'s first
+    // token and in `---`. With the rename lines stripped those tokens would
+    // send git to a path the tree no longer has, so both are rewritten from
+    // the `+++` token — taken verbatim, quoting and all, because re-quoting
+    // a C-quoted path by hand is exactly the transcription this command
+    // exists to avoid.
+    const plusLine = header.find((l) => l.startsWith('+++ '));
+    if (plusLine !== undefined) {
+      const bTok = plusLine.slice(4);
+      const aTok = bTok.startsWith('"')
+        ? `"a/${bTok.slice(3)}`
+        : `a/${bTok.slice(2)}`;
+      header = header.map((l) => {
+        if (l.startsWith('diff --git ')) return `diff --git ${aTok} ${bTok}`;
+        if (l.startsWith('--- ')) return `--- ${aTok}`;
+        return l;
+      });
+    }
+  }
   const body = lines.slice(hunk.diffStart - 1, hunk.diffEnd);
   return `${[...header, ...body].join('\n')}\n`;
 }
@@ -141,28 +185,44 @@ export function parseHunkId(id: string): { path: string; n: number } | null {
   return { path: id.slice(0, i), n };
 }
 
+/**
+ * What one git invocation came back with. `error`/`signal` are the
+ * spawn-level facts: a `status` of null with `error: 'ENOENT'` is "git never
+ * ran" (a mistyped --tree, a missing binary), and null with `signal` is the
+ * 60s hang guard — neither says anything about the patch, and folding them
+ * into the refusal branch records a harness failure as a coupling fact about
+ * the diff.
+ */
+export interface GitApplyResult {
+  status: number | null;
+  stderr: string;
+  error?: string;
+  signal?: string;
+}
+
 export interface RevertHunkArgs {
   diff: string;
   tree: string;
   hunk: string;
   /** Test seam — production shells out to the real git. */
-  exec?: (
-    cwd: string,
-    args: string[],
-  ) => { status: number | null; stderr: string };
+  exec?: (cwd: string, args: string[]) => GitApplyResult;
 }
 
-function gitApply(
-  cwd: string,
-  args: string[],
-): { status: number | null; stderr: string } {
+function gitApply(cwd: string, args: string[]): GitApplyResult {
   const r = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
     timeout: 60_000,
   });
-  return { status: r.status ?? null, stderr: (r.stderr ?? '').trim() };
+  return {
+    status: r.status ?? null,
+    stderr: (r.stderr ?? '').trim(),
+    ...(r.error
+      ? { error: (r.error as NodeJS.ErrnoException).code ?? r.error.message }
+      : {}),
+    ...(r.signal ? { signal: r.signal } : {}),
+  };
 }
 
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
@@ -185,12 +245,22 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       note: `hunk ${args.hunk} does not exist: ${sel.path} has ${have} — run with --list to see the ids this diff has.`,
     };
   }
-  const entry = listHunks(diffText).find((h) => h.id === args.hunk)!;
+  // Keyed on the PARSED selector, never the raw string: `parseHunkId`
+  // accepts non-canonical numbers (`f.ts:01`, `f.ts:1.0`), and an exact-id
+  // lookup for those returns undefined AFTER the existence check passed —
+  // the success branch would then throw on `entry.header` with the tree
+  // already mutated and exit code 2 telling the caller nothing happened.
+  const entry = listHunks(diffText).find(
+    (h) => h.path === sel.path && h.n === sel.n,
+  )!;
   const patch = extractHunkPatch(diffText, file, sel.n);
 
   const tree = resolve(args.tree);
-  const dir = join(tmpdir(), `qwen-review-revert-hunk-${process.pid}`);
-  mkdirSync(dir, { recursive: true });
+  // mkdtemp, not a pid-keyed name: a predictable path in the shared temp dir
+  // can be pre-planted as a symlink by a local peer, and `mkdirSync`
+  // (recursive) follows it silently. mkdtemp creates a fresh 0700 directory
+  // nothing else can have claimed.
+  const dir = mkdtempSync(join(tmpdir(), 'qwen-review-revert-hunk-'));
   const patchPath = join(dir, 'hunk.patch');
   writeFileSync(patchPath, patch, 'utf8');
   const exec = args.exec ?? gitApply;
@@ -198,6 +268,13 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     // `--check` first: a refused revert must leave the tree byte-identical,
     // or the verifier's next probe measures a half-mutation nothing reports.
     const check = exec(tree, ['apply', '-R', '--check', patchPath]);
+    if (check.error !== undefined || check.signal !== undefined) {
+      return {
+        applied: false,
+        hunk: entry,
+        note: `could not run git in ${tree}: ${check.error ?? `killed by ${check.signal}`} — a harness failure, not a fact about the hunk. Check --tree and that git is on PATH; the tree is unchanged (nothing ran).`,
+      };
+    }
     if (check.status !== 0) {
       return {
         applied: false,
@@ -285,11 +362,21 @@ export const revertHunkCommand: CommandModule = {
         report = r;
       }
       const text = JSON.stringify(report, null, 2);
-      if (out !== undefined) {
-        mkdirSync(dirname(resolve(out)), { recursive: true });
-        writeFileSync(resolve(out), `${text}\n`, 'utf8');
-      }
+      // stdout first: the exit code already carries `applied`'s semantics,
+      // and an fs failure on --out AFTER a successful reverse-apply must not
+      // swallow the report and flip the code — the caller would then treat a
+      // mutated tree as untouched.
       writeStdoutLine(text);
+      if (out !== undefined) {
+        try {
+          mkdirSync(dirname(resolve(out)), { recursive: true });
+          writeFileSync(resolve(out), `${text}\n`, 'utf8');
+        } catch (err) {
+          writeStderrLineSafe(
+            `revert-hunk: the report was printed above but --out failed: ${(err as Error).message}`,
+          );
+        }
+      }
     } catch (err) {
       writeStderrLineSafe(`revert-hunk: ${(err as Error).message}`);
       process.exitCode = err instanceof TypeError ? 2 : 1;

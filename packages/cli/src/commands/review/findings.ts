@@ -571,9 +571,19 @@ export function holdCriticalsFailingOnBase(
  * is the escape hatch used without paying its toll: Step 4's rule is that the
  * line names why no run could settle the claim, and an empty reason names
  * nothing — so downstream it counts as no witness at all.
+ *
+ * "No reason" is detected as "no letter or digit after `not run`" (Unicode
+ * classes, not `\w`), NOT as an enumeration of dash glyphs: the first draft
+ * listed three dashes and any other dash-like character (U+2015, U+2212,
+ * U+FF0D) slipped through as a "reason" — while the obvious tightening,
+ * `\W*$`, fails the other way, reading a perfectly good CJK reason as empty
+ * because JavaScript's `\w` is ASCII-only. A reason in any script contributes
+ * a letter or a number; punctuation alone contributes neither.
  */
 export function isEmptyNotRunWitness(witness: string): boolean {
-  return /^\s*(?:witness:\s*)?not run\s*[—–-]*\s*$/i.test(witness);
+  const m = /^\s*(?:witness:\s*)?not run(?<rest>[\s\S]*)$/i.exec(witness);
+  if (!m) return false;
+  return !/[\p{L}\p{N}]/u.test(m.groups!['rest']!);
 }
 
 /**
@@ -608,6 +618,14 @@ export function holdUnwitnessedFindings(findings: readonly Finding[]): {
       (f.severity !== 'Critical' && f.severity !== 'Suggestion') ||
       f.confidence !== 'high' ||
       f.source !== 'review' ||
+      // A measurement-held finding is exempt, deliberately: test-delta just
+      // demoted it Critical→Suggestion on the promise that it STAYS in front
+      // of a human as a posted Suggestion whose note says how to re-raise
+      // it. Judging that Suggestion here would compose the two holds into a
+      // silent drop to terminal-only — and it is not the unexecuted claim
+      // this rule exists to stop, because the measurement that moved it IS a
+      // run's output, riding the finding as `heldByMeasurement`.
+      f.heldByMeasurement !== undefined ||
       (f.witness !== undefined && !isEmptyNotRunWitness(f.witness))
     ) {
       return f;
