@@ -756,9 +756,7 @@ describe('buildProviderSetupInputs', () => {
         generationConfig: { contextWindowSize: 12345 },
       }),
     );
-    const survivor = written!.find(
-      (model) => model['id'] === 'my-code-custom',
-    );
+    const survivor = written!.find((model) => model['id'] === 'my-code-custom');
     expect(survivor?.['baseUrl']).toBeUndefined();
   });
 
@@ -937,6 +935,165 @@ describe('buildProviderSetupInputs', () => {
     );
     expect(inputs.preserveModels).toBeUndefined();
     expect(inputs.migratedLegacyModelIds).toBeUndefined();
+  });
+
+  it('never re-homes or deletes a shared-key legacy entry on a non-merge provider (R43-2)', async () => {
+    // minimax/zai/alibaba-standard are non-merge multi-endpoint providers
+    // with ONE static env key shared across all endpoints, so a baseUrl-less
+    // entry carrying it fails attribution closed exactly like the merge
+    // providers' R41-4 arms. The non-merge branch stamps baseUrl-less
+    // entries BEFORE any endpoint check and its install plan carries the
+    // UNSCOPED ownsModel predicate — so without the attribution gate an
+    // explicit connect deleted the entry (dropped from preserveModels,
+    // claimed by remove-owned) and an implicit reconnect re-homed it
+    // (preserved stamped with whichever endpoint the reconnect landed on,
+    // flipped again on the next connect there).
+    const legacyModel = {
+      id: 'my-model',
+      name: '[MiniMax] my-model',
+      envKey: 'MINIMAX_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const provider = qwenCore.findProviderById('minimax');
+    expect(provider).toBeDefined();
+    const helpers = {
+      getDefaultModelIds: qwenCore.getDefaultModelIds,
+      resolveBaseUrl: qwenCore.resolveBaseUrl,
+      normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+      existingModels: [legacyModel],
+    };
+
+    // Explicit connect at International omitting the legacy id: the entry
+    // must be carried through UNSTAMPED — omission from preserveModels
+    // deletes it under the non-merge plan's unscoped ownsModel.
+    const explicit = buildProviderSetupInputs(
+      {
+        providerId: 'minimax',
+        apiKey: 'sk-minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        modelIds: ['MiniMax-M3'],
+      },
+      provider!,
+      helpers,
+    );
+    expect(explicit.preserveModels).toEqual([legacyModel]);
+    expect(explicit.migratedLegacyModelIds).toBeUndefined();
+
+    // Implicit (defaults-only) reconnect: no stamp, no re-home.
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: 'minimax',
+        apiKey: 'sk-minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+      },
+      provider!,
+      helpers,
+    );
+    expect(implicit.preserveModels).toEqual([legacyModel]);
+    expect(implicit.migratedLegacyModelIds).toBeUndefined();
+
+    // End-to-end: the entry survives the explicit connect byte-identical —
+    // not deleted, no stamped International copy beside it.
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(provider!, {
+      ...explicit,
+      apiKey: 'sk-minimax',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env['MINIMAX_API_KEY'];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(legacyModel);
+    expect(written!.filter((model) => model['id'] === 'my-model')).toHaveLength(
+      1,
+    );
+  });
+
+  it('preserves a same-endpoint stamped custom for a non-merge provider on a defaults-only explicit reconnect (R43-4)', async () => {
+    // The serve catalog exposes no existingConfig, so Web Shell and SDK
+    // selections are defaults-seeded and can never carry a saved custom id
+    // (R42-1) — absence from an explicit modelIds selection is not
+    // deselection intent on this route. The merge branch applies merge-only
+    // semantics for exactly this reason; the non-merge branch still gated
+    // preserveModels on requestedIds, so the exact request shape this
+    // function was rewritten to handle (modelIds = the endpoint defaults)
+    // dropped a same-endpoint stamped custom out of preserveModels and the
+    // unscoped non-merge ownsModel deleted it — while the identical request
+    // with modelIds omitted preserved it.
+    const provider = qwenCore.findProviderById('deepseek');
+    expect(provider).toBeDefined();
+    const baseUrl = 'https://api.deepseek.com';
+    const savedCustom = {
+      id: 'deepseek-v4-custom',
+      name: '[DeepSeek] deepseek-v4-custom',
+      baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const helpers = {
+      getDefaultModelIds: qwenCore.getDefaultModelIds,
+      resolveBaseUrl: qwenCore.resolveBaseUrl,
+      normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+      existingModels: [savedCustom],
+    };
+
+    const explicit = buildProviderSetupInputs(
+      {
+        providerId: 'deepseek',
+        apiKey: 'sk-deepseek',
+        // The defaults-seeded Web Shell/SDK shape.
+        modelIds: qwenCore.getDefaultModelIds(provider!, baseUrl),
+      },
+      provider!,
+      helpers,
+    );
+    expect(explicit.preserveModels).toEqual([savedCustom]);
+
+    // Control: the implicit shape already preserved it.
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: 'deepseek',
+        apiKey: 'sk-deepseek',
+      },
+      provider!,
+      helpers,
+    );
+    expect(implicit.preserveModels).toEqual([savedCustom]);
+
+    // End-to-end: the custom model survives the defaults-only reconnect.
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [savedCustom],
+    });
+    const plan = qwenCore.buildInstallPlan(provider!, {
+      ...explicit,
+      apiKey: 'sk-deepseek',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env['DEEPSEEK_API_KEY'];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(savedCustom);
+    expect(
+      written!.filter((model) => model['id'] === 'deepseek-v4-custom'),
+    ).toHaveLength(1);
   });
 });
 

@@ -142,6 +142,12 @@ export function useProviderSetupFlow(
   );
   const committedBaseUrlRef = useRef('');
   const preserveModelsRef = useRef<ProviderModelConfig[]>([]);
+  // Ids of baseUrl-less legacy entries the dialog views seeded stamped into
+  // preserveModels (attributable to the restored endpoint, R43-3). Emitted
+  // as migratedLegacyModelIds on submit so buildInstallPlan claims the
+  // stored originals and the pairs collapse instead of duplicating. Swapped
+  // per protocol alongside preserveModelsRef.
+  const migratedLegacyModelIdsRef = useRef<string[]>([]);
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
@@ -169,6 +175,7 @@ export function useProviderSetupFlow(
       {
         baseUrl: string;
         preserveModels: readonly ProviderModelConfig[];
+        migratedLegacyModelIds: readonly string[];
       }
     >(),
   );
@@ -204,6 +211,11 @@ export function useProviderSetupFlow(
         readonly ProviderModelConfig[]
       >,
       baseUrlByProtocol?: ReadonlyMap<AuthType, string>,
+      migratedLegacyModelIds?: readonly string[],
+      migratedLegacyModelIdsByProtocol?: ReadonlyMap<
+        AuthType,
+        readonly string[]
+      >,
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
@@ -240,6 +252,11 @@ export function useProviderSetupFlow(
       committedBaseUrlRef.current = resolved;
       preserveModelsRef.current = [
         ...(preserveModelsByProtocol?.get(proto) ?? preserveModels ?? []),
+      ];
+      migratedLegacyModelIdsRef.current = [
+        ...(migratedLegacyModelIdsByProtocol?.get(proto) ??
+          migratedLegacyModelIds ??
+          []),
       ];
 
       setApiKeyError(null);
@@ -300,6 +317,8 @@ export function useProviderSetupFlow(
         savedModelStateByProtocolRef.current.set(protoKey, {
           baseUrl: baseUrlByProtocol?.get(protoKey) ?? '',
           preserveModels: preserveModelsByProtocol?.get(protoKey) ?? [],
+          migratedLegacyModelIds:
+            migratedLegacyModelIdsByProtocol?.get(protoKey) ?? [],
         });
       }
       const initialModelIds = [
@@ -331,6 +350,7 @@ export function useProviderSetupFlow(
     protocolDraftsRef.current.clear();
     committedBaseUrlRef.current = '';
     preserveModelsRef.current = [];
+    migratedLegacyModelIdsRef.current = [];
     customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
     endpointModelStateByProtocolRef.current.clear();
@@ -394,6 +414,10 @@ export function useProviderSetupFlow(
         preserveModelsRef.current = [
           ...(savedModelStateByProtocolRef.current.get(selectedProtocol)
             ?.preserveModels ?? []),
+        ];
+        migratedLegacyModelIdsRef.current = [
+          ...(savedModelStateByProtocolRef.current.get(selectedProtocol)
+            ?.migratedLegacyModelIds ?? []),
         ];
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
@@ -669,6 +693,16 @@ export function useProviderSetupFlow(
           ]);
           return liveSiblingIds.has(model.id);
         }
+        if (!provider.mergeModelsByIdentity && model.baseUrl === undefined) {
+          // A baseUrl-less entry reaching preserveModels on a non-merge
+          // provider is an untouchable fail-closed legacy entry (shared/
+          // sibling key, R41-4/R43-3), carried through unstamped by the
+          // dialog views. It cannot be seeded into the models field — no
+          // endpoint owns it — and the plan's UNSCOPED ownsModel deletes
+          // whatever does not reach it, so carry it regardless of field
+          // membership: such an entry is never deletable from any surface.
+          return true;
+        }
         const belongsToSelectedMergeEndpoint =
           !provider.mergeModelsByIdentity ||
           (model.baseUrl !== undefined && !belongsToAnotherEndpoint);
@@ -684,6 +718,11 @@ export function useProviderSetupFlow(
         apiKey: apiKey.trim(),
         modelIds: resolvedModelIds,
         ...(preserveModels.length > 0 ? { preserveModels } : {}),
+        ...(migratedLegacyModelIdsRef.current.length > 0
+          ? {
+              migratedLegacyModelIds: [...migratedLegacyModelIdsRef.current],
+            }
+          : {}),
         ...overrides,
       };
     },

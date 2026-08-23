@@ -1050,13 +1050,38 @@ export function buildProviderSetupInputs(
           }
         : model;
     if (!provider.mergeModelsByIdentity) {
+      // A non-merge install plan carries the provider's UNSCOPED ownsModel
+      // predicate: whatever this branch drops is deleted by the
+      // prepend-and-remove-owned merge. A baseUrl-less legacy entry whose
+      // env key fails attribution closed is untouchable (R41-4) — the
+      // shared static key of minimax/zai/alibaba-standard names the whole
+      // endpoint group, so neither a connect nor a reconnect here may
+      // stamp, re-home, or delete it. Carry it through UNSTAMPED so it is
+      // written back byte-identical; omission alone would delete it, since
+      // remove-owned claims every owned entry outside the plan (R43-2).
+      if (
+        model.baseUrl === undefined &&
+        !namesSelectedEndpoint(model) &&
+        namesSiblingEndpoint(model)
+      ) {
+        return [model];
+      }
       const belongsToAnotherEndpoint =
         helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) !==
         selectedEndpoint;
+      // The serve catalog exposes no existingConfig, so Web Shell and SDK
+      // selections are defaults-seeded and can never carry a saved id
+      // (R42-1): absence from an explicit modelIds selection is not
+      // deselection intent on this route. The merge branch below applies
+      // merge-only semantics for exactly this reason; non-merge providers
+      // must too — with the requestedIds gate, the exact defaults-only
+      // shape this function was rewritten to handle dropped a same-endpoint
+      // stamped custom out of preserveModels and the unscoped ownsModel
+      // deleted it, while the identical request with modelIds omitted
+      // preserved it (R43-4). Seeded CLI/ACP/VS flows remain the
+      // authoritative deselection surfaces.
       const shouldPreserve =
-        belongsToAnotherEndpoint ||
-        (!defaultIds.has(preserved.id) &&
-          (!hasExplicitModelIds || requestedIds.has(preserved.id)));
+        belongsToAnotherEndpoint || !defaultIds.has(preserved.id);
       return shouldPreserve ? [preserved] : [];
     }
     if (model.baseUrl === undefined) {

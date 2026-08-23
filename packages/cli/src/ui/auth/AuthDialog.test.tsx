@@ -565,6 +565,109 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     ]);
   });
 
+  it('fails attribution closed for shared-key legacy entries in both dialog views (R43-3)', () => {
+    // MOONSHOT_API_KEY serves BOTH Kimi api endpoints, so a baseUrl-less
+    // entry carrying it fails attribution closed (R41-4). Both dialog views
+    // stamped every baseUrl-less entry with the restored endpoint before
+    // any attribution check — and getProtocolSetups' list is the one
+    // useProviderSetupFlow.start() prefers — so an untouched /auth submit
+    // wrote a re-homed stamped copy (re-keyed to the restored endpoint)
+    // while the stored original was never claimed: a permanent legacy +
+    // stamped duplicate pair. Shared-key entries must be unseeded
+    // everywhere: not stamped into preserveModels, not seeded into the
+    // models field, and no migratedLegacyModelIds claim.
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+    const legacyModel = {
+      id: 'my-custom',
+      name: '[Kimi API] my-custom',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const modelProviders = { [AuthType.USE_OPENAI]: [legacyModel] };
+
+    const setup = getExistingProviderSetup(kimi!, modelProviders);
+    expect(setup.preserveModels).toBeUndefined();
+    expect(setup.migratedLegacyModelIds).toBeUndefined();
+    expect(setup.customModelIds).toEqual([]);
+    expect(setup.modelIdsByBaseUrl.size).toBe(0);
+
+    const proto = getProtocolSetups(kimi!, modelProviders);
+    expect(proto.preserveModelsByProtocol.size).toBe(0);
+    expect(proto.migratedLegacyModelIdsByProtocol.size).toBe(0);
+  });
+
+  it('keeps a sibling-attributable legacy entry out of a foreign endpoint seed (R43-3)', () => {
+    // KIMI_CODE_API_KEY names the coding endpoint; with an api endpoint
+    // restored the entry belongs to the sibling and must not be copied to
+    // the endpoint that does not own it.
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+    const legacyModel = {
+      id: 'my-code-custom',
+      name: '[Kimi Code] my-code-custom',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    // A stamped api entry fixes the restored endpoint at api-international.
+    const stampedApi = {
+      id: 'kimi-k3',
+      name: '[Kimi API] kimi-k3',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+    };
+    const modelProviders = {
+      [AuthType.USE_OPENAI]: [stampedApi, legacyModel],
+    };
+
+    const setup = getExistingProviderSetup(kimi!, modelProviders);
+    // kimi-k3 is a default id at the restored endpoint, so the stamped
+    // entry is regenerated rather than carried; the point here is that the
+    // sibling-attributable legacy entry is NOT stamped into this endpoint.
+    expect(setup.preserveModels).toBeUndefined();
+    expect(setup.migratedLegacyModelIds).toBeUndefined();
+    expect(setup.customModelIds).toEqual([]);
+    expect(setup.modelIdsByBaseUrl.get('https://api.moonshot.ai/v1')).toEqual([
+      'kimi-k3',
+    ]);
+
+    const proto = getProtocolSetups(kimi!, modelProviders);
+    expect(proto.preserveModelsByProtocol.size).toBe(0);
+    expect(proto.migratedLegacyModelIdsByProtocol.size).toBe(0);
+  });
+
+  it('stamps attributable legacy entries in both dialog views and emits their ids for collapse (R43-3)', () => {
+    // DEEPSEEK_API_KEY is unambiguously the single deepseek endpoint's own
+    // key, so the entry is attributable there: seeded stamped, with its id
+    // in migratedLegacyModelIds so buildInstallPlan claims the stored
+    // original and the pair collapses instead of duplicating.
+    const deepseek = findProviderById('deepseek');
+    expect(deepseek).toBeDefined();
+    const legacyModel = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const modelProviders = { [AuthType.USE_OPENAI]: [legacyModel] };
+    const stamped = {
+      ...legacyModel,
+      baseUrl: 'https://api.deepseek.com',
+    };
+
+    const setup = getExistingProviderSetup(deepseek!, modelProviders);
+    expect(setup.preserveModels).toEqual([stamped]);
+    expect(setup.migratedLegacyModelIds).toEqual(['legacy-custom']);
+
+    const proto = getProtocolSetups(deepseek!, modelProviders);
+    expect(proto.preserveModelsByProtocol.get(AuthType.USE_OPENAI)).toEqual([
+      stamped,
+    ]);
+    expect(
+      proto.migratedLegacyModelIdsByProtocol.get(AuthType.USE_OPENAI),
+    ).toEqual(['legacy-custom']);
+  });
+
   it('seeds no trims or customs for a provider without saved models', () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();

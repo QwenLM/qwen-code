@@ -459,6 +459,33 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         uiGroup: 'alibaba',
       };
     }
+    if (id === 'minimax') {
+      return {
+        id: 'minimax',
+        label: 'MiniMax API Key',
+        description: 'Quick setup for MiniMax models',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'international',
+            label: 'International',
+            url: 'https://api.minimax.io/v1',
+          },
+          {
+            id: 'china',
+            label: 'China',
+            url: 'https://api.minimaxi.com/v1',
+          },
+        ],
+        // ONE static env key shared across both endpoints, no
+        // mergeModelsByIdentity: the non-merge shared-key shape (R43-1).
+        envKey: 'MINIMAX_API_KEY',
+        models: [{ id: 'MiniMax-M3' }],
+        modelsEditable: true,
+        modelNamePrefix: 'MiniMax',
+        uiGroup: 'third-party',
+      };
+    }
     if (id === 'custom-openai-compatible') {
       return {
         id: 'custom-openai-compatible',
@@ -13443,6 +13470,80 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         migratedLegacyModelIds: expect.arrayContaining(['my-token-custom']),
       }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect carries a shared-key legacy entry through untouched on a non-merge provider (R43-1)', async () => {
+    // Serve twin tested in run-qwen-serve.test.ts (R43-2). minimax is a
+    // non-merge multi-endpoint provider whose ONE static env key is shared
+    // across both endpoints, so a baseUrl-less entry carrying it fails
+    // attribution closed (R41-4). The non-merge branch stamped such entries
+    // before any endpoint check: an explicit selection omitting the id
+    // dropped the entry from preserveModels — and since a non-merge install
+    // plan carries the UNSCOPED ownsModel predicate, prepend-and-remove-owned
+    // deleted the stored model — while an implicit reconnect preserved it
+    // stamped, silently re-homing it to the reconnect's endpoint. The gate
+    // must carry the entry through UNSTAMPED so it is written back
+    // byte-identical.
+    const legacyModel = {
+      id: 'my-model',
+      name: '[MiniMax] my-model',
+      envKey: 'MINIMAX_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // Explicit connect at International omitting the legacy id: carried
+    // through unstamped, never claimed for migration.
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'sk-minimax',
+        modelIds: ['MiniMax-M3'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'minimax' });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'minimax' }),
+      expect.objectContaining({ preserveModels: [legacyModel] }),
+    );
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'minimax' }),
+      expect.objectContaining({
+        migratedLegacyModelIds: expect.anything(),
+      }),
+    );
+
+    // Implicit reconnect: identical carry-through, no stamp.
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'sk-minimax',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'minimax' });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'minimax' }),
+      expect.objectContaining({ preserveModels: [legacyModel] }),
     );
 
     mockConnectionState.resolve();

@@ -2541,22 +2541,19 @@ function readExistingProviderConfig(
     ...(existing
       ? {
           modelIds: existing.models
-            .filter(
-              (model) =>
-                endpointScoped
-                  ? (model.baseUrl !== undefined &&
-                      normalizeBaseUrlForMatching(model.baseUrl) ===
-                        restoredEndpoint) ||
-                    (model.baseUrl === undefined &&
-                      restoredLegacyAttribution !== undefined &&
-                      (config.ownsModel
-                        ? config.ownsModel(model)
-                        : true) &&
-                      restoredLegacyAttribution.namesSelectedEndpoint(model))
-                  : model.baseUrl === undefined ||
-                    firstModel?.baseUrl === undefined ||
+            .filter((model) =>
+              endpointScoped
+                ? (model.baseUrl !== undefined &&
                     normalizeBaseUrlForMatching(model.baseUrl) ===
-                      normalizeBaseUrlForMatching(firstModel?.baseUrl),
+                      restoredEndpoint) ||
+                  (model.baseUrl === undefined &&
+                    restoredLegacyAttribution !== undefined &&
+                    (config.ownsModel ? config.ownsModel(model) : true) &&
+                    restoredLegacyAttribution.namesSelectedEndpoint(model))
+                : model.baseUrl === undefined ||
+                  firstModel?.baseUrl === undefined ||
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
           ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
@@ -2743,6 +2740,25 @@ function readProviderSetupInputs(
           }
         : model;
     if (!config.mergeModelsByIdentity) {
+      // A non-merge install plan carries the provider's UNSCOPED ownsModel
+      // predicate: whatever this branch drops is deleted by the
+      // prepend-and-remove-owned merge. A baseUrl-less legacy entry whose
+      // env key fails attribution closed is untouchable (R41-4) — the
+      // shared static key of minimax/zai/alibaba-standard names the whole
+      // endpoint group, so neither a connect nor a reconnect here may
+      // stamp, re-home, or delete it. Carry it through UNSTAMPED so it is
+      // written back byte-identical; omission alone would delete it, since
+      // remove-owned claims every owned entry outside the plan (R43-1 —
+      // twin of the serve gate in buildProviderSetupInputs). Unlike the
+      // serve route, this route seeds existingConfig, so the informed
+      // requestedIds gate below stays for every OTHER entry.
+      if (
+        model.baseUrl === undefined &&
+        !namesSelectedEndpoint(model) &&
+        namesSiblingEndpoint(model)
+      ) {
+        return [model];
+      }
       const belongsToAnotherEndpoint =
         normalizeBaseUrlForMatching(preserved.baseUrl) !== selectedEndpoint;
       const shouldPreserve =
