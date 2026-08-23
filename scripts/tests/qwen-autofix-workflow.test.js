@@ -38,6 +38,8 @@ const reviewVerificationRunner = readFileSync(
   reviewVerificationRunnerPath,
   'utf8',
 );
+const pushAndReportScriptPath = '.github/scripts/autofix-push-and-report.sh';
+const pushAndReportScript = readFileSync(pushAndReportScriptPath, 'utf8');
 const upsertDeferredScript = readFileSync(
   '.github/scripts/upsert-deferred-issue.sh',
   'utf8',
@@ -92,10 +94,21 @@ const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
   )?.[0] ?? '';
-const pushAndReportStep =
+// The step's body lives in a sibling script (the workflow file was at 90% of
+// GitHub's 500 KB start-runs limit, 98% of the repo's own gate). Assertions about what the round does when
+// it pushes and reports belong to the script; assertions about when it runs and
+// what reaches it belong to the `if:`/`env:` still in the YAML. Concatenating
+// keeps both under one name, so a line moving between the two does not silently
+// drop the invariant that pinned it.
+const pushAndReportStepYaml =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
+const pushAndReportStep = `${pushAndReportStepYaml}\n${pushAndReportScript}`;
+// Census assertions below count sites across the whole pipeline. The push
+// step's body is a sibling script now, so counting `workflow` alone would let
+// an extraction silently drop a site from the count it is meant to pin.
+const workflowWithScripts = `${workflow}\n${pushAndReportScript}`;
 const prepareStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
@@ -345,6 +358,16 @@ function runDevelopIssue(dir, stub) {
   ]);
 }
 
+// The idle-timeout sentinel detail exactly as run-agent.mjs's template
+// emits it (with the observed 20-minute window filled in), and the retry
+// headline the report step builds from it via
+// CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})".
+// Single-sourced so the composition test can tie the runner's emission to
+// these fixtures and to the workflow's classification needles.
+const IDLE_NOW =
+  'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
+const IDLE_HEAD = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
+
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -486,11 +509,29 @@ describe('qwen-autofix workflow', () => {
       'review-address already in flight or queued — skipping',
     );
     // The live-run listing filters status SERVER-side (in_progress + queued
-    // union): a client-side filter over the N newest runs loses a long-lived
-    // fanned-out run once cron traffic pushes it past the window, and its
-    // queued PRs silently stop looking busy.
-    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
-    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    // + pending union): a client-side filter over the N newest runs loses a
+    // long-lived fanned-out run once cron traffic pushes it past the window,
+    // and its queued PRs silently stop looking busy. 'pending' is part of the
+    // union because GitHub reports a run neither queued nor in_progress while
+    // its jobs wait on concurrency groups (#9596).
+    expect(reviewScanJob).toContain(
+      'for LIVE_STATUS in in_progress queued pending',
+    );
+    // The union calls the runs API directly, not `gh run list --status`: gh
+    // validates that flag against a client-side allow-list that rejects
+    // 'pending' before 2.65.0, so a runner whose gh lags the hosted images
+    // would exit 1 and silently fail-close EVERY scan; the API filter is
+    // server-side on every gh version. The jq filter must read the REST
+    // envelope's `id` — the gh-CLI `databaseId` field does not exist in the
+    // API payload, and an empty read would silently un-busy every scan.
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50"',
+    );
+    expect(reviewScanJob).toContain("--jq '.workflow_runs[].id'");
+    expect(reviewScanJob).not.toContain('.workflow_runs[].databaseId');
+    expect(reviewScanJob).not.toContain(
+      'gh run list --repo "${REPO}" --workflow qwen-autofix.yml',
+    );
     expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its
     // matrix, so review-address REVALIDATES the watermark against LIVE
@@ -556,9 +597,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 300-minute cap) so an active run is never aged out
+    // job runs up to its 330-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=360');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -1548,7 +1589,9 @@ describe('qwen-autofix workflow', () => {
     // filter, so the agent never sees it as feedback.
     expect(reviewScanJob).toContain('autofix-redcheck head=([0-9a-f]+)');
     expect(
-      workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
+      workflowWithScripts.match(
+        /<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g,
+      ) ?? [],
     ).toHaveLength(3);
     // Every step that EMITS the marker must define REPORT_HEAD itself — a
     // shell variable does not cross step boundaries — and no step may define
@@ -1562,10 +1605,19 @@ describe('qwen-autofix workflow', () => {
     // merges them and the misplacement stays invisible — that is how the
     // first version of this assertion passed while the bug was live.
     let emitterSteps = 0;
-    for (const m of workflow.matchAll(
-      /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
-    )) {
-      const body = m[1];
+    // The push step's body is a sibling script, so it is no longer one of the
+    // YAML step blocks — it is checked as one more block here. The pairing is
+    // per emitting UNIT (step body or the script it invokes), which is the
+    // scope a shell variable actually spans.
+    const emitterBodies = [
+      ...[
+        ...workflow.matchAll(
+          /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
+        ),
+      ].map((m) => m[1]),
+      pushAndReportScript,
+    ];
+    for (const body of emitterBodies) {
       const emits = body.includes(
         '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
       );
@@ -1583,7 +1635,7 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'checked_out_head=${CHECKED_OUT_HEAD}',
     );
-    expect(workflow).not.toContain('REPORT_HEAD="$(gh api');
+    expect(workflowWithScripts).not.toContain('REPORT_HEAD="$(gh api');
     // The handoff step must NOT stamp the redcheck marker when the agent
     // evaluated nothing (sentinel ts): doing so would make RED_HEAD ==
     // LIVE_HEAD and the retry scan would see N_RED_NOW=0, going idle
@@ -2794,10 +2846,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
@@ -3072,12 +3124,12 @@ describe('qwen-autofix workflow', () => {
     // The two-page fixtures below are synthetic (the per-page shape gh <
     // v2.31.0 emitted): they exercise the jq mechanics of the normalizer and
     // its consumers, not the wire format current gh produces.
-    expect(workflow).not.toContain('--paginate > "');
+    expect(workflowWithScripts).not.toContain('--paginate > "');
     // Pin the total --paginate code-site count so ANY new paginated site
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflow.split('--paginate').length - 1).toBe(21);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(21);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
@@ -3954,7 +4006,7 @@ describe('qwen-autofix workflow', () => {
             '  esac',
             'done',
             'set -- "${positional[@]}"',
-            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            'if [[ "$1" == "api" ]]; then',
             '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
             '  payload="${ENUM_LIST_ANSWER}"',
             'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
@@ -4019,7 +4071,7 @@ describe('qwen-autofix workflow', () => {
     expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
     // A jobs-view failure mid-enumeration fails closed the same way.
     const viewFailed = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewError: 'HTTP 500',
     });
     expect(viewFailed.candidates).toBe('');
@@ -4027,7 +4079,7 @@ describe('qwen-autofix workflow', () => {
     expect(viewFailed.fleet).toContain('HTTP 500');
     // A healthy enumeration accumulates the busy set and keeps candidates.
     const ok = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewAnswer: JSON.stringify({
         jobs: [
           { name: 'review-address (101, round 2)', status: 'in_progress' },
@@ -4126,7 +4178,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 330-minute
+    // A stranded marker must NOT keep blocking through the 360-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -4176,7 +4228,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 330-minute horizon is aged out...
+    // ...a check stuck past the 360-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -6774,6 +6826,44 @@ exit 1
         K,
       ),
     ).toBe('2');
+    // Idle (silent-sandbox) rounds are EXCLUDED from this census exactly
+    // like from the cap: the narrowing advice targets budget exhaustion,
+    // and the idle watchdog killed the round before any budget was
+    // exhausted (af-073). One pushed round plus one pure idle round must
+    // count zero — pre-fix the census reported 1 and told the agent to
+    // narrow scope for a wedged runner. Deleting the exclusion's jq clause
+    // flips both back to counting idle rounds and must fail here.
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    // ...but budget timeouts still count beside idle rounds, and an idle
+    // round between two budget ones is not a success, so it resets nothing.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('2');
     // Legacy pre-takeover markers (no win= field) count under key 'none' —
     // the common real case: a PR that timed out before any re-arm.
     expect(
@@ -6813,6 +6903,21 @@ exit 1
     expect(prepareBranchAndFeedbackStep).toContain(
       'contains("AutoFix ran out of time before finishing")',
     );
+    // The idle exclusion reuses the cap census's IDLE_N needle VERBATIM —
+    // a divergent token would classify the same headline differently in
+    // the two censuses.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'and (contains("AutoFix ran out of time before finishing (idle-timeout") | not)',
+    );
+    const prepareIdleNeedle = prepareBranchAndFeedbackStep.match(
+      /and \(contains\("([^"]+)"\) \| not\)/,
+    )?.[1];
+    const capIdleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(prepareIdleNeedle).toBeTruthy();
+    expect(capIdleNeedle).toBeTruthy();
+    expect(prepareIdleNeedle).toBe(capIdleNeedle);
     expect(reviewAddressReportStep).toContain(
       'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
     );
@@ -8019,7 +8124,7 @@ exit 1
     // the push path (a drift in only the no-op or failure suffix would
     // otherwise survive green).
     const roundTrip = (roundVar, { omitMeasuredAt = false } = {}) => {
-      const line = workflow.match(
+      const line = workflowWithScripts.match(
         new RegExp(
           `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
         ),
@@ -8065,9 +8170,11 @@ exit 1
     // run= identity the reader dedupes on — push stamps NEXT_ROUND, no-op
     // ROUND, the failure/handoff report MARK_ROUND.
     expect(
-      workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
+      workflowWithScripts.match(
+        /<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g,
+      ) ?? [],
     ).toHaveLength(3);
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
@@ -8097,10 +8204,10 @@ exit 1
     ]) {
       expect(pushAndReportStep).toContain(bind);
     }
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
@@ -8545,9 +8652,16 @@ exit 1
     // runner user and WORKDIR is a predictable path they can write, so a
     // re-read could be overwritten after the gate looked (a forged re-arm,
     // or a conflict verdict flipped back to sound, defeating the park).
-    const emitMarkerFn = pushAndReportStep.match(
-      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
-    )?.[0];
+    // The two copies live at different indentations now — one in a sibling
+    // script at column 0, one still inline in the YAML at ten — so compare
+    // them dedented. The invariant is that the LOGIC does not drift, and an
+    // indentation-sensitive compare would have to be deleted the moment
+    // either copy moves, which is exactly when it earns its keep.
+    const dedentBlock = (block) => block.replace(/^ {10}/gm, '');
+    const emitMarkerRe = /emit_growth_audit_marker\(\) \{[\s\S]*?\n {0,10}\}/;
+    const emitMarkerFn = dedentBlock(
+      pushAndReportStep.match(emitMarkerRe)?.[0] ?? '',
+    );
     expect(emitMarkerFn).toBeTruthy();
     expect(emitMarkerFn).not.toContain('growth-audit.json');
     expect(emitMarkerFn).toContain('AUDIT_VERDICT');
@@ -8555,9 +8669,9 @@ exit 1
     // step is a fresh shell). A drift between the copies — marker format,
     // re-arm suppression, the win= fallback — would ship green unless
     // pinned: extract both and require them identical.
-    const emitMarkerFnFailure = reviewAddressReportStep.match(
-      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
-    )?.[0];
+    const emitMarkerFnFailure = dedentBlock(
+      reviewAddressReportStep.match(emitMarkerRe)?.[0] ?? '',
+    );
     expect(emitMarkerFnFailure).toBeTruthy();
     expect(emitMarkerFnFailure).toBe(emitMarkerFn);
     // Both report steps consume the single verdict Finalize verification
@@ -9000,7 +9114,9 @@ exit 1
     // every feedback filter already excludes it, and never touches the
     // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
     // the prepare-side scan() parse.
-    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      workflowWithScripts.split('<!-- autofix-growth-base src=').length - 1,
+    ).toBe(3);
     expect(
       pushAndReportStep.split(
         '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
@@ -10330,6 +10446,99 @@ exit 1
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('delivers the push-and-report body as content, never from a path on disk', () => {
+    // The body of 'Push and report' is a sibling file (the workflow file sits
+    // near GitHub's 500 KB start-runs limit), but it is never executed FROM
+    // that file: the stage step reads it from the trusted-base checkout before
+    // any branch code runs and passes the text through step output, and the
+    // step runs those bytes. That is the delivery the inline block had, and
+    // the one upsert-deferred-issue.sh uses. Executing it by path instead
+    // would hand the PAT-bearing step — which runs after the agent and the
+    // gate have executed branch code on this host — whatever the branch left
+    // at that path.
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    // Captured under a per-run random delimiter, so the script's own text
+    // cannot close the heredoc and inject step outputs.
+    expect(stageStep).toMatch(
+      /_push_report_delim="EOF_\$\(head -c 16 \/dev\/urandom/,
+    );
+    expect(stageStep).toContain(
+      'echo "push_report_src<<${_push_report_delim}"',
+    );
+    expect(stageStep).toContain(
+      'cat .github/scripts/autofix-push-and-report.sh 2> /dev/null || true',
+    );
+    expect(pushAndReportStepYaml).toContain(
+      "PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'",
+    );
+    expect(pushAndReportStepYaml).toContain(
+      'bash --norc -c "${PUSH_REPORT_SRC}"',
+    );
+
+    // No path execution, in any spelling, from either half of the unit. A
+    // regex over exec verbs is not enough — a line continuation between the
+    // verb and the path evades it — so assert on the code itself: with
+    // comments stripped, the script's path may appear exactly once in the
+    // whole workflow, in the stage step's `cat`.
+    const code = (text) =>
+      text
+        .split('\n')
+        .filter((l) => !/^\s*(#|\/\/)/.test(l))
+        .join('\n');
+    const pathHits = (
+      code(workflow).match(/autofix-push-and-report\.sh/g) ?? []
+    ).length;
+    expect(pathHits).toBe(1);
+    expect(code(workflow)).toContain(
+      'cat .github/scripts/autofix-push-and-report.sh',
+    );
+    // The script must not re-enter itself by path either.
+    expect(code(pushAndReportScript)).not.toContain(
+      'autofix-push-and-report.sh',
+    );
+    // The staging machinery this replaced must not come back with it: a
+    // digest exists to protect an on-disk copy, and there is none.
+    expect(workflowWithScripts).not.toContain('push_report_sha256');
+    expect(workflowWithScripts).not.toContain(
+      '${RUNNER_TEMP}/autofix-push-and-report.sh',
+    );
+
+    // An empty capture means the stage step never read the file. Refuse
+    // before running anything, not after.
+    const guard = 'if [[ -z "${PUSH_REPORT_SRC}" ]]; then';
+    expect(pushAndReportStepYaml).toContain(guard);
+    expect(pushAndReportStepYaml).toMatch(
+      /if \[\[ -z "\$\{PUSH_REPORT_SRC\}" \]\]; then\n\s*echo '::error::[^\n]*refusing to push or report[^\n]*'\n\s*exit 1/,
+    );
+    expect(pushAndReportStepYaml.indexOf(guard)).toBeLessThan(
+      pushAndReportStepYaml.indexOf('bash --norc -c "${PUSH_REPORT_SRC}"'),
+    );
+
+    // R3-1 downstream half: 'Finalize autofix status comment' distinguishes
+    // "published a report" from "the step no-oped" by this output, so it must
+    // be written AFTER the body and never before it — a loader plant that
+    // kills this shell at execve exits 0 having written nothing.
+    const reported = 'echo \'round_reported=true\' >> "${GITHUB_OUTPUT}"';
+    expect(pushAndReportStepYaml).toContain(reported);
+    expect(pushAndReportStepYaml.indexOf(reported)).toBeGreaterThan(
+      pushAndReportStepYaml.indexOf('bash --norc -c "${PUSH_REPORT_SRC}"'),
+    );
+
+    // GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`, so
+    // the script's OWN flags must be exactly that. Pin the whole set of
+    // column-0 `set` lines rather than grepping for spellings: `set -o
+    // nounset`, `set -E -u` and a later `set +e` are all invisible to a
+    // spelling pin, and all three turn this from a move into a behaviour
+    // change. Nested `set` lines inside the quoted child bodies are indented
+    // and deliberately out of scope — the upsert child runs under `-u`.
+    expect(pushAndReportScript.match(/^set .*$/gm)).toEqual([
+      'set -eo pipefail',
+    ]);
+  });
+
   it('re-sanitizes git config and resets the helper list at every PAT-bearing git step', () => {
     // The job-start sanitize is pre-checkout hygiene; the gates then run
     // branch test code on the host and the sandboxed agent has the
@@ -10526,7 +10735,7 @@ exit 1
     // runs its own build/test between them), with PATH pinned first.
     expect(
       workflow.match(
-        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+        /\/usr\/bin\/echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| \/usr\/bin\/sha256sum -c - > \/dev\/null/g,
       ) ?? [],
     ).toHaveLength(2);
     expect(
@@ -10557,11 +10766,13 @@ exit 1
     // sslVerify=false would otherwise read the credential off the wire.
     // Count equality pins a future push site to ship with both or fail.
     const helperSites =
-      workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
+      workflowWithScripts.match(
+        /-c credential\."https:\/\/github\.com"\.helper=/g,
+      ) ?? [];
     // Tolerant of the intermediate `-c` transport/protocol flags git_auth
     // also carries between the sslVerify pin and the helper reset.
     const resetSites =
-      workflow.match(
+      workflowWithScripts.match(
         /-c http\.sslVerify=true (?:-c [^\n]*?)?-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
       ) ?? [];
     expect(helperSites).toHaveLength(3);
@@ -11183,6 +11394,104 @@ exit 1
     expect(reviewVerificationGateStep).not.toContain(
       'bash .github/scripts/run-autofix-review-verification.sh',
     );
+    // The gate launches through an env -i clean child with a SANCTIONED
+    // allowlist (R5-1): every variable the gate's own build/test checks need
+    // must be passed, and the step-pinned CI=true is one of them — without
+    // it the gate's checks run with inverted CI semantics and the 18
+    // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
+    // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
+    // Pin the launch STRUCTURALLY — one verbatim adjacency chain from the
+    // LD_* prefix through the digest-verified script, every entry in order
+    // with its exact value — not as text tokens: shell edits that preserve
+    // token text (a commented-out entry, a dropped `\`, an =-less operand, a
+    // quote suffix, an entry smuggled behind a `bash --norc` value, the
+    // launch head moved into a comment) each broke the child's isolation
+    // while every token-level pin stayed green (R2-1). Anchoring the chain
+    // on the LD_* prefix pins the one channel env -i cannot block; the
+    // body-side unset and PATH export are pinned with it (R3-1, R2-2). By
+    // themselves they do NOT protect the pre-launch digest check, which
+    // runs in this step's own bash: startup-time channels — an LD_*
+    // library mapped before line 1, a BASH_FUNC function import, a
+    // path-variable redirection of the checked file — are closed by the
+    // step-level env pins and the absolute digest path below (R6-2, R6-3,
+    // R6-4). The shapes AROUND the chain
+    // are closed by pinning the run body's whole statement list with
+    // comments stripped: a prefix command word that demotes the whole chain
+    // to one command's argv (the gate never executes and a forged outcome
+    // survives), a command appended or inserted around the launch, a
+    // demotion of the pinned block into a never-run arm, a commented-out or
+    // relocated statement — each adds, drops, reorders, or renames a
+    // statement here (R4-2, R4-3, R4-4). Within the chain, separators allow
+    // only bash whitespace — space/tab after the continuation newline: JS
+    // `\s` also matches a blank line, which splits the chain into two
+    // commands (the orphaned env -i prints and exits 0 while the rest runs
+    // with the FULL step environment), and NBSP/U+2028, which glue into the
+    // next operand and rename it. Blank lines filter out of the statement
+    // list too, so only this pin closes the blank-line split; lines that
+    // carry NBSP/U+2028 instead fail the statement list's exact match,
+    // whose ASCII-only strip keeps them visible (R4-1, R6-1).
+    const gateLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
+      'WORKDIR="${WORKDIR}"',
+      'BRANCH="${BRANCH}"',
+      'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
+      'CI="${CI:-true}"',
+      'KISS_AUDIT="${KISS_AUDIT:-false}"',
+      'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    ];
+    const gateLaunchPin = new RegExp(
+      gateLaunchTokens
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n[ \\t]*'),
+    );
+    // The digest check executes in the PARENT shell before the clean child
+    // exists. Its binaries are absolute paths and its inputs step-level
+    // pins, because ANY bare command word in the body — echo, export, or
+    // unset alike — is shadowed by $GITHUB_ENV-planted BASH_FUNC functions
+    // imported at bash startup (R6-4), and a shadowed in-shell pin arms a
+    // DEBUG trap that swaps the staged runner AFTER the digest passes and
+    // BEFORE the launch executes it (R8-1): the body carries no pin
+    // statement of its own, so the pinned list is exactly the digest line
+    // and the launch. The digest line is pinned whole and per step — a
+    // workflow-wide count accepts relocation out of the gates, and
+    // `|| true` accepts a digest mismatch under bash -e (R4-3, the
+    // resanitize sibling's doctrine).
+    const gateDigestCheck =
+      '/usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null';
+    const gateBodyStatements = [
+      gateDigestCheck,
+      ...gateLaunchTokens.map((token, index) =>
+        index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
+      ),
+    ];
+    // Bash breaks words only on ASCII space/tab/newline: strip ASCII
+    // whitespace only, so a line carrying any other "whitespace" (NBSP,
+    // U+2000–U+200A, U+2028, ...) keeps it and fails the exact match.
+    // JS trim() stripped those too, classifying `\u00a0# x` as a comment
+    // while bash executed it — a smuggled statement invisible to
+    // every other pin here (R6-1).
+    const gateBodyStatementsOf = (stepText) =>
+      stepText
+        .slice(stepText.indexOf('run: |-') + 'run: |-'.length)
+        .split('\n')
+        .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+        .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(gateBodyStatementsOf('run: |-\n  \u00a0# x')).toEqual(['\u00a0# x']);
+    for (const step of [
+      reviewVerificationGateStep,
+      repairVerificationGateStep,
+    ]) {
+      expect(step).toMatch(gateLaunchPin);
+      expect(gateBodyStatementsOf(step)).toEqual(gateBodyStatements);
+      // Exactly one launch per step: a second, unpinned `bash --norc` (the
+      // pinned block demoted into a never-run arm) must fail here (R2-1).
+      expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
+    }
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
@@ -11373,7 +11682,7 @@ exit 1
     // with a stubbed gh against fixture ic.json histories. String pins
     // alone cannot catch a census that silently zeroes.
     const digestBlock = pushAndReportStep.match(
-      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\n {10}fi\n/,
+      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\nfi\n/,
     )?.[0];
     expect(digestBlock).toBeTruthy();
     // Cross-pin: each census grep needle must match the actual headline
@@ -11809,7 +12118,7 @@ exit 1
     // AND both no-secret verification checkouts (convention: every host
     // checkout of an agent-writable branch severs hooks).
     expect(
-      `${workflow}\n${reviewVerificationRunner}`.split(
+      `${workflowWithScripts}\n${reviewVerificationRunner}`.split(
         'git config core.hooksPath /dev/null',
       ).length - 1,
     ).toBe(5);
@@ -12710,14 +13019,21 @@ exit 1
     // time; the agent file rides the artifact dump and the repair cleanup;
     // SKILL documents the fourth disposition. The script is executed from
     // that content, never opened by path, at both call sites.
-    expect(workflow.split('bash -c "${UPSERT_SRC}"').length - 1).toBe(2);
+    expect(
+      workflowWithScripts.split('bash -c "${UPSERT_SRC}"').length - 1,
+    ).toBe(2);
     // R10-8: bound EVERY execution of the staged path, not one spelling —
     // `sh …`, `bash -- …`, `source …`, `. …`, `exec bash …` all re-open it.
-    expect(workflow).not.toMatch(
-      /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    // Scoped to the scripts too, matching the positive census above: an
+    // extraction that moves the last path-opening site out of the YAML would
+    // otherwise leave these negatives green over a file they no longer cover.
+    // Line-continuation spellings count too: bash joins `\<newline>` before
+    // tokenizing, so the bans treat `\<newline>` as part of the line.
+    expect(workflowWithScripts).not.toMatch(
+      /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b(?:[^\n|]|\\\n)*\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
     );
-    expect(workflow).not.toMatch(
-      /(?:^|\s)(?:source|\.)\s+"?\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    expect(workflowWithScripts).not.toMatch(
+      /(?:^|\s)(?:source|\.)\s+(?:\\\n\s*)*"?\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
     );
     // Placement, not just counts: the digest-gated invocation is a step-local
     // function defined ONCE in 'Push and report' and called immediately after
@@ -12744,6 +13060,15 @@ exit 1
     // before any gated work. Exactly two clean-child launches (both arms of
     // 'Push and report' share run_deferred_upsert; the failure path has its
     // own).
+    // 'Push and report' ALSO carries the wrapper's own clean-child launch
+    // (the gate that verifies and runs the staged script) ahead of the
+    // upsert function in the concatenated YAML+script text; anchor these
+    // slices at the function so they keep targeting the UPSERT child. The
+    // failure step has no function — its child is inline, anchored at 0.
+    const upsertChildAnchor = (step) => {
+      const fn = step.indexOf('run_deferred_upsert');
+      return fn === -1 ? 0 : fn;
+    };
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       // LD_* is stripped by a command-prefix assignment BEFORE /usr/bin/env,
       // the one channel env -i cannot block (ld.so preloads into the env
@@ -12765,9 +13090,15 @@ exit 1
       // Anchor on the launch LINE, not the first textual mention: a comment
       // elsewhere in the step names `/usr/bin/env -i` too, and slicing from
       // there swallowed the whole step (which quietly weakened these pins).
-      const argStart = step.indexOf('LD_PRELOAD= LD_AUDIT=');
+      const argStart = step.indexOf(
+        'LD_PRELOAD= LD_AUDIT=',
+        upsertChildAnchor(step),
+      );
       expect(argStart).toBeGreaterThan(-1);
-      const argList = step.slice(argStart, step.indexOf('bash --norc -c'));
+      const argList = step.slice(
+        argStart,
+        step.indexOf('bash --norc -c', argStart),
+      );
       expect(argList.length).toBeGreaterThan(0);
       // R9-10: contains-only pins accept a symmetric ADDITION that widens the
       // child's environment. Enumerate what is actually passed and compare
@@ -12775,7 +13106,7 @@ exit 1
       // Delimited tokens, not substrings: match `NAME=value` up to the line
       // continuation, so a value swap or an extra entry is visible.
       const assignments = (
-        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       ).map((m) => m.trim());
       const passed = assignments.map((m) => m.split('=')[0]);
       // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
@@ -12828,7 +13159,7 @@ exit 1
       // …scoped to the upsert child: the step still runs the pre-existing
       // resanitize digest gate, which is a different staged script.
       const childBlock = step.slice(
-        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf('LD_PRELOAD= LD_AUDIT=', upsertChildAnchor(step)),
         step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
       );
       expect(childBlock.length).toBeGreaterThan(0);
@@ -12878,7 +13209,7 @@ exit 1
     // Four clean children: the two deferred-findings upserts plus the two
     // verification-gate launches (the gate runs after the agent step's
     // branch code, so its bash must inherit nothing at all).
-    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(4);
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(4);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -12886,6 +13217,7 @@ exit 1
     // absorb the one-level indent difference.
     const childCore = (step) =>
       step
+        .slice(upsertChildAnchor(step))
         .match(
           /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?could not create a gh config dir[^\n]*\n\s*exit 0\n\s*fi\n\s*export GH_CONFIG_DIR/,
         )?.[0]
@@ -13658,7 +13990,7 @@ exit 1
       // …scoped to the clean child: warnings elsewhere in the step reach the
       // log directly and never pass through the neutralizing replay.
       const child = step.slice(
-        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf('LD_PRELOAD= LD_AUDIT=', upsertChildAnchor(step)),
         step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
       );
       const wrapperWarnings =
@@ -14340,9 +14672,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 55');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '1080000'",
+      "QWEN_TIMEOUT_MS: '2700000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -14872,7 +15204,7 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSiteRe = /sed(?: -e)? 's\/<!--\/[^']*\/g'/g;
-    const escapeSites = workflow.match(escapeSiteRe) ?? [];
+    const escapeSites = workflowWithScripts.match(escapeSiteRe) ?? [];
     expect(escapeSites).toHaveLength(12);
     // The next agent-derived publish site lives in
     // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
@@ -14974,13 +15306,7 @@ exit 1
       reviewAddressReportStep.match(/^\s*HEADLINE_ZH="/gm) ?? [];
     expect(headlineAssignments.length).toBeGreaterThan(0);
     expect(headlineZhAssignments).toHaveLength(headlineAssignments.length);
-    for (const name of [
-      'CAUSE',
-      'LAST_FIX',
-      'GATE_CLAUSE',
-      'IDLE_CLAUSE',
-      'REMEDY',
-    ]) {
+    for (const name of ['CAUSE', 'LAST_FIX', 'GATE_CLAUSE', 'IDLE_CLAUSE']) {
       const en =
         reviewAddressReportStep.match(new RegExp(`^\\s*${name}=`, 'gm')) ?? [];
       const zh =
@@ -15019,6 +15345,9 @@ exit 1
         '轮未能推送任何内容',
       ],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
+      // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
+      // variables are gone) — its EN/ZH pairing stays pinned here.
+      ['HEADLINE', 'split or reduce the PR', '拆分或缩减该 PR'],
       [
         'HEADLINE',
         'deferred this item to a human under instruction',
@@ -15080,8 +15409,12 @@ exit 1
         '自身本轮之前的代码需要处理',
       ],
       ['IDLE_CLAUSE', 'no budget increase can cure', '提高预算也治不了'],
-      ['REMEDY', 'split or reduce the PR', '拆分或缩减该 PR'],
-      ['REMEDY', 'investigate the sandbox image', '排查 sandbox 镜像'],
+      ['IDLE_CLAUSE', 'do NOT count toward this cap', '不计入本上限'],
+      [
+        'IDLE_CLAUSE',
+        'investigate the sandbox image and runner docker daemon separately',
+        '请另行排查 sandbox 镜像与 runner 的 docker daemon',
+      ],
     ]) {
       expect(
         reviewAddressReportStep,
@@ -15324,9 +15657,24 @@ exit 1
     // handoff publishes one too (the handoff note + eval marker), and so do
     // the two brake-violation rejections (their note + marker post from the
     // report step), so all five read "finished", never "ended without
-    // publishing a report" above their own report.
+    // publishing a report" above their own report — fixed/noop
+    // additionally prove publication through the push step's output, since
+    // an env plant can no-op that step with exit 0 (R3-1).
     expect(finalizeStatusCommentStep).toContain(
-      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ]]',
+      '[[ "${PUBLISHED}" == \'true\' && ( "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ) ]]',
+    );
+    // R3-1 downstream half: an env plant can kill 'Push and report's shell
+    // at execve (silent exit 0, gate body never ran) — the in-step sentinel
+    // never runs in that shape, so the missing success output is the
+    // detection: it is written only after the sentinel-verified child exits
+    // 0, and absent it the success text would assert a report that never
+    // posted.
+    expect(finalizeStatusCommentStep).toContain(
+      "PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'",
+    );
+    expect(finalizeStatusCommentStep).toContain('PUBLISHED=true');
+    expect(finalizeStatusCommentStep).toMatch(
+      /if \[\[ "\$\{OUTCOME:-\}" == 'fixed' \|\| "\$\{OUTCOME:-\}" == 'noop' \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != 'true' \]\]; then\n\s*PUBLISHED=false/,
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
@@ -15625,8 +15973,7 @@ exit 1
     // advice: more minutes cannot cure a sandbox that produced nothing.
     const idleCapped = run({
       OUTCOME: 'failed',
-      AGENT_TIMEOUT:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      AGENT_TIMEOUT: IDLE_NOW,
       ROUND: '4',
     });
     expect(idleCapped).toContain('this was the last automatic attempt');
@@ -15863,7 +16210,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -15871,12 +16218,21 @@ exit 1
         },
       );
       rmSync(dir, { recursive: true, force: true });
-      const [mark, consec, headline] = out.split('|');
+      // The block echoes ::warning:: log lines (the idle-timeout census), so
+      // read the result off its sentinel — job-log noise must never be
+      // parsed as a field. The pre-sentinel half is the job-log surface the
+      // census warning targets; return it so tests can pin it.
+      const sentinelAt = out.lastIndexOf('@@R@@');
+      const [mark, consec, headline, headlineZh] = out
+        .slice(sentinelAt + 5)
+        .split('|');
       return {
         mark,
         consec: Number(consec),
         terminal: mark === '100',
         headline,
+        headlineZh,
+        log: out.slice(0, sentinelAt),
       };
     };
 
@@ -15986,50 +16342,112 @@ exit 1
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
-    // Idle (silent-sandbox) timeouts share the census — each burns a full
-    // budget — and when the window contains any, the breaker's advice says
-    // a budget increase cannot cure them.
-    const IDLE_HEAD =
-      '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
-    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    // Idle (silent-sandbox) timeouts are EXCLUDED from this cap: the remedy
+    // it prescribes (split the PR / raise the budget) cannot cure a runner
+    // that produced no output at all, and counting them parked healthy PRs
+    // (af-073). Interleaved with pushes they must never terminate — this is
+    // the shape that stopped #8332 at 24 rounds and #8368 at 28 while both
+    // were still pushing.
+    const allIdle = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleMixed.terminal).toBe(true);
-    expect(idleMixed.headline).toContain('time-budget exhaustions');
-    expect(idleMixed.headline).toContain(
-      'silent-sandbox (idle) timeouts that no budget increase can cure',
-    );
-    // An ALL-idle window swaps the closing remedy for the sandbox
-    // investigation — mirroring the round-level split — instead of
-    // prescribing the budget increase the clause above declared useless.
-    expect(idleMixed.headline).toContain(
-      'A human should investigate the sandbox image and runner docker daemon',
-    );
-    expect(idleMixed.headline).not.toContain('raise the agent time budget');
-    // A MIXED window (any real budget timeout) keeps the budget remedy.
-    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    expect(allIdle.terminal).toBe(false);
+    expect(allIdle.headline).toBe('orig');
+    // Idle rounds do not become budget timeouts by piling up: no count of
+    // them alone reaches the cap.
+    expect(
+      run(
+        Array(timeoutCap * 3)
+          .fill(IDLE_HEAD)
+          .flatMap((h) => [h, PUSH]),
+        {
+          agentTimeout: IDLE_NOW,
+        },
+      ).terminal,
+    ).toBe(false);
+    // The escape hatch that makes the exclusion safe: an idle round pushes
+    // nothing and matches no streak-reset needle, so a PERSISTENTLY wedged
+    // sandbox still terminates — at the CONSECUTIVE cap, with its own
+    // headline. Without this the exclusion would let a dead runner loop
+    // forever.
+    const idleStreak = run(Array(cap - 1).fill(IDLE_HEAD), {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleSome.terminal).toBe(true);
-    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
-    expect(idleSome.headline).toContain('raise the agent time budget');
-    // The CURRENT round's idle timeout is counted by the increment, not
-    // the grep: cap-1 budget priors plus an idle current round render
-    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
-    // suppresses the clause entirely (the grep sees no idle prior) and
-    // must fail here.
+    expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
+    expect(idleStreak.headline).toContain(
+      'consecutive rounds that pushed nothing',
+    );
+    // ...and the TERMINAL run's job log still names the wedged runner: the
+    // census warning runs outside the cap's terminal guard precisely so an
+    // all-idle stop — which lands on the consecutive breaker's headline —
+    // keeps its only infra signal. Moving the echo back under the guard
+    // suppresses the warning here and must fail.
+    expect(idleStreak.log).toContain(`::warning::#1: ${cap} silent-sandbox`);
+    // A window whose BUDGET timeouts alone reach the cap still trips, and
+    // the count it reports is the budget one — not the total, which would
+    // re-inflate the number the exclusion just corrected.
+    const mixedTrips = run(
+      [TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH],
+      { agentTimeout: 'timeout (3000000ms)' },
+    );
+    expect(mixedTrips.terminal).toBe(true);
+    expect(mixedTrips.headline).toContain(
+      `${timeoutCap} agent time-budget exhaustions`,
+    );
+    // ...and it names the idle rounds as excluded, so the operator still
+    // learns the runner misbehaved on a PR stopped for an unrelated reason.
+    expect(mixedTrips.headline).toContain('do NOT count toward this cap');
+    expect(mixedTrips.headline).toContain('raise the agent time budget');
+    // The idle clause's COUNT is pinned numerically in both languages —
+    // mixedTrips holds exactly one idle round while TIMEOUT_N is
+    // timeoutCap + 1, so an ${IDLE_N} → ${TIMEOUT_N} swap would inflate
+    // the reported fleet problem and must fail here.
+    expect(mixedTrips.headline).toContain('also holds 1 silent-sandbox');
+    expect(mixedTrips.headlineZh).toContain('本窗口另有 1 次静默');
+    // The ZH headline interpolates the same budget-only count — pin both
+    // halves, or a ${BUDGET_TIMEOUT_N} → ${TIMEOUT_N} mutation on the ZH
+    // line alone ships green while the comment's Chinese half re-inflates
+    // the number the exclusion just corrected.
+    expect(mixedTrips.headlineZh).toContain(`${timeoutCap} 次时间预算耗尽`);
+    expect(mixedTrips.headlineZh).not.toContain(
+      `${timeoutCap + 1} 次时间预算耗尽`,
+    );
+    // The headline interpolates BUDGET_TIMEOUT_N TWICE; the second
+    // sentence ("That is … full agent runs") needs its own pins in both
+    // languages, or the same swap mutant re-inflates exactly the count the
+    // exclusion corrected — and calls an idle round a "full agent run".
+    expect(mixedTrips.headline).toContain(
+      `That is ${timeoutCap} full agent runs`,
+    );
+    expect(mixedTrips.headline).not.toContain(
+      `That is ${timeoutCap + 1} full agent runs`,
+    );
+    expect(mixedTrips.headlineZh).toContain(`即 ${timeoutCap} 次完整`);
+    // The idle census ::warning:: is the only observability left for
+    // excluded idle timeouts — one idle round in this window warns exactly
+    // once (deleting the echo, flipping -gt 0, or swapping the count each
+    // fail here).
+    expect(mixedTrips.log).toContain('::warning::#1: 1 silent-sandbox');
+    // ...and its CAP interpolation and guidance tail are pinned too: a
+    // ${TIMEOUT_WINDOW_CAP} → ${CONSECUTIVE_FAILURE_CAP} swap would
+    // misstate the cap on the very channel designated the idle signal,
+    // and a reworded tail would drop the operator guidance.
+    expect(mixedTrips.log).toContain(
+      `excluded from the ${timeoutCap}-timeout cap; check the sandbox image and the runner docker daemon`,
+    );
+    // One idle round is enough to hold a would-be-capped window open: cap-1
+    // budget priors plus an idle current round is cap-1 budget timeouts, not
+    // cap. Deleting the IDLE_N increment (or the subtraction) terminates
+    // here and must fail.
     const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleCurrentOnly.terminal).toBe(true);
-    expect(idleCurrentOnly.headline).toContain(
-      '1 of those were silent-sandbox (idle) timeouts',
-    );
-    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(idleCurrentOnly.terminal).toBe(false);
+    expect(idleCurrentOnly.headline).toBe('orig');
+    // A window WITHOUT idle rounds says nothing about the sandbox — in the
+    // headline or the job log.
     expect(interleaved.headline).not.toContain('silent-sandbox');
+    expect(interleaved.log).not.toContain('::warning');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -16092,8 +16510,31 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
     );
+    // IDLE_N is SUBTRACTED from TIMEOUT_N, so its needle must be a strict
+    // extension of TIMEOUT_N's — a bare 'idle-timeout' substring could match
+    // provider error text that API_ERROR_DETAIL puts on the same first line
+    // and drive the difference negative.
     expect(reviewAddressReportStep).toContain(
-      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+      'IDLE_N="$(grep -c \'AutoFix ran out of time before finishing (idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    // ...checked on the needles extracted from the workflow pins above,
+    // not on literals — a literal-vs-literal comparison is true by
+    // construction and would stay green whatever the workflow says.
+    const timeoutNeedle = reviewAddressReportStep.match(
+      /TIMEOUT_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    const idleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(timeoutNeedle).toBeTruthy();
+    expect(idleNeedle).toBeTruthy();
+    expect(idleNeedle).toContain(timeoutNeedle);
+    // The cap gates on the budget-only count, never the total.
+    expect(reviewAddressReportStep).toContain(
+      'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
@@ -16137,6 +16578,61 @@ exit 1
         { window: 'current-window' },
       ),
     ).toMatchObject({ consec: 2, terminal: false });
+  });
+
+  it('ties the run-agent idle sentinel to the workflow classification and the replay fixture', () => {
+    // The idle classification lives in three independently-pinned places:
+    // run-agent.mjs's detail template (the EMITTER), the workflow's
+    // current-round glob and census needles (the CONSUMERS), and this
+    // file's replay fixture (the WITNESS). A format change on the emitter
+    // side must break this test — not silently stop the workflow
+    // classifying idle rounds while the fixture keeps replaying the old
+    // shape. Extract the REAL template and check every consumer against it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const idleDetailTemplate = runner.match(
+      /result\.idleTimedOut\s*\?\s*`([^`]+)`/,
+    )?.[1];
+    expect(idleDetailTemplate).toBeTruthy();
+    // The static prefix — emitted before any interpolation — is what the
+    // workflow's current-round classification keys on.
+    const detailPrefix = idleDetailTemplate.split('${')[0];
+    const globTokens = [
+      ...reviewAddressReportStep.matchAll(
+        /\[\[ "\$\{AGENT_TIMEOUT(?::-)?\}" == '([^']+)'\* \]\]/g,
+      ),
+    ].map((m) => m[1]);
+    expect(globTokens.length).toBeGreaterThanOrEqual(2);
+    for (const token of globTokens) {
+      expect(detailPrefix.startsWith(token)).toBe(true);
+    }
+    // The census needles, extracted as in the breaker test: IDLE_N's must
+    // be TIMEOUT_N's plus ' (' plus that same opening token.
+    const timeoutNeedle = reviewAddressReportStep.match(
+      /TIMEOUT_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    const idleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(timeoutNeedle).toBeTruthy();
+    expect(idleNeedle).toBeTruthy();
+    for (const token of new Set(globTokens)) {
+      expect(idleNeedle).toBe(`${timeoutNeedle} (${token}`);
+    }
+    // The replay fixture embeds the CAUSE-shaped headline with a concrete
+    // ms value — derive it from the template so a reworded sentinel fails
+    // here instead of shipping a fixture that replays a fantasy shape.
+    const detail = idleDetailTemplate.replace(
+      /\$\{QWEN_IDLE_TIMEOUT_MS\}/g,
+      '1200000',
+    );
+    expect(detail).toBe(IDLE_NOW);
+    const causeTemplate = reviewAddressReportStep.match(
+      /CAUSE="(ran out of time before finishing \(\$\{AGENT_TIMEOUT\}\))"/,
+    )?.[1];
+    expect(causeTemplate).toBeTruthy();
+    expect(IDLE_HEAD).toContain(
+      causeTemplate.replace('${AGENT_TIMEOUT}', detail),
+    );
   });
 
   it('posts the review-address report wrapper lines bilingually', () => {
@@ -16810,7 +17306,7 @@ exit 1
     // thread to work out what the bot handled. The agent cannot resolve threads
     // itself (its sandbox carries no token), so it records the inline-comment
     // ids it implemented and the push step maps each to its thread.
-    const lines = workflow.split('\n');
+    const lines = pushAndReportScript.split('\n');
     const i = lines.findIndex((l) => l.includes("CAN_RESOLVE_THREADS='false'"));
     const j = lines.findIndex(
       (l, k) => k > i && l.trim().startsWith('echo "🧵 confirmed'),
@@ -17337,7 +17833,7 @@ exit 1
     // summary — so the reviewer who opened that thread saw silence and could
     // not tell the finding had been read. Observed on #7731: five open threads,
     // every one of them answered nowhere but a separate summary comment.
-    const lines = workflow.split('\n');
+    const lines = pushAndReportScript.split('\n');
     const i = lines.findIndex((l) => l.includes('comment-replies.json" ]] &&'));
     const j = lines.findIndex(
       (l, k) => k > i && l.trim().startsWith('echo "🧵 replied on'),
@@ -19303,10 +19799,34 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // level, which outranks any $GITHUB_ENV plant; the gate itself then
     // runs through the workflow's env -i clean-child pattern, so its bash
     // inherits nothing at all (enumerating plants is the failure mode the
-    // verdict pipeline kept hitting).
+    // verdict pipeline kept hitting). LD_* load at startup the same way, so
+    // they are pinned empty at step level too — an in-body unset cannot
+    // unload a library already mapped into the parent running the digest
+    // check, and a bare unset is itself a BASH_FUNC shadow target (R6-2,
+    // R8-1) — and RUNNER_TEMP/WORKDIR/BRANCH steer that digest check and
+    // the child's tree, so they are pinned from trusted expression context
+    // too (R6-3). CI reaches the child's `CI="${CI:-true}"` expansion from
+    // the step environment, and `:-true` only covers an UNSET CI — a
+    // $GITHUB_ENV plant of CI=false survives the expansion and inverts the
+    // gate's CI semantics — so CI is pinned at step level too (R1-1).
+    // HOME reaches the child's allowlist from the step environment, and
+    // npm resolves its userconfig from HOME — a planted HOME's .npmrc
+    // script-shell wraps every verdict-determining `npm run`, so a red
+    // branch reports green; HOME is pinned from the stage-time capture
+    // (R8-3).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
+      expect(step).toContain("LD_PRELOAD: ''");
+      expect(step).toContain("LD_AUDIT: ''");
+      expect(step).toContain("LD_LIBRARY_PATH: ''");
+      expect(step).toContain("RUNNER_TEMP: '${{ runner.temp }}'");
+      expect(step).toContain(
+        "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+      );
+      expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
+      expect(step).toContain("CI: 'true'");
+      expect(step).toContain("HOME: '${{ steps.stage.outputs.trusted_home }}'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
@@ -19317,6 +19837,10 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
     }
+    // The review stage step records HOME before any branch code runs — the
+    // trusted_path doctrine — and only it: the issue job's stage has no
+    // gate child re-injecting HOME.
+    expect(workflow.match(/trusted_home=\$\{HOME\}/g) ?? []).toHaveLength(1);
   });
 });
 
@@ -20808,7 +21332,7 @@ describe('stale sandbox container cleanup', () => {
         '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
       );
       chmodSync(join(bin, 'docker'), 0o755);
-      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // The launcher line exactly as packages/cli/src/serve/sandbox.ts
       // prints it, then the wedge shape: one line, then silence.
       const stub = join(dir, 'qwen');
       writeFileSync(

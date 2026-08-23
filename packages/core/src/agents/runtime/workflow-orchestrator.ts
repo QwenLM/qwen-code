@@ -171,7 +171,7 @@ export function resolveConcurrencyLimit(
  * which apply valid overrides verbatim), clamped to a hard ceiling.
  *
  * Three time bounds act on a dispatch and they are NOT redundant:
- *  - `stallMs` (60s default) — no *progress* for this long ⇒ abort + retry.
+ *  - `stallMs` (3 min default) — no *progress* for this long ⇒ abort + retry.
  *    Held while a tool is in flight, so a slow tool is not a stall.
  *  - `max_time_minutes` (this) — total wall time for ONE attempt, stalled or
  *    not. Bounds the case the watchdog cannot see (a model that keeps

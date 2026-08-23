@@ -461,6 +461,25 @@ export function hasRebuiltToolRegistry(config: Config): boolean {
 export async function rebuildToolRegistryOnOverride(
   override: Config,
   base: Config,
+  options?: {
+    /**
+     * Whether to stamp {@link TOOL_REGISTRY_REBUILT} on `override`.
+     *
+     * The marker means "a descendant may skip its own rebuild", and
+     * `hasRebuiltToolRegistry` reads it through the prototype chain — so a
+     * LONG-LIVED override that carries it hands that permission to every
+     * wrapper built on it later, not just to the spawn it was made for. That
+     * is right for a short-lived per-launch override and wrong for a config
+     * an agent keeps: a dir-scoped workflow dispatch rebinds only the dir
+     * getters, and its rebuild is the sole re-anchoring that moves the
+     * subagent's tools above the wrapper. Skipping it leaves them bound to
+     * the config below, so relative paths resolve against the parent's
+     * working directory instead of the provisioned worktree.
+     *
+     * Default true, which is what every caller before this option did.
+     */
+    markRebuilt?: boolean;
+  },
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov = override as any;
@@ -470,7 +489,9 @@ export async function rebuildToolRegistryOnOverride(
   });
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   ov.getToolRegistry = () => agentRegistry;
-  ov[TOOL_REGISTRY_REBUILT] = true;
+  if (options?.markRebuilt !== false) {
+    ov[TOOL_REGISTRY_REBUILT] = true;
+  }
 }
 
 /**

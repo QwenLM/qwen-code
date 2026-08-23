@@ -221,7 +221,7 @@ function runQwen(options, prompt) {
   let idleTimedOut = false;
   let lastOutputAt = Date.now();
   // The sandbox launcher prints the container name before the container
-  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // starts (packages/cli/src/serve/sandbox.ts), so the FIRST match is this
   // run's own container — the kill-path reap below relies on that ownership.
   let sandboxName = '';
   let lineCarry = '';

@@ -12,6 +12,7 @@ import {
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
   type DaemonSettingDescriptor,
+  type DaemonSkillToggleMutation,
   type DaemonWorkspaceGitStatus,
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
@@ -39,7 +40,7 @@ type MockConnection = {
   currentMode: string;
   models: Array<{ id: string; label?: string }>;
   commands: unknown[];
-  skills: string[];
+  skills: string[] | undefined;
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
@@ -369,11 +370,15 @@ const {
         | { data: string; media_type: string }[]
         | undefined,
       streamingState: 'idle' as StreamingState,
+      sessionHasActivePrompt: false,
       blocks: [] as unknown[],
       messages: [] as unknown[],
       queuedPromptHoldHistory: [] as boolean[],
+      queuedPromptStreamingState: 'idle',
+      queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
@@ -394,6 +399,7 @@ const {
           attachmentId?: string;
         }) => void;
         isResponding?: boolean;
+        transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
@@ -439,6 +445,15 @@ const {
       // keeping the last-known-good data and status.
       settingsReloading: false,
       settingsError: undefined as Error | undefined,
+      workspaceEventSignals: {
+        artifactsVersion: 0,
+        extensionsVersion: 0,
+        skillsVersion: 0,
+        lastSkillMutation: undefined as DaemonSkillToggleMutation | undefined,
+        skillMutationsByCwd: undefined as
+          | Record<string, DaemonSkillToggleMutation[]>
+          | undefined,
+      },
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
       } | null,
@@ -557,10 +572,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
     useWorkspace: () => mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
     useMcp: () => mockMcp,
-    useWorkspaceEventSignals: () => ({
-      artifactsVersion: 0,
-      extensionsVersion: 0,
-    }),
+    useWorkspaceEventSignals: () => testState.workspaceEventSignals,
   };
 });
 
@@ -597,7 +609,7 @@ vi.mock('./hooks/useMessages', () => ({
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => testState.blocks,
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: testState.blocks }),
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -617,10 +629,17 @@ vi.mock('./hooks/useAnimationFrameValue', () => ({
 }));
 
 vi.mock('./hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: (args: { holdQueuedPromptsLocally?: boolean }) => {
+  useQueuedPrompts: (args: {
+    holdQueuedPromptsLocally?: boolean;
+    streamingState: string;
+    sessionHasActivePrompt?: boolean;
+  }) => {
     testState.queuedPromptHoldHistory.push(
       args.holdQueuedPromptsLocally === true,
     );
+    testState.queuedPromptStreamingState = args.streamingState;
+    testState.queuedPromptSessionHasActivePrompt =
+      args.sessionHasActivePrompt === true;
     return {
       queuedPrompts: [],
       queuedTexts,
@@ -680,6 +699,9 @@ vi.mock('./components/ChatEditor', async () => {
             ),
           );
         }, [onAttachmentsChange]);
+        React.useLayoutEffect(() => {
+          testState.onChatEditorLayout?.(props);
+        });
         React.useImperativeHandle(ref, () => ({
           clear: () => {
             testState.prompt = '';
@@ -819,6 +841,7 @@ vi.mock('./components/MessageList', async () => {
           attachmentId?: string;
         }) => void;
         isResponding?: boolean;
+        transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
         welcomeHeader?: React.ReactNode;
@@ -1157,6 +1180,7 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
+  useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
 }));
 
 vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
@@ -1196,10 +1220,17 @@ vi.doMock('./components/StatusBar', async () => {
 vi.doMock('./components/StreamingStatus', async () => {
   const React = await import('react');
   return {
-    StreamingStatus: ({ startedAt }: { startedAt?: number }) =>
+    StreamingStatus: ({
+      startedAt,
+      hasActivePrompt,
+    }: {
+      startedAt?: number;
+      hasActivePrompt?: boolean;
+    }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
+        'data-has-active-prompt': String(hasActivePrompt === true),
       }),
   };
 });
@@ -4674,6 +4705,57 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+function skillCommandFixture(name: string, description: string) {
+  return {
+    name,
+    description,
+    source: 'skill',
+    raw: {
+      name,
+      description,
+      input: null,
+      _meta: { source: 'skill' },
+    },
+  };
+}
+
+function emitSkillMutation(
+  id: string,
+  skills: Array<{ name: string; enabled: boolean }>,
+  activation: 'applied' | 'deferred' | 'partial' = 'partial',
+  sessionsRefreshed = activation === 'applied' ? 1 : 0,
+): void {
+  const mutation = {
+    id,
+    kind: 'skill_toggle' as const,
+    skills,
+    activation,
+    sessionsRefreshed,
+    sessionsFailed: activation === 'partial' ? 1 : 0,
+  };
+  const cwd = mockConnection.workspaceCwd;
+  const previousByCwd = testState.workspaceEventSignals.skillMutationsByCwd;
+  const existing = previousByCwd?.[cwd] ?? [];
+  testState.workspaceEventSignals = {
+    ...testState.workspaceEventSignals,
+    skillsVersion: testState.workspaceEventSignals.skillsVersion + 1,
+    lastSkillMutation: mutation,
+    skillMutationsByCwd: {
+      ...previousByCwd,
+      [cwd]: existing.some((entry) => entry.id === mutation.id)
+        ? existing
+        : [...existing, mutation],
+    },
+  };
+}
+
+function emitPartialSkillMutation(
+  id: string,
+  skills: Array<{ name: string; enabled: boolean }>,
+): void {
+  emitSkillMutation(id, skills, 'partial');
+}
+
 async function triggerAutoRecap(): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
@@ -4786,6 +4868,13 @@ beforeEach(() => {
   // hydration window (goalState still unknown) set it back to undefined.
   mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
   testState.ownerVersion = 0;
+  testState.workspaceEventSignals = {
+    artifactsVersion: 0,
+    extensionsVersion: 0,
+    skillsVersion: 0,
+    lastSkillMutation: undefined,
+    skillMutationsByCwd: undefined,
+  };
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
@@ -4828,11 +4917,15 @@ beforeEach(() => {
   testState.inputAnnotations = undefined;
   testState.promptImages = undefined;
   testState.streamingState = 'idle';
+  testState.sessionHasActivePrompt = false;
   testState.blocks = [];
   testState.messages = [];
   testState.queuedPromptHoldHistory = [];
+  testState.queuedPromptStreamingState = 'idle';
+  testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
@@ -6085,6 +6178,76 @@ describe('App composer footer renderer', () => {
         child.getAttribute('data-web-shell-composer'),
       ),
     );
+  });
+});
+
+describe('App conversation indicator keep-alive (#9487)', () => {
+  it('keeps the indicator mounted and composer running through a silent gap', async () => {
+    const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      composerFooterProps.push(props);
+      return <div data-testid="composer-footer" />;
+    };
+    const { container, rerender } = renderApp({
+      renderComposerFooter: ComposerFooter,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(false);
+
+    // Silent mid-turn gap: streamingState is idle while the daemon still
+    // reports the in-flight prompt.
+    testState.sessionHasActivePrompt = true;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    const status = container.querySelector('[data-testid="streaming-status"]');
+    expect(status).not.toBeNull();
+    expect(status?.getAttribute('data-has-active-prompt')).toBe('true');
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(true);
+
+    testState.sessionHasActivePrompt = false;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(composerFooterProps.at(-1)?.isRunning).toBe(false);
+  });
+
+  it('lets Escape cancel during a silent gap the daemon still owns', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    mockSessionActions.cancel.mockClear();
+
+    const pressEscape = () => {
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+
+    // Fully idle, no daemon prompt: Escape has nothing to cancel.
+    pressEscape();
+    pressEscape();
+    expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+
+    testState.sessionHasActivePrompt = true;
+    rerender();
+    await flush();
+
+    pressEscape(); // arm the two-press cancel
+    pressEscape(); // confirm it
+    expect(mockSessionActions.cancel).toHaveBeenCalled();
   });
 });
 
@@ -10993,6 +11156,7 @@ describe('App session callbacks', () => {
   });
 
   it('filters disabled skills from the web-shell skills list', async () => {
+    mockConnection.sessionId = undefined;
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [
         {
@@ -11017,6 +11181,7 @@ describe('App session callbacks', () => {
   });
 
   it('reloads skills when starting a new session', async () => {
+    mockConnection.sessionId = undefined;
     mockConnection.commands = [
       {
         name: 'review',
@@ -11060,6 +11225,7 @@ describe('App session callbacks', () => {
   });
 
   it('adds an enabled skill command when starting a new session', async () => {
+    mockConnection.sessionId = undefined;
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
     });
@@ -11097,6 +11263,712 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('uses the active session command snapshot for Skill enable and empty disable updates', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'stale-skill',
+          description: 'Stale workspace snapshot',
+          status: 'ok',
+        },
+      ],
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'stale-skill' }),
+      ]),
+    );
+
+    mockConnection.commands = [
+      {
+        name: 'web-search',
+        description: 'Search the web',
+        source: 'skill',
+        raw: {
+          name: 'web-search',
+          description: 'Search the web',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['web-search'];
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 1,
+      lastSkillMutation: {
+        id: 'enable-web-search',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: true }],
+        activation: 'applied',
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      },
+    };
+    rerender();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'web-search', description: 'Search the web' },
+    ]);
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+
+    mockConnection.commands = [];
+    mockConnection.skills = [];
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 2,
+      lastSkillMutation: {
+        id: 'disable-web-search',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: false }],
+        activation: 'applied',
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      },
+    };
+    rerender();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+  });
+
+  it('refreshes workspace Skills when an applied toggle refreshed no sessions', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'web-search', description: 'Search the web' },
+    ]);
+
+    emitSkillMutation(
+      'applied-web-search-without-refreshed-session',
+      [{ name: 'web-search', enabled: false }],
+      'applied',
+      0,
+    );
+    rerender();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
+  it('refreshes session-less composer Skills once for a deferred mutation', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      });
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 1,
+      lastSkillMutation: {
+        id: 'deferred-web-search',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: true }],
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      },
+    };
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
+
+    rerender();
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+  });
+
+  it('uses a refreshed workspace Skill snapshot after partial activation', async () => {
+    mockConnection.commands = [
+      {
+        name: 'web-search',
+        description: 'Search the web',
+        source: 'skill',
+        raw: {
+          name: 'web-search',
+          description: 'Search the web',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toHaveLength(1);
+
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 1,
+      lastSkillMutation: {
+        id: 'partial-web-search',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: false }],
+        activation: 'partial',
+        sessionsRefreshed: 0,
+        sessionsFailed: 1,
+      },
+    };
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+
+    mockConnection.commands = [
+      {
+        name: 'review',
+        description: 'Review changes',
+        source: 'skill',
+        raw: {
+          name: 'review',
+          description: 'Review changes',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['review'];
+    rerender();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'review', description: 'Review changes' },
+    ]);
+  });
+
+  it('revalidates a partial Skill mutation only within its workspace', async () => {
+    const enabledStatus = {
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'ok' as const,
+        },
+      ],
+    };
+    const disabledStatus = {
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'disabled' as const,
+        },
+      ],
+    };
+    const switchedSessionRefresh = deferred<typeof disabledStatus>();
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce(enabledStatus)
+      .mockResolvedValueOnce(disabledStatus)
+      .mockReturnValue(switchedSessionRefresh.promise);
+    const { rerender } = renderApp();
+    await flush();
+
+    emitPartialSkillMutation('partial-web-search-session-switch', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+    });
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await act(async () => {
+      switchedSessionRefresh.resolve(disabledStatus);
+      await switchedSessionRefresh.promise;
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+
+    emitPartialSkillMutation('partial-web-search-session-switch', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+    mockConnection.sessionId = 'session-3';
+    mockConnection.workspaceCwd = '/tmp/other-project';
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(4);
+    });
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'web-search', description: 'Search the web' },
+    ]);
+
+    mockConnection.sessionId = 'session-2';
+    mockConnection.workspaceCwd = '/tmp/project';
+    rerender();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(6);
+
+    mockConnection.status = 'connecting';
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    mockConnection.status = 'connected';
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(8);
+  });
+
+  it('keeps an in-flight partial Skill mutation when a later mutation is applied', async () => {
+    const pendingPartialRefresh = deferred<{
+      skills: Array<{
+        name: string;
+        description: string;
+        status: 'disabled';
+      }>;
+    }>();
+    const disabledStatus = {
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'disabled' as const,
+        },
+      ],
+    };
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockReturnValueOnce(pendingPartialRefresh.promise)
+      .mockResolvedValue(disabledStatus);
+    const { rerender } = renderApp();
+    await flush();
+
+    emitPartialSkillMutation('partial-web-search-batch', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    });
+
+    emitSkillMutation(
+      'applied-review-batch',
+      [{ name: 'review', enabled: false }],
+      'applied',
+    );
+    rerender();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(3);
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+
+    await act(async () => {
+      pendingPartialRefresh.resolve(disabledStatus);
+      await pendingPartialRefresh.promise;
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+  });
+
+  it('reconciles every Skill mutation delivered in one signal update', async () => {
+    const partialDisable: DaemonSkillToggleMutation = {
+      id: 'partial-web-search-single-update',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'partial',
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const appliedReview: DaemonSkillToggleMutation = {
+      id: 'applied-review-single-update',
+      kind: 'skill_toggle',
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+    const { rerender } = renderApp();
+    await flush();
+
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 2,
+      lastSkillMutation: appliedReview,
+      skillMutationsByCwd: {
+        [mockConnection.workspaceCwd]: [partialDisable, appliedReview],
+      },
+    };
+    rerender();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
+  it('revalidates a cancelled mutation after another workspace mutates', async () => {
+    const pendingWorkspaceARefresh = deferred<{
+      skills: Array<{
+        name: string;
+        description: string;
+        status: 'disabled';
+      }>;
+    }>();
+    const enabledStatus = {
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'ok' as const,
+        },
+      ],
+    };
+    const disabledStatus = {
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'disabled' as const,
+        },
+      ],
+    };
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce(enabledStatus)
+      .mockReturnValueOnce(pendingWorkspaceARefresh.promise)
+      .mockResolvedValue(disabledStatus);
+    const { rerender } = renderApp();
+    await flush();
+
+    emitPartialSkillMutation('partial-web-search-workspace-a', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    });
+
+    mockConnection.workspaceCwd = '/tmp/other-project';
+    mockConnection.sessionId = 'session-2';
+    mockConnection.commands = [];
+    mockConnection.skills = [];
+    rerender();
+    await flush();
+    emitSkillMutation(
+      'applied-review-workspace-b',
+      [{ name: 'review', enabled: false }],
+      'applied',
+    );
+    rerender();
+    await flush();
+
+    const callsBeforeReturning =
+      mockWorkspaceActions.loadSkillsStatus.mock.calls.length;
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockConnection.sessionId = 'session-1';
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus.mock.calls.length).toBe(
+        callsBeforeReturning + 2,
+      );
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+
+    await act(async () => {
+      pendingWorkspaceARefresh.resolve(disabledStatus);
+      await pendingWorkspaceARefresh.promise;
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+  });
+
+  it('surfaces a failed deferred Skill snapshot refresh', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({ skills: [] })
+      .mockRejectedValueOnce(new Error('Skill snapshot unavailable'));
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 1,
+      lastSkillMutation: {
+        id: 'failed-deferred-web-search',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: true }],
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      },
+    };
+    rerender();
+    await flush();
+
+    expect(onToast).toHaveBeenCalledWith('error', 'Skill snapshot unavailable');
+  });
+
+  it('reloads workspace skills when an applied toggle arrives while session skills are unknown', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+
+    const { rerender } = renderApp();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
+    emitSkillMutation(
+      'applied-web-search-unknown-skills',
+      [{ name: 'web-search', enabled: false }],
+      'applied',
+    );
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(
+      mockWorkspaceActions.loadSkillsStatus.mock.calls.length,
+    ).toBeGreaterThan(1);
+  });
+
+  it('uses the workspace Skill snapshot while the session Skill list is unknown', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'web-search',
+          description: 'Search the web',
+          status: 'ok',
+        },
+      ],
+    });
+
+    renderApp();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'web-search', description: 'Search the web' },
+      ]);
+    });
+  });
+
+  it('does not treat an unknown session Skill list as reflecting a disable', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = undefined;
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+
+    const { rerender } = renderApp();
+    await flush();
+    emitPartialSkillMutation('partial-web-search-unknown-skills', [
+      { name: 'web-search', enabled: false },
+    ]);
+    rerender();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+
+    mockConnection.skills = ['web-search'];
+    rerender();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
   it.each([404, 410])(
     'shows a missing-session empty state with a new-session action for %d',
     async (status) => {
@@ -11107,7 +11979,7 @@ describe('App session callbacks', () => {
       mockConnection.missingSession = true;
 
       const onSessionIdChange = vi.fn();
-      const { container } = renderApp({
+      const { container, rerender } = renderApp({
         onSessionIdChange,
       });
       await flush();
@@ -11129,6 +12001,23 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
       expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
       expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+
+      mockConnection.status = 'connected';
+      mockConnection.sessionId = undefined;
+      mockConnection.error = undefined;
+      mockConnection.errorStatus = undefined;
+      mockConnection.missingSession = false;
+      testState.sessionHasActivePrompt = false;
+      rerender();
+      await flush();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first message');
+        await flush();
+      });
+
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     },
   );
 
@@ -11650,16 +12539,65 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onToast).toHaveBeenCalledWith(
       'error',
-      "Slash commands can't be queued while a turn is running.",
+      'Slash commands are unavailable while a Goal owns the session or its state is loading.',
     );
   });
 
-  it('holds a composer prompt while Goal state is still hydrating', async () => {
-    // The session load clears `loadingTranscript` before its `goal()` fetch
-    // resolves, so the composer is writable while the Goal state is unknown.
-    // The queue-hold gate already fails closed on that state; a direct submit
-    // must too, or a prompt typed in that window is sent straight into a Goal
-    // the client has not learned about yet.
+  it.each([
+    [
+      'hidden command',
+      '/internal deploy',
+      { hiddenSlashCommands: ['internal'] },
+    ],
+    ['fast model command', '/model --fast qwen-max', {}],
+    ['skill command', '/skills deployer', {}],
+    ['delegated rename', '/rename --auto', {}],
+  ])(
+    'refuses an enqueue-style %s while a Goal owns the session',
+    async (_label, command, props) => {
+      const onToast = vi.fn();
+      mockConnection.goalState = activeGoalSnapshot('keep working');
+      renderApp({ ...props, onToast });
+      await flush();
+
+      let accepted: boolean | undefined;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await flush();
+      });
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Slash commands are unavailable while a Goal owns the session or its state is loading.',
+      );
+    },
+  );
+
+  it.each(['idle', 'responding'] as const)(
+    'does not enqueue a forwarded command while Goal state is hydrating (%s)',
+    async (streamingState) => {
+      mockConnection.goalState = undefined;
+      testState.streamingState = streamingState;
+      renderApp();
+      await flush();
+
+      let accepted: boolean | undefined;
+      await act(async () => {
+        accepted =
+          testState.latestChatEditorProps?.onSubmit('/deploy production');
+        await flush();
+      });
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends an idle composer prompt while Goal state is still hydrating', async () => {
     mockConnection.goalState = undefined;
     renderApp();
     await flush();
@@ -11672,20 +12610,129 @@ describe('App session callbacks', () => {
       await flush();
     });
 
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
-    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('hello during hydration');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello during hydration',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(accepted).toBe(true);
   });
 
-  it('holds queued prompts on the first render of an active Goal', async () => {
+  it('inserts a hydrating composer prompt while the session is active', async () => {
+    mockConnection.goalState = undefined;
+    testState.streamingState = 'responding';
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello during active turn');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello during active turn',
+    );
+  });
+
+  it('inserts a prompt before the first stream event reaches the client', async () => {
+    testState.sessionHasActivePrompt = true;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello before first token');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello before first token',
+    );
+    expect(testState.queuedPromptStreamingState).toBe('idle');
+    expect(testState.queuedPromptSessionHasActivePrompt).toBe(true);
+
+    mockSessionActions.sendPrompt.mockClear();
+    rawEnqueuePrompt.mockClear();
+    testState.sessionHasActivePrompt = false;
+    rerender();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello after completion');
+      await flush();
+    });
+
+    expect(testState.queuedPromptStreamingState).toBe('idle');
+    expect(testState.queuedPromptSessionHasActivePrompt).toBe(false);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('enqueues a forwarded command while the session is active and Goal is idle', async () => {
+    testState.streamingState = 'responding';
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/deploy production');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('/deploy production');
+  });
+
+  it('inserts a prompt when the session becomes active before effects run', async () => {
+    mockConnection.goalState = undefined;
+    const { rerender } = renderApp();
+    await flush();
+
+    let submitted = false;
+    testState.onChatEditorLayout = (props) => {
+      if (!props.isRunning || submitted) return;
+      submitted = true;
+      props.onSubmit('hello during active transition');
+    };
+    testState.streamingState = 'responding';
+
+    rerender({});
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello during active transition',
+    );
+  });
+
+  it('sends an idle composer prompt when an active Goal is known', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello during active Goal');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello during active Goal',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not locally hold prompts for an active Goal', async () => {
     mockConnection.goalState = activeGoalSnapshot();
 
     renderApp();
     await flush();
 
     expect(testState.queuedPromptHoldHistory.length).toBeGreaterThan(0);
-    expect(testState.queuedPromptHoldHistory).not.toContain(false);
+    expect(testState.queuedPromptHoldHistory).not.toContain(true);
   });
 
   it('restores the Goal snapshot when the same session learns its workspace', async () => {
@@ -13819,8 +14866,9 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('allows manual retry after a model stream interrupted turn error', async () => {
+  it('allows manual retry after a model stream interrupted turn error with an active Goal', async () => {
     const retrySend = deferred<void>();
+    mockConnection.goalState = activeGoalSnapshot('keep working');
     const { container, rerender } = renderApp();
     await flush();
 
@@ -13847,6 +14895,19 @@ describe('App session callbacks', () => {
 
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 
+    const staleRetry = testState.latestMessageListProps?.onRetryClick;
+    act(() => {
+      testState.sessionHasActivePrompt = true;
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    act(() => staleRetry?.());
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    act(() => {
+      testState.sessionHasActivePrompt = false;
+      rerender();
+    });
+
     mockSessionActions.sendPrompt.mockImplementationOnce(
       () => retrySend.promise,
     );
@@ -13869,6 +14930,7 @@ describe('App session callbacks', () => {
     testState.streamingState = 'responding';
     rerender();
     expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(testState.latestMessageListProps?.transcriptReloadPaused).toBe(true);
     expect(
       testState.latestMessageListProps?.activeTurnStartedAt,
     ).toBeUndefined();
@@ -18608,6 +19670,68 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
+  it.each([
+    ['fast-model selection', ['open-fast-model', 'model-select']],
+    ['settings language change', ['change-language-workspace']],
+  ])(
+    'shows the Goal-specific rejection for a blocked %s',
+    async (_label, actions) => {
+      const onToast = vi.fn();
+      mockConnection.goalState = activeGoalSnapshot('keep working');
+      const { container } = renderApp({ onToast });
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+
+      for (const action of actions) {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>(`[data-testid="${action}"]`)
+            ?.click();
+          await Promise.resolve();
+        });
+      }
+
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Slash commands are unavailable while a Goal owns the session or its state is loading.',
+      );
+    },
+  );
+
+  it.each([
+    ['fast-model selection', ['open-fast-model', 'model-select']],
+    ['settings language change', ['change-language-workspace']],
+  ])(
+    'blocks %s before the first stream event reaches the client',
+    async (_label, actions) => {
+      const onToast = vi.fn();
+      testState.sessionHasActivePrompt = true;
+      const { container } = renderApp({ onToast });
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+
+      for (const action of actions) {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>(`[data-testid="${action}"]`)
+            ?.click();
+          await Promise.resolve();
+        });
+      }
+
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        "Slash commands can't be queued while a turn is running.",
+      );
+    },
+  );
+
   it('clears model selection busy state after a same-session reattach', async () => {
     const selection = deferred<void>();
     mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
@@ -19271,8 +20395,9 @@ describe('App prompt send failure retry', () => {
     warn.mockRestore();
   });
 
-  it('marks the failed message and retries its original payload without a duplicate', async () => {
+  it('marks and retries a failed prompt while an active Goal is known', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.goalState = activeGoalSnapshot('keep working');
     const firstSend = deferred<void>();
     mockSessionActions.sendPrompt.mockImplementationOnce(() => {
       testState.blocks = [{ id: 'u1', kind: 'user' }];
@@ -19288,7 +20413,7 @@ describe('App prompt send failure retry', () => {
       },
     ] as DaemonInputAnnotation[];
     const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
-    renderApp();
+    const { rerender } = renderApp();
     await flush();
 
     act(() => {
@@ -19312,6 +20437,21 @@ describe('App prompt send failure retry', () => {
       document.querySelector('[data-testid="failed-prompt-retry"]')
         ?.textContent,
     ).toBe('u1');
+
+    const staleRetry = testState.latestMessageListProps?.onRetryFailedPrompt;
+    act(() => {
+      testState.sessionHasActivePrompt = true;
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    act(() => staleRetry?.());
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    act(() => {
+      testState.sessionHasActivePrompt = false;
+      rerender();
+    });
 
     await act(async () => {
       document
@@ -20954,10 +22094,7 @@ describe('App /goal command', () => {
 
   it('installs the allocated-session Goal before its re-sync resolves', async () => {
     // `workspaceActions.controlGoal` does not write `connection.goalState`, so
-    // without installing the create response the state stays goal-less for a
-    // whole round trip (up to the action timeout if the GET stalls): the hold
-    // gate reads false and a prompt typed in that window bypasses the Goal
-    // queue entirely.
+    // install the create response without waiting for the follow-up GET.
     const active = activeGoalSnapshot('first objective');
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockResolvedValueOnce({
@@ -20988,7 +22125,7 @@ describe('App /goal command', () => {
     await flush();
 
     expect(mockConnection.goalState).toBe(active);
-    expect(testState.queuedPromptHoldHistory.at(-1)).toBe(true);
+    expect(testState.queuedPromptHoldHistory.at(-1)).toBe(false);
     // The App's own snapshot drives the strip; asserting only the connection
     // state would re-read what this test's mock wrote.
     expect(
@@ -20998,14 +22135,17 @@ describe('App /goal command', () => {
 
     rawEnqueuePrompt.mockClear();
     mockSessionActions.sendPrompt.mockClear();
-    testState.prompt = 'bypass me';
+    testState.prompt = 'continue normally';
     await act(async () => {
-      testState.latestChatEditorProps?.onSubmit('bypass me');
+      testState.latestChatEditorProps?.onSubmit('continue normally');
       await flush();
     });
 
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('bypass me');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'continue normally',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('keeps a session-less /goal control in the composer', async () => {
