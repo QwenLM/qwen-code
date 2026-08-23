@@ -194,6 +194,32 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
 
 /**
+ * True when a nested tool-result part carries usable media bytes. Both
+ * carriers count: core's `convertToFunctionResponse` nests `inlineData` AND
+ * `fileData` parts into `functionResponse.parts` (tested at
+ * coreToolScheduler's 'should handle llmContent with fileData'), and core's
+ * slimming/microcompact treat `inlineData || fileData` as media. Policing
+ * only `inlineData` would let an extension/custom tool's `fileData` media
+ * slip past the gate into silent route slimming.
+ */
+function nestedPartCarriesMedia(inner: Part): boolean {
+  const hasInline =
+    typeof inner.inlineData?.data === 'string' &&
+    inner.inlineData.data.length > 0;
+  const fileUri = (inner.fileData as { fileUri?: unknown } | undefined)
+    ?.fileUri;
+  return hasInline || (typeof fileUri === 'string' && fileUri.length > 0);
+}
+
+/** MIME types are case-insensitive (RFC 6838); MCP servers supply them verbatim. */
+function nestedPartMime(inner: Part): string | undefined {
+  const mime =
+    inner.inlineData?.mimeType ??
+    (inner.fileData as { mimeType?: unknown } | undefined)?.mimeType;
+  return typeof mime === 'string' ? mime : undefined;
+}
+
+/**
  * Detect inline media nested inside `functionResponse.parts` — the carrier
  * qwen-code uses for tool-result images/audio (see
  * `coreToolScheduler.createFunctionResponsePart`). The top-level
@@ -213,17 +239,16 @@ function detectNestedFunctionResponseMedia(parts: PartListUnion): {
       ?.parts;
     if (!Array.isArray(nested)) continue;
     for (const inner of nested as Part[]) {
-      const mime = inner.inlineData?.mimeType;
-      const data = inner.inlineData?.data;
-      if (
-        typeof mime !== 'string' ||
-        typeof data !== 'string' ||
-        data.length === 0
-      ) {
+      const mime = nestedPartMime(inner);
+      if (mime === undefined || !nestedPartCarriesMedia(inner)) {
         continue;
       }
-      if (mime.startsWith('image/')) hasImage = true;
-      else if (mime.startsWith('audio/')) hasAudio = true;
+      // Case-insensitive, mirroring the audio bridge's own `isAudioPart`
+      // (which lowercases first): an 'AUDIO/WAV' tool result must be policed
+      // exactly like 'audio/wav'.
+      const lower = mime.toLowerCase();
+      if (lower.startsWith('image/')) hasImage = true;
+      else if (lower.startsWith('audio/')) hasAudio = true;
     }
   }
   return { hasImage, hasAudio };
@@ -252,13 +277,13 @@ function replaceNestedFunctionResponseMedia(
     let touched = false;
     const retained: Part[] = [];
     for (const inner of nested as Part[]) {
-      const mime = inner.inlineData?.mimeType;
-      const data = inner.inlineData?.data;
+      const mime = nestedPartMime(inner);
+      // Same predicate as `detectNestedFunctionResponseMedia` — both carriers
+      // (`inlineData` and `fileData`) and case-insensitive MIME matching.
       const isMatch =
-        typeof mime === 'string' &&
-        mime.startsWith(prefix) &&
-        typeof data === 'string' &&
-        data.length > 0;
+        mime !== undefined &&
+        mime.toLowerCase().startsWith(prefix) &&
+        nestedPartCarriesMedia(inner);
       if (isMatch) {
         touched = true;
       } else {
@@ -286,6 +311,46 @@ function replaceNestedFunctionResponseMedia(
       } as Part['functionResponse'],
     };
   });
+}
+
+/**
+ * Clamp inline media nested inside `functionResponse.parts` with the same
+ * `QWEN_CODE_MAX_INLINE_MEDIA_BYTES` ceiling every top-level routing path
+ * applies (audio-route clamp, native-skip clamp, image-route clamp, R33-2
+ * clamp, full-turn clamp; core's `clampNestedImages` covers the vision-bridge
+ * path). Without this, a media-routed tool-result continuation carrying an
+ * oversized supported-modality blob skips the clamp entirely — the exact
+ * blowup `clampInlineMediaPart` documents. Returns the input unchanged
+ * (identity) when nothing is oversized.
+ */
+function clampNestedFunctionResponseMedia(parts: PartListUnion): PartListUnion {
+  const list = Array.isArray(parts) ? parts : [parts];
+  let touched = false;
+  const mapped: Part[] = list.map((part) => {
+    if (typeof part === 'string') return { text: part };
+    const functionResponse = part.functionResponse as
+      | ({ parts?: unknown } & Record<string, unknown>)
+      | undefined;
+    const nested = functionResponse?.parts;
+    if (!Array.isArray(nested)) return part;
+    let nestedTouched = false;
+    const clampedInner = (nested as Part[]).map((inner) => {
+      const clamped = clampInlineMediaPart(inner);
+      if (clamped !== inner) nestedTouched = true;
+      return clamped;
+    });
+    if (!nestedTouched) return part;
+    touched = true;
+    const { parts: _oversized, ...rest } = functionResponse ?? {};
+    return {
+      ...part,
+      functionResponse: {
+        ...rest,
+        parts: clampedInner,
+      } as Part['functionResponse'],
+    };
+  });
+  return touched ? mapped : parts;
 }
 
 interface PendingDuplicateToolResponses {
@@ -1459,12 +1524,18 @@ export const useGeminiStream = (
         return { parts, shouldProceed: true };
       }
       if (!shouldRunVisionBridge(config)) {
-        if (inlineModelOverrideActiveRef.current) {
+        if (
+          inlineModelOverrideActiveRef.current ||
+          (modelOverrideRef.current !== undefined &&
+            mediaRoutedOverrideRef.current === modelOverrideRef.current)
+        ) {
           // Reaching this gate with an active inline override means the
           // capability probe rejected the images (unsupported or unresolvable
-          // target). With no vision bridge to describe them, fail closed
-          // visibly instead of exact-routing raw images that the route's
-          // slimming would silently placeholder-substitute.
+          // target); a media-routed override reaches it the same way (the
+          // probe rejects the image modality of the route that owns the
+          // turn's already-routed media). With no vision bridge to describe
+          // them, fail closed visibly instead of exact-routing raw images
+          // that the route's slimming would silently placeholder-substitute.
           addItem(
             {
               type: MessageType.ERROR,
@@ -1708,17 +1779,24 @@ export const useGeminiStream = (
           nextParts = result.parts;
         }
       }
-      // An inline override owning an image-bearing payload needs the same
-      // capability probe the audio branch runs: raw images exact-routed to a
-      // target that cannot see them are placeholder-substituted by the route's
-      // slimming — the model would answer about an image it never received.
-      // The audio probe above already resolved the route when audio was
-      // present (targetSupportsImage / modelOverrideResolutionFailed set).
+      // An override owning an image-bearing payload needs the same capability
+      // probe the audio branch runs: raw images exact-routed to a target that
+      // cannot see them are placeholder-substituted by the route's slimming —
+      // the model would answer about an image it never received. This covers
+      // BOTH inline (`/model`) overrides and media-routed overrides installed
+      // non-inline (skill tools / a prior drain's audio route): the send-time
+      // stamp exact-routes any media-carrying payload to the routed override,
+      // so a top-level image must be validated against that route exactly like
+      // the inline branch validates it — otherwise it passes raw into the
+      // exact route and is silently placeholder-substituted. The audio probe
+      // above already resolved the route when audio was present
+      // (targetSupportsImage / modelOverrideResolutionFailed set).
       if (
         nextParts !== null &&
         hasImageParts(nextParts) &&
-        inlineModelOverrideActiveRef.current &&
         modelOverrideRef.current !== undefined &&
+        (inlineModelOverrideActiveRef.current ||
+          mediaRoutedOverrideRef.current === modelOverrideRef.current) &&
         !targetSupportsImage &&
         !modelOverrideResolutionFailed
       ) {
@@ -1733,12 +1811,19 @@ export const useGeminiStream = (
             runtimeView.contentGeneratorConfig.modalities?.image === true;
         } catch (error) {
           modelOverrideResolutionFailed = true;
-          if (!mediaRouted) {
+          if (
+            !mediaRouted &&
+            mediaRoutedOverrideRef.current !== modelOverrideRef.current
+          ) {
             // R33-2 invariant, mirroring the audio branch: a fail-closed
             // resolution failure clears the inline override so the turn
             // degrades to the session model instead of sending the bare
             // unresolvable selector. When media already routed, the route
-            // stays valid for it and only the images fail closed below.
+            // stays valid for it and only the images fail closed below. The
+            // same holds when a media-routed override was established by an
+            // earlier segment/drain: clearing it here would orphan the
+            // already-routed media's exact route, so only the images fail
+            // closed.
             clearModelOverride(
               modelOverrideRef,
               inlineModelOverrideActiveRef,
@@ -1777,6 +1862,46 @@ export const useGeminiStream = (
           mediaRouted,
         };
       }
+      // A resolution failure with the override STILL active (a media-routed
+      // override the guard above refused to clear because it owns already-
+      // routed media) cannot degrade the images to the session model — the
+      // override owns the send. Exact-routing raw images would throw in
+      // the route's fail-closed resolution or be placeholder-substituted, so
+      // fail closed visibly (or hand them to the vision bridge when one is
+      // configured to describe them), keeping the pristine parts for Retry.
+      if (
+        nextParts !== null &&
+        modelOverrideResolutionFailed &&
+        modelOverrideRef.current !== undefined &&
+        hasImageParts(nextParts)
+      ) {
+        const pristineParts = nextParts;
+        const clampedParts = (
+          Array.isArray(nextParts) ? nextParts : [nextParts]
+        ).map((part) =>
+          typeof part === 'string' || !hasImageParts([part])
+            ? part
+            : clampInlineMediaPart(part),
+        );
+        if (!shouldRunVisionBridge(config)) {
+          preOverrideParts = preOverrideParts ?? pristineParts;
+          nextParts = [
+            ...splitImageParts(clampedParts).nonImageParts,
+            {
+              text: '[Image was not sent: the active model override could not be resolved.]',
+            },
+          ];
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Image was not sent: the active model override could not be resolved.',
+            },
+            timestamp,
+          );
+        } else {
+          nextParts = clampedParts;
+        }
+      }
       // R33-2: a fail-closed resolution failure clears the inline override, so
       // the images are now destined for the default session model. If that model
       // supports images, applyVisionBridgeIfNeeded below early-returns the parts
@@ -1788,6 +1913,7 @@ export const useGeminiStream = (
       if (
         nextParts !== null &&
         modelOverrideResolutionFailed &&
+        modelOverrideRef.current === undefined &&
         hasImageParts(nextParts)
       ) {
         const pristineParts = nextParts;
@@ -1938,7 +2064,13 @@ export const useGeminiStream = (
         );
       }
       return {
-        parts: result,
+        // Clamp whatever nested media survives the gate: this is the one
+        // routing path that would otherwise skip
+        // QWEN_CODE_MAX_INLINE_MEDIA_BYTES (every top-level path clamps
+        // first). Clamping is deterministic — unlike the capability
+        // substitutions above it needs no pristine capture: a retry re-clamps
+        // to the same placeholder instead of re-shipping the oversized bytes.
+        parts: clampNestedFunctionResponseMedia(result),
         // The substitution irreversibly strips the nested media: keep the
         // pristine payload so the retry store saves it instead of the marker
         // text. Retry drops the one-shot inline override and re-gates the
@@ -3861,17 +3993,25 @@ export const useGeminiStream = (
         }
       }
 
+      // Report routing only when a route SURVIVED the drain: `drainMediaRouted`
+      // is sticky (a mid-drain fail-closed resolution failure clears the
+      // override after an earlier segment routed, and the recheck pass then
+      // re-bridges every retained medium), so emitting `mediaRouted: true`
+      // with a now-undefined selector would let core fall back to the stale
+      // pre-drain `options.modelOverride` and exact-route the fully degraded
+      // steer into a route the CLI just dropped.
+      const drainRouteSelector = drainMediaRouted
+        ? mediaRoutedOverrideRef.current
+        : undefined;
       return {
         parts: resolvedMessages,
         retryParts: retryDiffers ? retryMessages : undefined,
-        mediaRouted: drainMediaRouted,
+        mediaRouted: drainRouteSelector !== undefined,
         // Capture the drain-time route so the nested continuation keeps the
         // exact route the media was bridged/routed for — the drain may have
         // installed (or cleared) the override after the caller's send options
         // were frozen, so those can no longer be trusted to name the route.
-        routeSelector: drainMediaRouted
-          ? mediaRoutedOverrideRef.current
-          : undefined,
+        routeSelector: drainRouteSelector,
         restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
@@ -3929,6 +4069,10 @@ export const useGeminiStream = (
             if (settled) return;
             settled = true;
             resolved.accept();
+            // The push-landed settle owns the steer content now: tell whoever
+            // stored a retry payload for this input to hand back the payload
+            // it superseded (exactly-once, symmetric with onRestore).
+            input.onAccept?.();
           },
           restore: () => {
             if (settled) return;
@@ -3980,6 +4124,19 @@ export const useGeminiStream = (
     // retry store ("No failed request to retry.").
     const previous = lastPromptRef.current;
     lastPromptRef.current = stored;
+    // Settle fires `onAccept` once the steer's push has landed. From that
+    // point the steer content is owned by the history (a later Ctrl+Y Retry
+    // strips/replaces it via the orphan strip), so the retry store must hand
+    // back the outer payload it superseded — leaving the steer payload in the
+    // store would let Ctrl+Y re-deliver an already-accepted steer when a LATER
+    // core-driven continuation of the same outer request fails (the exact
+    // twice-delivery the sibling `onRestore` hook prevents for the re-queue
+    // channel: the content cannot reach the model twice).
+    steerInput.onAccept = () => {
+      if (lastPromptRef.current === stored) {
+        lastPromptRef.current = previous;
+      }
+    };
     steerInput.onRestore = () => {
       // The re-queue owns recovery once restore settles the input: drop the
       // steer's payload so Ctrl+Y neither re-delivers the steer alongside the
@@ -4515,8 +4672,18 @@ export const useGeminiStream = (
           // supplies the same invariant for steered attachments whose bridge
           // failed: metadata.preOverrideParts carries the pristine media where
           // finalQueryToSend carries the marker.
+          //
+          // The drain's capture must win over the gate's
+          // (`preOverrideParts`): one continuation can produce BOTH captures —
+          // the gate substitutes nested tool-result media and captures its
+          // input, which still contains the drain's marker-substituted steer
+          // segment (pushed into responsesToSend before submitQuery receives
+          // the pristine steer payload). Storing the gate capture would let
+          // Ctrl+Y re-gate the tool media but resend '[Audio was not sent: …]'
+          // for the steer forever — the marker-resend anti-pattern. The drain
+          // capture is the same tool responses plus the pristine steer media.
           lastPromptRef.current =
-            preOverrideParts ?? metadata?.preOverrideParts ?? finalQueryToSend;
+            metadata?.preOverrideParts ?? preOverrideParts ?? finalQueryToSend;
           lastPromptErroredRef.current = false;
           const steerInput = metadata?.steerInput;
           if (steerInput) {
@@ -4546,11 +4713,24 @@ export const useGeminiStream = (
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate ||
+          submitType === SendMessageType.Retry
+        ) {
+          // trigger new prompt event for session stats in CLI. Retry mints
+          // its prompt_id from this counter without an explicit id
+          // (submitQuery's fallback) and — unlike UserQuery/Cron/Teammate —
+          // used not to advance it, so a later media-free Notification drain
+          // minted the SAME id, matched the retry's media-routed stamp, and
+          // was exact-routed into the stale override's fail-closed
+          // resolution. Advancing here makes every minted id unique.
+          startNewPrompt();
+        }
+
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate
         ) {
-          // trigger new prompt event for session stats in CLI
-          startNewPrompt();
-
           // log user prompt event for telemetry, only text prompts for now
           if (typeof queryToSend === 'string') {
             logUserPrompt(

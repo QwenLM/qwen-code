@@ -372,7 +372,11 @@ function supportsMimeType(
   modalities: InputModalities | undefined,
 ): boolean | undefined {
   if (!modalities) return undefined;
-  const mime = mimeType ?? DEFAULT_MIME;
+  // MIME types are case-insensitive (RFC 6838) and MCP servers supply the
+  // string verbatim: an 'AUDIO/WAV' tool result must match the audio
+  // modality exactly like 'audio/wav', or a capable route would silently
+  // placeholder-substitute it.
+  const mime = (mimeType ?? DEFAULT_MIME).toLowerCase();
   if (mime.startsWith('image/')) return modalities.image;
   if (mime === 'application/pdf') return modalities.pdf;
   if (mime.startsWith('audio/')) return modalities.audio;
@@ -397,6 +401,7 @@ function isNonImageMime(mime: string): boolean {
   // Anything outside image/* is rendered with the `[document: ...]`
   // placeholder. audio/video are rare on qwen-code's tool surface and
   // the placeholder is purely informational, so the conservative
-  // grouping is acceptable.
-  return !mime.startsWith('image/');
+  // grouping is acceptable. Case-insensitive like supportsMimeType
+  // (RFC 6838): 'IMAGE/PNG' is still an image.
+  return !mime.toLowerCase().startsWith('image/');
 }

@@ -356,6 +356,33 @@ describe('compactionInputSlimming', () => {
       });
     });
 
+    it('matches MIME types case-insensitively against the modalities', () => {
+      // MIME types are case-insensitive (RFC 6838) and MCP servers supply
+      // the string verbatim: an 'AUDIO/WAV' part must match the audio
+      // modality exactly like 'audio/wav', or a capable route would silently
+      // placeholder-substitute content it can consume.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'AUDIO/WAV', data: 'AUDIO' } },
+            { inlineData: { mimeType: 'Image/PNG', data: 'IMAGE' } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, { audio: true });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { inlineData: { mimeType: 'AUDIO/WAV', data: 'AUDIO' } },
+        { text: '[image: Image/PNG]' },
+      ]);
+      expect(result.stats).toEqual({
+        imagesStripped: 1,
+        documentsStripped: 0,
+      });
+    });
+
     it('replaces fileData parts using the same placeholder logic', () => {
       const history: Content[] = [
         {

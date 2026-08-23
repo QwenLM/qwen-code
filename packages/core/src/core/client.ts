@@ -259,6 +259,14 @@ export interface SteerInput {
    * payload so the two recovery channels stay mutually exclusive.
    */
   onRestore?: () => void;
+  /**
+   * Invoked after `accept` settles this input (the push landed, so the steer
+   * content is owned by the history). Symmetric counterpart of `onRestore`:
+   * the CLI uses it to hand the retry store back the payload the drain
+   * superseded, so a later Ctrl+Y cannot re-deliver the already-accepted
+   * steer when a subsequent continuation of the same request fails.
+   */
+  onAccept?: () => void;
   /** Commits UI/recording side effects after the request accepts the input. */
   accept: () => void;
   /** Restores the input when the next model request never accepts it. */
