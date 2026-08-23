@@ -11,6 +11,10 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
+        __dirname,
+        '../core/src/tools/sub-session-constants.ts',
+      ),
       '@qwen-code/qwen-code-core/goalWire': path.resolve(
         __dirname,
         '../core/src/goals/goal-wire.ts',
@@ -84,6 +88,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/bridgeOptions': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeOptions.ts',
+      ),
+      '@qwen-code/acp-bridge/promptLedger': path.resolve(
+        __dirname,
+        '../acp-bridge/src/prompt-ledger.ts',
       ),
       '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
         __dirname,
