@@ -24,27 +24,37 @@ vi.mock('./ui/popover', async () => {
   };
 });
 
-const { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient } =
-  vi.hoisted(() => {
-    const workspaceGitBranches = vi.fn();
-    const workspaceGitCreateBranch = vi.fn();
-    // A stable client so the popover's memoized workspace handle (and thus its
-    // fetch effect) stays referentially stable across renders.
-    const workspaceClient = {
-      workspaceByCwd: () => ({
-        workspaceGitBranches,
-        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
-        workspaceGitCreateBranch,
-        workspaceGitPush: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-        workspaceGitPull: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-      }),
-    };
-    return { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient };
-  });
+const {
+  workspaceGitBranches,
+  workspaceGitCreateBranch,
+  workspaceGitPull,
+  workspaceClient,
+} = vi.hoisted(() => {
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitCreateBranch = vi.fn();
+  const workspaceGitPull = vi
+    .fn()
+    .mockResolvedValue({ success: true, output: '' });
+  // A stable client so the popover's memoized workspace handle (and thus its
+  // fetch effect) stays referentially stable across renders.
+  const workspaceClient = {
+    workspaceByCwd: () => ({
+      workspaceGitBranches,
+      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCreateBranch,
+      workspaceGitPush: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPull,
+    }),
+  };
+  return {
+    workspaceGitBranches,
+    workspaceGitCreateBranch,
+    workspaceGitPull,
+    workspaceClient,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   const actual =
@@ -165,6 +175,104 @@ describe('BranchPickerPopover actions', () => {
 
     expect(onOpenCommit).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('offers stash and discard options when the pull hits a dirty tree', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          { error: 'dirty_working_tree', message: 'would be overwritten' },
+          'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+        ),
+      )
+      .mockResolvedValueOnce({ success: true, output: '' });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+    expect(document.body.textContent).toContain('Discard Changes and Update');
+
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenLastCalledWith(
+      { stash: true },
+      undefined,
+    );
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).toContain('Updated successfully');
+  });
+
+  it('requires confirmation before discarding changes for a pull', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          { error: 'dirty_working_tree', message: 'would be overwritten' },
+          'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+        ),
+      )
+      .mockResolvedValueOnce({ success: true, output: '' });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    clickButton('Discard Changes and Update');
+    await flush();
+
+    expect(document.body.textContent).toContain('cannot be undone');
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
+
+    clickButton('Discard and Update');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenLastCalledWith(
+      { force: true },
+      undefined,
+    );
   });
 
   it('explains an invalid branch name instead of silently returning', async () => {

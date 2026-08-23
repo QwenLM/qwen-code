@@ -270,10 +270,31 @@ async function handlePull(
     });
     return;
   }
+  if (body['stash'] !== undefined && typeof body['stash'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_stash', message: 'stash must be a boolean' });
+    return;
+  }
+  if (body['force'] !== undefined && typeof body['force'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_force', message: 'force must be a boolean' });
+    return;
+  }
   const rebase = body['rebase'] === true;
   const fetchOnly = body['fetchOnly'] === true;
+  const stash = body['stash'] === true;
+  const force = body['force'] === true;
+  if (stash && force) {
+    res.status(400).json({
+      error: 'invalid_stash_force',
+      message: 'stash and force are mutually exclusive',
+    });
+    return;
+  }
   try {
-    const result = await gitPull(cwd, { rebase, fetchOnly }, env);
+    const result = await gitPull(cwd, { rebase, fetchOnly, stash, force }, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);

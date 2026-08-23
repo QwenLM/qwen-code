@@ -496,21 +496,101 @@ export interface GitPullResult {
   output: string;
 }
 
+export interface GitPullOptions {
+  rebase?: boolean;
+  fetchOnly?: boolean;
+  /**
+   * Stash local changes (including untracked files) before pulling and
+   * restore them afterwards, so a dirty working tree does not block the
+   * update.
+   */
+  stash?: boolean;
+  /**
+   * Discard all local changes (tracked modifications and untracked files)
+   * before pulling. Destructive.
+   */
+  force?: boolean;
+}
+
+async function currentStashSha(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return (
+    await runGit(cwd, ['rev-parse', '-q', '--verify', 'refs/stash'], env).catch(
+      () => '',
+    )
+  ).trim();
+}
+
 /**
  * Pull (fetch + merge) or fetch-only from the remote.
  */
 export async function gitPull(
   cwd: string,
-  opts?: { rebase?: boolean; fetchOnly?: boolean },
+  opts?: GitPullOptions,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitPullResult> {
+  if (opts?.stash && opts?.force) {
+    throw new Error('stash and force are mutually exclusive');
+  }
   if (opts?.fetchOnly) {
     const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);
     return { success: true, output: output.trim() };
   }
+  if (opts?.force) {
+    await runGit(cwd, ['reset', '--hard'], env);
+    await runGit(cwd, ['clean', '-fd'], env);
+  }
+  let stashed = false;
+  if (opts?.stash) {
+    // Compare refs/stash before/after instead of parsing the push output,
+    // which differs between git versions and locales.
+    const before = await currentStashSha(cwd, env);
+    await runGit(
+      cwd,
+      [
+        'stash',
+        'push',
+        '--include-untracked',
+        '-m',
+        'qwen-code: auto-stash before pull',
+      ],
+      env,
+    );
+    const after = await currentStashSha(cwd, env);
+    stashed = after !== '' && after !== before;
+  }
   const args = ['pull'];
   if (opts?.rebase) args.push('--rebase');
-  const output = await runGit(cwd, args, env);
+  let output: string;
+  try {
+    output = await runGit(cwd, args, env);
+  } catch (err) {
+    if (stashed) {
+      // Restore the pre-pull state: abort any partial merge/rebase, then
+      // bring the user's changes back. A failed restore leaves the stash
+      // entry in place, so nothing is lost either way.
+      await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
+      await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
+      await runGit(cwd, ['stash', 'pop'], env).catch(() => {});
+    }
+    throw err;
+  }
+  if (stashed) {
+    const popOutput = await runGit(cwd, ['stash', 'pop'], env).catch(
+      (popErr) => {
+        // Conflicting restore: git keeps the stash entry, so report the
+        // details instead of failing an otherwise successful pull.
+        const e = popErr as { stdout?: string; stderr?: string };
+        return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+      },
+    );
+    return {
+      success: true,
+      output: `${output.trim()}\n${popOutput.trim()}`.trim(),
+    };
+  }
   return { success: true, output: output.trim() };
 }
 

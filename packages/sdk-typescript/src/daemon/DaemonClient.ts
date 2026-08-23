@@ -1307,6 +1307,8 @@ export class DaemonClient {
   async workspaceGitPull(opts?: {
     rebase?: boolean;
     fetchOnly?: boolean;
+    stash?: boolean;
+    force?: boolean;
   }): Promise<DaemonGitPullResult> {
     return await this.jsonRequest<DaemonGitPullResult>(
       '/workspace/git/pull',
@@ -5815,6 +5817,8 @@ export class WorkspaceDaemonClient {
     opts?: {
       rebase?: boolean;
       fetchOnly?: boolean;
+      stash?: boolean;
+      force?: boolean;
     },
     cwd?: string,
   ): Promise<DaemonGitPullResult> {

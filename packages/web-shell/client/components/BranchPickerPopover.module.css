@@ -235,6 +235,63 @@
   );
 }
 
+.pullBlocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  background: color-mix(in srgb, var(--destructive, #ef4444) 8%, transparent);
+}
+
+.pullBlockedMessage {
+  color: var(--destructive, #ef4444);
+}
+
+.pullBlockedHint {
+  color: var(--muted-foreground, #888);
+}
+
+.pullBlockedActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pullBlockedButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.pullBlockedButton:hover,
+.pullBlockedButton:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.pullBlockedButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pullBlockedButtonDanger {
+  color: var(--destructive, #ef4444);
+  border-color: color-mix(
+    in srgb,
+    var(--destructive, #ef4444) 40%,
+    transparent
+  );
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }

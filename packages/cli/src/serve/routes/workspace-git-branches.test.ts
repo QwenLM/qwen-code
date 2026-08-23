@@ -80,6 +80,33 @@ describe('workspace Git branch routes', () => {
     expect(response.body.error).toBe('invalid_rebase');
   });
 
+  it('rejects a wrong-typed stash with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash');
+  });
+
+  it('rejects a wrong-typed force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ force: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_force');
+  });
+
+  it('rejects combining stash and force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: true, force: true });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash_force');
+  });
+
   it('rejects a checkout with a missing ref with 400', async () => {
     const response = await request(app())
       .post('/workspace/git/checkout')
@@ -187,6 +214,47 @@ function appWithWorkspace(cwd: string) {
   return app;
 }
 
+// Repo with a remote commit that modified a.txt, plus an uncommitted local
+// edit to the same file — a plain pull fails with a dirty working tree. The
+// edits land in separate hunks so a stash/pull/pop round trip merges cleanly.
+function makeDirtyPullRepo(): string {
+  const dir = makeRepo();
+  const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`);
+  fs.writeFileSync(path.join(dir, 'a.txt'), `${lines.join('\n')}\n`);
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'extend a.txt');
+
+  const remote = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+  );
+  tmpRoots.push(remote);
+  git(remote, 'init', '-q', '--bare');
+  git(dir, 'remote', 'add', 'origin', remote);
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  const clone = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+  );
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  const remoteContent = fs
+    .readFileSync(path.join(clone, 'a.txt'), 'utf8')
+    .replace('line 10', 'line 10 remote');
+  fs.writeFileSync(path.join(clone, 'a.txt'), remoteContent);
+  git(clone, 'add', '.');
+  git(clone, 'commit', '-q', '-m', 'remote edit');
+  git(clone, 'push', '-q', 'origin', 'HEAD');
+
+  const localContent = fs
+    .readFileSync(path.join(dir, 'a.txt'), 'utf8')
+    .replace('line 1\n', 'line 1 local\n');
+  fs.writeFileSync(path.join(dir, 'a.txt'), localContent);
+  return dir;
+}
+
 afterEach(() => {
   for (const dir of tmpRoots.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -243,6 +311,57 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('no_upstream');
+  });
+
+  it('classifies a plain pull on a dirty tree as dirty_working_tree', async () => {
+    const dir = makeDirtyPullRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+  });
+
+  it('updates a dirty tree and restores the local changes with stash', async () => {
+    const dir = makeDirtyPullRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    const expected = [
+      'line 1 local',
+      ...Array.from({ length: 8 }, (_, i) => `line ${i + 2}`),
+      'line 10 remote',
+    ];
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      `${expected.join('\n')}\n`,
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('discards the local changes and updates with force', async () => {
+    const dir = makeDirtyPullRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    const expected = [
+      ...Array.from({ length: 9 }, (_, i) => `line ${i + 1}`),
+      'line 10 remote',
+    ];
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      `${expected.join('\n')}\n`,
+    );
   });
 
   it('does not misclassify a non-dirty error when the workspace path contains "dirty"', async () => {

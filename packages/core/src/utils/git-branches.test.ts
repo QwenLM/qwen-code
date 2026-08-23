@@ -49,6 +49,16 @@ function makeBareRemote(): string {
   return remote;
 }
 
+function makeClone(remote: string): string {
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  return clone;
+}
+
 function currentBranch(cwd: string): string {
   return git(cwd, 'symbolic-ref', '--short', 'HEAD').trim();
 }
@@ -540,6 +550,122 @@ describe('gitPull', () => {
     expect(result.success).toBe(true);
     expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
     expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+  });
+
+  it('stash pull updates a dirty tree and restores the local changes', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'untracked\n');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(fs.existsSync(path.join(dir, 'scratch.txt'))).toBe(true);
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('stash pull behaves like a plain pull when the tree is clean', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('stash pull reports a conflicting restore and keeps the stash entry', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote edit\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote edit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    const result = await gitPull(dir, { stash: true });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain('CONFLICT');
+    expect(
+      git(dir, 'stash', 'list', '--oneline').trim().split('\n'),
+    ).toHaveLength(1);
+  });
+
+  it('restores the dirty state when a stash pull fails', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    // No -u: the pull fails with "no tracking information".
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toThrow();
+
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('force pull discards local changes and updates', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'untracked\n');
+
+    const result = await gitPull(dir, { force: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
+    expect(fs.existsSync(path.join(dir, 'scratch.txt'))).toBe(false);
+  });
+
+  it('rejects combining stash and force', async () => {
+    const dir = makeRepo();
+
+    await expect(gitPull(dir, { stash: true, force: true })).rejects.toThrow(
+      /mutually exclusive/,
+    );
   });
 });
 
