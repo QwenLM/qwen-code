@@ -187,7 +187,7 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
-import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -279,11 +279,11 @@ import {
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
-} from '../utils/languageUtils.js';
+} from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
-import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -5510,6 +5510,9 @@ class QwenAgent implements Agent {
           restoreOptions,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
@@ -5853,6 +5856,9 @@ class QwenAgent implements Agent {
           RESUME_RESTORE_OPTIONS,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       let response: ResumeSessionResponse | undefined;
       try {
@@ -11908,6 +11914,9 @@ class QwenAgent implements Agent {
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
           logger: debugLogger,
+          // Read-only history dump never re-hangs the question. Skip
+          // finalize only on load/resume that will actually restore.
+          suppressRestoreAskUserQuestion: true,
         });
 
         return {

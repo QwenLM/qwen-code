@@ -100,6 +100,7 @@ import {
   GoalPersistenceUnavailableError,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -673,6 +674,33 @@ describe('Server Config (config.ts)', () => {
           memoryAgentMaxTurns: 2.5,
         }).getMemoryAgentMaxTurns(),
       ).toBeUndefined();
+    });
+  });
+
+  describe('restorable ask_user_question preservation', () => {
+    it('defaults to off when the restore switch is unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getRestoreAskUserQuestion()).toBe(false);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+    });
+
+    it('preserves by default when the restore switch is on', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(true);
+    });
+
+    it('stops preserving after suppression, without touching the restore switch', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      config.suppressRestorableAskUserQuestionPreservation();
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
     });
   });
 
@@ -2398,6 +2426,7 @@ describe('Server Config (config.ts)', () => {
               evidenceCursor: { recordId: 'goal-active' },
               turnCount: 1,
               activeTimeMs: 10,
+              tokensUsed: 0,
               createdAt: 1,
               updatedAt: 2,
             },
@@ -2634,6 +2663,29 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('bills Goal turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const permit = started[0]!;
+
+      config.getChatRecordingService()!.recordAssistantTurn({
+        model: 'test-model',
+        tokens: { totalTokenCount: 4_500 },
+        goalContext: permit,
+      });
+      await runtime.finishTurn(permit);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
@@ -4106,7 +4158,39 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers image_gen when an image-only model route is selected', async () => {
+    it('registers image_gen when a dual-role model is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'dual-role-model',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+        imageModel: `openai:dual-role-model\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getModel()).toBe('dual-role-model');
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'dual-role-model',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('registers image_gen for a legacy image-and-vision-only route', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
         ...baseParams,
@@ -4117,6 +4201,7 @@ describe('Server Config (config.ts)', () => {
               baseUrl,
               envKey: 'TEST_IMAGE_GENERATION_KEY',
               imageOnly: true,
+              visionOnly: true,
             },
           ],
         },
@@ -4173,6 +4258,102 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('rejects a route without image generation capability', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'chat-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(`openai:chat-model\0${baseUrl}`),
+      ).toBeUndefined();
+    });
+
+    it('resolves a vision-only image generation route with explicit capability', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'vision-only-model',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              visionOnly: true,
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(
+          `openai:vision-only-model\0${baseUrl}`,
+        ),
+      ).toEqual({
+        model: 'vision-only-model',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('rejects an image generation route without an environment key', () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl,
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel(
+          `openai:dual-role-model\0${baseUrl}`,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('rejects an ambiguous image generation route', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'dual-role-model',
+              baseUrl: 'https://images-a.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+            {
+              id: 'dual-role-model',
+              baseUrl: 'https://images-b.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              supportsImageGeneration: true,
+            },
+          ],
+        },
+      });
+
+      expect(
+        config.resolveImageGenerationModel('openai:dual-role-model'),
+      ).toBeUndefined();
     });
 
     it('registers image_gen immediately when the image model changes at runtime', async () => {

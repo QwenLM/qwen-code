@@ -17549,6 +17549,12 @@ describe('CoreToolScheduler activation wiring', () => {
   function buildSchedulerWithSkillManager(opts: {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
+    /**
+     * What the owner DECLARED to the model, when it filters its declarations.
+     * `undefined` leaves the option off, which is the top-level session shape:
+     * the scheduler then falls back to the registry.
+     */
+    declaredHasSkillTool?: boolean;
     toolResult?: ToolResult;
     // Names the mock SkillManager.listSkills will report as available. When
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
@@ -17556,7 +17562,14 @@ describe('CoreToolScheduler activation wiring', () => {
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+    addInlineAnnouncedSkillKeys: ReturnType<typeof vi.fn>;
   } {
+    // Exposed so the gate's SECOND effect is assertable. Consuming the
+    // announcement is what starves the parent: the orchestrator's
+    // `drainSkillAndCommandReminders` consumes exactly these keys, so a
+    // restricted subagent that marks them used hides the activation from the
+    // owner that can act on it — with no reminder of its own to show for it.
+    const addInlineAnnouncedSkillKeys = vi.fn();
     const fsTool = new MockTool({
       name: ToolNames.READ_FILE,
       execute: vi.fn().mockResolvedValue(
@@ -17634,7 +17647,7 @@ describe('CoreToolScheduler activation wiring', () => {
       },
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
-      addInlineAnnouncedSkillKeys: vi.fn(),
+      addInlineAnnouncedSkillKeys,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -17643,8 +17656,11 @@ describe('CoreToolScheduler activation wiring', () => {
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
+      ...(opts.declaredHasSkillTool === undefined
+        ? {}
+        : { hasSkillTool: () => opts.declaredHasSkillTool! }),
     });
-    return { scheduler, onAllToolCallsComplete };
+    return { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys };
   }
 
   function getResponseText(call: ToolCall): string {
@@ -17681,6 +17697,87 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
     expect(responseText).toContain('became available via the Skill tool');
+  });
+
+  it('stays silent when SkillTool is registered but was never declared', async () => {
+    // The defect this gate was written for, and the shape the registry cannot
+    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
+    // so a subagent running an explicit `tools` list that omits it still has
+    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
+    // gate permanently open, and the agent got a reminder naming a tool
+    // absent from its declarations: a wasted turn on `Tool "skill" not
+    // found`, and an announcement marked consumed on the shared Config, so
+    // the parent that CAN invoke it never learns the skill activated.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        declaredHasSkillTool: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).not.toContain('became available via the Skill tool');
+    expect(responseText).not.toContain('tsx-helper');
+    // The half that starves the parent. Moving this call outside the gate
+    // while leaving the text inside passes every other assertion here: the
+    // subagent stays silent AND the orchestrator's drain finds the key
+    // already consumed, so nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it('announces when the owner declares SkillTool, whatever the registry holds', async () => {
+    // The other direction, so the predicate is not mistaken for a second
+    // "off" switch: an owner that declares the tool gets the reminder.
+    //
+    // `skillToolPresent: false` is the point. With both inputs true an
+    // implementation that AND-ed them would pass this too; with the registry
+    // saying no and the declaration saying yes, only an implementation that
+    // actually prefers the declaration survives.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+        declaredHasSkillTool: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(getResponseText(completed[0])).toContain(
+      'became available via the Skill tool',
+    );
+    // …and the announcement IS consumed here, so the parent does not repeat
+    // what this agent already showed. The pair is what makes the negative
+    // assertion above mean "not consumed" rather than "never consumed".
+    expect(addInlineAnnouncedSkillKeys).toHaveBeenCalled();
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {

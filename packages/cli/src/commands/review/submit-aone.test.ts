@@ -295,15 +295,16 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(process.exitCode).toBeUndefined();
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
-    // The Aone path FORCES context-unavailable into the compose input —
-    // the cap lives where `aoneWrite` is a fact, not in the model-written
-    // state, so an omitted/forged field cannot buy a real platform
-    // approval. Dropping the force must fail this pin.
+    // The Aone path hands the state's contextUnavailable claim through
+    // UNCHANGED — parity with GitHub, now that pr-context is Aone-backed
+    // and a run's claim means what it says there. The REVIEW state carries
+    // no claim, so nothing is forced either way. Reintroducing the old
+    // force must fail this pin.
     expect(
       (composeMock.mock.calls[0][0] as Record<string, unknown>)[
         'contextUnavailable'
       ],
-    ).toBe(true);
+    ).toBeUndefined();
     const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
     expect(req.prNumber).toBe(1);
     expect(req.ownerRepo).toBe('maxcompute/odps_src');
@@ -365,6 +366,60 @@ describe('submit posts an authorised Aone target through a1', () => {
         "block the merge while their discussions stay unresolved. They are NOT marked as AI comments — `a1 repo mr comment create` cannot set the flag — so they join the generic discussion gate only; a repo's dedicated ai_comment merge gate does not track them",
       ),
     );
+  });
+
+  it('the contextUnavailable claim crosses the Aone seam unchanged, in BOTH directions', () => {
+    // true stays true — a run that never read the MR keeps its cap.
+    expect(() =>
+      runSubmit(
+        base({
+          review: writeReview({
+            ...REVIEW,
+            state: { modelId: 'test-model', contextUnavailable: true },
+          }),
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(
+      (composeMock.mock.calls[0][0] as Record<string, unknown>)[
+        'contextUnavailable'
+      ],
+    ).toBe(true);
+    vi.clearAllMocks();
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+    });
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'gitlab.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    submitAoneMock.mockReturnValue({ ...AONE_RESULT });
+    // false stays false — a run that READ the MR is no longer force-capped:
+    // the wired approval is reachable on a clean verdict.
+    expect(() =>
+      runSubmit(
+        base({
+          review: writeReview({
+            ...REVIEW,
+            state: { modelId: 'test-model', contextUnavailable: false },
+          }),
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(
+      (composeMock.mock.calls[0][0] as Record<string, unknown>)[
+        'contextUnavailable'
+      ],
+    ).toBe(false);
   });
 
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
@@ -607,7 +662,7 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(postedJson().posted).toBe(true);
-    // The force applies ONLY to the Aone path — a GitHub write hands the
+    // No path forces the claim anymore — a GitHub write hands the
     // state's own context claim through RAW (the reads are backed there):
     // this fixture state carries no claim, so undefined reaches compose —
     // coercing it to false here would also coerce a malformed non-boolean
