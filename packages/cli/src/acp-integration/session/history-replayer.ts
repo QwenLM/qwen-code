@@ -44,6 +44,7 @@ export interface PendingReplayToolCall {
 export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
   finalizeDangling?: boolean;
+  skipFinalizeCallIds?: ReadonlySet<string>;
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
   goalCause?: GoalStateCause;
@@ -89,6 +90,7 @@ export class HistoryReplayer {
       initialGoalState?: GoalSnapshotV2;
       initialGoalCause?: GoalStateCause;
       goalBootstrap?: HistoryReplayGoalBootstrap;
+      skipFinalizeCallIds?: ReadonlySet<string>;
     } = {},
   ): Promise<void> {
     try {
@@ -108,6 +110,9 @@ export class HistoryReplayer {
       await this.replayPage(records, {
         finalizeDangling: true,
         gaps,
+        ...(options.skipFinalizeCallIds
+          ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+          : {}),
         ...(options.initialGoalState
           ? { goalState: options.initialGoalState }
           : {}),
@@ -179,10 +184,7 @@ export class HistoryReplayer {
     const replay = this.machine.snapshot();
     this.copyCumulativeUsage(replay);
     const state = {
-      pendingToolCalls:
-        options.finalizeDangling === true
-          ? []
-          : replay.pendingToolCalls.map(toLegacyPendingToolCall),
+      pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
       replay,
     };
     this.setActiveRecordId(null);
@@ -232,6 +234,9 @@ export class HistoryReplayer {
       initialState,
       gaps: options.gaps,
       presentation: this.presentationAdapter(),
+      ...(options.skipFinalizeCallIds
+        ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+        : {}),
       onDiagnostic: (diagnostic) => {
         if (
           diagnostic.code === 'malformed_part' &&
