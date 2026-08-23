@@ -329,9 +329,10 @@ export class DingtalkChannel extends ChannelBase {
    * R19-x (R19-24): the turn token current per session — a fresh object at
    * each `onPromptStart`. `closeSegmentWithFiles` captures it at DISPATCH
    * time (a close can still be in flight when the next turn starts, and a
-   * late record must belong to the turn that dispatched the close);
-   * `sendResponseMessage` reads it at record time (streamed blocks only
-   * ever send inside their own turn's flush).
+   * late record must belong to the turn that dispatched the close).
+   * R21-3: `sendResponseMessage` captures it at dispatch time for the same
+   * reason — a turn ending via cancel or bridge error leaves a streamed
+   * block in flight past the turn-end sweep.
    */
   private readonly boundaryFailureTurns = new Map<string, object>();
   /**
@@ -2085,7 +2086,8 @@ export class DingtalkChannel extends ChannelBase {
    * skips it for cancelled turns and empty final responses — so a recorded
    * boundary failure was swept unheard there, and a close still in flight
    * recorded after the sweep and poisoned the next turn. Drain the session's
-   * in-flight close, then surface whatever it recorded: the turn is already
+   * in-flight chain (boundary closes and streamed-block sends), then surface
+   * whatever it recorded: the turn is already
    * booked, so the apology the rethrow would otherwise have earned is sent
    * best-effort instead.
    */
@@ -2174,15 +2176,21 @@ export class DingtalkChannel extends ChannelBase {
     // and sends best-effort the apology a rethrow would otherwise have
     // earned. Non-streaming callers keep the throw — their rejection fails
     // the turn directly.
-    try {
-      await this.deliverResponseMessage(chatId, text, sessionId);
-    } catch (error) {
-      this.recordPendingBoundaryFailure(
-        sessionId,
-        error,
-        this.boundaryFailureTurns.get(sessionId),
-      );
-    }
+    // R21-3: capture the turn token at dispatch and track the send in the
+    // session's in-flight chain. ChannelBase awaits the streamer's flush
+    // only on the non-cancelled success path; on a cancel or bridge-error
+    // exit the sweep runs while a send is still in flight (`stop()` drops
+    // the buffer without awaiting the chain), and a record-time token read
+    // misattributed the failure to the next turn or stranded it with no
+    // consumer. The tracked chain lets the sweep drain the send first.
+    const turn = this.boundaryFailureTurns.get(sessionId);
+    const send = this.deliverResponseMessage(chatId, text, sessionId).catch(
+      (error: unknown) => {
+        this.recordPendingBoundaryFailure(sessionId, error, turn);
+      },
+    );
+    this.trackBoundaryClose(sessionId, send);
+    await send;
   }
 
   private async deliverResponseMessage(
@@ -2373,9 +2381,10 @@ export class DingtalkChannel extends ChannelBase {
   /**
    * R15-1: chain a boundary close into the session's in-flight tracker so
    * `onResponseComplete` can drain it before consulting
-   * `pendingBoundaryFailures`. Swallows the close's own outcome — its
-   * failures are the map's business, and ChannelBase swallows hook errors
-   * anyway.
+   * `pendingBoundaryFailures`; R21-3 chains streamed-block sends here too,
+   * so the turn-end sweep drains them the same way. Swallows the tracked
+   * outcome — its failures are the map's business, and ChannelBase swallows
+   * hook errors anyway.
    */
   private trackBoundaryClose(sessionId: string, close: Promise<void>): void {
     const settled = close.then(
