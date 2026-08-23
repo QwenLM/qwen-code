@@ -234,13 +234,27 @@ function extractAnchoredStubDigest(value: string): string | null {
  * STUB_PRODUCER_PREFIXES) and the digest must be line-anchored with a full
  * 64-hex payload, so arbitrary result text that merely contains the label
  * is fingerprinted verbatim instead of being collapsed to a quoted window.
+ *
+ * Non-stub text is canonicalized to its own sha256 digest marker instead of
+ * being carried verbatim: the batch-budget fit rewrites an over-budget
+ * batch's results into fit headers embedding the sha256 of the full pre-fit
+ * text (fitText), while an under-budget batch keeps the raw text. Those two
+ * representations of identical content must collide or a frozen board whose
+ * batch oscillates around the budget boundary would count every poll as
+ * "changed" and fail open past every result-aware guard (issue #9450).
+ * Hashing the full text preserves every distinction a changed board makes
+ * (including inside the band a fit would drop), and the `<persisted-stub>`
+ * sentinel keeps a canonicalized result from ever colliding with a literal
+ * small output that happens to match the raw text of another shape.
  */
 function stripPersistenceEnvelope(value: string): string {
   const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
     value.startsWith(prefix),
   );
   if (!isProducerStub) {
-    return value;
+    return `<persisted-stub>sha256:${createHash('sha256')
+      .update(value)
+      .digest('hex')}`;
   }
 
   const digest = extractAnchoredStubDigest(value);

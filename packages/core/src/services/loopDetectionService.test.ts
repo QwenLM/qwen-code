@@ -27,6 +27,7 @@ import {
 } from '../utils/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  fingerprintToolResult,
   LoopDetectionService,
 } from './loopDetectionService.js';
 
@@ -3419,6 +3420,51 @@ describe('LoopDetectionService', () => {
         }
         expect(fired).toBe(false);
         expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      });
+
+      it('collides the raw and batch-budget-fitted fingerprints of identical content', () => {
+        // A batch oscillating around the budget boundary alternates between
+        // the raw output (under-budget) and the digest-reduced fit header
+        // (over-budget). The two representations of identical content must
+        // fingerprint identically or every poll counts as "changed" and
+        // the result-aware guards never fire (issue #9450).
+        expect(fingerprintToolResult(taskListResult(FROZEN_BOARD, 'raw'))).toBe(
+          fingerprintToolResult(batchBudgetResult('fitted', FROZEN_BOARD)),
+        );
+        // A changed board stays distinct in both representations.
+        expect(
+          fingerprintToolResult(taskListResult(FROZEN_BOARD, 'raw')),
+        ).not.toBe(
+          fingerprintToolResult(
+            batchBudgetResult('fitted', `${FROZEN_BOARD}new row`),
+          ),
+        );
+      });
+
+      it('halts a frozen board whose representation alternates raw/fitted across the budget boundary', () => {
+        // Witness along the finding's shape: identical board content, but
+        // the batch fits under budget on solo polls (raw) and over budget
+        // on co-batched polls (fitted). Pre-fix the alternating
+        // fingerprints judged every poll "changed" — unchangedStreak and
+        // consecutiveIdenticalResults reset every round and no guard
+        // fired. With the representations colliding, the always-on
+        // consecutive guard halts at the 5th identical request with all
+        // prior results observed unchanged.
+        let fired = false;
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD + 1 && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            i % 2 === 0
+              ? taskListResult(FROZEN_BOARD, `poll_${i}`)
+              : batchBudgetResult(`poll_${i}`, FROZEN_BOARD),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
       });
     });
   });
