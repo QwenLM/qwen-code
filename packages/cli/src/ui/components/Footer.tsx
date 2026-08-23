@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { type RefObject, useRef } from 'react';
+import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -48,27 +49,36 @@ const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
   );
 };
 
-export const Footer: React.FC = () => {
+interface FooterProps {
+  containerRef?: RefObject<DOMElement | null>;
+}
+
+export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
+  const isNarrow = isNarrowWidth(terminalWidth);
+  const statusLineRef = useRef<DOMElement>(null);
+  const { width: statusLineWidth, hasMeasured: hasMeasuredStatusLine } =
+    useBoxMetrics(statusLineRef);
   const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
     hideContextIndicator,
-  } = useStatusLine();
+  } = useStatusLine(
+    isNarrow,
+    hasMeasuredStatusLine ? statusLineWidth : undefined,
+  );
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
-
-  const { columns: terminalWidth } = useTerminalSize();
-  const isNarrow = isNarrowWidth(terminalWidth);
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -203,6 +213,7 @@ export const Footer: React.FC = () => {
   // (bottom), right section has indicators. Status line and hints coexist.
   return (
     <Box
+      ref={containerRef}
       flexDirection={isNarrow ? 'column' : 'row'}
       justifyContent={isNarrow ? 'flex-start' : 'space-between'}
       width="100%"
@@ -211,6 +222,7 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box
+        ref={statusLineRef}
         flexDirection="column"
         flexGrow={1}
         flexShrink={isNarrow ? 0 : 1}

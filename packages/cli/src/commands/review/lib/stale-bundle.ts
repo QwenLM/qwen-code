@@ -30,9 +30,11 @@
 //
 // SCOPE, so silence is not read as more than it is: the roots are the review
 // commands, the file that registers them, the review-only lease they import
-// from `services/`, and the bundled skill — not the modules those import.
-// Editing `utils/stdioHelpers.ts` or a core helper on a review path and
-// skipping the rebuild produces no warning. The line drawn here is the code
+// from `services/`, the two review helpers left in `utils/`, and the bundled
+// skill — not the modules those import. The validator itself is back under
+// `commands/review/`, which the directory root covers. Editing
+// `utils/stdioHelpers.ts` or a core helper on a review path and skipping the
+// rebuild produces no warning. The line drawn here is the code
 // whose behaviour a review is about; a quiet run means that code matches the
 // bundle, not that the whole tree does.
 //
@@ -358,6 +360,19 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
         'services',
         'review-worktree-lease.ts',
       ),
+      kind: 'code',
+    },
+    // The two helpers of the findings validator live in `utils/`, outside
+    // the `review/` directory root; a root list that lost them would keep
+    // both digest copies equal while a skipped rebuild silently runs the
+    // bundle's old validator. The validator itself moved back into
+    // `commands/review/` (#9146), which the directory root covers.
+    {
+      path: join(repoRoot, 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
+      kind: 'code',
+    },
+    {
+      path: join(repoRoot, 'packages', 'cli', 'src', 'utils', 'paths.ts'),
       kind: 'code',
     },
     {

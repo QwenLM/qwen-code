@@ -32,6 +32,10 @@ describe('hooksCommand', () => {
     });
   });
 
+  it('opts in to running during streaming', () => {
+    expect(hooksCommand.canRunDuringStreaming).toBe(true);
+  });
+
   describe('basic functionality', () => {
     it('should open hooks management dialog in interactive mode', async () => {
       const result = await hooksCommand.action!(mockContext, '');

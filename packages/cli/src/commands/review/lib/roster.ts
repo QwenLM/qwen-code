@@ -27,6 +27,11 @@
 import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
 import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
+// The topology gate lives in `budget.ts` — it is a size ruling, and the round
+// cap needs the same one. Re-exported here because this file was its home and
+// the roster is where a reader looks for "which fan-out was owed".
+export { isTerritoryFanOut } from './budget.js';
+import { isTerritoryFanOut } from './budget.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -94,20 +99,6 @@ export function reviewMode(plan: RosterPlan): ReviewMode {
   }
   if (Array.isArray(plan.untrackedFiles)) return 'local';
   return 'diff-only';
-}
-
-/**
- * The topology gate, in code.
- *
- * The same two numbers the skill's prose turns on. It is here so the roster and
- * the reader cannot disagree about which fan-out was owed — a disagreement that
- * would show up as a review being told it forgot eleven agents it was never
- * supposed to launch.
- */
-export function isTerritoryFanOut(plan: RosterPlan): boolean {
-  const src = Number(plan.srcDiffLines ?? 0);
-  const total = Number(plan.diffLines ?? 0);
-  return !(src <= 500 && total <= 3200);
 }
 
 /** Does the diff remove or replace anything? If not, 1b has nothing to audit. */
@@ -267,6 +258,24 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
+  // A heavy INTERACTION file keeps its invariant agents, even though its
+  // chunk agent is briefed for the seam only.
+  //
+  // Skipping them was tempting and wrong. The premise was that an interaction
+  // file's full-range slice is code the previous round already cleared — true
+  // only while the MERGE BASE holds still between rounds, and nothing
+  // enforces that. The anchor gate validates `--since` against head history;
+  // neither the round cache nor the posted ledger carries a base identity, so
+  // a BACKWARD base move — the author retargets the PR to an older base, an
+  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
+  // hunks no round has read, they arrive inside a heavy interaction file's
+  // full-range slice, and these three agents are the only ones that would
+  // have walked them. A clean verdict re-anchors past them for good.
+  //
+  // So the skip is off until the anchor can prove base continuity. It costs
+  // three agents on a rare shape — heavy, unchanged since the anchor, and
+  // importing something that moved — and it buys back the one direction this
+  // whole design refuses to lose in.
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
       add('invariant-a', file);

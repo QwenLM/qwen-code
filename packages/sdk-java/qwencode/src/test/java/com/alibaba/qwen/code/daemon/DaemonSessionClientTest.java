@@ -1681,6 +1681,18 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void destroyAcceptsAlreadyClosingForCurrentSession() {
+        server.createContext("/session/session-1", exchange ->
+                sendJson(exchange, 404,
+                        "{\"error\":\"closing\",\"code\":\"session_closing\",\"sessionId\":\"session-1\"}"));
+
+        try (DaemonClient daemon = newClient()) {
+            DaemonSessionClient session = daemon.createSession();
+            session.destroySession();
+        }
+    }
+
+    @Test
     void destroyDoesNotTreatGenericNotFoundAsAlreadyDeleted() {
         server.createContext("/session/session-1", exchange ->
                 sendJson(exchange, 404, "{\"error\":\"route not found\"}"));

@@ -8,11 +8,12 @@ import type { PartListUnion } from '@google/genai';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
-} from './utils/commands.js';
+} from './ui/commands/commands.js';
 import {
   Logger,
   uiTelemetryService,
   type Config,
+  type GoalStateCause,
   type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
@@ -65,7 +66,7 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
-export type NonInteractiveSlashCommandResult =
+export type NonInteractiveSlashCommandResult = (
   | {
       type: 'submit_prompt';
       content: PartListUnion;
@@ -92,6 +93,7 @@ export type NonInteractiveSlashCommandResult =
       type: 'goal_control';
       operation: GoalCommandOperation;
       response: GoalStateResponse;
+      cause?: GoalStateCause;
     }
   | {
       type: 'unsupported';
@@ -100,7 +102,22 @@ export type NonInteractiveSlashCommandResult =
     }
   | {
       type: 'no_command';
-    };
+    }
+) & {
+  /** Present when a command was resolved and executed. */
+  resolvedCommand?: ResolvedSlashCommandInfo;
+};
+
+/**
+ * The command the processor actually resolved the input to — shadowing-aware.
+ * Callers that gate behavior on "which command ran" (e.g. the ACP recording
+ * gate for the built-in `advisor`) must use this, not the raw input token:
+ * a user-defined command named `advisor` shadows the built-in.
+ */
+export interface ResolvedSlashCommandInfo {
+  name: string;
+  kind: CommandKind;
+}
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.
@@ -153,6 +170,7 @@ function handleCommandResult(
         type: 'goal_control',
         operation: result.operation,
         response: result.response,
+        ...(result.cause ? { cause: result.cause } : {}),
       };
 
     /**
@@ -349,11 +367,23 @@ async function registerModelInvocableCommands(
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
  */
+/**
+ * Session-scoped callbacks a caller can expose to the commands it runs.
+ * Only the ACP host supplies these: it keeps one long-lived session object
+ * across `/clear`, so commands that switch sessions have to be able to tell
+ * it to re-attach.
+ */
+export interface NonInteractiveSlashCommandSessionHooks {
+  /** @see CommandContext['session']['startNewSession'] */
+  startNewSession?: (sessionId: string) => void;
+}
+
 export const handleSlashCommand = async (
   rawQuery: string,
   abortController: AbortController,
   config: Config,
   settings: LoadedSettings,
+  sessionHooks?: NonInteractiveSlashCommandSessionHooks,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -543,6 +573,11 @@ export const handleSlashCommand = async (
     return { type: 'no_command' };
   }
 
+  const resolvedCommand: ResolvedSlashCommandInfo = {
+    name: commandToExecute.name,
+    kind: commandToExecute.kind,
+  };
+
   // Not used by custom commands but may be in the future.
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
@@ -565,6 +600,8 @@ export const handleSlashCommand = async (
 
   const context: CommandContext = {
     executionMode,
+    abortSignal:
+      commandToExecute.name === 'advisor' ? abortController.signal : undefined,
     services: {
       config,
       settings,
@@ -574,6 +611,9 @@ export const handleSlashCommand = async (
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
+      ...(sessionHooks?.startNewSession
+        ? { startNewSession: sessionHooks.startNewSession }
+        : {}),
     },
     invocation: {
       raw: trimmed,
@@ -609,6 +649,7 @@ export const handleSlashCommand = async (
       type: 'message',
       messageType: 'info',
       content: 'Command executed successfully.',
+      resolvedCommand,
     };
   }
 
@@ -628,18 +669,24 @@ export const handleSlashCommand = async (
     }
     if (hookResult.blockedResult) {
       recordSkillCommandInvocation(false);
-      return hookResult.blockedResult;
+      return { ...hookResult.blockedResult, resolvedCommand };
     }
     recordSkillCommandInvocation(true);
     void recordAutoSkillCommandUsage(config, commandToExecute);
-    return handleCommandResult(
-      { ...result, content: hookResult.content },
-      outputHistoryItems,
-    );
+    return {
+      ...handleCommandResult(
+        { ...result, content: hookResult.content },
+        outputHistoryItems,
+      ),
+      resolvedCommand,
+    };
   }
 
   // Handle different result types
-  return handleCommandResult(result, outputHistoryItems);
+  return {
+    ...handleCommandResult(result, outputHistoryItems),
+    resolvedCommand,
+  };
 };
 
 /**

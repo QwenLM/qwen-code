@@ -19,6 +19,7 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
+  isImageGenerationCapable,
   parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
@@ -27,6 +28,7 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -45,7 +47,25 @@ const COMPACTION_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.';
 
 const IMAGE_MODEL_CONFIGURATION_HINT =
-  'Configure a model with imageOnly: true, baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
+  'Configure a model with supportsImageGeneration: true (or legacy imageOnly: true), baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
+
+const MODEL_PICKER_FLAGS = [
+  'fast',
+  'voice',
+  'vision',
+  'compaction',
+  'image',
+  'project',
+  'global',
+] as const;
+const MODEL_PICKER_FLAG_PATTERN = `(?:${MODEL_PICKER_FLAGS.join('|')})`;
+const MODEL_PICKER_ONLY_PATTERN = new RegExp(
+  `^(?:\\s*--${MODEL_PICKER_FLAG_PATTERN})*\\s*$`,
+);
+
+export function isPickerOnlyModelInvocation(args: string): boolean {
+  return MODEL_PICKER_ONLY_PATTERN.test(args);
+}
 
 /**
  * Parse --project / --global scope flags from the argument string.
@@ -346,7 +366,7 @@ function getAvailableModelIds(
       : config.getAvailableModels();
   const availableModels = models.filter((m) => {
     if (mode === 'image')
-      return m.imageOnly === true && !m.fastOnly && !m.voiceOnly;
+      return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
     if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
     if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
@@ -932,7 +952,9 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (model) =>
-          model.imageOnly === true && !model.fastOnly && !model.voiceOnly,
+          isImageGenerationCapable(model) &&
+          !model.fastOnly &&
+          !model.voiceOnly,
       );
       const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
@@ -1115,6 +1137,9 @@ export const modelCommand: SlashCommand = {
         modelName,
         scopeOverride,
       );
+      if (context.executionMode === 'acp') {
+        await recordDaemonSessionModelFromConfig(config);
+      }
       return {
         type: 'message',
         messageType: 'info',

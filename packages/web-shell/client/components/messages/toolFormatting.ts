@@ -514,6 +514,13 @@ export function getAgentType(agent: ACPToolCall): string {
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
 }
 
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
+}
+
 /**
  * Locale-aware agent type display name. Looks up `agentType.<name>`
  * (case-insensitive) via the translator; falls back to the raw name

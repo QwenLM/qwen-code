@@ -464,7 +464,15 @@ export type ToolArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
+
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
 
 export type ToolArtifactStorage =
   | 'workspace'
@@ -659,6 +667,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -682,6 +691,46 @@ export interface McpToolProgressData {
   total?: number;
   /** Optional human-readable progress message */
   message?: string;
+}
+
+export interface McpAppResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
+}
+
+export interface McpAppResourcePermissions {
+  camera?: Record<string, never>;
+  microphone?: Record<string, never>;
+  geolocation?: Record<string, never>;
+  clipboardWrite?: Record<string, never>;
+}
+
+export interface McpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
+}
+
+/** A completed MCP tool call with an interactive MCP Apps resource. */
+export interface McpAppResultDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: McpAppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
 }
 
 /**
@@ -750,6 +799,7 @@ export type ToolResultDisplay =
   | TaskListResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
+  | McpAppResultDisplay
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;

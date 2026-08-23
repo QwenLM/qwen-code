@@ -77,6 +77,7 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
+  getFunctionResponseParts,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -117,6 +118,7 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
+  getFunctionCallFingerprint,
   normalizeModelToolCallIds,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
@@ -442,6 +444,11 @@ export type StreamEvent =
     }
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
+
+export interface GeminiChatSendOptions {
+  /** Skip only the configured model fallback chain for this request. */
+  disableModelFallbacks?: boolean;
+}
 
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
@@ -1156,6 +1163,86 @@ function isValidContentPart(part: Part): boolean {
   return !isInvalid;
 }
 
+const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
+
+function degradedPlaceholderError(): InvalidStreamError {
+  return new InvalidStreamError(
+    'Model response is an upstream fail-fast placeholder.',
+    'UPSTREAM_DEGRADED_RESPONSE',
+  );
+}
+
+function isDegradedPlaceholderTurn(content: Content): boolean {
+  const parts = content.parts ?? [];
+  return (
+    parts.length > 0 &&
+    parts.every(
+      (part) =>
+        part.functionCall === undefined &&
+        (part.thought || part.text !== undefined),
+    ) &&
+    parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('')
+      .trim() === UPSTREAM_DEGRADED_PLACEHOLDER
+  );
+}
+
+async function* rejectDegradedPlaceholderResponse(
+  stream: AsyncGenerator<GenerateContentResponse>,
+): AsyncGenerator<GenerateContentResponse> {
+  const pending: GenerateContentResponse[] = [];
+  let text = '';
+  let passthrough = false;
+
+  for await (const chunk of stream) {
+    if (passthrough) {
+      yield chunk;
+      continue;
+    }
+
+    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+    if (
+      parts.some(
+        (part) =>
+          part.functionCall !== undefined ||
+          (!part.thought && part.text === undefined),
+      )
+    ) {
+      yield* pending;
+      pending.length = 0;
+      yield chunk;
+      passthrough = true;
+      continue;
+    }
+
+    const chunkText = parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('');
+    if (pending.length === 0 && chunkText === '') {
+      yield chunk;
+      continue;
+    }
+
+    pending.push(chunk);
+    text += chunkText;
+    const trimmed = text.trim();
+    if (trimmed && !UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)) {
+      yield* pending;
+      pending.length = 0;
+      passthrough = true;
+    }
+  }
+
+  if (passthrough) return;
+  if (text.trim() === UPSTREAM_DEGRADED_PLACEHOLDER) {
+    throw degradedPlaceholderError();
+  }
+  yield* pending;
+}
+
 /**
  * Validates the history contains the correct roles.
  *
@@ -1200,7 +1287,9 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
         i++;
       }
       if (isValid) {
-        curatedHistory.push(...modelOutput);
+        curatedHistory.push(
+          ...modelOutput.filter((turn) => !isDegradedPlaceholderTurn(turn)),
+        );
       }
     }
   }
@@ -1228,7 +1317,19 @@ function appendCuratedContent(
 function copyContentContainer(content: Content): Content {
   return {
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    ...(content.parts ? { parts: content.parts.map(copyPartContainer) } : {}),
+  };
+}
+
+function copyPartContainer(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
   };
 }
 
@@ -1470,12 +1571,14 @@ interface ScanResult {
   expected: Map<string, string>;
   matched: Map<string, FrLocation[]>;
   scanEnd: number;
+  adjacentIdx: number;
 }
 
 /** Decision-phase output: exact mutations the next phase will apply. */
 interface RepairPlan {
   modelIdx: number;
   scanEnd: number;
+  adjacentIdx: number;
   synthesizeIds: Array<[string, string]>;
   hoistedParts: Part[];
   removalTargets: Array<{ turnIdx: number; partIdx: number }>;
@@ -1497,6 +1600,14 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 
   const matched = new Map<string, FrLocation[]>();
   let scanIdx = modelIdx + 1;
+  while (
+    scanIdx < history.length &&
+    history[scanIdx]?.role === 'model' &&
+    isDegradedPlaceholderTurn(history[scanIdx])
+  ) {
+    scanIdx++;
+  }
+  const adjacentIdx = scanIdx;
   while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
     const parts = history[scanIdx].parts ?? [];
     for (let pIdx = 0; pIdx < parts.length; pIdx++) {
@@ -1511,7 +1622,7 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
     scanIdx++;
   }
 
-  return { modelIdx, expected, matched, scanEnd: scanIdx };
+  return { modelIdx, expected, matched, scanEnd: scanIdx, adjacentIdx };
 }
 
 /**
@@ -1525,7 +1636,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
-  const adjacentIdx = scan.modelIdx + 1;
+  const adjacentIdx = scan.adjacentIdx;
   for (const [id, name] of scan.expected) {
     const locations = scan.matched.get(id);
     if (!locations || locations.length === 0) {
@@ -1555,6 +1666,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   return {
     modelIdx: scan.modelIdx,
     scanEnd: scan.scanEnd,
+    adjacentIdx: scan.adjacentIdx,
     synthesizeIds,
     hoistedParts,
     removalTargets,
@@ -1564,12 +1676,12 @@ function planRepair(scan: ScanResult): RepairPlan {
 
 /**
  * MUTATION — apply the plan to `history` in place. Returns the count
- * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
- * outer loop can advance its cursor.
+ * of new user turns inserted (0 or 1) so the outer loop can advance its
+ * cursor.
  *
  * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
- * user turn OR splice a new user turn between. The HEAD insert is
+ * turns after the resolved adjacent turn, (3) HEAD-insert at that user
+ * turn OR splice a new user turn there. The HEAD insert is
  * load-bearing (mirrors upstream `hoistToolResults`) — see the
  * canonical note for why tail-append re-triggers the wedge.
  */
@@ -1597,19 +1709,20 @@ function applyRepair(
     if (turnParts) turnParts.splice(loc.partIdx, 1);
   }
 
-  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // (2) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
-  const adjacentIdx = plan.modelIdx + 1;
+  const adjacentIdx = plan.adjacentIdx;
   for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
     if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
       history.splice(j, 1);
     }
   }
 
+  if (partsToInject.length === 0) return { insertedBefore: 0 };
+
   // (3) Place new parts at the head of the adjacent user turn, OR
-  // insert a fresh user turn between this model turn and whatever
-  // follows.
+  // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
     const existing = next.parts ?? [];
@@ -1626,6 +1739,10 @@ function applyRepair(
   return { insertedBefore: 1 };
 }
 
+export interface RepairOrphanedToolUseOptions {
+  preserveCallIds?: ReadonlySet<string>;
+}
+
 /**
  * Forward-walk `history`, planning and applying the repair for each
  * `model[functionCall]` turn in turn. Iteration is index-based and the
@@ -1639,12 +1756,14 @@ function applyRepair(
 export function repairOrphanedToolUseTurns(
   history: Content[],
   reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
+  options?: RepairOrphanedToolUseOptions,
 ): {
   injected: Array<{ callId: string; name: string }>;
   droppedDuplicates: Array<{ callId: string; name: string }>;
 } {
   const injected: Array<{ callId: string; name: string }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+  const preserveCallIds = options?.preserveCallIds;
 
   for (let i = 0; i < history.length; i++) {
     if (history[i].role !== 'model') continue;
@@ -1653,6 +1772,11 @@ export function repairOrphanedToolUseTurns(
     if (scan.expected.size === 0) continue;
 
     const plan = planRepair(scan);
+    if (preserveCallIds && preserveCallIds.size > 0) {
+      plan.synthesizeIds = plan.synthesizeIds.filter(
+        ([id]) => !preserveCallIds.has(id),
+      );
+    }
     if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
       continue;
     }
@@ -1871,6 +1995,7 @@ export class GeminiChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
+    let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
       const skipEntry = currentUserContent
         ? curatedHistory.find(
@@ -1880,24 +2005,28 @@ export class GeminiChat {
                 currentUserContent.parts?.some((p) => c.parts?.includes(p))),
           )
         : undefined;
-      const replaced = replaceImagePayloadsInPlace(
+      replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
       );
-      const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(replaced, maxRecentImages);
-      if (reattachParts.length > 0) {
-        const last = requestHistory.at(-1);
-        if (last?.role === 'user') {
-          last.parts = [...(last.parts ?? []), ...reattachParts];
-        } else {
-          requestHistory.push({ role: 'user', parts: reattachParts });
-        }
-      }
-      return requestHistory;
     }
-    return curatedHistory.map(copyContentContainer);
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    const reattachParts = buildReattachParts(
+      replaced,
+      maxRecentImages,
+      requestHistory,
+      this.imagePayloadStore,
+    );
+    if (reattachParts.length > 0) {
+      const last = requestHistory.at(-1);
+      if (last?.role === 'user') {
+        last.parts = [...(last.parts ?? []), ...reattachParts];
+      } else {
+        requestHistory.push({ role: 'user', parts: reattachParts });
+      }
+    }
+    return requestHistory;
   }
 
   private getRequestHistoryForRoute(
@@ -2194,6 +2323,7 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
     goalContext?: GoalTurnPermit,
+    options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
@@ -2489,11 +2619,14 @@ export class GeminiChat {
       // Per-send orphan repair (belt-and-suspenders alongside the
       // startChat load-time pass). Runs AFTER user content lands so a
       // user-supplied tool_result closes the pair before we synthesize
-      // anything. Logs are tagged so investigators can distinguish this
-      // pass from the session-load pass and from the React scheduler's
-      // dedup-drop. See the canonical note above
-      // `ORPHAN_TOOL_USE_REPAIR_REASON`.
-      const inlineRepair = repairOrphanedToolUseTurns(this.history);
+      // anything. An ordinary prompt that races a restore re-hang must
+      // still close the pair — `model[functionCall] → user[text]` is
+      // rejected by Anthropic-compatible providers. Restore itself sends
+      // the real functionResponse, so this pass is a no-op on that path.
+      const inlineRepair = repairOrphanedToolUseTurns(
+        this.history,
+        ORPHAN_TOOL_USE_REPAIR_REASON,
+      );
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
           `[REPAIR] sendMessageStream inline pass synthesized ` +
@@ -3617,9 +3750,10 @@ export class GeminiChat {
           // - Maximum 3 fallback transitions (capped by config normalization).
           // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
-          const fallbackModels = exactRoute
-            ? []
-            : self.config.getModelFallbacks();
+          const fallbackModels =
+            exactRoute || options?.disableModelFallbacks
+              ? []
+              : self.config.getModelFallbacks();
 
           if (
             fallbackModels.length > 0 &&
@@ -3965,7 +4099,7 @@ export class GeminiChat {
 
     return this.processStreamResponse(
       model,
-      streamResponse,
+      rejectDegradedPlaceholderResponse(streamResponse),
       goalContext,
       transportContinuationPrefix,
     );
@@ -4040,9 +4174,9 @@ export class GeminiChat {
   }
 
   /**
-   * Returns a shallow copy of the history and each entry's parts array without
-   * cloning large part payloads. Use only for read-only consumers or consumers
-   * that replace touched entries before mutating them.
+   * Copies history containers, Part objects, and nested functionResponse parts
+   * without cloning large leaf payloads. Consumers must not mutate leaf
+   * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
     const history = curated
@@ -4141,6 +4275,42 @@ export class GeminiChat {
       }
     }
     return ids;
+  }
+
+  /**
+   * Map of handled tool-call id → (name, args) fingerprint for duplicate
+   * provider-id replay detection: model-turn `functionCall`s whose id has a
+   * matching user-turn `functionResponse`. Walk-only, no clone, same
+   * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
+   * large args are cached per part object (see getFunctionCallFingerprint).
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    const fingerprintsById = new Map<string, string>();
+    const respondedIds = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role === 'user') {
+        for (const part of entry.parts ?? []) {
+          const id = part.functionResponse?.id;
+          if (id) respondedIds.add(id);
+        }
+        continue;
+      }
+      for (const part of entry.parts ?? []) {
+        const functionCall = part.functionCall;
+        if (functionCall?.id && !fingerprintsById.has(functionCall.id)) {
+          fingerprintsById.set(
+            functionCall.id,
+            getFunctionCallFingerprint(functionCall),
+          );
+        }
+      }
+    }
+    const handled = new Map<string, string>();
+    for (const id of respondedIds) {
+      const fingerprint = fingerprintsById.get(id);
+      if (fingerprint !== undefined) handled.set(id, fingerprint);
+    }
+    return handled;
   }
 
   /**
@@ -4384,11 +4554,14 @@ export class GeminiChat {
    * Instance wrapper around the free-function {@link repairOrphanedToolUseTurns}.
    * See the canonical note above `ORPHAN_TOOL_USE_REPAIR_REASON`.
    */
-  repairOrphanedToolUseTurns(reason?: string): {
+  repairOrphanedToolUseTurns(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    return repairOrphanedToolUseTurns(this.history, reason);
+    return repairOrphanedToolUseTurns(this.history, reason, options);
   }
 
   setTools(tools: Tool[]): void {

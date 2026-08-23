@@ -11,10 +11,12 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
+import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import {
@@ -57,6 +59,8 @@ export interface SessionCard {
   updatedAt?: string;
   color?: DaemonSessionGroupPresetColor | null;
   isCurrent: boolean;
+  /** GitHub PRs bound to the session, in binding order (last = latest). */
+  prs?: DaemonSessionPrInfo[];
   /** The workspace the session lives in. */
   workspaceCwd: string;
   /** True when the session belongs to a non-primary workspace. */
@@ -104,6 +108,7 @@ export function deriveSessionCards(
       updatedAt: session.updatedAt || session.createdAt,
       color: session.color,
       isCurrent: session.sessionId === currentSessionId,
+      prs: session.prs,
       workspaceCwd: session.workspaceCwd,
       isNonPrimary: isNonPrimaryWorkspaceSession(
         session.workspaceCwd,
@@ -162,7 +167,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
@@ -176,6 +181,7 @@ function SessionOverviewPanelInner({
 
   const { sessions, loading, error, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
+    pollIntervalMs: LIST_POLL_MS,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
@@ -186,7 +192,10 @@ function SessionOverviewPanelInner({
   // single-workspace daemon), so the overview is mission control for every
   // workspace, not just the primary one.
   const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
+    useOtherWorkspaceSessions(
+      includeOtherWorkspaces && !workspaceCwd,
+      LIST_POLL_MS,
+    );
   const mergedSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
@@ -201,20 +210,6 @@ function SessionOverviewPanelInner({
 
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [popupBlocked, setPopupBlocked] = useState(false);
-
-  // Poll the cheap list. Skip a tick when the tab is hidden or the previous
-  // request is still outstanding (mirrors the sidebar / daemon-status polls).
-  const listInFlight = useRef(false);
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (document.hidden || listInFlight.current) return;
-      listInFlight.current = true;
-      void Promise.all([reload(), reloadOther()]).finally(() => {
-        listInFlight.current = false;
-      });
-    }, LIST_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [reload, reloadOther]);
 
   // Poll the richer status report less often — it is the only source of
   // per-session "needs approval" and current-model, but costs more to build.
@@ -312,9 +307,9 @@ function SessionOverviewPanelInner({
   }, [splitIds]);
 
   const refresh = useCallback(() => {
-    void reload();
-    void reloadOther();
-    void statusReload();
+    void reload().catch(() => undefined);
+    void reloadOther().catch(() => undefined);
+    void statusReload().catch(() => undefined);
   }, [reload, reloadOther, statusReload]);
 
   if (cards.length === 0) {
@@ -422,7 +417,7 @@ function SessionOverviewPanelInner({
               <button
                 type="button"
                 className={styles.cardLabel}
-                onClick={() => onOpenSession(card.sessionId)}
+                onClick={() => onOpenSession(card.sessionId, card.workspaceCwd)}
                 title={card.label}
               >
                 {card.label}
@@ -432,6 +427,7 @@ function SessionOverviewPanelInner({
                   {t('sessionsOverview.current')}
                 </span>
               )}
+              <SessionPrBadge prs={card.prs ?? []} />
             </div>
             <div className={styles.cardMeta}>
               <span
@@ -489,7 +485,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;

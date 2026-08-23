@@ -19,6 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
   isPortableAbsolutePath,
@@ -73,6 +74,7 @@ export interface WorkspaceManagementRouteDeps {
   pickWorkspaceDirectory?: (
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
+  reservedWorkspaceRoots?: readonly string[];
 }
 
 export interface WorkspaceRemovalActivity {
@@ -106,7 +108,9 @@ export interface WorkspaceManagementHandle {
   publishOwnedRuntime(
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+    validateBeforePublication: (
+      runtime: WorkspaceRuntime,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
 }
 
@@ -126,9 +130,32 @@ export function registerWorkspaceManagementRoutes(
     getAcpHandle,
     runtimeRemoval,
     pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
+    reservedWorkspaceRoots = [],
   } = deps;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
+  const canonicalizeIfPresent = (candidate: string): string => {
+    const resolved = resolve(candidate);
+    try {
+      return realpathSync.native(resolved);
+    } catch {
+      return resolved;
+    }
+  };
+  const isReservedWorkspacePath = (candidate: string): boolean => {
+    const resolvedCandidate = resolve(candidate);
+    const canonicalCandidate = canonicalizeIfPresent(candidate);
+    return reservedWorkspaceRoots.some((configuredRoot) => {
+      const resolvedRoot = resolve(configuredRoot);
+      const canonicalRoot = canonicalizeIfPresent(configuredRoot);
+      return (
+        resolvedCandidate === resolvedRoot ||
+        isWithinRoot(resolvedCandidate, resolvedRoot) ||
+        canonicalCandidate === canonicalRoot ||
+        isWithinRoot(canonicalCandidate, canonicalRoot)
+      );
+    });
+  };
   // Serialize runtime addition, persistence promotion/forget, updates, and
   // removal by canonical cwd so conflicting management mutations cannot cross
   // their validation and persistence commit points concurrently.
@@ -247,7 +274,9 @@ export function registerWorkspaceManagementRoutes(
   const publishOwnedRuntime = async (
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+    validateBeforePublication: (
+      runtime: WorkspaceRuntime,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime> => {
     if (!createWorkspaceRuntime || !runtimeRemoval) {
       throw new Error('Managed workspace runtime publication is unavailable');
@@ -259,7 +288,10 @@ export function registerWorkspaceManagementRoutes(
     let registered = false;
     try {
       runtime = await createWorkspaceRuntime(canonicalCwd, { provenance });
-      await validate(runtime);
+      if (runtime.primary) {
+        throw new Error('Daemon-owned workspace runtime must not be primary');
+      }
+      await validateBeforePublication(runtime);
       const publish = async () => {
         if (sealed) throw new Error('Daemon is shutting down');
         if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
@@ -338,6 +370,7 @@ export function registerWorkspaceManagementRoutes(
         .listManaged()
         .some(
           (runtime) =>
+            !isInternalWorkspaceRuntime(runtime) &&
             !isScratchRootCompatible(
               runtime.workspaceCwd,
               managedScratchRoot.canonicalRoot,
@@ -384,6 +417,7 @@ export function registerWorkspaceManagementRoutes(
 
       const boundCwds = workspaceRegistry
         .listManaged()
+        .filter((entry) => !isInternalWorkspaceRuntime(entry))
         .map((entry) => entry.workspaceCwd);
       for (const [cwd, operation] of inFlight) {
         if (operation === 'addition' && cwd !== canonical) boundCwds.push(cwd);
@@ -700,6 +734,14 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
+      if (isReservedWorkspacePath(sandboxCwd)) {
+        res.status(409).json({
+          error: 'Workspace path is reserved for Conversations.',
+          code: 'conversation_workspace_reserved',
+        });
+        return;
+      }
+
       // Canonicalize with the OS-native syscall, the same call startup
       // registration uses (canonicalizeWorkspace -> realpathSync.native). The
       // POSIX JS realpath() can differ on case-insensitive filesystems
@@ -712,6 +754,14 @@ export function registerWorkspaceManagementRoutes(
         res.status(400).json({
           error: 'Path does not exist or is not accessible',
           code: 'invalid_path',
+        });
+        return;
+      }
+
+      if (isReservedWorkspacePath(canonical)) {
+        res.status(409).json({
+          error: 'Workspace path is reserved for Conversations.',
+          code: 'conversation_workspace_reserved',
         });
         return;
       }
@@ -1136,7 +1186,7 @@ export function registerWorkspaceManagementRoutes(
   ): WorkspaceRuntime | undefined => {
     const selector = String(req.params['workspace'] ?? '');
     const byId = workspaceRegistry.getManagedByWorkspaceId(selector);
-    if (byId) return byId;
+    if (byId && !isInternalWorkspaceRuntime(byId)) return byId;
     if (!isPortableAbsolutePath(selector)) {
       res.status(400).json({
         error: '`workspace` must decode to a workspace id or absolute path',
@@ -1564,7 +1614,10 @@ export function registerWorkspaceManagementRoutes(
         primaryWorkspace: snapshot.primaryWorkspace,
         entries: snapshot.workspaces.map((cwd) => {
           const registrationId = workspaceRegistrationId(cwd);
-          const runtime = workspaceRegistry.getByWorkspaceCwd(cwd);
+          const reserved = isReservedWorkspacePath(cwd);
+          const runtime = reserved
+            ? undefined
+            : workspaceRegistry.getByWorkspaceCwd(cwd);
           return {
             id: registrationId,
             cwd,
@@ -1572,7 +1625,8 @@ export function registerWorkspaceManagementRoutes(
               ? { displayName: snapshot.displayNames[registrationId] }
               : {}),
             active:
-              runtime !== undefined || registrationIsActive(registrationId),
+              !reserved &&
+              (runtime !== undefined || registrationIsActive(registrationId)),
             persisted: true,
           };
         }),
@@ -1618,7 +1672,11 @@ export function registerWorkspaceManagementRoutes(
                 registrationId ||
               candidate.registrationIds?.includes(registrationId) === true,
           );
+        if (runtime && isInternalWorkspaceRuntime(runtime)) {
+          runtime = undefined;
+        }
         operationCwd = runtime?.workspaceCwd;
+        let reservedRegistration = false;
         if (!operationCwd) {
           let storedCwd: string | undefined;
           try {
@@ -1640,6 +1698,7 @@ export function registerWorkspaceManagementRoutes(
             return;
           }
           if (storedCwd) {
+            reservedRegistration = isReservedWorkspacePath(storedCwd);
             try {
               operationCwd = realpathSync.native(resolve(storedCwd));
             } catch {
@@ -1666,10 +1725,14 @@ export function registerWorkspaceManagementRoutes(
           ownsInFlight = true;
         }
         runtime =
-          (operationCwd
+          (!reservedRegistration && operationCwd
             ? workspaceRegistry.getManagedByWorkspaceCwd(operationCwd)
             : undefined) ?? runtime;
-        const active = registrationIsActive(registrationId);
+        if (runtime && isInternalWorkspaceRuntime(runtime)) {
+          runtime = undefined;
+        }
+        const active =
+          !reservedRegistration && registrationIsActive(registrationId);
         let removed: boolean;
         try {
           removed = await workspaceRegistrationStore.removeById(registrationId);

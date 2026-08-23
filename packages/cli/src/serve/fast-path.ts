@@ -10,7 +10,7 @@ import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
-import { normalizeServeFastPathArgv } from './fast-path-argv.js';
+import { normalizeServeFastPathArgv } from '../utils/serve-fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
@@ -85,6 +85,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
+  ['restore-ask-user-question', 'restoreAskUserQuestion'],
   ['rate-limit', 'rateLimit'],
 ]);
 

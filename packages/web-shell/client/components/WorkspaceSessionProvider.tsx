@@ -14,7 +14,6 @@ import {
 import { getTranslator, normalizeLanguage } from '../i18n';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
-
 interface WorkspaceSessionProviderProps {
   sessionId?: string;
   workspaceId?: string;
@@ -95,7 +94,6 @@ export function WorkspaceSessionProvider({
     () => getTranslator(normalizeLanguage(webShellProps.language)),
     [webShellProps.language],
   );
-
   useEffect(() => {
     if (!lockWorkspaceCwd || !workspace.capabilities || pathWorkspace) return;
     if (registeredWorkspace?.requestedCwd === lockWorkspaceCwd) return;
@@ -229,7 +227,7 @@ export function WorkspaceSessionProvider({
 
   return (
     <DaemonSessionProvider
-      key={`${targetWorkspace?.id ?? effectiveWorkspaceId ?? 'primary'}:${effectiveSessionId ?? 'new'}`}
+      key="main-session"
       sessionId={effectiveSessionId}
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
