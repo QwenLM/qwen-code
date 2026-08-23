@@ -1159,4 +1159,118 @@ describe('review run (handler)', () => {
     expect(result.timedOut).toBe(true);
     expect(process.exitCode).toBe(1);
   });
+
+  it('keeps a stop verdict a concurrent run overwrote before the child exited', async () => {
+    // The stop sidecar is the shared per-target name, written with plain
+    // `writeFileSync` — no per-run component, no O_EXCL. A concurrent run of
+    // the same target truncated-overwrites it with its own runId stamp while
+    // this run's child still lives, and the single post-close read then saw
+    // the foreign stamp: the runId fence correctly refused it as THIS run's
+    // verdict but turned a round the capture decided into "Review did not
+    // complete" (exit 1). The window spans the whole child session, so no
+    // micro-timing is needed. The capture poll snapshots the sidecar in-run,
+    // the same protection the composed verdict gets.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        // Step 1: the capture decides nothing to review and writes the stop
+        // sidecar, stamped by THIS run.
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            openBlockers: 0,
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    // The capture poll snapshots the sidecar while the child still runs...
+    await vi.advanceTimersByTimeAsync(1_000);
+    // ...then a concurrent run of the same target stamps the shared sidecar
+    // its own before the child exits.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+      JSON.stringify({
+        reason: 'scope-emptied',
+        openBlockers: 2,
+        runId: 'another-run',
+      }),
+      'utf8',
+    );
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('keeps a stop verdict a same-stem cleanup swept before the child exited', async () => {
+    // The sibling shape of the overwrite race: the sidecar sits under the
+    // same `qwen-review-<target>-` prefix the Step 9 cleanup sweep unlinks,
+    // and a same-stem full round can sweep it while the stop round's child
+    // is still alive. The in-run snapshot holds the verdict either way.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            openBlockers: 0,
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    await vi.advanceTimersByTimeAsync(1_000);
+    rmSync(join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'));
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+});
+
+describe('classifyRunTarget — a trailing backslash is a POSIX filename character', () => {
+  it('keeps the backslash: the child derivation never strips it', () => {
+    // The trim used to strip trailing backslashes too, but the child's
+    // `sourcePath` derivation (`repoRelativeOf` → `safeTarget`) never does,
+    // and on POSIX a backslash is an ordinary filename character: for a file
+    // literally named `notes\` the parent pinned `qwen-review-notes-…` while
+    // every child artifact carried `notes_` — the review ran (and with
+    // --comment posted) while the parent reported no verdict, every run, for
+    // that target. Only forward slashes are separators both sides strip.
+    expect(classifyRunTarget('notes\\')).toEqual({
+      kind: 'file',
+      base: 'notes_',
+    });
+    // A tab-completed trailing separator still classifies:
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
+  });
 });

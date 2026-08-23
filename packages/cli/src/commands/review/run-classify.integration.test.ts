@@ -24,6 +24,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyRunTarget } from './run.js';
+import { repoRelativeOf } from './lib/paths.js';
+import { safeTarget } from '../../utils/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 
 let repo: string;
@@ -113,4 +115,24 @@ describe('classifyRunTarget — canonical file pins', () => {
     expect(outside.kind).toBe('file');
     expect((outside as { base: string }).base).not.toContain('..');
   });
+});
+
+describe('classifyRunTarget — parent pin and child derivation agree for a backslash name', () => {
+  it.skipIf(process.platform === 'win32')(
+    'a file literally named `notes\\` yields one pin on both sides',
+    () => {
+      // On POSIX a backslash is an ordinary filename character. The child
+      // (`capture-local --file`) derives its artifact stem through
+      // `repoRelativeOf` → `safeTarget` and never strips trailing
+      // backslashes; the parent pin must spell the file the same way or the
+      // poll never matches. (On Windows a backslash IS a separator and
+      // `resolve` normalizes it away — this shape is POSIX-only.)
+      writeFileSync(join(repo, 'notes\\'), 'export const a = 1;\n');
+      const classified = classifyRunTarget('notes\\');
+      expect(classified).toEqual({
+        kind: 'file',
+        base: safeTarget(repoRelativeOf(repo, 'notes\\').rel),
+      });
+    },
+  );
 });

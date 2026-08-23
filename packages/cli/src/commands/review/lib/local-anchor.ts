@@ -228,7 +228,16 @@ export function hashWorktreeFiles(
     // to read the attributes would compare "unchanged" and certify a
     // rendering neither had seen — the same fail-open this whole field
     // exists to close. UNHASHABLE re-reviews it instead.
-    out[p] = a === undefined ? UNHASHABLE : `${out[p]}:${a}`;
+    //
+    // …and when the answer ITSELF is UNHASHABLE — a driver name that did not
+    // survive the decode — the WHOLE identity takes it: appending the slot
+    // composed `100644:<blob>:unhashable`, which equals itself across
+    // rounds, so a rendering flip moved nothing and the section was sliced
+    // out of scope carrying the previous verdict. What cannot be named
+    // faithfully cannot be certified — the module's own standard, applied
+    // to the identity and not just the slot.
+    out[p] =
+      a === undefined || a === UNHASHABLE ? UNHASHABLE : `${out[p]}:${a}`;
   }
   return out;
 }

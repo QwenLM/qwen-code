@@ -216,3 +216,61 @@ describe('hashWorktreeFiles — every diff-driver spelling reaches the fold', ()
     expect(after).toContain('.binary=true');
   });
 });
+
+describe('hashWorktreeFiles — an undecodable driver name unhashes the WHOLE identity', () => {
+  it('marks the identity UNHASHABLE, not a composite ending in the slot', () => {
+    // The record stream is utf8-decoded, so an invalid byte in a driver NAME
+    // folds to U+FFFD and the config probe could never match the raw-byte key
+    // git itself matches — `renderingAttributes` answers UNHASHABLE for the
+    // path (verified against git 2.39.5: `check-attr --stdin -z` echoes the
+    // raw byte back). Composing that answer onto the mode-and-blob prefix
+    // produced `100644:<blob>:unhashable` — a string that compares equal to
+    // itself across rounds, so flipping `diff.<raw-bytes>.binary` changed
+    // the rendering while the identity stood still and the section was
+    // sliced out of scope. The module's own standard applies to the WHOLE
+    // identity: what cannot be named faithfully cannot be certified.
+    writeFileSync(
+      join(repo, '.gitattributes'),
+      Buffer.concat([
+        Buffer.from('data.bin diff='),
+        Buffer.from([0xff]),
+        Buffer.from('drv\n'),
+      ]),
+    );
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+    writeFileSync(join(repo, 'plain.ts'), 'export const a = 1;\n');
+
+    const out = hashWorktreeFiles(repo, ['data.bin', 'plain.ts']);
+
+    expect(out['data.bin']).toBe('unhashable');
+    // The sibling is the control arm: the probe ran and answered normally,
+    // so the UNHASHABLE above is the undecodable-name discipline, not a
+    // wholesale fallback (an ENOBUFS-style empty answer map would unhash
+    // BOTH).
+    expect(out['plain.ts']).toContain('diff=unspecified');
+  });
+
+  it('re-enters scope on the next round instead of comparing unchanged', async () => {
+    // The consequence the identity exists for: UNHASHABLE never equals
+    // itself, so a round that hashed the path re-reviews it rather than
+    // comparing it unchanged and slicing it out of scope with the previous
+    // verdict riding on a rendering no round saw. The composite identity
+    // this replaces compared equal to itself, which is exactly what made
+    // the rendering flip invisible.
+    const { changedSince } = await import('./local-anchor.js');
+    writeFileSync(
+      join(repo, '.gitattributes'),
+      Buffer.concat([
+        Buffer.from('data.bin diff='),
+        Buffer.from([0xff]),
+        Buffer.from('drv\n'),
+      ]),
+    );
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+
+    const before = hashWorktreeFiles(repo, ['data.bin']);
+    const after = hashWorktreeFiles(repo, ['data.bin']);
+
+    expect(changedSince(before, after)).toContain('data.bin');
+  });
+});

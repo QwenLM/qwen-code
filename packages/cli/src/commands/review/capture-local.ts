@@ -19,6 +19,7 @@
 import type { CommandModule } from 'yargs';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -51,7 +52,7 @@ import {
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { gitOpt } from './lib/git.js';
+import { gitOpt, gitRaw } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -121,6 +122,65 @@ function display(path: string): string {
 }
 
 /**
+ * Cached paths that dropped out of THIS capture while still on disk — and
+ * that the base HEAD does not certify.
+ *
+ * A path the cached round hashed that this one no longer sees is normally a
+ * deletion, which the symmetric difference rightly treats as a change. But
+ * "still on disk and out of the capture" is not a deletion — it is a capture
+ * that stopped SEEING the path: an ignore rule added between rounds is the
+ * live case (`ls-files --others --exclude-standard` stops enumerating it),
+ * and the flag clause in `anchorRefusalReason` cannot see it because no flag
+ * changed. Such a path reads as "vanished", the slice keeps zero sections,
+ * and the scope-emptied stop fires over bytes no round captured — decided,
+ * and repeated every round, because a stop never advances the cache.
+ *
+ * The discriminator is the base HEAD: a TRACKED path that left the diff did
+ * so because its bytes now equal the tree the diff is taken against — HEAD
+ * itself certifies it, and its vanishing is the designed discarded-change
+ * shape the scope-emptied stop decides. What is NOT in HEAD's tree is
+ * untracked invisible content — refused, at the cost of a full round.
+ */
+function vanishedStillOnDisk(
+  repoRoot: string,
+  cachedFiles: Record<string, string>,
+  currentHashes: Record<string, string>,
+): string[] {
+  const onDisk: string[] = [];
+  for (const p of Object.keys(cachedFiles)) {
+    if (Object.hasOwn(currentHashes, p)) continue;
+    try {
+      lstatSync(join(repoRoot, p));
+    } catch {
+      continue; // genuinely gone — the symmetric difference owns it
+    }
+    onDisk.push(p);
+  }
+  if (onDisk.length === 0) return [];
+  // RAW, like every other listing in this module: a name may legally begin
+  // or end with whitespace, which the trimming wrappers eat.
+  let listing: string;
+  try {
+    listing = gitRaw(
+      '-C',
+      repoRoot,
+      'ls-tree',
+      '-r',
+      '-z',
+      '--name-only',
+      'HEAD',
+    ).toString('utf8');
+  } catch {
+    // An unborn HEAD has no tree: nothing is certified, and everything
+    // still on disk is invisible content. A failed listing refuses the same
+    // way — over-review is the affordable direction.
+    listing = '';
+  }
+  const inHead = new Set(listing.split('\0'));
+  return onDisk.filter((path) => !inHead.has(path));
+}
+
+/**
  * Why the previous round's anchor cannot scope this capture — or null when it
  * can. Every reason is said out loud: an anchor silently ignored looks
  * exactly like an anchor honoured over a full-size diff.
@@ -137,6 +197,11 @@ function anchorRefusalReason(
   treeHeldStill: boolean,
   /** Did THIS capture include untracked files? */
   untracked: boolean,
+  /**
+   * Cached paths still on disk but gone from this capture and not certified
+   * by the base HEAD — see `vanishedStillOnDisk`.
+   */
+  vanishedStillPresent: readonly string[],
 ): string | null {
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
@@ -205,6 +270,17 @@ function anchorRefusalReason(
     // The captured diff is HEAD-vs-worktree: under a moved HEAD the same
     // worktree bytes describe a different change under review.
     return 'HEAD moved since the last local round';
+  }
+  if (vanishedStillPresent.length > 0) {
+    // Visibility narrowed without any flag moving — an ignore rule added
+    // between rounds is the live case. The path's absence from this capture
+    // is scope, not a deletion, and honouring the anchor would stop decided
+    // over bytes no round captured.
+    return `${
+      vanishedStillPresent.length
+    } cached path(s) dropped out of this capture while still on disk (e.g. ${display(
+      vanishedStillPresent[0].slice(0, 96),
+    )})`;
   }
   return null;
 }
@@ -531,6 +607,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       capture.skipped.length,
       treeHeldStill,
       args.untracked !== false,
+      cache === null
+        ? []
+        : vanishedStillOnDisk(capture.repoRoot, cache.files, hashes),
     );
     if (refusal !== null) {
       writeStderrLine(

@@ -1186,3 +1186,31 @@ describe('capture-local — round-3 findings', () => {
     expect(stderrLines.join('\n')).toContain('HEAD moved');
   });
 });
+
+describe('capture-local — an ignore rule between rounds is visibility, not deletion', () => {
+  it('refuses the anchor for a cached path still on disk but dropped from the capture', () => {
+    // An ignore rule added between rounds narrows the capture exactly like
+    // `--no-untracked` — `ls-files --others --exclude-standard` stops
+    // enumerating the path — while no flag changed, so the flag clause sees
+    // nothing. The cached path then reads as "vanished": the slice keeps zero
+    // sections and the scope-emptied stop fired over bytes no round
+    // captured, repeating every round because a stop never advances the
+    // cache. The only vanished-equals-change class is a path GONE from disk;
+    // one that still exists is invisible content, and the round must fall
+    // back to the full capture.
+    seedDirtyTree();
+    write('deploy.sh', '#!/bin/sh\necho v1\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+
+    write('.git/info/exclude', 'deploy.sh\n');
+    write('deploy.sh', '#!/bin/sh\necho v2, edited while invisible\n');
+
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second.incremental).toBeUndefined();
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('still on disk');
+  });
+});
