@@ -416,6 +416,25 @@ import {
   type GenerationEvent,
 } from './generation.js';
 
+type SessionOwnedWorkflowTool = {
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+  ): {
+    execute(signal: AbortSignal): Promise<WorkflowToolResult>;
+  };
+};
+
+function isSessionOwnedWorkflowTool(
+  value: unknown,
+): value is SessionOwnedWorkflowTool {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'buildSessionOwnedBackground' in value &&
+    typeof value.buildSessionOwnedBackground === 'function'
+  );
+}
+
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
 const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
@@ -11331,17 +11350,16 @@ class QwenAgent implements Agent {
           const workflowTool = config
             .getToolRegistry()
             .getTool(ToolNames.WORKFLOW);
-          if (!workflowTool) {
+          if (!isSessionOwnedWorkflowTool(workflowTool)) {
             throw RequestError.invalidParams(
               undefined,
               'The workflow tool is unavailable; cannot run this saved workflow.',
             );
           }
           const result = (await workflowTool
-            .build({
+            .buildSessionOwnedBackground({
               scriptPath: savedWorkflow.scriptPath,
-              run_in_background: true,
-            } satisfies WorkflowParams)
+            })
             .execute(new AbortController().signal)) as WorkflowToolResult;
           const startedTask = result.workflowRunId
             ? registry.get(result.workflowRunId)
@@ -11369,20 +11387,19 @@ class QwenAgent implements Agent {
           const workflowTool = config
             .getToolRegistry()
             .getTool(ToolNames.WORKFLOW);
-          if (!workflowTool) {
+          if (!isSessionOwnedWorkflowTool(workflowTool)) {
             throw RequestError.invalidParams(
               undefined,
               `The workflow tool is unavailable; cannot ${action} this run.`,
             );
           }
-          const startParams: WorkflowParams = {
+          const startParams: Omit<WorkflowParams, 'run_in_background'> = {
             script: task.script,
             args: task.args,
             ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
-            run_in_background: true,
           };
           const result = (await workflowTool
-            .build(startParams)
+            .buildSessionOwnedBackground(startParams)
             .execute(new AbortController().signal)) as WorkflowToolResult;
           if (action === 'rerun') {
             const rerunTask = result.workflowRunId

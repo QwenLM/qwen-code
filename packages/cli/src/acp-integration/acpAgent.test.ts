@@ -10223,13 +10223,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
       return { llmContent: 'started', workflowRunId: 'wf_5678efab' };
     });
-    const build = vi.fn().mockReturnValue({ execute });
+    const buildSessionOwnedBackground = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
       isWorkflowsEnabled: vi.fn().mockReturnValue(true),
       getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn((name: string) =>
-          name === 'workflow' ? { build } : undefined,
+          name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
         ),
       }),
     });
@@ -10265,9 +10265,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: 'wf_5678efab',
     });
-    expect(build).toHaveBeenCalledWith({
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
       scriptPath: '/tmp/.qwen/workflows/deep-review.js',
-      run_in_background: true,
     });
     expect(execute).toHaveBeenCalledOnce();
 
@@ -10295,12 +10294,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       task.status = 'running';
       return { llmContent: 'started' };
     });
-    const build = vi.fn().mockReturnValue({ execute });
+    const buildSessionOwnedBackground = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn((name: string) =>
-          name === 'workflow' ? { build } : undefined,
+          name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
         ),
       }),
     });
@@ -10326,11 +10325,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'retry',
       }),
     ).resolves.toEqual({ changed: true, status: 'running' });
-    expect(build).toHaveBeenCalledWith({
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
       script: task.script,
       args: task.args,
       resumeFromRunId: task.runId,
-      run_in_background: true,
     });
     expect(execute).toHaveBeenCalledOnce();
 
@@ -10382,12 +10380,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       tasks.push(concurrentRerun, rerun);
       return { llmContent: 'started', workflowRunId: rerun.runId };
     });
-    const build = vi.fn().mockReturnValue({ execute });
+    const buildSessionOwnedBackground = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn((name: string) =>
-          name === 'workflow' ? { build } : undefined,
+          name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
         ),
       }),
     });
@@ -10417,10 +10415,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: rerun.runId,
     });
-    expect(build).toHaveBeenCalledWith({
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
       script: task.script,
       args: task.args,
-      run_in_background: true,
     });
     expect(execute).toHaveBeenCalledOnce();
     expect(rerun).toMatchObject({

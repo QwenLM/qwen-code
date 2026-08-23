@@ -220,6 +220,11 @@ describe('WorkflowTool', () => {
         run_in_background: true,
       }),
     ).toThrow(/completion channel/i);
+    expect(() =>
+      new WorkflowTool(interactiveConfig).buildSessionOwnedBackground({
+        script: 'return 1',
+      }),
+    ).toThrow(/completion channel/i);
 
     interactiveRegistry.setCompletionCallback(vi.fn());
     const acpConfig = {
@@ -233,6 +238,32 @@ describe('WorkflowTool', () => {
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
+  });
+
+  it('starts a session-owned background run outside the interactive TUI', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-session-owned')),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async () => 'unused',
+    })
+      .buildSessionOwnedBackground({
+        script: `phase('Inspect'); return { status: 'ready' };`,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
+    const run = registry.get(result.workflowRunId!);
+    expect(run?.isBackgrounded).toBe(true);
+    await vi.waitFor(() =>
+      expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+    );
   });
 
   it('does not register a background run when the caller is already aborted', async () => {
