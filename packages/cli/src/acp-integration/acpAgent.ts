@@ -10678,12 +10678,17 @@ class QwenAgent implements Agent {
         // already pinned here. Re-applying would clear every live session's
         // active plan revision even though the gate never changed (the
         // workspaceReload twin above guards its no-op case the same way).
+        // This only covers the already-pinned case: on the first write the
+        // override is still `undefined`, so the per-session no-op decision
+        // inside applySessionWorkflowOverrideToLiveSessions catches a first
+        // write whose pushed value matches what live sessions already derive
+        // from settings.
         if (this.sessionWorkflowEnabledOverride === enabled) {
           return { enabled, sessionsUpdated: 0 };
         }
-        this.sessionWorkflowEnabledOverride = enabled;
-        this.applySessionWorkflowOverrideToLiveSessions();
-        return { enabled, sessionsUpdated: this.sessions.size };
+        const sessionsUpdated =
+          this.applySessionWorkflowOverrideToLiveSessions(enabled);
+        return { enabled, sessionsUpdated };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
         const sessionId = params['sessionId'];
@@ -12326,8 +12331,12 @@ class QwenAgent implements Agent {
           (this.sessionWorkflowEnabledOverride !== undefined &&
             reloadedSessionWorkflow !== this.sessionWorkflowEnabledOverride)
         ) {
-          this.sessionWorkflowEnabledOverride = reloadedSessionWorkflow;
-          this.applySessionWorkflowOverrideToLiveSessions();
+          // The diff above can fire against a stale `this.settings` view (the
+          // UI write path pins the override without updating it), so the
+          // no-op decision is made per live session inside the helper.
+          this.applySessionWorkflowOverrideToLiveSessions(
+            reloadedSessionWorkflow,
+          );
         }
 
         const sessions = [...this.sessions.entries()];
@@ -13002,20 +13011,35 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Pins every live Session's workflow gate to the daemon-held override and
-   * drops any bound plan revision. The provider reads the field rather than
-   * capturing a value so a later re-derivation (a settings-file reload) reaches
-   * sessions that were pinned earlier.
+   * Pins the workflow gate of every live Session whose effective gate
+   * actually changes to `enabled`, dropping the bound plan revision on those
+   * sessions, then records `enabled` as the daemon-held override. The no-op
+   * decision is per-session because neither caller's own state can answer it:
+   * on a first UI write the override is still `undefined` although sessions
+   * already derive the pushed value from settings (a shadowed workspace
+   * write), and a reload diff can fire against a stale settings view that the
+   * UI write path never updated. Each session's live value is read BEFORE the
+   * field reassignment below so a pinned provider cannot report the new value
+   * as its "before" state. The provider reads the field rather than capturing
+   * a value so a later re-derivation (a settings-file reload) reaches
+   * sessions that were pinned earlier. Returns the number of sessions whose
+   * gate changed.
    */
-  private applySessionWorkflowOverrideToLiveSessions(): void {
+  private applySessionWorkflowOverrideToLiveSessions(enabled: boolean): number {
+    let sessionsUpdated = 0;
     for (const session of this.sessions.values()) {
-      session
-        .getConfig()
-        .setSessionWorkflowEnabledProvider?.(
-          () => this.sessionWorkflowEnabledOverride === true,
-        );
+      const config = session.getConfig();
+      if (config.isSessionWorkflowEnabled?.() === enabled) {
+        continue;
+      }
+      config.setSessionWorkflowEnabledProvider?.(
+        () => this.sessionWorkflowEnabledOverride === true,
+      );
       session.clearActiveTodoPlanRevision();
+      sessionsUpdated++;
     }
+    this.sessionWorkflowEnabledOverride = enabled;
+    return sessionsUpdated;
   }
 
   private setupFileSystem(config: Config): void {
