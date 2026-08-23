@@ -81,6 +81,7 @@ import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -1178,6 +1179,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    promptLedgerModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -1190,6 +1192,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./prompt-terminal-ledger.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -1219,6 +1222,7 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
 
@@ -3977,8 +3981,8 @@ async function runQwenServeImpl(
             message,
           }),
       },
-      ...(opts.experimentalLsp === true
-        ? { extraArgs: ['--experimental-lsp'] }
+      ...(acpChildExtraArgs(opts)
+        ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
     });
     const statusProvider = runtime.createDaemonStatusProvider({
@@ -4314,6 +4318,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && primaryGenerationGuard.closed) {
@@ -4360,6 +4367,12 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        // Prompt terminal ledger: persisted beside the transcript so a
+        // restarted daemon can reconcile dangling prompts on cold load.
+        promptLedger: runtime.createPromptLedgerSink(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
@@ -4693,8 +4706,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
@@ -4727,6 +4740,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && secondaryGenerationGuard.closed) {
@@ -4773,6 +4789,10 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        promptLedger: runtime.createPromptLedgerSink(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
@@ -5244,8 +5264,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
@@ -5292,6 +5312,9 @@ async function runQwenServeImpl(
             channelDeliveryDiagnosticRedaction,
           ),
           maxSessions: opts.maxSessions,
+          ...(opts.restoreAskUserQuestion === true
+            ? { restoreAskUserQuestion: true }
+            : {}),
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: (event) => {
             if (event.type === 'registered' && generationGuard.closed) return;
@@ -5336,6 +5359,16 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          // Live-conversation workspaces keep transcripts outside the
+          // runtime storage layout, so no ledger sink is wired there.
+          ...(provenance === 'live-conversation'
+            ? {}
+            : {
+                promptLedger: runtime.createPromptLedgerSink(
+                  cwd,
+                  wsEnv.sessionRuntimeBaseDir,
+                ),
+              }),
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,

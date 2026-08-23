@@ -256,6 +256,22 @@ describe('buildAgentContentGeneratorConfig', () => {
         "Image-only model 'registry-model-id' cannot be used for content generation",
       );
     });
+
+    it('allows dual-role models for agent content generation', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        supportsImageGeneration: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'anthropic' },
+      );
+
+      expect(result.model).toBe('registry-model-id');
+      expect(result.authType).toBe('anthropic');
+    });
   });
 
   describe('edge cases', () => {

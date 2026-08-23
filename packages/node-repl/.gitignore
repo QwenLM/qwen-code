@@ -1,0 +1,5 @@
+dist/
+build/
+*.tsbuildinfo
+.qwen_node_repl_cell_*
+src/fixtures/napi/build/
