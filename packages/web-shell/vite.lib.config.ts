@@ -164,6 +164,8 @@ export default defineConfig({
         'echarts',
         /^echarts\//,
         'react-markdown',
+        'remark-cjk-friendly',
+        /^remark-cjk-friendly\//,
         'remark-gfm',
         'remark-math',
         'rehype-katex',
