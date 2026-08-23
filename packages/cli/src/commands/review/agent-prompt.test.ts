@@ -4030,6 +4030,43 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('go read the claimed source first');
   });
 
+  it('the verify brief carries the #9789 do-not-refute list and the constructible rejection bar', () => {
+    // The recall leak the finder-side RECALL rule closes has a verifier half:
+    // "silence is better than noise" read as a confidence bar lets Step 4 drop
+    // real-but-uncertain findings instead of downgrading them. The counterweight
+    // is the PLAUSIBLE-by-default list — a finding whose failure scenario names
+    // a state the code does not exclude may not be refuted as
+    // "too speculative" — and the bar that constrains rejection to what is
+    // constructible from the code. Pin each shape and each ground: a paraphrase
+    // that dropped any of them would reopen the leak silently.
+    const p = buildRoleBrief(PLAN, 'verify');
+    // The do-not-refute shapes.
+    expect(p).toContain('PLAUSIBLE by default');
+    expect(p).toContain('concurrency race');
+    expect(p).toContain('rare-but-reachable path');
+    expect(p).toContain('falsy zero');
+    expect(p).toContain('off-by-one');
+    expect(p).toContain('retry storm');
+    expect(p).toContain('lost an anchor');
+    // The four constructible rejection grounds.
+    expect(p).toContain('factually wrong');
+    expect(p).toContain('provably impossible');
+    expect(p).toContain('already handled in this diff');
+    expect(p).toContain('pure style with no observable effect');
+    // A rejection constructing none of them downgrades, never drops. Pin the
+    // consequence clause, not just its subject: a mutation flipping "is not a
+    // verdict this pipeline keeps: it downgrades…" into "is a verdict…: reject"
+    // survives the subject assertion alone (verified by mutation probe), which
+    // is exactly the drop-instead-of-downgrade leak this test exists to close.
+    expect(p).toContain('A rejection that constructs none of these');
+    expect(p).toContain('is not a verdict this pipeline keeps');
+    expect(p).toContain(
+      'downgrades to `confirmed (low confidence)` and goes to a human',
+    );
+    // Verifier-side recall must not bleed into a finder dimension.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('PLAUSIBLE by default');
+  });
+
   it('the verify brief carries the #9341 live-verification run disciplines', () => {
     // A live two-arm verification of the standalone-session PR produced four
     // disciplines the brief did not then carry, each from a measured miss: a
