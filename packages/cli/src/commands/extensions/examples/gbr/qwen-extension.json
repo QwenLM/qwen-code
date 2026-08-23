@@ -1,0 +1,20 @@
+{
+  "name": "gbr",
+  "displayName": {
+    "en": "Build Remote Agent",
+    "zh": "Build Remote Agent 配对"
+  },
+  "description": {
+    "en": "Pair a phone running Build Remote Agent to this Qwen Code session (spectator). Protocol gbr/1. Not affiliated with xAI or SpaceX.",
+    "zh": "将运行 Build Remote Agent 的手机配对到本 Qwen Code 会话（旁观）。协议 gbr/1。与 xAI / SpaceX 无关。"
+  },
+  "version": "0.6.1",
+  "mcpServers": {
+    "gbr": {
+      "command": "node",
+      "args": [
+        "/ABS/PATH/GrokBuildRemote-Agents/mcp/gbr-mcp/bin/gbr-mcp.js"
+      ]
+    }
+  }
+}
