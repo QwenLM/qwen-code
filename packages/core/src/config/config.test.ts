@@ -5131,6 +5131,34 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('drops a sticky disable when rebuilding onto a thinking-mandatory model', async () => {
+      // A disable override carried onto a registered canDisable:false model
+      // cannot apply on the wire; the restore must drop it (and the
+      // `reasoning: false` it re-pins) instead of concealing it behind the
+      // model's projected effort.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k3',
+          authType,
+          baseUrl: 'https://api.moonshot.cn/v1',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+    });
+
     it('restores the user effort on a standalone auth refresh under a preset disable', async () => {
       // The user cleared a preset disable and chose a tier, so the session
       // carries the tier while the model's preset still resolves

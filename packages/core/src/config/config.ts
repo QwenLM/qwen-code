@@ -19,6 +19,7 @@ import type {
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
+import { resolveModelReasoningConfiguration } from '../core/model-reasoning-config.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -4756,6 +4757,20 @@ export class Config {
       return;
     }
     if (override.type === 'disabled') {
+      const cfg = this.contentGeneratorConfig;
+      const reasoning = resolveModelReasoningConfiguration({
+        modelId: cfg.model,
+        authType: cfg.authType,
+        baseUrl: cfg.baseUrl,
+      });
+      if (reasoning?.canDisable === false) {
+        // Thinking-mandatory models ignore a disable on the wire, so the
+        // override cannot apply; drop it (and the `reasoning: false` it
+        // re-pinned) instead of concealing it behind a projected effort.
+        this.setReasoningDisabled(false);
+        this.reasoningOverride = undefined;
+        return;
+      }
       this.setReasoningDisabled(true);
       return;
     }

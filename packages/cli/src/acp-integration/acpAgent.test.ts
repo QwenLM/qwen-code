@@ -7503,6 +7503,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('clears a sticky disable from the fallback reasoning surface', async () => {
+    // A sticky disable carried onto an unregistered model has no "Thinking
+    // off" option on the fallback surface; choosing default or a tier must
+    // clear the disable instead of no-oping on it and reporting success.
+    const sessionId = 'fallback-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string };
+    } = { reasoning: false };
+    innerConfig.getModel = vi.fn().mockReturnValue('my-custom-model');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      if (generation.reasoning === false) return;
+      generation.reasoning = effort ? { effort } : undefined;
+    });
+    innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
+      generation.reasoning = disabled ? false : undefined;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option?.options.map(({ value }) => value)).not.toContain('none');
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as SetSessionConfigOptionResponse;
+      expect(innerConfig.setReasoningDisabled).toHaveBeenLastCalledWith(false);
+      expect(generation.reasoning).toBeUndefined();
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('default');
+
+      generation.reasoning = false;
+      const tier = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'high',
+      })) as SetSessionConfigOptionResponse;
+      expect(innerConfig.setReasoningDisabled).toHaveBeenLastCalledWith(false);
+      expect(generation.reasoning).toEqual({ effort: 'high' });
+      expect(
+        tier.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('high');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects provider-aware DeepSeek reasoning tiers', async () => {
     const sessionId = 'deepseek-v4-reasoning-session';
     const innerConfig = await setupSessionMocks(sessionId);
