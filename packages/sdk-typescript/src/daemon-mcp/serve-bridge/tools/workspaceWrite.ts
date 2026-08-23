@@ -9,6 +9,7 @@ import { tool } from '../../tool.js';
 import { formatJsonResult, formatToolError } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
 import { handler, resolveSessionId } from '../helpers.js';
+import { PERMISSION_MODES } from '../../../types/permission-mode.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceWriteTools(state: BridgeState): any[] {
@@ -82,9 +83,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       'session_set_approval_mode',
       'Change the approval mode of a session (plan, default, auto-edit, auto, yolo).',
       {
-        mode: z
-          .enum(['plan', 'default', 'auto-edit', 'auto', 'yolo'])
-          .describe('Approval mode.'),
+        mode: z.enum(PERMISSION_MODES).describe('Approval mode.'),
         persist: z
           .boolean()
           .optional()

@@ -354,12 +354,7 @@ export class WebViewProvider {
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {
-        const current = (info?.currentModeId || null) as
-          | 'plan'
-          | 'default'
-          | 'auto-edit'
-          | 'yolo'
-          | null;
+        const current = info?.currentModeId ?? null;
         this.currentModeId = current;
       } catch (_error) {
         // Ignore error when parsing mode info

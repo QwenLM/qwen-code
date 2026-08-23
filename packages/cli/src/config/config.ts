@@ -6,6 +6,7 @@
 
 import {
   ApprovalMode,
+  APPROVAL_MODES,
   AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -100,14 +101,6 @@ function resolveLocaleForExtensions(settings: Settings): string {
   return detectSystemLanguage();
 }
 
-const VALID_APPROVAL_MODE_VALUES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-
 const SKILL_LEVELS: readonly SkillLevel[] = [
   'project',
   'user',
@@ -121,7 +114,7 @@ function isSkillLevel(value: unknown): value is SkillLevel {
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${VALID_APPROVAL_MODE_VALUES.join(
+    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
       ', ',
     )}`,
   );
@@ -129,22 +122,15 @@ function formatApprovalModeError(value: string): Error {
 
 function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
-  switch (normalized) {
-    case 'plan':
-      return ApprovalMode.PLAN;
-    case 'default':
-      return ApprovalMode.DEFAULT;
-    case 'yolo':
-      return ApprovalMode.YOLO;
-    case 'auto_edit':
-    case 'autoedit':
-    case 'auto-edit':
-      return ApprovalMode.AUTO_EDIT;
-    case 'auto':
-      return ApprovalMode.AUTO;
-    default:
-      throw formatApprovalModeError(value);
+  const canonical =
+    normalized === 'auto_edit' || normalized === 'autoedit'
+      ? ApprovalMode.AUTO_EDIT
+      : normalized;
+  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
+  if (approvalMode === undefined) {
+    throw formatApprovalModeError(value);
   }
+  return approvalMode;
 }
 
 export interface CliArgs {
@@ -715,7 +701,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+          choices: APPROVAL_MODES,
           description:
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })

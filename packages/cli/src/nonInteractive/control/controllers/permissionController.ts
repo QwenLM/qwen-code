@@ -24,6 +24,7 @@ import type {
   WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
+  APPROVAL_MODES,
   InputFormat,
   ToolConfirmationOutcome,
   ToolNames,
@@ -146,7 +147,7 @@ export class PermissionController extends BaseController {
   private checkPermissionMode(): { allowed: boolean; message?: string } {
     const mode = this.context.permissionMode;
 
-    // Map permission modes to approval logic (aligned with VALID_APPROVAL_MODE_VALUES)
+    // Map permission modes to approval logic.
     switch (mode) {
       case 'yolo': // Allow all tools
       case 'auto-edit': // Auto-approve edit operations
@@ -217,13 +218,7 @@ export class PermissionController extends BaseController {
     }
 
     const mode = payload.mode;
-    const validModes: PermissionMode[] = [
-      'default',
-      'plan',
-      'auto-edit',
-      'auto',
-      'yolo',
-    ];
+    const validModes = APPROVAL_MODES as readonly PermissionMode[];
 
     if (!validModes.includes(mode)) {
       throw new Error(
