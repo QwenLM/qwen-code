@@ -3438,51 +3438,61 @@ describe('subagent.ts', () => {
         );
       });
 
-      it('forwards continuation retry events to subagent loop detection', async () => {
-        const loopSpy = vi
-          .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-          .mockReturnValue(false);
+      it.each([
+        { retry: { type: 'retry' as const, isContinuation: true } },
+        { retry: { type: 'retry' as const } },
+      ])(
+        'forwards retry events to subagent loop detection',
+        async ({ retry }) => {
+          const loopSpy = vi
+            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+            .mockReturnValue(false);
 
-        const { config } = await createMockConfig();
-        mockSendMessageStream.mockResolvedValue(
-          (async function* () {
-            yield {
-              type: 'retry',
-              isContinuation: true,
-            };
-            yield {
-              type: 'chunk',
-              value: {
-                candidates: [
-                  {
-                    finishReason: 'STOP',
-                    content: { parts: [{ text: 'done' }] },
-                  },
-                ],
-              },
-            };
-          })(),
-        );
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockResolvedValue(
+            (async function* () {
+              yield {
+                ...retry,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      finishReason: 'STOP',
+                      content: { parts: [{ text: 'done' }] },
+                    },
+                  ],
+                },
+              };
+            })(),
+          );
 
-        const scope = await AgentHeadless.create(
-          'test-agent',
-          config,
-          promptConfig,
-          defaultModelConfig,
-          defaultRunConfig,
-          { tools: [] },
-          new AgentEventEmitter(),
-        );
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+            { tools: [] },
+            new AgentEventEmitter(),
+          );
 
-        await scope.execute(new ContextState());
+          await scope.execute(new ContextState());
 
-        expect(loopSpy).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: GeminiEventType.Retry,
-            isContinuation: true,
-          }),
-        );
-      });
+          const retryArg = loopSpy.mock.calls.find(
+            ([event]) => event.type === GeminiEventType.Retry,
+          )?.[0] as { type: GeminiEventType; isContinuation?: boolean };
+          expect(retryArg).toEqual(
+            expect.objectContaining({ type: GeminiEventType.Retry }),
+          );
+          if ('isContinuation' in retry) {
+            expect(retryArg.isContinuation).toBe(true);
+          } else {
+            expect(retryArg).not.toHaveProperty('isContinuation');
+          }
+        },
+      );
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {
