@@ -473,7 +473,11 @@ describe('PlanExecutionView', () => {
     expect(container.textContent).toContain('Depends on: research');
     expect(container.textContent).toContain('33%');
     expect(container.textContent).toContain('1 / 3');
-    expect(container.textContent).toContain('2Active agents');
+    // 3, not 2: the strip now derives from the same source as the node
+    // badges (executionStatus), so the unassigned in_progress tool call
+    // with no live daemon task counts too — previously the strip silently
+    // disagreed with the badge rendered for that same tool.
+    expect(container.textContent).toContain('3Active agents');
     expect(container.textContent).toContain('Child agent');
     expect(container.textContent).toContain('Unassigned executions');
     const step = container.querySelector<HTMLButtonElement>(
@@ -500,6 +504,51 @@ describe('PlanExecutionView', () => {
     );
     act(() => button?.click());
     expect(onOpen).toHaveBeenCalledWith(agentTool('build'));
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  // R7-2: a replayed transcript of an interrupted session carries Agent tool
+  // calls still in_progress (or paused) with NO live daemon task. The node
+  // badges render Running/Paused off executionStatus's transcript fallback;
+  // the overview strip must agree instead of reporting "Active agents: 0".
+  it('counts transcript-only running and paused agents in Active agents', () => {
+    const nestedAgent = {
+      ...agentTool('build'),
+      callId: 'call-nested',
+      title: 'Nested agent',
+      parentToolCallId: 'call-build',
+    };
+    // Parent + nested are both transcript-only in_progress; the verify tool
+    // persisted a paused status. No live tasks exist at all.
+    const rootTool = { ...agentTool('build'), subTools: [nestedAgent] };
+    const pausedTool: ACPToolCall = {
+      ...agentTool('verify'),
+      callId: 'call-paused',
+      status: 'completed',
+      rawOutput: { status: 'paused' },
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool, pausedTool]}
+            tasks={[]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // 3 = in_progress parent + in_progress nested + paused transcript tool.
+    // Before the fix every one of these required a live daemon task entry
+    // and the strip rendered 0 while the build node badge showed Running.
+    expect(container.textContent).toContain('3Active agents');
 
     act(() => root.unmount());
     container.remove();

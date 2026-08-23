@@ -180,6 +180,20 @@ function executionStatus(
   return isAgentCancelled(tool) ? 'cancelled' : getAgentDisplayStatus(tool);
 }
 
+/**
+ * Whether an executionStatus counts toward the overview strip's "Active
+ * agents". Deliberately the same statuses that make
+ * `getPlanNodeStateFromIndex` render a node running/paused: the live task
+ * statuses ('running' / 'paused') plus the transcript 'in_progress' that
+ * `executionStatus` reports for an in-flight tool call with no live daemon
+ * task — so the strip and the node badges never contradict each other.
+ */
+function isAgentExecutionActive(status: string): boolean {
+  return (
+    status === 'running' || status === 'in_progress' || status === 'paused'
+  );
+}
+
 function nestedTasksFromIndex(
   tool: ACPToolCall,
   taskIndex: TaskExecutionIndex,
@@ -412,17 +426,35 @@ export function PlanExecutionView({
   // completion (including to aria-valuenow) while a step is still outstanding.
   const progressPercent =
     todos.length === 0 ? 0 : Math.floor((completedCount / todos.length) * 100);
+  // Derive from the same source as the node badges (executionStatus): the
+  // live daemon index when a task exists, otherwise the tool call's
+  // persisted/transcript status. Counting only live tasks contradicted the
+  // badges on a replayed transcript of an interrupted session — the node
+  // rendered Running off an in_progress tool call while this strip reported
+  // "Active agents: 0" because no live daemon task existed.
   const activeAgentCount = tools.reduce((count, tool) => {
-    const root = taskForTool(tool, taskIndex);
-    if (!root) return count;
-    return (
-      count +
-      [
-        root,
-        ...nestedTasksFromIndex(tool, taskIndex).map(({ task }) => task),
-      ].filter((task) => task.status === 'running' || task.status === 'paused')
-        .length
+    let total = isAgentExecutionActive(executionStatus(tool, taskIndex))
+      ? 1
+      : 0;
+    const nestedLiveTasks = nestedTasksFromIndex(tool, taskIndex);
+    total += nestedLiveTasks.filter(
+      ({ task }) => task.status === 'running' || task.status === 'paused',
+    ).length;
+    // Nested transcript agents the live index does not already cover (the
+    // replay shape has no live tasks at all). Dedup by toolUseId so a nested
+    // agent present in BOTH surfaces counts once.
+    const liveNestedToolUseIds = new Set(
+      nestedLiveTasks
+        .map(({ task }) => task.toolUseId)
+        .filter((toolUseId): toolUseId is string => toolUseId !== undefined),
     );
+    for (const { tool: nestedTool } of nestedAgentToolsForTool(tool)) {
+      if (liveNestedToolUseIds.has(nestedTool.callId)) continue;
+      if (isAgentExecutionActive(executionStatus(nestedTool, taskIndex))) {
+        total += 1;
+      }
+    }
+    return count + total;
   }, 0);
   const attentionCount = [...statesByTodo.values()].filter(
     (state) => state.attention,
