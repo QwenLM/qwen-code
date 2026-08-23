@@ -1119,21 +1119,29 @@ describe('the never-content-read and never-walk invariants', () => {
     expect(collection.subjects.map((f) => f.path)).toContain('src/scanner.ts');
   });
 
-  it('records a secret-shaped name carrying a trailing newline', () => {
+  it.each([
+    ['a trailing LF', '.env\n'],
+    ['a trailing CR', '.env\r'],
+    ['a trailing DEL', '.npmrc\x7f'],
+    ['a trailing NUL', 'app.key\x00'],
+  ])('records a secret-shaped name carrying %s', (_label, name) => {
     // Filesystem names are byte strings, and every name clause is
-    // `$`-anchored: a trailing CR/LF slips the lot and the file becomes a
-    // content-read audit subject.
-    const weird = join(dir, '.env\n');
+    // `$`-anchored: a trailing control character slips the lot and the file
+    // becomes a content-read audit subject. The strip covers all of C0 plus
+    // DEL, so each boundary spelling is pinned here rather than just the
+    // newline one — the class is written with escapes precisely so a reader
+    // can check that claim (literal bytes made the whole module undiffable).
+    const weird = join(dir, name);
     try {
       writeFileSync(weird, 'API_KEY=x\n');
     } catch {
       return; // the platform refuses the name; nothing to guard
     }
     const collection = collectAuditFiles(dir);
-    expect(collection.subjects.map((f) => f.path)).not.toContain('.env\n');
-    expect(collection.uncoverable.map((u) => u.reason)).toContain(
-      'secret-shaped',
-    );
+    expect(collection.subjects.map((f) => f.path)).not.toContain(name);
+    expect(collection.uncoverable.find((u) => u.path === name)).toMatchObject({
+      reason: 'secret-shaped',
+    });
   });
 
   it('names the newly covered credential shapes', () => {
