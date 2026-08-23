@@ -74,7 +74,7 @@ import {
 import {
   WORKSPACE_RESTRICTED_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
-} from '../utils/settingsUtils.js';
+} from './settingsUtils.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
 
