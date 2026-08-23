@@ -237,6 +237,14 @@ describe('BuiltinCommandLoader', () => {
     expect(forkCmd?.kind).toBe(CommandKind.BUILT_IN);
   });
 
+  it('should always register the /advisor command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const advisorCmd = commands.find((c) => c.name === 'advisor');
+    expect(advisorCmd).toBeDefined();
+    expect(advisorCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
   it('should include lsp command only when LSP is enabled', async () => {
     const disabledLoader = new BuiltinCommandLoader(mockConfig);
     const disabledCommands = await disabledLoader.loadCommands(
@@ -251,6 +259,24 @@ describe('BuiltinCommandLoader', () => {
     );
 
     expect(enabledCommands.find((c) => c.name === 'lsp')).toBeDefined();
+  });
+
+  it('should include workflows command only when workflows are enabled', async () => {
+    const disabledLoader = new BuiltinCommandLoader(mockConfig);
+    const disabledCommands = await disabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+    expect(
+      disabledCommands.find((c) => c.name === 'workflows'),
+    ).toBeUndefined();
+
+    (mockConfig.isWorkflowsEnabled as Mock).mockReturnValue(true);
+    const enabledLoader = new BuiltinCommandLoader(mockConfig);
+    const enabledCommands = await enabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(enabledCommands.find((c) => c.name === 'workflows')).toBeDefined();
   });
 
   it('should still load all other commands when ideCommand() throws', async () => {

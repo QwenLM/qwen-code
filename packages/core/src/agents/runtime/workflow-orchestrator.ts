@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
 import {
@@ -51,6 +52,7 @@ import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
+import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
@@ -156,9 +158,91 @@ export function resolveConcurrencyLimit(
  * Bound the resource ceiling for workflow subagents so a single `agent()`
  * call cannot loop the model indefinitely. Values mirror conservative
  * upstream defaults; P5 will refine via `budget` once it exists.
+ *
+ * These are floors on *safety*, not statements about how long real work
+ * takes. A long-running agent — a build-and-test step, an analysis of a
+ * 2 000-line file, anything that pages through large reads — exceeds 50
+ * turns or 10 minutes routinely, and under the GOAL-terminal contract
+ * hitting either shows up as a `null` element in `parallel()`: an agent that
+ * silently went missing rather than one that visibly failed. So both are
+ * operator-tunable via env, on the same env-override pattern as the other
+ * workflow bounds; like `QWEN_CODE_MAX_WORKFLOW_AGENTS` (and unlike
+ * `QWEN_CODE_WORKFLOW_STALL_SECONDS` / `QWEN_CODE_MAX_WORKFLOW_SECONDS`,
+ * which apply valid overrides verbatim), clamped to a hard ceiling.
+ *
+ * Three time bounds act on a dispatch and they are NOT redundant:
+ *  - `stallMs` (3 min default) — no *progress* for this long ⇒ abort + retry.
+ *    Held while a tool is in flight, so a slow tool is not a stall.
+ *  - `max_time_minutes` (this) — total wall time for ONE attempt, stalled or
+ *    not. Bounds the case the watchdog cannot see (a model that keeps
+ *    emitting progress forever).
+ *  - `QWEN_CODE_MAX_WORKFLOW_SECONDS` (30min default) — the whole run,
+ *    every dispatch together. Raising the per-agent bound without raising
+ *    this one just moves which limit kills the run.
  */
-const WORKFLOW_SUBAGENT_MAX_TURNS = 50;
-const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS = 50;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const WORKFLOW_SUBAGENT_MAX_TURNS_ENV =
+  'QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS';
+export const WORKFLOW_SUBAGENT_MAX_MINUTES_ENV =
+  'QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES';
+/** 10× the defaults — generous for a legitimate long agent, still bounded. */
+export const HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING = 500;
+export const HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING = 100;
+
+/**
+ * Resolve one env-tunable per-subagent bound. Same contract as
+ * {@link resolveMaxAgentsPerRun}: a non-integer / <1 override is rejected
+ * with a debug warning and the default is used; an override above the hard
+ * ceiling is clamped.
+ */
+function resolveSubagentBound(
+  envName: string,
+  defaultValue: number,
+  ceiling: number,
+  env: Record<string, string | undefined>,
+): number {
+  const raw = env[envName];
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${envName}=${JSON.stringify(raw)}, using default (${defaultValue})`,
+    );
+    return defaultValue;
+  }
+  if (parsed > ceiling) {
+    debugLogger.warn(
+      `${envName}=${parsed} exceeds hard ceiling (${ceiling}); clamping.`,
+    );
+    return ceiling;
+  }
+  return parsed;
+}
+
+/** Per-attempt turn ceiling for a workflow subagent. */
+export function resolveSubagentMaxTurns(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return resolveSubagentBound(
+    WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+    DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+    HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
+    env,
+  );
+}
+
+/** Per-attempt wall-clock ceiling, in minutes, for a workflow subagent. */
+export function resolveSubagentMaxTimeMinutes(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return resolveSubagentBound(
+    WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+    DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+    HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
+    env,
+  );
+}
 
 /**
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
@@ -321,6 +405,7 @@ export interface WorkflowRunOutcome {
 export type WorkflowAgentDispatch = (
   prompt: string,
   opts: WorkflowAgentOpts,
+  dispatchId?: string,
 ) => Promise<WorkflowAgentResult>;
 
 function generateRunId(): string {
@@ -382,9 +467,12 @@ export function createProductionDispatch(
    * just without budget recording.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
-  bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
+  bridgeApprovalEvents?: (
+    emitter: AgentEventEmitter,
+    dispatchId?: string,
+  ) => () => void,
 ): WorkflowAgentDispatch {
-  return async (prompt, opts) => {
+  return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
     // transcript would carry no evidence of what the agent was asked —
     // and a stall retry on top would open the file with an orphaned
@@ -416,7 +504,10 @@ export function createProductionDispatch(
     return runStallResilient(
       async (attemptSignal, emitter) => {
         attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        const cleanupApprovalBridge = bridgeApprovalEvents?.(
+          emitter,
+          dispatchId,
+        );
         const cleanupTranscript = attachDispatchTranscript(
           config,
           workflowAgentId,
@@ -575,11 +666,16 @@ async function runSingleDispatch(
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
+  // The fast path hands `config` to AgentHeadless untouched, so it has no
+  // way to honour a directory rebind — `workingDir` MUST route through the
+  // override path or it would be silently dropped and the agent would run in
+  // the parent working tree.
   if (
     opts.agentType === undefined &&
     opts.model === undefined &&
     opts.isolation === undefined &&
-    opts.schema === undefined
+    opts.schema === undefined &&
+    opts.workingDir === undefined
   ) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
@@ -593,8 +689,8 @@ async function runSingleDispatch(
       // and the loop guards never tripped — combined with the cancellation
       // bug below, workflows were effectively unkillable.
       {
-        max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-        max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+        max_turns: resolveSubagentMaxTurns(),
+        max_time_minutes: resolveSubagentMaxTimeMinutes(),
       },
       // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
       // upstream Tg8 — closes the back-channel that would let a subagent
@@ -841,12 +937,52 @@ async function runOverridePath(
   // resolve cwd-related getters via the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  // Same contradiction the sandbox gate names, re-checked here: the sandbox
+  // gate reads the raw opts BEFORE the JSON revival, so an enumerable getter
+  // can withhold `isolation` during validation and surface it at stringify
+  // time. The host sees the revived plain object, so this check is the one
+  // that cannot be evaded.
+  if (opts.isolation !== undefined && opts.workingDir !== undefined) {
+    throw new Error(
+      'agent({workingDir, isolation}): incompatible options. workingDir ' +
+        'pins the agent to a worktree you already own; isolation creates ' +
+        'a fresh one and removes it afterwards. Pass one.',
+    );
+  }
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createWorktreeConfigOverride(
+    effectiveContext = createDirScopedConfigOverride(
       config,
       worktreeIsolation.path,
     );
+  } else if (opts.workingDir !== undefined) {
+    if (
+      typeof opts.workingDir !== 'string' ||
+      opts.workingDir.trim().length === 0
+    ) {
+      throw new Error(
+        'agent({workingDir}): must be a non-empty string naming an existing git worktree of this repository.',
+      );
+    }
+    // Caller-owned worktree: same rebind, no provisioning and no cleanup.
+    // Validated by AgentTool's own `working_dir` resolver so a script-supplied
+    // path cannot move the subagent's workspace boundary somewhere the
+    // equivalent `agent` tool call would have refused — the directory must be
+    // a registered linked worktree of this repository.
+    const resolved = await resolveExternalWorktreeDir(
+      config,
+      opts.workingDir,
+      'workingDir',
+    );
+    if ('error' in resolved) {
+      // JSON.stringify escapes only C0 — sanitize the echo too so DEL / C1
+      // (incl. NEL) in the model-authored path cannot fragment the message,
+      // the same threat the agentType SECURITY note above names.
+      throw new Error(
+        `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    effectiveContext = createDirScopedConfigOverride(config, resolved.path);
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -920,8 +1056,8 @@ async function runOverridePath(
         // own runConfig / maxTurns — these are workflow-level safety bounds,
         // not subagent-level preferences. P5 will refine via budget.
         runConfigOverrides: {
-          max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-          max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+          max_turns: resolveSubagentMaxTurns(),
+          max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
         eventEmitter,
       },
@@ -1210,20 +1346,22 @@ async function provisionWorkflowWorktree(
 }
 
 /**
- * Build a Config wrapper that rebinds every "where am I?" surface to the
- * isolated worktree path. `Object.create(base)` keeps prototype lookups
- * walking back to the parent for everything else (model config, session
- * id, MCP servers), while the own-property overrides shadow the cwd-
- * adjacent fields so the subagent's tools (Edit / Write / Read / Glob /
- * Grep / Ls / Shell) anchor inside the worktree.
+ * Build a Config wrapper that rebinds every "where am I?" surface to a
+ * directory. `Object.create(base)` keeps prototype lookups walking back to
+ * the parent for everything else (model config, session id, MCP servers),
+ * while the own-property overrides shadow the cwd-adjacent fields so the
+ * subagent's tools (Edit / Write / Read / Glob / Grep / Ls / Shell) anchor
+ * inside it.
  *
- * Mirrors the inline rebind block at agent.ts:2008-2024. Sets BOTH the
- * field shape (e.g. `targetDir`) AND the method shape (`getTargetDir`)
- * because JS does not promote a getter assignment to a field shadow —
- * call sites that read `this.targetDir` directly inside Config methods
- * would otherwise still resolve through the prototype to the parent.
+ * Shared by both directory-scoped dispatch modes — `isolation: 'worktree'`,
+ * which provisions the directory, and `workingDir`, which is handed one the
+ * caller already owns. Mirrors the inline rebind block at agent.ts:2008-2024.
+ * Sets BOTH the field shape (e.g. `targetDir`) AND the method shape
+ * (`getTargetDir`) because JS does not promote a getter assignment to a field
+ * shadow — call sites that read `this.targetDir` directly inside Config
+ * methods would otherwise still resolve through the prototype to the parent.
  */
-function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
+function createDirScopedConfigOverride(base: Config, wtPath: string): Config {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov: any = Object.create(base);
   ov.targetDir = wtPath;
@@ -1232,7 +1370,10 @@ function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
   ov.getCwd = () => wtPath;
   ov.getWorkingDir = () => wtPath;
   ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
+  const wtFileService = new FileDiscoveryService(
+    wtPath,
+    base.getFileFilteringOptions().customIgnoreFiles,
+  );
   ov.fileDiscoveryService = wtFileService;
   ov.getFileService = () => wtFileService;
   const wtWorkspace = new WorkspaceContext(wtPath);
@@ -1513,8 +1654,33 @@ export class WorkflowOrchestrator {
     // cap regardless of launch path (increment-then-check: calls 1..max pass,
     // the (max+1)th throws), and scheduler.run enforces the dispatch window.
     let agentCount = 0;
+    let dispatchTraceCount = 0;
     const emitter = req.emitter;
     const budget = req.budget;
+    const dependencyContext = new AsyncLocalStorage<{ tails: string[] }>();
+    const issueDispatchTrace = (
+      prompt: string,
+      opts: WorkflowAgentOpts,
+      cached = false,
+    ): string => {
+      const id = `dispatch-${(dispatchTraceCount += 1)}`;
+      const store = dependencyContext.getStore();
+      const dependsOn = Array.from(new Set(store?.tails ?? []));
+      if (store) store.tails = [id];
+      try {
+        emitter?.dispatchQueued?.({
+          id,
+          ...(typeof opts.label === 'string' ? { label: opts.label } : {}),
+          prompt,
+          dependsOn,
+          queuedAt: Date.now(),
+          ...(cached ? { cached: true } : {}),
+        });
+      } catch (e) {
+        debugLogger.warn('emitter.dispatchQueued threw:', e);
+      }
+      return id;
+    };
 
     // P6: resume journal state. `prefixHash` chains across sequential
     // agent() calls; `hadMiss` enforces the "first miss invalidates the
@@ -1567,6 +1733,7 @@ export class WorkflowOrchestrator {
             }
             const label =
               typeof opts.label === 'string' ? opts.label : undefined;
+            const dispatchId = issueDispatchTrace(prompt, opts, true);
             try {
               emitter?.agentDispatched?.(label);
             } catch (e) {
@@ -1576,6 +1743,11 @@ export class WorkflowOrchestrator {
               emitter?.agentCompleted?.(label);
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            try {
+              emitter?.dispatchSettled?.(dispatchId, undefined, Date.now());
+            } catch (e) {
+              debugLogger.warn('emitter.dispatchSettled threw:', e);
             }
             // Resolve even if the gate aborts: rejecting an already-cached
             // result at teardown would surface an unobserved rejection for
@@ -1648,6 +1820,7 @@ export class WorkflowOrchestrator {
       // settles (success or thrown) — defensive try/catch on both so a
       // subscriber error never propagates into the script.
       const label = typeof opts.label === 'string' ? opts.label : undefined;
+      const dispatchId = issueDispatchTrace(prompt, opts);
       try {
         emitter?.agentDispatched?.(label);
       } catch (e) {
@@ -1668,10 +1841,20 @@ export class WorkflowOrchestrator {
         } catch (e) {
           debugLogger.warn('emitter.agentCompleted threw:', e);
         }
+        try {
+          emitter?.dispatchSettled?.(dispatchId, message, Date.now());
+        } catch (e) {
+          debugLogger.warn('emitter.dispatchSettled threw:', e);
+        }
       };
       return scheduler
         .run(async () => {
           try {
+            try {
+              emitter?.dispatchStarted?.(dispatchId, Date.now());
+            } catch (e) {
+              debugLogger.warn('emitter.dispatchStarted threw:', e);
+            }
             // P5 R1 (Critical #2): re-check the gate at slot-acquire time so
             // queued thunks see budget updates from already-completed in-
             // flight dispatches. Without this, the entry gate above is
@@ -1688,7 +1871,7 @@ export class WorkflowOrchestrator {
                 budget.spent(),
               );
             }
-            const result = await this.dispatch(prompt, opts);
+            const result = await this.dispatch(prompt, opts, dispatchId);
             emitCompletion();
             // P6: append the live result to the journal so a later resume
             // serves it from cache. Only JSON-serializable results are
@@ -1771,8 +1954,8 @@ export class WorkflowOrchestrator {
         );
     };
 
-    const parallelImpl = makeParallelImpl(signal);
-    const pipelineImpl = makePipelineImpl(signal);
+    const parallelImpl = makeParallelImpl(signal, dependencyContext);
+    const pipelineImpl = makePipelineImpl(signal, dependencyContext);
 
     // P-nested: build the host-side `workflow(nameOrRef, args)` impl. Only
     // wired at the top level (when a resolver is provided). The nested
@@ -1814,13 +1997,9 @@ export class WorkflowOrchestrator {
             // so the parent can try/catch it like any other async failure.
             return await nestedSandbox.run(resolved.script);
           } finally {
-            // Nested logs (script log() lines AND the unconsumed-
-            // rejection mirror) reach no production surface on their
-            // own — getLogs() is only ever read on the top-level
-            // sandbox and the production emitter's logAppended is a
-            // deliberate no-op. Merge them into the parent run's logs
-            // at nested settlement (after the nested flush ran) so a
-            // failed nested dispatch leaves a visible trace.
+            // The shared emitter already publishes nested logs live. Merge
+            // them into the parent buffer without re-emitting so the final
+            // outcome retains the same lines exactly once.
             for (const line of nestedSandbox.getLogs()) {
               parentSandboxRef.current?.appendLog(line);
             }
@@ -1842,7 +2021,9 @@ export class WorkflowOrchestrator {
     });
     parentSandboxRef.current = sandbox;
     try {
-      const result = await sandbox.run(req.script);
+      const result = await dependencyContext.run({ tails: [] }, () =>
+        sandbox.run(req.script),
+      );
       return {
         runId,
         result,
@@ -1958,7 +2139,8 @@ async function settleToNullArray(
  * array never reaches the script directly.
  */
 function makeParallelImpl(
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  dependencyContext: AsyncLocalStorage<{ tails: string[] }>,
 ): (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]> {
   return (thunks) => {
     if (!Array.isArray(thunks)) {
@@ -1978,7 +2160,28 @@ function makeParallelImpl(
         );
       }
     }
-    return settleToNullArray(thunks, signal);
+    const parent = dependencyContext.getStore();
+    const inheritedTails = parent?.tails ?? [];
+    const branches = thunks.map((thunk) => {
+      const store = { tails: [...inheritedTails] };
+      return {
+        store,
+        thunk: () => dependencyContext.run(store, thunk),
+      };
+    });
+    return settleToNullArray(
+      branches.map(({ thunk }) => thunk),
+      signal,
+    ).then((result) => {
+      if (parent && branches.length > 0) {
+        parent.tails = mergeFanoutTails(
+          parent.tails,
+          inheritedTails,
+          branches.flatMap(({ store }) => store.tails),
+        );
+      }
+      return result;
+    });
   };
 }
 
@@ -1995,7 +2198,8 @@ function makeParallelImpl(
  * per-element vm-realm revival.
  */
 function makePipelineImpl(
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  dependencyContext: AsyncLocalStorage<{ tails: string[] }>,
 ): (
   items: unknown[],
   ...stages: Array<
@@ -2020,11 +2224,55 @@ function makePipelineImpl(
         );
       }
     }
-    const chains = items.map(
-      (item, idx) => () => runPipelineChain(item, idx, stages),
-    );
-    return settleToNullArray(chains, signal, 'pipeline');
+    const parent = dependencyContext.getStore();
+    const inheritedTails = parent?.tails ?? [];
+    const branches = items.map((item, idx) => {
+      const store = { tails: [...inheritedTails] };
+      return {
+        store,
+        thunk: () =>
+          dependencyContext.run(store, () =>
+            runPipelineChain(item, idx, stages),
+          ),
+      };
+    });
+    return settleToNullArray(
+      branches.map(({ thunk }) => thunk),
+      signal,
+      'pipeline',
+    ).then((result) => {
+      if (parent && branches.length > 0) {
+        parent.tails = mergeFanoutTails(
+          parent.tails,
+          inheritedTails,
+          branches.flatMap(({ store }) => store.tails),
+        );
+      }
+      return result;
+    });
   };
+}
+
+function mergeFanoutTails(
+  currentParentTails: readonly string[],
+  inheritedTails: readonly string[],
+  branchTails: readonly string[],
+): string[] {
+  const inherited = new Set(inheritedTails);
+  // A dispatching branch always ends on its fresh dispatch id; a branch that
+  // never dispatched still carries its inherited seed. Merging that seed back
+  // would re-inject ancestor ids as redundant transitive dependsOn edges —
+  // unless no branch dispatched at all, where the inherited tails must pass
+  // through unchanged (same contract as an empty fan-out).
+  const newBranchTails = branchTails.filter((tail) => !inherited.has(tail));
+  const merged =
+    newBranchTails.length > 0
+      ? [
+          ...newBranchTails,
+          ...currentParentTails.filter((tail) => !inherited.has(tail)),
+        ]
+      : currentParentTails;
+  return Array.from(new Set(merged));
 }
 
 /**

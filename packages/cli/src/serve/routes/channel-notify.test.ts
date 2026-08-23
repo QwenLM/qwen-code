@@ -101,7 +101,7 @@ describe('channel notify routes', () => {
     );
   });
 
-  it('rejects qualified notifications for the Conversations runtime', async () => {
+  it('hides the Conversations runtime from qualified notifications', async () => {
     const live = runtime(
       'conversations',
       '/work/Conversations',
@@ -117,7 +117,7 @@ describe('channel notify routes', () => {
       .send(body);
 
     expect(response.status).toBe(400);
-    expect(response.body.code).toBe('live_channel_management_reserved');
+    expect(response.body.code).toBe('workspace_mismatch');
     expect(deliver).not.toHaveBeenCalled();
   });
 

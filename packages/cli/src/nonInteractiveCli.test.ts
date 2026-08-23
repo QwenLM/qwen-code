@@ -34,6 +34,7 @@ import {
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
   LoopType,
+  getToolCallFingerprint,
   CronScheduler,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
@@ -251,7 +252,7 @@ describe('runNonInteractive', () => {
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
-    getHistoryFunctionResponseIds: Mock;
+    getHistoryToolCallFingerprints: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
@@ -329,7 +330,7 @@ describe('runNonInteractive', () => {
         recordToolCalls: vi.fn(),
       })),
       getChat: vi.fn(() => ({})),
-      getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+      getHistoryToolCallFingerprints: vi.fn(() => new Map<string, string>()),
     };
 
     let currentModel = 'test-model';
@@ -1153,6 +1154,15 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
     const runAbortController = new AbortController();
+    let interactionOpen = true;
+    getActiveInteractionSpanSpy.mockImplementation(() =>
+      interactionOpen ? interactionSpan : undefined,
+    );
+    endInteractionSpanSpy.mockImplementation((_status, metadata) => {
+      if (metadata?.promptId === 'budget-stream-abort') {
+        interactionOpen = false;
+      }
+    });
     mockGeminiClient.sendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield { type: GeminiEventType.Content, value: 'partial response' };
@@ -1160,7 +1170,17 @@ describe('runNonInteractive', () => {
           await new Promise<void>((_, reject) => {
             runAbortController.signal.addEventListener(
               'abort',
-              () => reject(new Error('stream aborted after budget expiry')),
+              () => {
+                if (
+                  getActiveInteractionSpanSpy('budget-stream-abort') ===
+                  interactionSpan
+                ) {
+                  endInteractionSpanSpy('cancelled', {
+                    promptId: 'budget-stream-abort',
+                  });
+                }
+                reject(new Error('stream aborted after budget expiry'));
+              },
               { once: true },
             );
           });
@@ -3264,8 +3284,10 @@ describe('runNonInteractive', () => {
 
   it('should stop repeated duplicate provider tool-call responses from drain items', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-drain']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        ['tool-drain', getToolCallFingerprint('testTool', { arg1: 'value1' })],
+      ]),
     );
 
     const notificationXml =
@@ -3356,8 +3378,13 @@ describe('runNonInteractive', () => {
 
   it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-history']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
     );
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -3404,6 +3431,74 @@ describe('runNonInteractive', () => {
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-history"',
     );
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
+  it('executes an id-colliding tool call whose args differ from the handled call', async () => {
+    setupMetricsMock();
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
+    );
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-history__qwen_dup_2',
+        providerCallId: 'tool-history',
+        name: 'testTool',
+        args: { arg1: 'value2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-collision',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValueOnce({
+      callId: 'tool-history__qwen_dup_2',
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-history__qwen_dup_2',
+            name: 'testTool',
+            response: { output: 'fresh result' },
+          },
+        },
+      ],
+      resultDisplay: 'fresh result',
+      error: undefined,
+      errorType: undefined,
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-collision',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const resultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    expect(
+      JSON.stringify(resultParts[0].functionResponse?.response),
+    ).not.toContain('Duplicate provider tool call id');
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -3592,7 +3687,7 @@ describe('runNonInteractive', () => {
 
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
-    const apiError = new Error('API connection failed');
+    const apiError = new Error('API connection failed: token=secret');
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
       throw apiError;
     });
@@ -3605,6 +3700,12 @@ describe('runNonInteractive', () => {
         'prompt-id-4',
       ),
     ).rejects.toThrow(apiError);
+
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-id-4',
+      errorMessage: 'headless invocation failed',
+      errorType: 'Error',
+    });
   });
 
   it('should not exit if a tool is not found, and should send error back to model', async () => {
@@ -7201,7 +7302,10 @@ describe('runNonInteractive', () => {
           callId: 'tool-side',
           providerCallId: 'tool-side',
           name: 'side_effect_tool',
-          args: { path: '/tmp/second' },
+          // Same args as the first call: an exact replay of the handled
+          // provider id. A different-args collision would be a fresh call
+          // and no longer receives a duplicate response.
+          args: { path: '/tmp/first' },
           isClientInitiated: false,
           prompt_id: 'prompt-id-dup-structured',
         },

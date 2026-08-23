@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
-import { serializeGoalStatusMessage } from './GoalStatusMessage';
 import { SystemMessage } from './SystemMessage';
 
 (
@@ -348,34 +346,92 @@ describe('SystemMessage — background notification i18n body', () => {
   });
 });
 
-describe('SystemMessage — goal status activation', () => {
-  const content = serializeGoalStatusMessage({
-    kind: 'set',
-    condition: 'Ship safely',
-    setAt: 1,
+describe('SystemMessage — inline images', () => {
+  it('renders image thumbnails when images prop is provided', () => {
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,base64data');
+    expect(img?.className).toContain('chatImageThumb');
   });
 
-  it('keeps the existing interactive event behavior by default', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
+  it('makes images clickable when onImagePreview is provided', () => {
+    const onImagePreview = vi.fn();
     const container = render(
-      <SystemMessage content={content} variant="info" isLatest />,
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+        onImagePreview={onImagePreview}
+      />,
     );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).toHaveBeenCalledOnce();
-    window.removeEventListener('web-shell-goal-status-active', handler);
+
+    const img = container.querySelector('img');
+    expect(img?.className).toContain('chatImageThumbInteractive');
+
+    act(() => {
+      img?.click();
+    });
+
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,base64data',
+      'User uploaded image 1',
+    );
   });
 
-  it('does not dispatch the goal event in readonly mode', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
+  it('renders multiple images in a row', () => {
     const container = render(
-      <TranscriptRenderModeProvider value="readonly">
-        <SystemMessage content={content} variant="info" isLatest />
-      </TranscriptRenderModeProvider>,
+      <SystemMessage
+        content="look at these"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[
+          { data: 'img1', mimeType: 'image/png' },
+          { data: 'img2', mimeType: 'image/jpeg' },
+        ]}
+      />,
     );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).not.toHaveBeenCalled();
-    window.removeEventListener('web-shell-goal-status-active', handler);
+
+    const imgs = container.querySelectorAll('img');
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
+    expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
+  });
+
+  it('renders injected files with the ordinary user attachment row', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="explain this"
+        variant="info"
+        source="mid_turn_message_injected"
+        files={[
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    const file = container.querySelector('[role="button"]') as HTMLElement;
+    expect(file.textContent).toContain('notes.txt');
+    act(() => file.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'notes.txt',
+    });
   });
 });
