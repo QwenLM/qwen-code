@@ -506,11 +506,22 @@ export function buildInstallPlan(
     typeof storedKey === 'string' &&
     (storedKey === envKey ||
       (config.ownsEnvKeyShape?.(storedKey, protocol, baseUrl) ?? false));
+  // Round-trip gate for the env-key clause (R44-2, R44-4): omission from the
+  // submission is deselection intent only for baseUrl-less entries the caller
+  // actually exposed. `undefined` keeps the historical behavior (fully
+  // round-tripping callers); a provided set scopes the claim to those ids plus
+  // any id this plan writes (a replaced/collapsed entry must still own its
+  // stored original regardless of who surfaced it).
+  const roundTrippedLegacyModelIds =
+    inputs.roundTrippedLegacyModelIds === undefined
+      ? undefined
+      : new Set(inputs.roundTrippedLegacyModelIds);
+  const plannedModelIds = new Set(models.map((model) => model.id));
   // Defense-in-depth for the id-collision clause: even an id this run
   // migrated must never claim a baseUrl-less entry whose env key names a
   // SIBLING endpoint — such an entry belongs there, and no migration here can
   // legitimately own it (R40-2).
-  const { namesSiblingEndpoint } = legacyEnvKeyAttribution(
+  const { namesSelectedEndpoint, namesSiblingEndpoint } = legacyEnvKeyAttribution(
     config,
     protocol,
     baseUrl,
@@ -519,11 +530,30 @@ export function buildInstallPlan(
     ? (Array.isArray(config.baseUrl) || freeFormProvider) && providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
-          (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
+          // The endpoint-match clause applies only to STAMPED entries. A
+          // baseUrl-less entry normalizes to '', which would equal a
+          // free-form install whose resolved baseUrl is '' and claim every
+          // baseUrl-less legacy entry — short-circuiting the attribution
+          // guard below (R44-1).
+          ((model.baseUrl !== undefined &&
+            normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint) ||
             (model.baseUrl === undefined &&
               !namesSiblingEndpoint(model) &&
-              (migratedLegacyModelIds.has(model.id) ||
-                (freeFormProvider && ownsLegacyEnvKey(model.envKey)))))
+              // The id-collision clause claims only entries this run actually
+              // migrated, and a migrated entry is always attributable to the
+              // selected endpoint. Gating on attribution keeps a floating key
+              // (names NO endpoint) whose id merely collides with a migrated
+              // entry from being claimed and deleted — the namesSiblingEndpoint
+              // guard does not protect it because it names no endpoint at all
+              // (R44-3). Callers only ever migrate attributable entries, so
+              // this never under-claims a real migration.
+              ((migratedLegacyModelIds.has(model.id) &&
+                namesSelectedEndpoint(model)) ||
+                (freeFormProvider &&
+                  ownsLegacyEnvKey(model.envKey) &&
+                  (roundTrippedLegacyModelIds === undefined ||
+                    plannedModelIds.has(model.id) ||
+                    roundTrippedLegacyModelIds.has(model.id))))))
       : undefined
     : providerOwnsModel;
   const firstModel = models[0];

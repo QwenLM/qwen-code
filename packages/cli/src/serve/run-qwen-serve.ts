@@ -1147,6 +1147,14 @@ export function buildProviderSetupInputs(
     modelIds,
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
+    // The serve catalog exposes no existingConfig, so Web Shell/SDK selections
+    // are defaults-seeded and can never carry — nor deliberately omit — a
+    // saved baseUrl-less legacy id. Passing an EMPTY round-trip set tells
+    // buildInstallPlan that absence from `modelIds` is never deselection
+    // intent here, so its free-form env-key clause cannot delete an
+    // attributable entry this route merely failed to migrate (R44-2; the
+    // merge-only guarantee R42-1 established for stamped customs).
+    roundTrippedLegacyModelIds: [],
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
 }

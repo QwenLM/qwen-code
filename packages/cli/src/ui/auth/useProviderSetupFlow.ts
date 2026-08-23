@@ -723,6 +723,15 @@ export function useProviderSetupFlow(
               migratedLegacyModelIds: [...migratedLegacyModelIdsRef.current],
             }
           : {}),
+        // The dialog is a round-tripping caller, but only for the baseUrl-less
+        // legacy ids it actually surfaced (the ones the views seeded/claimed,
+        // tracked in migratedLegacyModelIdsRef). Emitting this set — always,
+        // even empty — tells buildInstallPlan that omission from `modelIds`
+        // is deselection intent only for those ids. An attributable entry the
+        // dialog never exposed (e.g. its endpoint could not be restored, so
+        // the views left it invisible) is then protected from the free-form
+        // env-key claim instead of being silently deleted on submit (R44-4).
+        roundTrippedLegacyModelIds: [...migratedLegacyModelIdsRef.current],
         ...overrides,
       };
     },

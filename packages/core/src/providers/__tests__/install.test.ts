@@ -1341,6 +1341,194 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it('keeps every baseUrl-less legacy entry when a free-form install resolves an empty baseUrl (R44-1)', async () => {
+    // A free-form install whose resolved baseUrl is '' (a serve request with a
+    // missing baseUrl resolves to '') must not let the endpoint-match clause
+    // claim every baseUrl-less legacy entry: normalizeBaseUrlForMatching of a
+    // baseUrl-less entry is '', and '' === selectedEndpoint ('') would claim
+    // them all — sibling-endpoint entries, fail-closed suffix-less keys, and
+    // floating keys alike — short-circuiting the attribution guard (R44-1).
+    const siblingBaseUrl = 'https://sib.example/v1';
+    const siblingEntry = {
+      id: 'sib-model',
+      name: 'sib-model',
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, siblingBaseUrl),
+    };
+    const suffixlessEntry = {
+      id: 'sfx-model',
+      name: 'sfx-model',
+      envKey: legacyCustomEnvKey(AuthType.USE_OPENAI, 'https://other.example/v1'),
+    };
+    const floatingEntry = {
+      id: 'flt-model',
+      name: 'flt-model',
+      envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [siblingEntry, suffixlessEntry, floatingEntry],
+    });
+    const emptyEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, '');
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: '',
+      apiKey: 'sk-new',
+      modelIds: ['my-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[emptyEnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'sib-model' }),
+    );
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'sfx-model' }),
+    );
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'flt-model' }),
+    );
+  });
+
+  it('keeps a floating baseUrl-less entry whose id collides with a migrated entry (R44-3)', async () => {
+    const e1BaseUrl = 'https://e1.example/v1';
+    const e1EnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, e1BaseUrl);
+    const floatingKey = `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`;
+    // X is attributable to E1 (its 12-hex key); F is a floating prefix-only
+    // key that names NO endpoint. Both share the id 'my-model'. Migrating X
+    // emits that id, but the id-collision claim must not reach F: the only
+    // defense F has is that its key names no endpoint, so the claim must be
+    // gated on attribution — namesSiblingEndpoint does not protect F (R44-3).
+    const attributableX = {
+      id: 'my-model',
+      name: 'my-model',
+      envKey: e1EnvKey,
+    };
+    const floatingF = {
+      id: 'my-model',
+      name: 'my-model',
+      envKey: floatingKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [attributableX, floatingF],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: e1BaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['my-model'],
+      migratedLegacyModelIds: ['my-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[e1EnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // The attributable X collapses into the planned my-model@E1...
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'my-model', baseUrl: e1BaseUrl }),
+    );
+    // ...while the floating F survives (never migrated, names no endpoint).
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'my-model', envKey: floatingKey }),
+    );
+  });
+
+  it('protects an unexposed attributable baseUrl-less entry via roundTrippedLegacyModelIds (R44-4)', async () => {
+    const bBaseUrl = 'https://b.example/v1';
+    const bEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, bBaseUrl);
+    // An attributable baseUrl-less entry the caller never exposed (its id is
+    // in neither modelIds nor roundTrippedLegacyModelIds) must not be claimed
+    // by the env-key clause: absence is not deselection when the entry was
+    // never surfaced (R44-4).
+    const hiddenEntry = {
+      id: 'my-model',
+      name: 'my-model',
+      envKey: bEnvKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [hiddenEntry],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: bBaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['my-new-model'],
+      roundTrippedLegacyModelIds: [],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[bEnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'my-model', envKey: bEnvKey }),
+    );
+  });
+
+  it('still removes an exposed attributable entry deselected via roundTrippedLegacyModelIds (R44-4)', async () => {
+    const bBaseUrl = 'https://b.example/v1';
+    const bEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, bBaseUrl);
+    // The round-trip gate must not over-protect: an entry the caller surfaced
+    // (id present in roundTrippedLegacyModelIds) and then deselected is still
+    // removed by the env-key clause.
+    const exposedEntry = {
+      id: 'legacy-custom',
+      name: 'legacy-custom',
+      envKey: bEnvKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [exposedEntry],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: bBaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['my-model'],
+      roundTrippedLegacyModelIds: ['legacy-custom'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[bEnvKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'my-model', name: 'my-model', baseUrl: bBaseUrl, envKey: bEnvKey },
+    ]);
+  });
+
   it('keeps the selected sibling endpoint model when reconnecting', async () => {
     const codingModels = buildProviderTemplate(
       kimiProvider,

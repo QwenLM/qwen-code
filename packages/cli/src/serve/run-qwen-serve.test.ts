@@ -937,6 +937,72 @@ describe('buildProviderSetupInputs', () => {
     expect(inputs.migratedLegacyModelIds).toBeUndefined();
   });
 
+  it('keeps an attributable baseUrl-less custom entry on an explicit serve reconnect (R44-2)', async () => {
+    // The free-form custom provider's env-key clause owns attributable
+    // baseUrl-less entries, so the R42-1 merge-only guarantee must hold here
+    // too: the serve catalog exposes no existingConfig, so a Web Shell/SDK
+    // selection is seeded from what the user types and can never carry a
+    // saved baseUrl-less legacy id. Dropping such an entry from
+    // preserveModels and letting the env-key clause claim it deleted the
+    // user's saved custom model; absence is not deselection on this route.
+    // roundTrippedLegacyModelIds=[] marks the route as non-round-tripping so
+    // buildInstallPlan never treats absence as deselection.
+    const aBaseUrl = 'https://a.example/v1';
+    const legacyModel = {
+      id: 'my-custom',
+      name: 'my-custom',
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        aBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+        // An explicit selection (the only shape Web Shell sends) that cannot
+        // carry 'my-custom' — the catalog never exposed it.
+        modelIds: ['typed-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(inputs.roundTrippedLegacyModelIds).toEqual([]);
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.customProvider, {
+      ...inputs,
+      apiKey: 'sk-a',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[legacyModel.envKey];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // The entry survives the explicit reconnect — not deleted by the env-key
+    // clause despite being absent from the selection.
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'my-custom' }),
+    );
+  });
+
   it('never re-homes or deletes a shared-key legacy entry on a non-merge provider (R43-2)', async () => {
     // minimax/zai/alibaba-standard are non-merge multi-endpoint providers
     // with ONE static env key shared across all endpoints, so a baseUrl-less

@@ -179,6 +179,26 @@ export interface ProviderSetupInputs {
    * (R40-2).
    */
   migratedLegacyModelIds?: readonly string[];
+  /**
+   * Ids of baseUrl-less legacy entries the caller EXPOSED for a deselection
+   * decision — i.e. round-tripped from saved state into the selection the
+   * submitted `modelIds` reflects. The free-form env-key ownership clause
+   * (which removes an attributable baseUrl-less entry omitted from the
+   * submission) treats omission as deselection intent ONLY for these ids.
+   *
+   * A caller that cannot round-trip saved ids — the serve route exposes no
+   * existingConfig, so Web Shell/SDK selections are defaults-seeded and can
+   * never carry or deliberately omit a saved baseUrl-less id (R42-1, R44-2) —
+   * passes an EMPTY list, so absence is never treated as deselection there.
+   * A seeded caller passes the ids it actually surfaced; an entry it never
+   * surfaced (e.g. the CLI dialog hides an attributable entry whose endpoint
+   * it could not restore, R44-4) is likewise protected.
+   *
+   * When OMITTED (undefined) the historical behavior applies — the env-key
+   * clause owns every attributable entry — which keeps callers that fully
+   * round-trip (CLI wizard, ACP, VS Code) unchanged.
+   */
+  roundTrippedLegacyModelIds?: readonly string[];
   advancedConfig?: {
     enableThinking?: boolean;
     multimodal?: InputModalities;
