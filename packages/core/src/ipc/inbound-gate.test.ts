@@ -25,6 +25,8 @@ interface Harness {
   setRawPolicy: (policy: unknown) => void;
   throwOnMode: () => void;
   throwOnPolicy: () => void;
+  failDelivery: () => void;
+  recoverDelivery: () => void;
 }
 
 function harness(
@@ -40,6 +42,7 @@ function harness(
   const delivered: PeerUserFrame[] = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
   const state = { heldChanges: 0 };
+  let deliveryFails = false;
 
   const gate = new InboundGate({
     getApprovalMode: () => {
@@ -50,7 +53,10 @@ function harness(
       if (policyThrows) throw new Error('settings getter exploded');
       return policy as InboundPolicy | undefined;
     },
-    deliver: (frame) => delivered.push(frame),
+    deliver: (frame) => {
+      if (deliveryFails) throw new Error('accepted-message backlog is full');
+      delivered.push(frame);
+    },
     reportStatus: (frame, status) =>
       statuses.push({ msgId: frame.msgId, status }),
     onHeldChange: () => {
@@ -79,6 +85,12 @@ function harness(
     },
     throwOnPolicy: () => {
       policyThrows = true;
+    },
+    failDelivery: () => {
+      deliveryFails = true;
+    },
+    recoverDelivery: () => {
+      deliveryFails = false;
     },
   } as Harness;
 }
@@ -488,6 +500,67 @@ describe('onHeldChange', () => {
     expect(() => gate.admit(f)).not.toThrow();
     expect(gate.decide(f.msgId, 'approve')).toBe('done');
     expect(deliver).toHaveBeenCalledWith(f);
+  });
+});
+
+describe('delivery failure after review', () => {
+  it('re-holds an approved message whose delivery fails', () => {
+    // A full input queue must not turn an approval into a silent,
+    // unrecoverable drop: the message stays reviewable and the sender
+    // hears it is still waiting, not that it expired.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('held');
+
+    h.failDelivery();
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('failed');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.gate.getHeld()[0].frame.msgId).toBe(f.msgId);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'held' });
+  });
+
+  it('lets the user retry a failed approval once delivery recovers', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ fromMode: 'prompting' });
+    h.gate.admit(f);
+    h.failDelivery();
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('failed');
+
+    h.recoverDelivery();
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.delivered).toEqual([f]);
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
+  });
+
+  it('reinserts a failed approval at its original position', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const first = frame({ fromMode: 'prompting' });
+    const second = frame({ fromMode: 'prompting' });
+    h.gate.admit(first);
+    h.gate.admit(second);
+
+    h.failDelivery();
+    expect(h.gate.decide(first.msgId, 'approve')).toBe('failed');
+    expect(h.gate.getHeld().map((entry) => entry.frame.msgId)).toEqual([
+      first.msgId,
+      second.msgId,
+    ]);
+  });
+
+  it('re-holds messages whose delivery fails during reevaluate', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ fromMode: 'prompting' });
+    h.gate.admit(f);
+
+    h.failDelivery();
+    h.setMode(ApprovalMode.DEFAULT);
+    expect(h.gate.reevaluate('mode-changed')).toBe(0);
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.gate.getHeld()[0].frame.msgId).toBe(f.msgId);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'held' });
   });
 });
 

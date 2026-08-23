@@ -280,18 +280,29 @@ export class InboundGate {
    * Returns 'gone' when the id is unknown — it may have been evicted,
    * expired at shutdown, or already decided. Callers surface that rather
    * than treating it as an error, because a stale UI action is normal.
+   *
+   * Returns 'failed' when an approved message could not be delivered
+   * (the input queue is full or tearing down). The message is parked
+   * again exactly where it was, so it stays reviewable and the user can
+   * retry; claiming 'done' would report a release that never happened.
    */
-  decide(msgId: string, decision: 'approve' | 'deny'): 'done' | 'gone' {
+  decide(
+    msgId: string,
+    decision: 'approve' | 'deny',
+  ): 'done' | 'failed' | 'gone' {
     const index = this.held.findIndex((entry) => entry.frame.msgId === msgId);
     if (index === -1) return 'gone';
     const [entry] = this.held.splice(index, 1);
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
-      this.report(
-        entry.frame,
-        this.tryDeliver(entry.frame) ? 'delivered' : 'expired',
-      );
+      if (!this.tryDeliver(entry.frame)) {
+        this.held.splice(index, 0, entry);
+        this.report(entry.frame, 'held');
+        this.notifyHeldChange();
+        return 'failed';
+      }
+      this.report(entry.frame, 'delivered');
     } else {
       this.report(entry.frame, 'denied');
     }
@@ -330,23 +341,29 @@ export class InboundGate {
       }
     }
 
+    let released = 0;
+    for (const entry of release) {
+      if (this.tryDeliver(entry.frame)) {
+        released += 1;
+        this.report(entry.frame, 'delivered');
+      } else {
+        // A failed delivery must not drop a message the user can still
+        // review: park it again and tell the sender it is still waiting.
+        stillHeld.push(entry);
+        this.report(entry.frame, 'held');
+      }
+    }
+
     this.held.length = 0;
     this.held.push(...stillHeld);
 
-    for (const entry of release) {
-      this.report(
-        entry.frame,
-        this.tryDeliver(entry.frame) ? 'delivered' : 'expired',
-      );
-    }
-
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
-        `reevaluate (${reason}): released ${release.length}, dropped ${dropped}, ${this.held.length} still held`,
+        `reevaluate (${reason}): released ${released}, dropped ${dropped}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
-    return release.length;
+    return released;
   }
 
   /**

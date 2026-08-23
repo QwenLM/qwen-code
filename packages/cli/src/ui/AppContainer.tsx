@@ -362,6 +362,8 @@ export function useQueuedSubmissionDrain({
   popNextSubmission,
   enqueueGoalTurn,
   restoreMessages,
+  restorePeerMessage,
+  addHistoryItem,
   submitQuery,
   submissionInFlightRef,
   submissionSettledRevision,
@@ -376,6 +378,8 @@ export function useQueuedSubmissionDrain({
   popNextSubmission: UseMessageQueueReturn['popNextSubmission'];
   enqueueGoalTurn: UseMessageQueueReturn['enqueueGoalTurn'];
   restoreMessages: UseMessageQueueReturn['restoreMessages'];
+  restorePeerMessage: UseMessageQueueReturn['restorePeerMessage'];
+  addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
   submitQuery: ReturnType<typeof useGeminiStream>['submitQuery'];
   submissionInFlightRef: RefObject<boolean>;
   submissionSettledRevision: number;
@@ -456,44 +460,67 @@ export function useQueuedSubmissionDrain({
         isProcessing,
       };
     };
-    const request =
-      submission.kind === 'goal'
-        ? submitQuery(
-            submission.continuationContext,
-            SendMessageType.Goal,
-            undefined,
-            {
-              goal: submission,
-              onAdmissionFailed: () => {
-                enqueueGoalTurn(submission);
-                markAdmissionFailed();
-              },
-            },
-          )
-        : submitQuery(
-            submission.modelText,
-            SendMessageType.UserQuery,
-            undefined,
-            {
-              userAdmission: { turnKey: submission.turnKey },
-              ...(submission.submittedPrompt === undefined
-                ? {}
-                : { submittedPrompt: submission.submittedPrompt }),
-              onAdmissionFailed: () => {
-                // Deferred until idle, the same recovery the direct /btw
-                // path uses: admission failed because a turn is active,
-                // and the mid-turn steer drain returns raw text only — an
-                // undeferred restore of a peer envelope would be steered
-                // into that turn with its projection lost.
-                restoreMessages(
-                  [submission.modelText],
-                  submission.submittedPrompt,
-                  true,
-                );
-                markAdmissionFailed();
-              },
-            },
-          );
+    let request: Promise<void>;
+    if (submission.kind === 'goal') {
+      request = submitQuery(
+        submission.continuationContext,
+        SendMessageType.Goal,
+        undefined,
+        {
+          goal: submission,
+          onAdmissionFailed: () => {
+            enqueueGoalTurn(submission);
+            markAdmissionFailed();
+          },
+        },
+      );
+    } else if (submission.kind === 'peer') {
+      // Peer envelopes skip user-input preprocessing (slash/shell/@):
+      // the text is peer-authored, so submit them on the Teammate send
+      // type, whose early return exists for exactly this hazard. That
+      // path suppresses the user bubble, so render the one-line
+      // projection in its place.
+      addHistoryItem(
+        { type: MessageType.NOTIFICATION, text: submission.displayText },
+        Date.now(),
+      );
+      request = submitQuery(
+        submission.modelText,
+        SendMessageType.Teammate,
+        undefined,
+        {
+          onAdmissionFailed: () => {
+            restorePeerMessage(submission.modelText, submission.displayText);
+            markAdmissionFailed();
+          },
+        },
+      );
+    } else {
+      request = submitQuery(
+        submission.modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          userAdmission: { turnKey: submission.turnKey },
+          ...(submission.submittedPrompt === undefined
+            ? {}
+            : { submittedPrompt: submission.submittedPrompt }),
+          onAdmissionFailed: () => {
+            // Deferred until idle, the same recovery the direct /btw
+            // path uses: admission failed because a turn is active,
+            // and the mid-turn steer drain returns raw text only, which
+            // would steer an undeferred restore into that turn with its
+            // projection lost.
+            restoreMessages(
+              [submission.modelText],
+              submission.submittedPrompt,
+              true,
+            );
+            markAdmissionFailed();
+          },
+        },
+      );
+    }
     void Promise.resolve(request)
       .catch((error) => {
         debugLogger.warn('Queued submission failed during admission', error);
@@ -516,6 +543,8 @@ export function useQueuedSubmissionDrain({
     popNextSubmission,
     queueDrainNonce,
     restoreMessages,
+    restorePeerMessage,
+    addHistoryItem,
     streamingState,
     submissionInFlightRef,
     submissionSettledRevision,
@@ -2348,6 +2377,8 @@ export const AppContainer = (props: AppContainerProps) => {
     popAllMessages,
     restoreMessages,
     drainQueue,
+    addPeerMessage,
+    restorePeerMessage,
   } = useMessageQueue();
 
   midTurnDrainRef.current = drainQueue;
@@ -2421,14 +2452,14 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [addMessage, remoteInput]);
 
   // Cross-session messaging: accepted peer messages enter the same queue as
-  // typed input. First argument is the model-bound text and must stay the
-  // full envelope — it carries the attribution and the authority notice;
-  // the one-line form rides along as the submitted-prompt projection (what
-  // hooks and the recording see), never as the model's copy. Deferred
-  // until idle: the mid-turn steer drain returns raw text only, so a
-  // drained peer message would be recorded and displayed as the envelope
-  // itself — the user's own prompt apparently wrapped in an authority
-  // notice — with the projection lost for good.
+  // typed input but drain on their own path — the queue marks them peer,
+  // and the drain submits them with a send type that skips user-input
+  // preprocessing, because the text is peer-authored: a `@path` inside it
+  // would otherwise read files into the context with no user interaction.
+  // First argument is the model-bound text and must stay the full
+  // envelope — it carries the attribution and the authority notice; the
+  // one-line form rides along as the display projection, never as the
+  // model's copy.
   const peerMessaging = usePeerMessaging();
   useEffect(() => {
     if (!peerMessaging) return;
@@ -2437,10 +2468,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // frames arrive at socket speed but drain at one per turn, and the
       // queue must not grow unboundedly for a busy session.
       if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
-      addMessage(modelText, true, displayText);
+      addPeerMessage(modelText, displayText);
       return true;
     });
-  }, [addMessage, getPendingSubmissionCount, peerMessaging]);
+  }, [addPeerMessage, getPendingSubmissionCount, peerMessaging]);
 
   // Surface parked messages. The model never sees a held message, so
   // without a notice the only symptom is a peer that seems to be ignored.
@@ -4527,6 +4558,8 @@ export const AppContainer = (props: AppContainerProps) => {
     popNextSubmission,
     enqueueGoalTurn,
     restoreMessages,
+    restorePeerMessage,
+    addHistoryItem: historyManager.addItem,
     submitQuery,
     submissionInFlightRef,
     submissionSettledRevision,

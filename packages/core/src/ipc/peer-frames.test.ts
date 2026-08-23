@@ -127,6 +127,23 @@ describe('parsePeerFrame — user frames', () => {
     expect(parsePeerFrame(line(input))).toBeNull();
   });
 
+  // `all` is the /peers bulk keyword, intercepted before any id
+  // resolution: a held message wearing that handle could never be decided
+  // individually, and acting on it would decide every held message.
+  it.each([
+    ['the exact bulk keyword', { ...validUser, msgId: 'all' }],
+    ['a dash-spelled bulk keyword', { ...validUser, msgId: 'a-l-l' }],
+    ['an upper-case bulk keyword', { ...validUser, msgId: 'ALL' }],
+  ])('rejects %s so it cannot alias /peers all', (_label, input) => {
+    expect(parsePeerFrame(line(input))).toBeNull();
+  });
+
+  it('still admits ids that merely contain the keyword', () => {
+    expect(
+      parsePeerFrame(line({ ...validUser, msgId: 'all-nodes-restart-001' })),
+    ).not.toBeNull();
+  });
+
   it('accepts the id shape legitimate senders produce', () => {
     const frame = buildUserFrame({ content: 'hi' });
     expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toMatchObject({
@@ -170,6 +187,7 @@ describe('parsePeerFrame — control frames', () => {
     ['an unknown status', { ...validControl, status: 'maybe' }],
     ['a missing origMsgId', { ...validControl, origMsgId: undefined }],
     ['a whitespace-bearing msgId', { ...validControl, msgId: 'has space' }],
+    ['a bulk-keyword msgId', { ...validControl, msgId: 'all' }],
   ])('rejects a control frame with %s', (_label, input) => {
     expect(parsePeerFrame(line(input))).toBeNull();
   });

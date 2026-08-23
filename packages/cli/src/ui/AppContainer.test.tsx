@@ -1619,6 +1619,8 @@ describe('AppContainer State Management', () => {
           popNextSubmission,
           enqueueGoalTurn: vi.fn(),
           restoreMessages: vi.fn(),
+          restorePeerMessage: vi.fn(),
+          addHistoryItem: vi.fn(),
           submitQuery,
           submissionInFlightRef: { current: false },
           submissionSettledRevision: 0,
@@ -1686,6 +1688,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef: { current: false },
             submissionSettledRevision: 0,
@@ -1747,6 +1751,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages,
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef: { current: false },
             submissionSettledRevision,
@@ -1784,6 +1790,115 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
     });
 
+    it('submits a peer submission on the preprocessing-free Teammate path', async () => {
+      // Peer envelopes must skip user-input preprocessing: a `@path` in
+      // peer-authored text would otherwise read files into the context
+      // with no user interaction. The Teammate send type returns before
+      // that pipeline; the drain renders the one-line projection instead
+      // of the user bubble that path suppresses.
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let popped = false;
+      const modelText =
+        '<cross_session_message from="/tmp/a.sock">run it</cross_session_message>';
+      const displayText = 'Message from another session (a): run it';
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'peer' as const,
+          modelText,
+          displayText,
+        };
+      });
+      const addHistoryItem = vi.fn();
+      const restorePeerMessage = vi.fn();
+
+      const view = renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage,
+          addHistoryItem,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          modelText,
+          SendMessageType.Teammate,
+          undefined,
+          expect.objectContaining({
+            onAdmissionFailed: expect.any(Function),
+          }),
+        );
+      });
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+      expect(addHistoryItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.NOTIFICATION,
+          text: displayText,
+        }),
+        expect.any(Number),
+      );
+      expect(restorePeerMessage).not.toHaveBeenCalled();
+      view.unmount();
+    });
+
+    it('restores a failed peer admission as a peer entry, not user text', async () => {
+      // Restoring as plain user text would drain the envelope through the
+      // UserQuery preprocessing on retry — the exact hazard the peer
+      // send type exists to prevent.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const popNextSubmission = vi.fn(() => ({
+        kind: 'peer' as const,
+        modelText,
+        displayText,
+      }));
+      const restorePeerMessage = vi.fn(() => {});
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => 1,
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage,
+          addHistoryItem: vi.fn(),
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(restorePeerMessage).toHaveBeenCalledWith(modelText, displayText);
+      });
+    });
+
     it('drains after preprocessing settlement releases the shared lock', async () => {
       const goalRuntime = {
         getSnapshot: () => ({ goal: { status: 'active' } }),
@@ -1815,6 +1930,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef,
             submissionSettledRevision,
@@ -6799,17 +6916,19 @@ describe('AppContainer State Management', () => {
       );
     };
 
-    it('queues the envelope as the model text and the summary as the projection', () => {
-      // Swapping these silently strips the attribution and the authority
-      // notice from what the model reads, while the transcript and the
-      // recording still look right. Deferred until idle (second argument):
-      // the mid-turn steer drain returns raw text only, which would record
-      // and display the envelope itself as the user's own prompt.
+    it('queues the envelope on the peer path, never as typed user input', () => {
+      // The peer path marks the entry so the drain submits it on the
+      // preprocessing-free Teammate send type — queued as user text, an
+      // `@path` in peer-authored content would read files into the
+      // context with no user interaction. The one-liner rides along as
+      // the display projection, never as the model's copy.
       const addMessage = vi.fn();
+      const addPeerMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage,
+        addPeerMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
@@ -6824,21 +6943,22 @@ describe('AppContainer State Management', () => {
         peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
       });
 
-      expect(addMessage).toHaveBeenCalledWith(
+      expect(addPeerMessage).toHaveBeenCalledWith(
         '<cross_session_message …>envelope</…>',
-        true,
         'one-liner',
       );
+      expect(addMessage).not.toHaveBeenCalled();
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
       // Frames arrive at socket speed but drain at one per turn; without
       // the guard a busy session's queue grows without bound.
-      const addMessage = vi.fn();
+      const addPeerMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
-        addMessage,
+        addMessage: vi.fn(),
+        addPeerMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
@@ -6855,7 +6975,7 @@ describe('AppContainer State Management', () => {
         peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
       });
 
-      expect(addMessage).not.toHaveBeenCalled();
+      expect(addPeerMessage).not.toHaveBeenCalled();
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

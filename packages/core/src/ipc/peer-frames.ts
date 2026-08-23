@@ -86,7 +86,11 @@ export type PeerFrame = PeerUserFrame | PeerControlFrame;
  * dash-strips to nothing renders an empty one. Either defeats per-message
  * review — with a benign-plus-malicious pair, the user who wants the
  * benign message is forced into `accept all`, releasing the malicious one
- * unreviewed. `buildUserFrame` emits `randomUUID`, which always passes.
+ * unreviewed. An id that canonicalizes to `all` is refused for the same
+ * reason: it aliases the bulk keyword, so it could never be decided
+ * individually — acting on its displayed handle would decide every held
+ * message instead. `buildUserFrame` emits `randomUUID`, which always
+ * passes.
  */
 const MSG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
@@ -130,6 +134,9 @@ export function parsePeerFrame(line: string): PeerFrame | null {
 
   const msgId = parsed['msgId'];
   if (typeof msgId !== 'string' || !MSG_ID_RE.test(msgId)) return null;
+  // Reserved at the wire boundary: `/peers` intercepts the `all` keyword
+  // before it ever resolves an id.
+  if (canonicalizeMsgId(msgId) === 'all') return null;
 
   if (parsed['type'] === 'user') {
     const message = parsed['message'];

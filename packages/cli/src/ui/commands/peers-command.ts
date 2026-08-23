@@ -184,19 +184,31 @@ export const peersCommand: SlashCommand = {
       };
     }
 
-    if (target === 'all') {
+    // Lowercased: the keyword and id resolution both fold case, so an
+    // uppercase ALL must still mean every message, not degrade into an
+    // id-prefix lookup that silently decides one of them.
+    if (target.toLowerCase() === 'all') {
       // Snapshot first: deciding mutates the held list underneath us.
       const ids = held.map((entry) => entry.frame.msgId);
       let count = 0;
+      let failed = 0;
       for (const msgId of ids) {
-        if (peerMessaging.decide(msgId, decision) === 'done') count += 1;
+        const outcome = peerMessaging.decide(msgId, decision);
+        if (outcome === 'done') count += 1;
+        else if (outcome === 'failed') failed += 1;
       }
       return {
         type: 'message',
         messageType: 'info',
-        content: `${verb === 'accept' ? 'Released' : 'Dropped'} ${count} message${
-          count === 1 ? '' : 's'
-        }.`,
+        content:
+          `${verb === 'accept' ? 'Released' : 'Dropped'} ${count} message${
+            count === 1 ? '' : 's'
+          }.` +
+          (failed > 0
+            ? ` ${failed} could not be delivered and ${
+                failed === 1 ? 'is' : 'are'
+              } still waiting — try again once the session catches up.`
+            : ''),
       };
     }
 
@@ -223,6 +235,14 @@ export const peersCommand: SlashCommand = {
         messageType: 'info',
         content:
           'That message is no longer waiting — it may have expired or already been decided.',
+      };
+    }
+    if (outcome === 'failed') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'The session could not take the message just now — its input queue is full. It is still waiting; try again in a moment.',
       };
     }
 

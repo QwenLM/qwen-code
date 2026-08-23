@@ -974,4 +974,101 @@ describe('useMessageQueue', () => {
       });
     });
   });
+
+  describe('peer messages', () => {
+    it('drains a leading peer message alone, never aggregated with user text', () => {
+      // Peer envelopes are peer-authored and submit on a preprocessing-free
+      // path: batching one into a UserQuery turn would run its `@path`
+      // references through the user's file-loading pipeline.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+        result.current.addMessage('typed text');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'typed text',
+      });
+    });
+
+    it('keeps peer entries out of a user-text batch that drains first', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed text');
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'typed text',
+      });
+      expect(submission && 'submittedPrompt' in submission).toBe(true);
+
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('restores a failed peer admission ahead of the queue, still peer', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed text');
+        result.current.restorePeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('never drains a peer message mid-turn', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+    });
+  });
 });

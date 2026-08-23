@@ -142,7 +142,10 @@ export class PeerMessaging {
     return this.gate?.getHeld() ?? [];
   }
 
-  decide(msgId: string, decision: 'approve' | 'deny'): 'done' | 'gone' {
+  decide(
+    msgId: string,
+    decision: 'approve' | 'deny',
+  ): 'done' | 'failed' | 'gone' {
     return this.gate?.decide(msgId, decision) ?? 'gone';
   }
 

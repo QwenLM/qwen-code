@@ -350,4 +350,39 @@ describe('/peers', () => {
     expect(result.content).toContain('No messages');
     expect(fake.decide).not.toHaveBeenCalled();
   });
+
+  it('treats an upper-case ALL as the bulk keyword, not an id prefix', async () => {
+    // A case-folded resolveHeld would match the 'all…' id on its own and
+    // decide exactly one message while the user asked for every one.
+    messages = [
+      held({ msgId: 'all-nodes-restart-001' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+    const result = await run(fake, 'accept ALL');
+    expect(fake.decide).toHaveBeenCalledTimes(2);
+    expect(result.content).toContain('Released 2 messages');
+  });
+
+  it('reports a failed delivery honestly instead of claiming release', async () => {
+    messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    fake.decide = vi.fn(() => 'failed');
+    const result = await run(fake, 'accept aaaaaa');
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('still waiting');
+  });
+
+  it('keeps undeliverable messages out of the released count', async () => {
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+    fake.decide = vi
+      .fn()
+      .mockReturnValueOnce('done')
+      .mockReturnValueOnce('failed');
+    const result = await run(fake, 'accept all');
+    expect(result.content).toContain('Released 1 message.');
+    expect(result.content).toContain('1 could not be delivered');
+    expect(result.content).toContain('still waiting');
+  });
 });
