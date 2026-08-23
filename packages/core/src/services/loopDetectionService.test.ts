@@ -2878,6 +2878,91 @@ describe('LoopDetectionService', () => {
       expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
+    it('still halts a continuously frozen poller across Finished round-trips', () => {
+      // The Finished-boundary decay must only release ABANDONED keys: a board
+      // that stays frozen while the model keeps polling every round-trip keeps
+      // its stuck signal, so the adaptive cap still halts it just past the
+      // soft cap (fail-safe twin of the abandon regression below).
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-frozen-rounds');
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+
+      let fired = false;
+      let totalCalls = 0;
+      for (let round = 0; round < 40 && !fired; round++) {
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        totalCalls++;
+        if (fired) break;
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) break;
+        fired = capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+      }
+      expect(fired).toBe(true);
+      expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      expect(totalCalls).toBeLessThanOrEqual(22);
+    });
+
+    it('releases the adaptive cap when a frozen poller is abandoned for productive work', () => {
+      // The cap's stateful stuck signal must not latch a stale peak from an
+      // abandoned key: interleaved frozen polls peak the signal, then the
+      // model stops polling and does diverse productive work. Pre-fix the
+      // add-only key map kept the peak for the whole prompt, so the turn was
+      // halted as TURN_TOOL_CALL_CAP just past the soft cap (issue #9450).
+      // CLI default skipLoopDetection=true: the cap is the only live path.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-abandon');
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+
+      let fired = false;
+      // 8 interleaved frozen task_list polls, each its own round-trip: the
+      // stateful stuck signal peaks at 8 without halting (still under cap).
+      for (let round = 0; round < 8 && !fired; round++) {
+        fired ||= capService.checkAlwaysOnSafeties(
+          taskListEvent(`tl-${round}`),
+        );
+        fired ||= capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        if (fired) break;
+        fired = capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+      }
+      expect(fired).toBe(false);
+
+      // The model abandons polling and does diverse productive work well past
+      // the soft cap of 20. The abandoned key's peak must decay at the
+      // Finished boundaries, so no TURN_TOOL_CALL_CAP halt fires.
+      for (let i = 0; i < 30 && !fired; i++) {
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_c', { i }),
+        );
+        if (fired) break;
+        if (i % 3 === 2) {
+          capService.checkAlwaysOnSafeties(finishedEvent);
+        }
+      }
+      expect(fired).toBe(false);
+      expect(capService.getLastLoopType()).toBeNull();
+    });
+
     it('does not collapse the fingerprint when board content merely quotes the digest label', () => {
       // task_list embeds peer-authored text verbatim, and agents quote stub
       // text (including the `Full output sha256: <hex>` line this PR adds to

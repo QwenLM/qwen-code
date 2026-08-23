@@ -426,6 +426,16 @@ export class LoopDetectionService {
     }
   >();
 
+  // Stateful keys that recorded a result since the last Finished round-trip
+  // boundary. At each Finished, keys NOT in this set produced no result for
+  // a whole round-trip: the model moved on to other work, so their streak
+  // evidence is abandoned and must stop feeding the cap's stuck signal —
+  // otherwise a key abandoned after a frozen phase keeps its peak for the
+  // whole prompt and the adaptive cap halts a productive turn just past the
+  // soft cap (issue #9450). Keys that keep polling appear in every round's
+  // results and are never decayed.
+  private statefulResultKeysSinceLastFinished = new Set<string>();
+
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
   // consumed by recordToolResultByCallId).
@@ -498,6 +508,11 @@ export class LoopDetectionService {
     if (fingerprint === null) return false;
     const key = this.getToolCallKey(toolCall);
 
+    // Round-trip boundary bookkeeping: this key produced a result in the current
+    // round, so the Finished-boundary decay must not treat it as abandoned
+    // (see statefulResultKeysSinceLastFinished).
+    this.statefulResultKeysSinceLastFinished.add(key);
+
     // Rolling result history for the alternating-pattern carve-out (see
     // checkAlternatingPattern), capped at one window's occurrences per key.
     const history = this.statefulAlternationHistory.get(key) ?? [];
@@ -558,13 +573,7 @@ export class LoopDetectionService {
     if (consecutiveIdentical > this.statefulCapKeyRepeat) {
       this.statefulCapKeyRepeat = consecutiveIdentical;
     } else if (fingerprintChanged) {
-      let peak = consecutiveIdentical;
-      for (const other of this.statefulRepeatState.values()) {
-        if (other.consecutiveIdenticalResults > peak) {
-          peak = other.consecutiveIdenticalResults;
-        }
-      }
-      this.statefulCapKeyRepeat = peak;
+      this.recomputeStatefulCapPeak();
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
@@ -718,6 +727,12 @@ export class LoopDetectionService {
     // round-trip rather than resetting to zero.
     if (event.type === GeminiEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
+      // Results are recorded between round-trips (after the Finished event
+      // of the stream that emitted their calls), so at this boundary the
+      // results recorded since the previous Finished are exactly the prior
+      // round's executed results — the safe point to decay stateful keys
+      // absent from them (see decayAbandonedStatefulStreaks).
+      this.decayAbandonedStatefulStreaks();
       return false;
     }
 
@@ -744,6 +759,7 @@ export class LoopDetectionService {
         state.unchangedStreak = 0;
         state.consecutiveIdenticalResults = 0;
       }
+      this.statefulResultKeysSinceLastFinished.clear();
       this.statefulAlternationHistory.clear();
       this.statefulRepeatKeys.clear();
       return false;
@@ -1326,6 +1342,55 @@ export class LoopDetectionService {
   }
 
   /**
+   * Recomputes the cap's stateful stuck signal (statefulCapKeyRepeat) from
+   * the keys' CURRENT consecutive-identical-result streaks, dropping any
+   * latched peak that no longer reflects live evidence.
+   */
+  private recomputeStatefulCapPeak(): void {
+    let peak = 0;
+    for (const state of this.statefulRepeatState.values()) {
+      if (state.consecutiveIdenticalResults > peak) {
+        peak = state.consecutiveIdenticalResults;
+      }
+    }
+    this.statefulCapKeyRepeat = peak;
+  }
+
+  /**
+   * Round-trip boundary decay for the cap's stateful stuck signal. A key
+   * that produced no result for a whole round-trip was abandoned: the model
+   * moved on to other work, so its frozen-phase streak must stop feeding the
+   * stuck signal. Without this the key map is add-only and the peak latches
+   * for the whole prompt — the adaptive cap would then halt a productive
+   * turn just past the soft cap on the abandoned key's stale peak (issue
+   * #9450). Keys polled in every round-trip appear in the set and keep their
+   * streaks, so a continuously frozen board still arms the cap. lastFingerprint
+   * survives the decay: when polling resumes, the first fresh result is
+   * still judged against the last observed one (changed → productive,
+   * unchanged → the count re-accumulates toward the halt).
+   */
+  private decayAbandonedStatefulStreaks(): void {
+    let decayed = false;
+    for (const [key, state] of this.statefulRepeatState) {
+      if (this.statefulResultKeysSinceLastFinished.has(key)) continue;
+      if (
+        state.consecutiveIdenticalResults > 0 ||
+        state.resultsObserved > 0 ||
+        state.unchangedStreak > 0
+      ) {
+        state.consecutiveIdenticalResults = 0;
+        state.resultsObserved = 0;
+        state.unchangedStreak = 0;
+        decayed = true;
+      }
+    }
+    this.statefulResultKeysSinceLastFinished.clear();
+    if (decayed) {
+      this.recomputeStatefulCapPeak();
+    }
+  }
+
+  /**
    * Records a (tool,args) occurrence for the adaptive cap and updates the
    * running max repeat count. Always-on (called from checkAlwaysOnSafeties
    * with the already-hashed key).
@@ -1493,6 +1558,7 @@ export class LoopDetectionService {
     this.capMaxKeyRepeat = 0;
     this.statefulCapKeyRepeat = 0;
     this.statefulRepeatState.clear();
+    this.statefulResultKeysSinceLastFinished.clear();
     this.statefulRepeatKeys.clear();
     this.statefulAlternationHistory.clear();
     this.requestByCallId.clear();
