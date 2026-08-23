@@ -20,8 +20,22 @@ const skillDir = path.dirname(fileURLToPath(import.meta.url));
 const POINTER_RE = /\(measured; DESIGN\.md — ([^()\n]+(?:\([^()\n]*\))?)\)/g;
 const POINTER_OPEN = '(measured; DESIGN.md — ';
 
-function skillBody(): string {
+// The verdict-gated reference files (#9787): Step 7, Step 8 and the Aone
+// paths live beside the core body and are read on demand. The split moved
+// whole sections verbatim, so every revert guard below governs the full
+// corpus, whichever file the guarded text now lives in.
+const REFERENCE_FILES = ['posting.md', 'persistence.md', 'aone.md'];
+
+function coreBody(): string {
   return fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+}
+
+function referenceBody(name: string): string {
+  return fs.readFileSync(path.join(skillDir, 'references', name), 'utf8');
+}
+
+function skillBody(): string {
+  return [coreBody(), ...REFERENCE_FILES.map(referenceBody)].join('\n');
 }
 
 function incidentPointers(body: string): string[] {
@@ -950,5 +964,66 @@ describe('bundled review skill', () => {
       (m) => m[1],
     );
     expect(new Set(advertised)).toEqual(new Set(declared));
+  });
+
+  it('ships the verdict-gated reference files beside the core body', () => {
+    // The split (#9787) moves whole steps, not rules: the core keeps the
+    // gates and the invariants that bind runs which never load a file, and
+    // each reference owns one conditional territory.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name).length).toBeGreaterThan(1000);
+    }
+    expect(referenceBody('posting.md')).toContain('# Step 7: Submit PR review');
+    expect(referenceBody('persistence.md')).toContain(
+      '# Step 8: Save review report and cache',
+    );
+    expect(referenceBody('aone.md')).toContain('# Aone Code paths');
+  });
+
+  it('gates every reference file on the verdict in the core body', () => {
+    // A run must learn from the injected core alone WHICH file to read and
+    // when; a gate that moved into the file it gates would be unreadable.
+    const core = coreBody();
+    expect(core).toContain('**Reference files, gated by this verdict.**');
+    expect(core).toContain('`references/posting.md` — Step 7');
+    expect(core).toContain('`references/persistence.md` — Step 8');
+    expect(core).toContain('`references/aone.md` — the Aone paths');
+  });
+
+  it('keeps the write prohibition and the posting gates in the core body', () => {
+    // The one-sentence write ban and the PR-only/high-only posting rule must
+    // bind a run that never loads posting.md — the bypass they guard against
+    // does not wait for the gate file.
+    const core = coreBody();
+    expect(core).toContain(
+      '`qwen review submit` is the only write path in this skill',
+    );
+    expect(core).toContain('Posting is a PR-only, high-only action');
+    // The step headings stay in core so every "Step 7" / "Step 8" cross-
+    // reference in the corpus resolves to the pointer that forwards.
+    expect(core).toContain('## Step 7: Submit PR review');
+    expect(core).toContain('## Step 8: Save review report and cache');
+    // The compose-state field list relocated to Step 6 references the
+    // never-in-body rule whose full text moved to posting.md; the entry must
+    // restate the rule's substance so a report-only run (which never loads
+    // posting.md) still sees why a Suggestion must not ride the review body.
+    expect(core).toContain('does not filter review bodies');
+  });
+
+  it('moved the sections whole — no step body duplicated across files', () => {
+    const core = coreBody();
+    // Distinctive openings of the moved sections: present in exactly one file.
+    expect(core).not.toContain(
+      '**Use the "Create Review" API to submit verdict + inline comments',
+    );
+    expect(core).not.toContain('### Report persistence');
+    expect(core).not.toContain(
+      'run `/review` **from inside a clone of that repo**',
+    );
+    // The compose-state field list relocated from Step 7 to Step 6's Verdict
+    // section: one copy in the corpus, in the core.
+    const corpus = skillBody();
+    expect(corpus.match(/- `modelId` — for the footer\./g)).toHaveLength(1);
+    expect(core).toContain('- `modelId` — for the footer.');
   });
 });

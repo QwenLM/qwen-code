@@ -18,7 +18,7 @@
 // edit that changes a template fails HERE, next to the code that must follow
 // it, instead of silently in a review months later.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -33,10 +33,7 @@ const repoRoot = resolve(
   '..',
 );
 
-const SKILL_PATH = join(
-  repoRoot,
-  'packages/core/src/skills/bundled/review/SKILL.md',
-);
+const SKILL_DIR = join(repoRoot, 'packages/core/src/skills/bundled/review');
 
 /** The `{target}` token, rendered per class exactly as the skill defines it. */
 const TARGETS = {
@@ -46,9 +43,22 @@ const TARGETS = {
 };
 
 describe('run pins match the bundled skill templates', () => {
-  const skill = existsSync(SKILL_PATH)
-    ? readFileSync(SKILL_PATH, 'utf8').replace(/\r\n/g, '\n')
-    : null;
+  // The skill is a corpus since #9787: the composed-name template lives in
+  // the core SKILL.md, the report stems in references/persistence.md. Read
+  // every file of it, sorted so the oracle is deterministic.
+  const skill = (() => {
+    if (!existsSync(join(SKILL_DIR, 'SKILL.md'))) return null;
+    const parts = [readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8')];
+    const refsDir = join(SKILL_DIR, 'references');
+    if (existsSync(refsDir)) {
+      for (const name of readdirSync(refsDir).sort()) {
+        if (name.endsWith('.md')) {
+          parts.push(readFileSync(join(refsDir, name), 'utf8'));
+        }
+      }
+    }
+    return parts.join('\n').replace(/\r\n/g, '\n');
+  })();
 
   // A sparse or partial checkout has no skill to read; the pins are still
   // covered by run.test.ts's own cases. Failing here would report a checkout
