@@ -21,17 +21,20 @@ import path from 'node:path';
  * declaration and emits `import {} from` / `export {} from`, a runtime edge
  * that still evaluates the target module. Everything else (value imports,
  * value re-exports, dynamic `import()`) is reported too: a literal or
- * single-segment template source is checked against its resolved path, and a
+ * single-segment template source is checked against its resolved path. CLI
+ * baseUrl specifiers rooted at `src/` are resolved from `packages/cli/` and
+ * checked the same way. A
  * computed source (a multi-segment template or a `+` concatenation) whose
- * statically known prefix is relative is reported fail-closed, because
+ * statically known prefix is local is reported fail-closed, because
  * interpolation can contribute a `../` step no static check can rule out. A
- * computed source with no statically known relative prefix is dropped, the
- * same boundary applied to non-relative static specifiers. The two remaining
+ * computed source with no statically known local prefix is dropped, the same
+ * boundary applied to package and builtin specifiers. The two remaining
  * instances (`Settings` in `modelConfigUtils.ts`, `CommandContext` in
  * `sessionPaths.ts`) are this irreducible type-level coupling.
  */
 
-const CLI_UTILS_MARKER = 'packages/cli/src/utils/';
+const CLI_PACKAGE_MARKER = 'packages/cli/';
+const CLI_UTILS_MARKER = `${CLI_PACKAGE_MARKER}src/utils/`;
 const TEST_OR_FIXTURE_SEGMENTS = new Set(['__tests__', 'fixtures']);
 
 function isCliUtilsProductionFile(filename) {
@@ -52,11 +55,13 @@ function isCliUtilsProductionFile(filename) {
 
 function escapesUtils(filename, importedPath) {
   const normalized = path.normalize(filename).replaceAll('\\', '/');
-  const utilsRoot = normalized.slice(
-    0,
-    normalized.lastIndexOf(CLI_UTILS_MARKER) + CLI_UTILS_MARKER.length,
+  const markerStart = normalized.lastIndexOf(CLI_UTILS_MARKER);
+  const utilsRoot = normalized.slice(0, markerStart + CLI_UTILS_MARKER.length);
+  const cliRoot = normalized.slice(0, markerStart + CLI_PACKAGE_MARKER.length);
+  const resolved = path.resolve(
+    importedPath.startsWith('src/') ? cliRoot : path.dirname(filename),
+    importedPath,
   );
-  const resolved = path.resolve(path.dirname(filename), importedPath);
   return path
     .relative(utilsRoot, resolved)
     .replaceAll('\\', '/')
@@ -92,6 +97,10 @@ function isRelativePrefix(prefix) {
   );
 }
 
+function isCliBaseUrlPrefix(prefix) {
+  return prefix.startsWith('src/');
+}
+
 export default {
   meta: {
     type: 'problem',
@@ -120,7 +129,7 @@ export default {
     const reportIfEscaping = (sourceNode, importedPath) => {
       if (
         typeof importedPath === 'string' &&
-        importedPath.startsWith('.') &&
+        (importedPath.startsWith('.') || isCliBaseUrlPrefix(importedPath)) &&
         escapesUtils(filename, importedPath)
       ) {
         context.report({ node: sourceNode, messageId: 'noUtilsUpwardImport' });
@@ -156,11 +165,14 @@ export default {
       // interpolation can contribute a `../` step, so no static check can
       // prove the import stays inside utils/ (a leading `../` cannot be
       // undone by interpolation at all). A computed source with no known
-      // relative prefix — a bare identifier, a package-like prefix — is
-      // dropped, the same boundary applied to non-relative static
-      // specifiers.
+      // local prefix — a bare identifier or a package-like prefix — is
+      // dropped, the same boundary applied to package and builtin static
+      // specifiers. CLI baseUrl sources rooted at `src/` are local too.
       const prefix = knownDynamicPrefix(source);
-      if (typeof prefix === 'string' && isRelativePrefix(prefix)) {
+      if (
+        typeof prefix === 'string' &&
+        (isRelativePrefix(prefix) || isCliBaseUrlPrefix(prefix))
+      ) {
         context.report({
           node: source,
           messageId: 'noUtilsUnprovableDynamicImport',

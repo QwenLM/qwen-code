@@ -30,6 +30,7 @@ describe('no-utils-upward-import', () => {
     ],
     ['packages/cli/src/utils/foo.ts', '../ui/commands/types.js'],
     ['packages/cli/src/utils/foo.ts', '../i18n/index.js'],
+    ['packages/cli/src/utils/foo.ts', 'src/config/settings.js'],
     [
       'packages/cli/src/utils/foo.ts',
       '../nonInteractive/nonInteractiveHelpers.js',
@@ -62,9 +63,10 @@ describe('no-utils-upward-import', () => {
     ).toHaveLength(1);
     expect(runRule("import('../config/settings.js');", file)).toHaveLength(1);
     expect(runRule('import(`../config/settings.js`);', file)).toHaveLength(1);
+    expect(runRule("import('src/config/settings.js');", file)).toHaveLength(1);
   });
 
-  it('fails closed on computed dynamic sources with a relative known prefix', () => {
+  it('fails closed on computed dynamic sources with a local known prefix', () => {
     const file = 'packages/cli/src/utils/foo.ts';
     // A multi-segment template: interpolation can contribute a `../` step,
     // and a leading `../` cannot be undone, so the import cannot be proven
@@ -77,9 +79,10 @@ describe('no-utils-upward-import', () => {
     // A relative `./` prefix is also unprovable (interpolation could still
     // climb), so it is reported too.
     expect(runRule('import(`./sub/${name}.js`);', file)).toHaveLength(1);
+    expect(runRule('import(`src/config/${name}.js`);', file)).toHaveLength(1);
   });
 
-  it('drops computed dynamic sources with no statically known relative prefix', () => {
+  it('drops computed dynamic sources with no statically known local prefix', () => {
     const file = 'packages/cli/src/utils/foo.ts';
     // A bare identifier or a package-like prefix is the same boundary the
     // static check applies to non-relative specifiers — not reported.
@@ -104,6 +107,12 @@ describe('no-utils-upward-import', () => {
       runRule(
         "import value from '../../utils/sibling.js';",
         'packages/cli/src/utils/housekeeping/cleanup.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import value from 'src/utils/sibling.js';",
+        'packages/cli/src/utils/foo.ts',
       ),
     ).toHaveLength(0);
     // same doubly-nested shape as the reject case: a sibling import stays
