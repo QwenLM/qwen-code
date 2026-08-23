@@ -38,7 +38,6 @@ export const useMessageHandling = () => {
   const [messages, setMessages] = useState<TextMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState('');
   // Track the index of the assistant placeholder message during streaming
   const streamingMessageIndexRef = useRef<number | null>(null);
   // Track the index of the current aggregated thinking message
@@ -142,9 +141,8 @@ export const useMessageHandling = () => {
   /**
    * Set waiting for response state
    */
-  const setWaitingForResponse = useCallback((message: string) => {
+  const setWaitingForResponse = useCallback(() => {
     setIsWaitingForResponse(true);
-    setLoadingMessage(message);
   }, []);
 
   /**
@@ -152,7 +150,6 @@ export const useMessageHandling = () => {
    */
   const clearWaitingForResponse = useCallback(() => {
     setIsWaitingForResponse(false);
-    setLoadingMessage('');
   }, []);
 
   return {
@@ -160,7 +157,6 @@ export const useMessageHandling = () => {
     messages,
     isStreaming,
     isWaitingForResponse,
-    loadingMessage,
 
     // Operations
     addMessage,

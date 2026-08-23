@@ -120,7 +120,6 @@ vi.mock('./hooks/message/useMessageHandling.js', () => ({
     messages: mockMessages,
     isStreaming: mockMessageState.isStreaming,
     isWaitingForResponse: mockMessageState.isWaitingForResponse,
-    loadingMessage: null,
     addMessage: mockAddMessage,
     endStreaming: mockEndStreaming,
     setWaitingForResponse: vi.fn(),
