@@ -381,6 +381,38 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       },
     );
 
+    itOnWin32(
+      'skips a non-record value when merging case-collided keys',
+      async () => {
+        const resolvedDir = path.resolve(dir);
+        const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({
+            [resolvedDir]: {
+              slack: {
+                hash: hashMcpServerConfig(server),
+                status: 'approved',
+              },
+            },
+            [flipDriveCase(resolvedDir)]: {
+              // A hand edit or sync corruption can write `null` where a
+              // record belongs. The merge guard must skip it (rather than
+              // dereference `record.status` and condemn the whole file); the
+              // valid decision under the other casing must survive.
+              slack: null,
+            },
+          }),
+        );
+        resetMcpApprovalsForTesting();
+        const approvals = loadMcpApprovals();
+        expect(approvals.errors).toEqual([]);
+        expect(approvals.getState(resolvedDir, 'slack', server)).toBe(
+          'approved',
+        );
+      },
+    );
+
     itOnWin32('folds legacy UNC keys at load time', async () => {
       const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
       fs.writeFileSync(
