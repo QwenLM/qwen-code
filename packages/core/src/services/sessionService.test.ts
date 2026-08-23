@@ -22,6 +22,7 @@ import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  computeUniqueBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -5953,23 +5954,25 @@ describe('SessionService', () => {
     it('returns titles whose custom_title starts with the prefix (case-insensitive)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'my-branch (Branch)',
+        'my-branch(1)',
       );
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'My-Branch (Branch 2)',
+        'My-Branch(2)',
       );
       seedSessionWithTitle(
         '33333333-3333-3333-3333-333333333333',
         'unrelated session',
       );
 
-      const titles =
-        await service.findSessionTitlesByPrefix('my-branch (Branch');
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
 
       expect(new Set(titles)).toEqual(
-        new Set(['my-branch (Branch)', 'My-Branch (Branch 2)']),
+        new Set(['my-branch(1)', 'My-Branch(2)']),
       );
+      await expect(
+        service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
+      ).resolves.toBe('my-branch(1)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -5980,22 +5983,22 @@ describe('SessionService', () => {
     it('skips sessions from other projects (collisions are project-scoped)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'shared (Branch)',
+        'shared(1)',
         cwd,
       );
       // Same chats dir (sessions are stored under projectHash anyway), but
       // the record's cwd belongs to another project → must be skipped.
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'shared (Branch 2)',
+        'shared(2)',
         '/some/other/project',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('shared (Branch');
-      expect(titles).toEqual(['shared (Branch)']);
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
     });
 
-    it('skips files without a custom_title record', async () => {
+    it('uses the picker prompt when a session has no custom title', async () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
@@ -6013,12 +6016,40 @@ describe('SessionService', () => {
           timestamp: '2026-04-22T00:00:00.000Z',
           cwd,
           version: 'test',
-          message: { role: 'user', parts: [{ text: 'hi' }] },
+          message: {
+            role: 'user',
+            parts: [{ text: '创建 MR 描述生成 Skill(1)' }],
+          },
         }) + '\n',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('anything');
-      expect(titles).toEqual([]);
+      const titles =
+        await service.findSessionTitlesByPrefix('创建 MR 描述生成 Skill(');
+      expect(titles).toEqual(['创建 MR 描述生成 Skill(1)']);
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        '创建 MR 描述生成 Skill(1)',
+      );
+    });
+  });
+
+  describe('computeUniqueBranchTitle', () => {
+    it('uses the first available numeric suffix', async () => {
+      const service = {
+        findSessionTitlesByPrefix: vi
+          .fn()
+          .mockResolvedValue([
+            '创建 MR 描述生成 Skill(1)',
+            '创建 MR 描述生成 Skill(2)',
+            '创建 MR 描述生成 Skill(4)',
+          ]),
+      } as unknown as SessionService;
+
+      await expect(
+        computeUniqueBranchTitle('创建 MR 描述生成 Skill', service),
+      ).resolves.toBe('创建 MR 描述生成 Skill(3)');
+      expect(service.findSessionTitlesByPrefix).toHaveBeenCalledWith(
+        '创建 MR 描述生成 Skill(',
+      );
     });
   });
 

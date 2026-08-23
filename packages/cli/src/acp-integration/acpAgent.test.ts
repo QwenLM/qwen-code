@@ -621,9 +621,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     readonly rpcCode = -32023;
     readonly errorKind = 'session_writer_unavailable';
   },
-  computeUniqueBranchTitle: vi.fn(
-    async (baseName: string) => `${baseName} (Branch)`,
-  ),
+  computeUniqueBranchTitle: vi.fn(async (baseName: string) => `${baseName}(1)`),
   Storage: {
     getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
     getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
@@ -15626,6 +15624,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       {
         cwd: '/workspace-other',
         sessionId: liveSessionId,
+        name: '创建 MR 描述生成 Skill',
       },
     );
 
@@ -15638,12 +15637,12 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
-      { title: 'Source session (Branch)' },
+      { title: '创建 MR 描述生成 Skill(1)' },
     );
     expect(sessionService.renameSession).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      title: 'Source session (Branch)',
-      displayName: 'Source session (Branch)',
+      title: '创建 MR 描述生成 Skill(1)',
+      displayName: '创建 MR 描述生成 Skill(1)',
     });
 
     mockConnectionState.resolve();
@@ -15652,21 +15651,32 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it.each([
     {
-      sourceTitle: 'Source session (Branch 2)',
-      expectedTitle: 'Source session (Branch)',
+      sourceTitle: 'Source session(2)',
+      name: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: 'Source session(1)',
+    },
+    {
+      sourceTitle: 'Recorder title',
+      name: 'Picker title(2)',
+      persistedDisplayName: undefined,
+      expectedTitle: 'Picker title(1)',
     },
     {
       sourceTitle: undefined,
-      expectedTitle: '550e8400 (Branch)',
+      name: undefined,
+      persistedDisplayName: 'Prompt session',
+      expectedTitle: 'Prompt session(1)',
     },
   ])(
     'derives the branch title from $sourceTitle',
-    async ({ sourceTitle, expectedTitle }) => {
+    async ({ sourceTitle, name, persistedDisplayName, expectedTitle }) => {
       const recording = makeRecordingService();
       recording.getCurrentCustomTitle.mockReturnValue(sourceTitle);
       const sessionService = {
         forkSession: vi.fn().mockResolvedValue(undefined),
         findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+        getSessionDisplayName: vi.fn().mockResolvedValue(persistedDisplayName),
         renameSession: vi.fn().mockResolvedValue(true),
         removeSession: vi.fn().mockResolvedValue(undefined),
       };
@@ -15682,6 +15692,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         {
           cwd: '/tmp',
           sessionId: liveSessionId,
+          ...(name !== undefined ? { name } : {}),
         },
       );
 
@@ -15694,6 +15705,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
         title: expectedTitle,
         displayName: expectedTitle,
       });
+      expect(sessionService.getSessionDisplayName).toHaveBeenCalledTimes(
+        sourceTitle === undefined && name === undefined ? 1 : 0,
+      );
 
       mockConnectionState.resolve();
       await agentPromise;
@@ -15719,7 +15733,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       {
         cwd: '/tmp',
         sessionId: liveSessionId,
-        name: 'Side task',
+        name: 'Side task(2)',
       },
     );
 
@@ -15731,15 +15745,15 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sourceType: 'side_task',
           sourceId: liveSessionId,
         },
-        title: 'Side task',
+        title: 'Side task(2)',
       },
     );
     expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
     expect(sessionService.renameSession).not.toHaveBeenCalled();
     expect(sessionService.removeSession).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      title: 'Side task',
-      displayName: 'Side task',
+      title: 'Side task(2)',
+      displayName: 'Side task(2)',
     });
 
     mockConnectionState.resolve();
@@ -15804,7 +15818,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
-      { title: 'Source session (Branch)', atRecordId: checkpoint },
+      { title: 'Source session(1)', atRecordId: checkpoint },
     );
     expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
     expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();

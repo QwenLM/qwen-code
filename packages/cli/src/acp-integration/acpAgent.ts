@@ -1137,19 +1137,12 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
-function deriveForkBaseName(
-  name: unknown,
-  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
-  sessionId: string,
-): string {
-  if (typeof name === 'string' && name.trim().length > 0) {
-    return name.trim();
-  }
-  const existingTitle = recording?.getCurrentCustomTitle();
-  const stripped = existingTitle
-    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+function normalizeBranchBaseName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value
+    .replace(/\s*(?:\(Branch(?:\s+\d+)?\)|\(\d+\))\s*$/, '')
     .trim();
-  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
+  return normalized || undefined;
 }
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
@@ -12009,11 +12002,15 @@ class QwenAgent implements Agent {
                   const recording = sourceConfig.getChatRecordingService();
                   const sessionService = sourceConfig.getSessionService();
 
-                  const baseName = deriveForkBaseName(
-                    name,
-                    recording,
-                    sessionId,
-                  );
+                  const baseName =
+                    normalizeBranchBaseName(name) ??
+                    normalizeBranchBaseName(
+                      recording?.getCurrentCustomTitle(),
+                    ) ??
+                    normalizeBranchBaseName(
+                      await sessionService.getSessionDisplayName(sessionId),
+                    ) ??
+                    sessionId.slice(0, 8);
 
                   const title = await computeUniqueBranchTitle(
                     baseName,
@@ -12051,7 +12048,11 @@ class QwenAgent implements Agent {
         const recording = sourceConfig.getChatRecordingService();
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
-        const title = deriveForkBaseName(name, recording, sessionId);
+        const title =
+          typeof name === 'string' && name.trim().length > 0
+            ? name.trim()
+            : (normalizeBranchBaseName(recording?.getCurrentCustomTitle()) ??
+              sessionId.slice(0, 8));
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {

@@ -233,7 +233,7 @@ export function useBranchCommand(
 
         // 11. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
-        //    user-provided `name`; no `(Branch)` suffix — that decoration
+        //    user-provided `name`; no generated numeric suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing
         //    announcement.
         const titleInfo = name ? ` "${name}"` : '';

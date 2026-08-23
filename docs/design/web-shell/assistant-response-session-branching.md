@@ -700,6 +700,9 @@ target `<newSessionId>.jsonl` must therefore be the last resource published.
 Before creating target resources, compute and sanitize the final title. The
 Core fork input includes that title, and Core appends its `custom_title` record
 inside the staged transcript. There is no post-publication rename transaction.
+Use the source session's picker display name (`customTitle || prompt`) as the
+base, remove an existing generated fork suffix, and append the lowest available
+numeric suffix: `Title(1)`, `Title(2)`, and so on.
 
 ### 14.2 Temporary resources
 
