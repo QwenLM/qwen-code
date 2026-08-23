@@ -64,6 +64,29 @@ describe('no-utils-upward-import', () => {
     expect(runRule('import(`../config/settings.js`);', file)).toHaveLength(1);
   });
 
+  it('fails closed on computed dynamic sources with a relative known prefix', () => {
+    const file = 'packages/cli/src/utils/foo.ts';
+    // A multi-segment template: interpolation can contribute a `../` step,
+    // and a leading `../` cannot be undone, so the import cannot be proven
+    // to stay inside utils/ — reported even though part is interpolated.
+    expect(runRule('import(`../i18n/${locale}.js`);', file)).toHaveLength(1);
+    // A `+` concatenation with a relative leftmost literal, same reasoning.
+    expect(runRule("import('../config/' + name + '.js');", file)).toHaveLength(
+      1,
+    );
+    // A relative `./` prefix is also unprovable (interpolation could still
+    // climb), so it is reported too.
+    expect(runRule('import(`./sub/${name}.js`);', file)).toHaveLength(1);
+  });
+
+  it('drops computed dynamic sources with no statically known relative prefix', () => {
+    const file = 'packages/cli/src/utils/foo.ts';
+    // A bare identifier or a package-like prefix is the same boundary the
+    // static check applies to non-relative specifiers — not reported.
+    expect(runRule('import(moduleName);', file)).toHaveLength(0);
+    expect(runRule('import(`${pkg}/entry.js`);', file)).toHaveLength(0);
+  });
+
   it('allows imports that stay within utils', () => {
     expect(
       runRule(

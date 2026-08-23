@@ -20,10 +20,15 @@ import path from 'node:path';
  * reported instead: under this repo's `verbatimModuleSyntax`, tsc keeps the
  * declaration and emits `import {} from` / `export {} from`, a runtime edge
  * that still evaluates the target module. Everything else (value imports,
- * value re-exports, literal/template dynamic `import()`) is reported too. The
- * two remaining instances (`Settings` in `modelConfigUtils.ts`,
- * `CommandContext` in `sessionPaths.ts`) are this irreducible type-level
- * coupling.
+ * value re-exports, dynamic `import()`) is reported too: a literal or
+ * single-segment template source is checked against its resolved path, and a
+ * computed source (a multi-segment template or a `+` concatenation) whose
+ * statically known prefix is relative is reported fail-closed, because
+ * interpolation can contribute a `../` step no static check can rule out. A
+ * computed source with no statically known relative prefix is dropped, the
+ * same boundary applied to non-relative static specifiers. The two remaining
+ * instances (`Settings` in `modelConfigUtils.ts`, `CommandContext` in
+ * `sessionPaths.ts`) are this irreducible type-level coupling.
  */
 
 const CLI_UTILS_MARKER = 'packages/cli/src/utils/';
@@ -58,6 +63,35 @@ function escapesUtils(filename, importedPath) {
     .startsWith('..');
 }
 
+/**
+ * The statically known leading characters of a computed dynamic-import
+ * source: the first quasi of a template literal, the string literal itself,
+ * or the leftmost operand of a `+` concatenation. Anything else (a bare
+ * identifier, a call, an empty first quasi) has no statically known prefix.
+ */
+function knownDynamicPrefix(node) {
+  if (node.type === 'Literal') {
+    return typeof node.value === 'string' ? node.value : null;
+  }
+  if (node.type === 'TemplateLiteral') {
+    return node.quasis[0].value.cooked;
+  }
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    return knownDynamicPrefix(node.left);
+  }
+  return null;
+}
+
+/** Whether a known prefix spells a relative specifier (`./`, `../`, `.`, `..`). */
+function isRelativePrefix(prefix) {
+  return (
+    prefix === '.' ||
+    prefix === '..' ||
+    prefix.startsWith('./') ||
+    prefix.startsWith('../')
+  );
+}
+
 export default {
   meta: {
     type: 'problem',
@@ -70,6 +104,11 @@ export default {
         'packages/cli/src/utils must not import outside utils/. ' +
         'Invert the dependency (pass the value in) or move the module to the ' +
         'domain directory that owns it (#9146).',
+      noUtilsUnprovableDynamicImport:
+        'packages/cli/src/utils cannot statically prove this computed ' +
+        'dynamic import() stays inside utils/ — interpolation can ' +
+        'contribute a `../` step. Resolve the target through a literal or ' +
+        'single-segment template source, or pass the module in (#9146).',
     },
   },
   create(context) {
@@ -106,11 +145,26 @@ export default {
       const { source } = node;
       if (source.type === 'Literal') {
         reportIfEscaping(source, source.value);
-      } else if (
-        source.type === 'TemplateLiteral' &&
-        source.quasis.length === 1
-      ) {
+        return;
+      }
+      if (source.type === 'TemplateLiteral' && source.quasis.length === 1) {
         reportIfEscaping(source, source.quasis[0].value.cooked);
+        return;
+      }
+      // Computed sources — multi-segment templates and `+` concatenations —
+      // fail closed when their statically known prefix is relative:
+      // interpolation can contribute a `../` step, so no static check can
+      // prove the import stays inside utils/ (a leading `../` cannot be
+      // undone by interpolation at all). A computed source with no known
+      // relative prefix — a bare identifier, a package-like prefix — is
+      // dropped, the same boundary applied to non-relative static
+      // specifiers.
+      const prefix = knownDynamicPrefix(source);
+      if (typeof prefix === 'string' && isRelativePrefix(prefix)) {
+        context.report({
+          node: source,
+          messageId: 'noUtilsUnprovableDynamicImport',
+        });
       }
     };
 
