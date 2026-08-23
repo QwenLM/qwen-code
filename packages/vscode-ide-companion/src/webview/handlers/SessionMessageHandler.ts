@@ -874,6 +874,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
         },
       });
 
+      // The companion's direct stdio ACP channel never receives a
+      // user_message_chunk for an interactive prompt, so echo the user's
+      // own turn into the transcript timeline (mirrors the daemon-bridge
+      // echo on the SSE bus). Posted before the prompt is dispatched so
+      // the user block renders ahead of this turn's assistant frames.
+      const transcriptEchoSessionId = this.agentManager.currentSessionId;
+      if (transcriptEchoSessionId && displayText) {
+        this.sendToWebView({
+          type: 'transcriptUpdate',
+          data: {
+            sessionId: transcriptEchoSessionId,
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: displayText },
+            },
+          },
+        });
+      }
+
       await this.agentManager.sendMessage(
         buildPromptBlocks(promptText, promptImages),
       );

@@ -238,6 +238,64 @@ describe('SessionMessageHandler', () => {
     ]);
   });
 
+  it('echoes the user prompt into the ACP transcript as a user_message_chunk', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello transcript',
+      displayText: 'hello transcript',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello transcript' },
+    });
+
+    // The direct stdio ACP channel never emits user_message_chunk for an
+    // interactive prompt; the handler must synthesize it so the user's own
+    // turn renders in the WebShell transcript timeline.
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello transcript' },
+        },
+      },
+    });
+    // The echo must be posted before the prompt is dispatched so the user
+    // block renders ahead of this turn's assistant frames.
+    const echoCallIndex = sendToWebView.mock.calls.findIndex(
+      (call) =>
+        (call[0] as { type?: string } | undefined)?.type === 'transcriptUpdate',
+    );
+    expect(echoCallIndex).toBeGreaterThanOrEqual(0);
+    expect(sendToWebView.mock.invocationCallOrder[echoCallIndex]).toBeLessThan(
+      agentManager.sendMessage.mock.invocationCallOrder[0],
+    );
+  });
+
   it('sends image file context as prompt image blocks', async () => {
     mockProcessImageAttachments.mockImplementation(
       async (promptText: string) => ({
@@ -999,6 +1057,66 @@ describe('SessionMessageHandler', () => {
       expect.objectContaining({
         type: 'qwenSessionSwitched',
         data: expect.objectContaining({ sessionId: archivedSessionId }),
+      }),
+    );
+  });
+
+  it('publishes the fresh ACP session id as liveSessionId in the load-failure fallback boundary', async () => {
+    const archivedSessionId = 'archived-session';
+    const agentManager: {
+      isConnected: boolean;
+      currentSessionId: string | null;
+      getSessionList: ReturnType<typeof vi.fn>;
+      loadSessionViaAcp: ReturnType<typeof vi.fn>;
+      getSessionMessages: ReturnType<typeof vi.fn>;
+      createNewSession: ReturnType<typeof vi.fn>;
+    } = {
+      isConnected: true,
+      currentSessionId: 'old-acp-session',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ id: archivedSessionId, cwd: '/workspace' }]),
+      loadSessionViaAcp: vi
+        .fn()
+        .mockRejectedValue(new Error('session not found on server')),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
+      createNewSession: vi.fn(),
+    };
+    // Mirror the real manager: session/new flips currentSessionId to the
+    // freshly created ACP session.
+    agentManager.createNewSession.mockImplementation(async () => {
+      agentManager.currentSessionId = 'new-acp-session';
+      return 'new-acp-session';
+    });
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'switchQwenSession',
+      data: { sessionId: archivedSessionId },
+    });
+
+    // The transcript filter must learn the live session id from the
+    // boundary; otherwise every live frame of the fresh session is
+    // dropped because it does not carry the archived id.
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'qwenSessionSwitched',
+        data: expect.objectContaining({
+          sessionId: archivedSessionId,
+          liveSessionId: 'new-acp-session',
+        }),
       }),
     );
   });
