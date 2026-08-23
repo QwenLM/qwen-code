@@ -32,6 +32,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  containedUnderCheckout,
   discardWorktree,
   exposeDependencies,
   sanitizedGitEnv,
@@ -442,6 +443,37 @@ describe('worktreeResidue', () => {
       ]);
     } finally {
       rmSync(aliasHome, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalises the bound before the containment prefix test', () => {
+    // The gate's two sides arrive in different spellings — on Windows git
+    // renders `--git-common-dir` with forward slashes while the caller's
+    // resolved path carries backslashes, so no literal prefix match ever
+    // succeeds across that and the fallback must resolve the bound as well
+    // as the tree path. A POSIX lane cannot spell a separator mismatch —
+    // git's discovery chdir canonicalises there too — so a link-carried
+    // bound stands in: a spelling the resolution must translate before the
+    // prefix test can see through it, the same call's work on both hosts.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-bound-')));
+    try {
+      const checkout = join(home, 'repo');
+      const wt = join(checkout, '.qwen', 'tmp', 'review-wt');
+      mkdirSync(wt, { recursive: true });
+      const linked = join(home, 'alias');
+      symlinkSync(checkout, linked);
+
+      expect(containedUnderCheckout(wt, linked)).toBe(true);
+      // The literal test still answers first when the spellings agree.
+      expect(containedUnderCheckout(wt, checkout)).toBe(true);
+      // A bound from elsewhere stays refused in both spellings — including
+      // one nothing can resolve: the refusal fails closed.
+      const elsewhere = join(home, 'elsewhere');
+      mkdirSync(elsewhere);
+      expect(containedUnderCheckout(wt, elsewhere)).toBe(false);
+      expect(containedUnderCheckout(wt, join(home, 'absent'))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

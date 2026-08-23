@@ -155,6 +155,28 @@ export function redirectedAncestor(
   }
 }
 
+/**
+ * Whether the tree's path runs under the checkout its common dir belongs to,
+ * read across the spellings its two sides carry: the caller's path as
+ * spelled, the common dir as git's discovery resolved it — on Windows,
+ * forward slashes against Node's backslashes. Resolving BOTH sides
+ * canonicalises a linked spelling and a platform's two renderings of the
+ * same directory alike; the literal test stays first so an unresolvable
+ * side still answers.
+ */
+export function containedUnderCheckout(
+  spelled: string,
+  bound: string,
+): boolean {
+  if (spelled.startsWith(bound + sep)) return true;
+  try {
+    return realpathSync(spelled).startsWith(realpathSync(bound) + sep);
+  } catch {
+    // Unresolvable: the literal test is the whole containment test.
+  }
+  return false;
+}
+
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
 export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -733,32 +755,26 @@ export function worktreeResidue(
       // The walk below is bounded at the repository the common dir belongs
       // to — above that is the user's own layout, and `/var` is a symlink on
       // every macOS box. A bound only bounds when the tree's path actually
-      // runs under it, and the containment test reads BOTH spellings its two
-      // sides carry: the caller's path as spelled, git's common dir as
-      // physical (its discovery chdir canonicalises). A tree reached through
-      // a link ABOVE the checkout — `/tmp` on every macOS box, a linked
-      // home — fails the literal test while remaining the healthy shape, so
-      // its resolution decides that case, and the walk still lstats every
-      // spelled component under the bound either way. Contained in NEITHER
-      // spelling is the suspect shape — a forge whose common dir is steered
-      // so the walk's stop test fires before the planted link is ever
-      // lstat'd, a repo that merely names this path its `core.worktree` —
-      // and refusing it here is what keeps the walk from escaping its bound
-      // up into the filesystem's own links. Measured: through the steered
-      // boundary a completely genuine forge pair certified a mutant clean,
-      // and the literal-only test refused every healthy tree on a host whose
-      // checkout spelling carries a link above the repository.
+      // runs under it, and the two sides of that test carry DIFFERENT
+      // spellings: the caller's path as spelled, the common dir as git's
+      // discovery resolved it — on Windows, forward slashes against Node's
+      // backslashes. A tree reached through a link ABOVE the checkout —
+      // `/tmp` on every macOS box, a linked home — fails the literal test
+      // while remaining the healthy shape, so resolving BOTH sides decides
+      // that case, and the walk still lstats every spelled component under
+      // the bound either way. Contained in NEITHER spelling is the suspect
+      // shape — a forge whose common dir is steered so the walk's stop test
+      // fires before the planted link is ever lstat'd, a repo that merely
+      // names this path its `core.worktree` — and refusing it here is what
+      // keeps the walk from escaping its bound up into the filesystem's own
+      // links. Measured: through the steered boundary a completely genuine
+      // forge pair certified a mutant clean, and comparing the tree against
+      // the bound's own spelling refused every healthy tree on a host whose
+      // checkout carries a link above the repository — on Windows, where the
+      // separators alone never match, every tree on every run.
       const spelled = resolve(cwd);
       const bound = dirname(commonDir);
-      let contained = spelled.startsWith(bound + sep);
-      if (!contained) {
-        try {
-          contained = realpathSync(spelled).startsWith(bound + sep);
-        } catch {
-          // Unresolvable: the literal test is the whole containment test.
-        }
-      }
-      if (!contained) {
+      if (!containedUnderCheckout(spelled, bound)) {
         return {
           paths: [],
           total: 0,
