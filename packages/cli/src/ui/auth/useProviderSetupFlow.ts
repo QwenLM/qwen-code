@@ -58,6 +58,12 @@ export type ModelDiscoveryStatus = 'idle' | 'loading' | 'success' | 'failed';
 export interface ModelIdsEditContext {
   customModelIds: string[];
   activeCustomModelId?: string;
+  /**
+   * The comma-segment index of `activeCustomModelId` in the raw custom-ids
+   * text. The id alone cannot identify the token being edited: the same id
+   * can sit in the buffer twice, and the caret can move between the copies.
+   */
+  activeCustomModelSegment?: number;
   removedRecommendationId?: string;
 }
 
@@ -186,15 +192,27 @@ export function useProviderSetupFlow(
   const modelIdsEditInProgressRef = useRef(false);
   const activeCustomModelIdRef = useRef<string | undefined>(undefined);
   // The caret resting in a token is not proof the user is editing it: an
-  // arrow-key move back over a comma-terminated id reports it too. Latched
-  // true only by a text edit, so the prune's keep clause protects tokens
-  // being typed, not tokens merely navigated to.
+  // arrow-key move back over a comma-terminated id reports it too. Set by a
+  // text edit, and a caret report holds it true only while it stays inside
+  // the occurrence that edit touched — so the prune's keep clause protects
+  // tokens being typed, not tokens merely navigated to.
   const activeTokenEditTouchedRef = useRef(false);
+  // The token occurrence the last text edit touched, as the caret's segment
+  // index in the raw custom-ids text plus the id it owned. Caret reports
+  // compare against it to tell "still inside the token being typed" from
+  // "moved to another token" — the id alone cannot, because the same id can
+  // sit in the buffer twice.
+  const editedTokenRef = useRef<{ segment: number; id: string } | null>(null);
   const customModelIdsRef = useRef<string[]>([]);
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
   // of any edit before that edit becomes the authored baseline.
   const injectedModelIdRef = useRef<string | null>(null);
+  // The id the keep clause shielded during an in-flight edit. The shield
+  // freezes it into the authorship reference point; when typing continues
+  // past it, the commit delta must not read that as a removal — so exactly
+  // this id is exempt from the removed set, and only until the commit.
+  const frozenTokenRef = useRef<string | null>(null);
 
   const setDisplayedModelIds = useCallback((value: string) => {
     displayedModelIdsRef.current = value;
@@ -229,6 +247,14 @@ export function useProviderSetupFlow(
       modelIdsEditInProgressRef.current = true;
       activeCustomModelIdRef.current = context?.activeCustomModelId;
       activeTokenEditTouchedRef.current = true;
+      editedTokenRef.current =
+        context?.activeCustomModelSegment !== undefined &&
+        context.activeCustomModelId !== undefined
+          ? {
+              segment: context.activeCustomModelSegment,
+              id: context.activeCustomModelId,
+            }
+          : null;
       liveModelIdsRef.current = value;
       setModelIds(value);
     },
@@ -269,13 +295,15 @@ export function useProviderSetupFlow(
         : ids.filter((id) => id !== injected);
     const before = strip(normalizeModelIds(displayedModelIdsRef.current));
     const after = strip(normalizeModelIds(committed));
-    // A before-id that grew into a longer after-id is a token still being
-    // typed — the buffer passes through the shorter id on its way to it —
-    // not a removal. Reading the growth as a removal would delete a default
-    // the user never unchecked from the baseline.
+    // A token the keep clause shielded during an in-flight edit was frozen
+    // into the reference point; typing on past it drops it from the
+    // committed selection. That is growth, not a removal — the user never
+    // unchecked anything — so exactly the shielded id is exempt. Provenance,
+    // not string shape: a removed id that merely prefixes a surviving one is
+    // a rename or a deleted prefix twin, and both are genuine removals.
     const removed = new Set(
       before.filter(
-        (id) => !after.includes(id) && !after.some((a) => a.startsWith(id)),
+        (id) => !after.includes(id) && id !== frozenTokenRef.current,
       ),
     );
     const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
@@ -286,11 +314,16 @@ export function useProviderSetupFlow(
     }
     authoredModelIdsRef.current = authored.join(', ');
     // The commit is the new reference point: recording it twice would read the
-    // second pass's `before` as ids the user had removed.
+    // second pass's `before` as ids the user had removed. The edit markers go
+    // with it: the frozen id was folded into the baseline, and the token the
+    // last edit touched no longer has any claim on the keep clause.
     displayedModelIdsRef.current = committed;
     liveModelIdsRef.current = committed;
     modelIdsEditInProgressRef.current = false;
     activeCustomModelIdRef.current = undefined;
+    activeTokenEditTouchedRef.current = false;
+    editedTokenRef.current = null;
+    frozenTokenRef.current = null;
   }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
@@ -364,16 +397,26 @@ export function useProviderSetupFlow(
       // keystrokes instead of overwriting them with a stale value. Either way
       // the baseline is left for the step's next real commit to move, which
       // sees the delta against the reference point set below.
-      const kept = normalizeModelIds(
+      // The exemption branch is the only way an unserved built-in survives,
+      // so record the id that survives through it: the freeze puts it into
+      // the reference point installed below, and the commit that folds this
+      // edit must not read its later disappearance as a removal.
+      frozenTokenRef.current = null;
+      const kept: string[] = [];
+      for (const id of normalizeModelIds(
         editInProgress ? liveModelIdsRef.current : authoredModelIdsRef.current,
-      ).filter(
-        (id) =>
-          served.has(id) ||
-          !builtIn.has(id) ||
-          (editInProgress &&
-            activeTokenEditTouchedRef.current &&
-            id === activeCustomModelIdRef.current),
-      );
+      )) {
+        if (served.has(id) || !builtIn.has(id)) {
+          kept.push(id);
+        } else if (
+          editInProgress &&
+          activeTokenEditTouchedRef.current &&
+          id === activeCustomModelIdRef.current
+        ) {
+          frozenTokenRef.current = id;
+          kept.push(id);
+        }
+      }
       // Pruning everything would leave the step with nothing checked and no
       // way to submit; fall back to the provider's first live model. That is
       // the wizard's pick, not the user's, so it stays out of the authored
@@ -714,12 +757,20 @@ export function useProviderSetupFlow(
     [editModelIds],
   );
 
-  const changeActiveCustomModelId = useCallback((value?: string) => {
-    activeCustomModelIdRef.current = value;
-    // Navigation is not editing: an arrow-key or focus move must not leave
-    // the token the caret lands in protected by the keep clause.
-    activeTokenEditTouchedRef.current = false;
-  }, []);
+  const changeActiveCustomModelId = useCallback(
+    (value?: string, segment?: number) => {
+      activeCustomModelIdRef.current = value;
+      // Navigation is not editing — except inside the very occurrence the
+      // last text edit touched: that edit is still alive, and a lookup
+      // landing before the next keystroke must keep shielding the token.
+      // Any other report — another occurrence of the same id, a terminated
+      // neighbour, focus leaving — ends the protection.
+      const edited = editedTokenRef.current;
+      activeTokenEditTouchedRef.current =
+        edited !== null && segment === edited.segment && value === edited.id;
+    },
+    [],
+  );
 
   const submitModelIds = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): boolean => {

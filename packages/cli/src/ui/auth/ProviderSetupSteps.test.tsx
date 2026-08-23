@@ -1115,6 +1115,74 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('keeps a half-typed token in the buffer when the caret moved inside it', async () => {
+    // R19-2. The user is typing a longer id that passes through an unserved
+    // built-in, and the caret moved around inside that token before the
+    // lookup landed. The edit is still alive, so the flow's keep clause
+    // shielded the token and it stayed in the selection; the re-derive must
+    // then leave it in the buffer for the remaining keystrokes — the
+    // active-segment drop only reaches built-ins the selection lost.
+    let swapFlow!: (next: ProviderSetupFlow) => void;
+    function FlowHarness({ first }: { first: ProviderSetupFlow }) {
+      const [flow, setFlow] = useState(first);
+      swapFlow = setFlow;
+      return <ProviderSetupSteps flow={flow} />;
+    }
+
+    const before = createModelIdsFlow({ modelIds: '' });
+    const beforeState = before.state as unknown as Record<string, unknown>;
+    beforeState['discoveryStatus'] = 'loading';
+    beforeState['recommendedModelsRevision'] = 0;
+    const { unmount } = renderWithProviders(<FlowHarness first={before} />);
+
+    for (const char of 'MiniMax-M3') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    // The caret moves around inside the token being typed.
+    for (let offset = 0; offset < 3; offset += 1) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+    for (let offset = 0; offset < 3; offset += 1) {
+      await act(async () => {
+        pressLatestKey('right');
+      });
+    }
+
+    const submitModelIds = vi.fn();
+    // `MiniMax-M3` is the flow's actual post-resolution state for this
+    // scenario: the caret moves stayed inside the occurrence the last edit
+    // touched, so the keep clause shielded the unserved built-in.
+    const after = createModelIdsFlow({
+      modelIds: 'MiniMax-M3',
+      submitModelIds,
+    });
+    const afterState = after.state as unknown as Record<string, unknown>;
+    afterState['recommendedModels'] = [{ id: 'MiniMax-M2.7' }];
+    afterState['discoveryStatus'] = 'success';
+    afterState['recommendedModelsRevision'] = 1;
+    await act(async () => {
+      swapFlow(after);
+    });
+
+    for (const char of '-latest') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+    await act(async () => {
+      pressLatestKey('return');
+    });
+
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3-latest'],
+    });
+    unmount();
+  });
+
   it('reports the post-edit caret when a separator ends an active id', async () => {
     const changeModelIds = vi.fn();
     const flow = createModelIdsFlow({ modelIds: '', changeModelIds });
@@ -1142,14 +1210,14 @@ describe('ProviderSetupSteps', () => {
     });
 
     const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
-    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('beta');
+    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('beta', 1);
 
     for (let offset = 0; offset < 6; offset += 1) {
       await act(async () => {
         pressLatestKey('left');
       });
     }
-    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('alpha');
+    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('alpha', 0);
 
     await act(async () => {
       pressLatestKey('down');

@@ -598,6 +598,7 @@ function ModelIdsStep({
       modelIdsCaretRef.current = offset;
       flow.changeActiveCustomModelId(
         modelIdAtCaret(customModelIdsText, offset),
+        segmentIndexAtCaret(customModelIdsText, offset),
       );
     },
     [customModelIdsText, flow],
@@ -666,14 +667,18 @@ function ModelIdsStep({
       recommendationKeys: string[],
       removedRecommendationId?: string,
     ) => {
+      const editingCustomInput =
+        focusedModelIndex === MODEL_CUSTOM_INPUT_FOCUS_INDEX;
       flow.changeModelIds(
         mergeModelIds(customText, recommendationKeys).join(', '),
         {
           customModelIds: normalizeModelIds(customText),
-          activeCustomModelId:
-            focusedModelIndex === MODEL_CUSTOM_INPUT_FOCUS_INDEX
-              ? modelIdAtCaret(customText, modelIdsCaretRef.current)
-              : undefined,
+          activeCustomModelId: editingCustomInput
+            ? modelIdAtCaret(customText, modelIdsCaretRef.current)
+            : undefined,
+          activeCustomModelSegment: editingCustomInput
+            ? segmentIndexAtCaret(customText, modelIdsCaretRef.current)
+            : undefined,
           ...(removedRecommendationId ? { removedRecommendationId } : {}),
         },
       );
@@ -736,6 +741,7 @@ function ModelIdsStep({
       if (key.name === 'tab') {
         flow.changeActiveCustomModelId(
           modelIdAtCaret(customModelIdsText, modelIdsCaretRef.current),
+          segmentIndexAtCaret(customModelIdsText, modelIdsCaretRef.current),
         );
         setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
         return;
@@ -828,6 +834,10 @@ function ModelIdsStep({
             onUp={() => {
               flow.changeActiveCustomModelId(
                 modelIdAtCaret(customModelIdsText, modelIdsCaretRef.current),
+                segmentIndexAtCaret(
+                  customModelIdsText,
+                  modelIdsCaretRef.current,
+                ),
               );
               setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
             }}

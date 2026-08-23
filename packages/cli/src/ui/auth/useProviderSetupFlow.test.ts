@@ -669,6 +669,7 @@ describe('useProviderSetupFlow model discovery', () => {
 
     expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(1);
   });
+
   it('does not read a token still being typed as a user removal', async () => {
     // R11-1. The step syncs the WHOLE composed selection on every keystroke,
     // so while a longer custom id is typed the buffer passes through shorter
@@ -935,6 +936,99 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(ids).toContain('priv');
   });
 
+  it('keeps a token being typed when the caret moves inside it', async () => {
+    // R19-2. The user is typing a longer id that passes through RETIRED_ID
+    // and presses an arrow key inside the SAME token to correct a character.
+    // That caret report stays within the occurrence the last text edit
+    // touched — the edit is still alive — so a lookup landing before the
+    // next keystroke must keep shielding the token. Blanket-clearing the
+    // latch on every caret report pruned it instead: the step's re-derive
+    // then stripped it from the buffer under the caret, and Enter installed
+    // the garble the remaining keystrokes produced.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // The buffer reads exactly RETIRED_ID; the step reports the segment
+    // owning the caret alongside the edit...
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    // ...and again on the caret move that stays inside the same segment.
+    act(() => result.current.changeActiveCustomModelId(RETIRED_ID, 0));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+  });
+
+  it('stops shielding a duplicate id when the caret moves to the other copy', async () => {
+    // R19-2 control. In a `B,B` buffer the two copies are the same id, so
+    // the reset cannot key on the id alone: the last text edit landed in the
+    // second occurrence, and the caret moving into the first is navigation
+    // to a comma-terminated token, which must end the protection.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // Type RETIRED_ID twice; the last edit owns the second segment.
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, ${RETIRED_ID}`,
+        {
+          customModelIds: [RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 1,
+        },
+      ),
+    );
+    // Caret moves to the first copy — same id, different occurrence.
+    act(() => result.current.changeActiveCustomModelId(RETIRED_ID, 0));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    expect(normalizeModelIds(result.current.state.modelIds)).not.toContain(
+      RETIRED_ID,
+    );
+  });
+
   it('keeps a default banked when its transient freeze only grew', async () => {
     // The lookup resolves on the exact keystroke where the buffer reads
     // exactly RETIRED_ID, so the keep clause freezes the transient token
@@ -999,6 +1093,108 @@ describe('useProviderSetupFlow model discovery', () => {
     const restored = normalizeModelIds(result.current.state.modelIds);
     expect(restored).toContain(RETIRED_ID);
     expect(restored).toContain(typed);
+  });
+
+  it('banks a committed rename that grows a custom id', async () => {
+    // R19-1, shape one. The user commits `my-model`, re-enters, and renames
+    // by appending: `before` is [`my-model`], `after` is [`my-model-v2`].
+    // That is a committed removal of the shorter id — but reading the
+    // removed set from string shape exempted it (`my-model-v2` starts with
+    // `my-model`), so the baseline kept both and the next pair change
+    // restored the id the user had replaced. Custom ids have no checkbox;
+    // the commit delta is their only removal channel.
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // Commit 1: bank a custom id.
+    const kept = result.current.state.modelIds;
+    act(() => result.current.changeModelIds(`${kept}, my-model`));
+    act(() => {
+      result.current.goBack();
+    });
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+
+    // Commit 2: rename it by appending.
+    act(() => result.current.changeModelIds(`${kept}, my-model-v2`));
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain('my-model-v2');
+    expect(restored).not.toContain('my-model');
+  });
+
+  it('banks the deletion of a custom id that prefixes a surviving one', async () => {
+    // R19-1, shape two. The baseline holds `my-deploy` and
+    // `my-deploy-backup`; the user deletes the shorter twin and commits.
+    // The surviving sibling starts with the removed id, so a shape-based
+    // exemption emptied the removed set — the deletion never reached the
+    // baseline and the next pair change resurrected it.
+    fetchProviderModelIdsMock.mockResolvedValue(discovered(SERVED_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+
+    // Commit 1: bank two custom ids, one prefixing the other.
+    const kept = result.current.state.modelIds;
+    act(() =>
+      result.current.changeModelIds(`${kept}, my-deploy, my-deploy-backup`),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+
+    // Commit 2: delete the shorter twin.
+    act(() => result.current.changeModelIds(`${kept}, my-deploy-backup`));
+    act(() => {
+      result.current.goBack();
+    });
+
+    // A pair change restores from the baseline.
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain('my-deploy-backup');
+    expect(restored).not.toContain('my-deploy');
   });
 
   it('banks an in-flight recommendation removal without banking typed prefixes', async () => {
@@ -1185,6 +1381,7 @@ describe('useProviderSetupFlow model discovery', () => {
       dropped,
     );
   });
+
   it('lets a second commit remove what the first one banked', async () => {
     // The commit is the new authorship reference point. Leaving it on the
     // pre-edit display made a later removal invisible: `before` still lacked
