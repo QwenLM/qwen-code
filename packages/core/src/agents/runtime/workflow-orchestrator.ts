@@ -7,7 +7,10 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
-import type { Config } from '../../config/config.js';
+import {
+  installSessionWorkflowRevisionWriteThrough,
+  type Config,
+} from '../../config/config.js';
 import {
   createWorkflowSandbox,
   debugLogger,
@@ -1364,6 +1367,11 @@ async function provisionWorkflowWorktree(
 function createDirScopedConfigOverride(base: Config, wtPath: string): Config {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov: any = Object.create(base);
+  // Session Workflow plan-revision state is session-global on the root
+  // Config; without the write-through a divergent todo_write inside the
+  // directory-scoped agent would clear it only as an own property on this
+  // wrapper (see installSessionWorkflowRevisionWriteThrough).
+  installSessionWorkflowRevisionWriteThrough(ov as Config, base);
   ov.targetDir = wtPath;
   ov.cwd = wtPath;
   ov.getTargetDir = () => wtPath;
@@ -1591,6 +1599,11 @@ async function createSchemaConfigOverride(
 ): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override: any = Object.create(base);
+  // Same session-global revision contract as createDirScopedConfigOverride —
+  // the schema wrapper is the outermost layer when both apply, so its
+  // write-through must also reach the base (which may itself be the
+  // directory-scoped wrapper; the chain bottoms out at the root Config).
+  installSessionWorkflowRevisionWriteThrough(override as Config, base);
   await rebuildToolRegistryOnOverride(override as Config, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));

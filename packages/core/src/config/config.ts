@@ -9082,9 +9082,11 @@ export class Config {
  *
  * Apply at EVERY wrapper builder — `createApprovalModeOverride`
  * (tools/agent/agent.ts), `buildSubagentContextOverride`
- * (subagents/subagent-manager.ts), and both branches of
- * `InProcessBackend.createPerAgentConfig` — otherwise the un-shimmed family
- * silently diverges the session-global revision.
+ * (subagents/subagent-manager.ts), both branches of
+ * `InProcessBackend.createPerAgentConfig`, and `createDirScopedConfigOverride`
+ * + `createSchemaConfigOverride` (agents/runtime/workflow-orchestrator.ts) —
+ * otherwise the un-shimmed family silently diverges the session-global
+ * revision.
  */
 export function installSessionWorkflowRevisionWriteThrough(
   wrapper: Config,
