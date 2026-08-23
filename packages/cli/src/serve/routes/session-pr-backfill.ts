@@ -235,6 +235,7 @@ export async function backfillWorkspaceSessionPrs(
   }
 
   let remoteWebUrl: string | undefined;
+  let remoteResolved = false;
   for (const candidate of candidates) {
     let numbers: number[] = [];
     if (candidate.conventionNumber !== undefined) {
@@ -247,6 +248,12 @@ export async function backfillWorkspaceSessionPrs(
       }
     }
     if (numbers.length === 0) continue;
+    // The convention number is bound last so it is the sidecar's newest
+    // entry: a capped write evicts the oldest entries, which must be
+    // branch mappings, not the session's own PR.
+    if (candidate.conventionNumber !== undefined) {
+      numbers = [...numbers.slice(1), candidate.conventionNumber];
+    }
     // Bind only the cap's tail: upsertSessionPr evicts the oldest entries
     // beyond the cap, so binding more would leave the evicted numbers
     // looking unbound — re-bound (with a fresh createdAt) on every run,
@@ -254,12 +261,10 @@ export async function backfillWorkspaceSessionPrs(
     if (numbers.length > SESSION_PR_LIST_LIMIT) {
       result.overLimit += numbers.length - SESSION_PR_LIST_LIMIT;
       if (candidate.conventionNumber !== undefined) {
-        // The pr-<N> slug names the session's own PR — keep it and evict
-        // the oldest branch-mapped numbers instead. Bound last, it is the
-        // sidecar's newest entry, so a later run that binds a new number
-        // evicts a branch mapping rather than the convention number.
+        // Keep the pr-<N> slug's PR and evict the oldest branch-mapped
+        // numbers instead.
         numbers = [
-          ...numbers.slice(1).slice(-(SESSION_PR_LIST_LIMIT - 1)),
+          ...numbers.slice(0, -1).slice(-(SESSION_PR_LIST_LIMIT - 1)),
           candidate.conventionNumber,
         ];
       } else {
@@ -284,7 +289,12 @@ export async function backfillWorkspaceSessionPrs(
       }
       let url = numberToUrl.get(number);
       if (url === undefined && number === candidate.conventionNumber) {
-        remoteWebUrl ??= getRemoteWebUrl(runtime.workspaceCwd);
+        // Cache the miss too: an unresolvable remote must cost one
+        // blocking git spawn per workspace, not one per candidate.
+        if (!remoteResolved) {
+          remoteWebUrl = getRemoteWebUrl(runtime.workspaceCwd);
+          remoteResolved = true;
+        }
         if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;
       }
       if (url === undefined) {
@@ -293,17 +303,23 @@ export async function backfillWorkspaceSessionPrs(
       }
       const state = numberToState.get(number);
       try {
-        await upsertSessionPr(prPath, {
+        const persisted = await upsertSessionPr(prPath, {
           number,
           url,
           ...(state ? { state } : {}),
         });
+        // A capped write can evict a number this run's start-of-run
+        // snapshot still counts as bound — including the convention
+        // number when an earlier run left it in the oldest slot. Rebuild
+        // `have` from what is actually on disk so an evicted number is
+        // re-bound later in this loop instead of silently dropped.
+        have.clear();
+        for (const entry of persisted) have.add(entry.number);
       } catch {
         // One unwritable sidecar must not abort the whole workspace.
         result.writeErrors = (result.writeErrors ?? 0) + 1;
         continue;
       }
-      have.add(number);
       result.bound += 1;
     }
   }

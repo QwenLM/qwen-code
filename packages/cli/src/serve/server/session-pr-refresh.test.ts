@@ -31,6 +31,7 @@ const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
 const SESSION_A = '00000000-0000-4000-8000-000000000001';
 const SESSION_B = '00000000-0000-4000-8000-000000000002';
+const SESSION_C = '00000000-0000-4000-8000-000000000003';
 
 function pr(number: number, state: string) {
   return {
@@ -145,7 +146,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
       sessionRuntimeBaseDir: runtimeDir,
       primary: true,
       trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
+      env: {
+        mode: 'parent-process',
+        overlayKeys: [],
+        effectiveEnv: { GH_TOKEN: 'x' },
+      },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
@@ -201,7 +206,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect(persisted?.[0]?.createdAt).toBe(seeded[0]?.createdAt);
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
       workspaceCwd,
-      undefined,
+      { GH_TOKEN: 'x' },
       { state: 'all', limit: 500, slim: true },
     );
   });
@@ -333,6 +338,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
     expect(result).toEqual({ scanned: 2, updated: 2 });
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      { GH_TOKEN: 'x' },
+      { state: 'all', limit: 500, slim: true },
+    );
     expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
     expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
   });
@@ -427,6 +437,69 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('closed');
+  });
+
+  it('treats a draft PR as open for the state snapshot', async () => {
+    // The sidecar snapshot has no 'draft' variant, and isValidSessionPr
+    // rejects it — a persisted 'draft' would hide the session's bindings.
+    // Seeded 'closed' so the normalization is an observable rewrite.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 44,
+      url: 'https://github.com/o/r/pull/44',
+      state: 'closed',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(44, 'draft')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  it('keeps sweeping when a sidecar is corrupt or unreadable', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    // Invalid JSON makes readSessionPrs return null...
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await fsp.writeFile(prPathB, '{invalid', 'utf8');
+    // ...and a directory at the path makes it throw (EISDIR). Neither may
+    // abort the sweep for the healthy sessions that follow.
+    await seedSession(SESSION_C);
+    const prPathC = sessionService.getPrSessionPathForArchiveState(
+      SESSION_C,
+      'active',
+    );
+    await fsp.mkdir(prPathC, { recursive: true });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect(await fsp.readFile(prPathB, 'utf8')).toBe('{invalid');
   });
 
   it('keeps sweeping when a transcript head has no string cwd', async () => {

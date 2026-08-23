@@ -53,7 +53,7 @@ const SESSION_G = '00000000-0000-4000-8000-000000000007';
 function pr(
   number: number,
   headRefName: string,
-  state: 'open' | 'merged' | 'closed' = 'open',
+  state: 'open' | 'merged' | 'closed' | 'draft' = 'open',
 ) {
   return {
     number,
@@ -156,7 +156,11 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionRuntimeBaseDir: runtimeDir,
       primary: true,
       trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
+      env: {
+        mode: 'parent-process',
+        overlayKeys: [],
+        effectiveEnv: { GH_TOKEN: 'x' },
+      },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
@@ -245,7 +249,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // bindable, and slim avoids the GraphQL timeouts on large queries.
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
       workspaceCwd,
-      undefined,
+      { GH_TOKEN: 'x' },
       { state: 'all', limit: 500, slim: true },
     );
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
@@ -278,6 +282,57 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
     expect(prs?.[0]).toMatchObject({ number: 31, state: 'merged' });
+  });
+
+  it('persists a draft PR as open', async () => {
+    // The sidecar snapshot has no 'draft' variant, and isValidSessionPr
+    // rejects it — a persisted 'draft' would hide the session's bindings.
+    await seedSession(SESSION_A, 'wip/thing');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(44, 'wip/thing', 'draft')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({ number: 44, state: 'open' });
+  });
+
+  it('resolves the git remote at most once per workspace', async () => {
+    // A PATH shim stands in for git and records every spawn: with gh
+    // unavailable and no resolvable remote, three unresolved convention
+    // candidates must cost one blocking lookup, not one per session.
+    const shimDir = path.join(workspaceCwd, 'git-shim');
+    const spawnLog = path.join(workspaceCwd, 'git-spawns.log');
+    await fsp.mkdir(shimDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(shimDir, 'git'),
+      `#!/bin/sh\necho "$@" >> "${spawnLog}"\nexit 1\n`,
+    );
+    await fsp.chmod(path.join(shimDir, 'git'), 0o755);
+    await seedSession(SESSION_B);
+    await seedWorktreeSidecar(SESSION_B, 'pr-1', 'worktree-pr-1');
+    await seedSession(SESSION_C);
+    await seedWorktreeSidecar(SESSION_C, 'pr-2', 'worktree-pr-2');
+    await seedSession(SESSION_D);
+    await seedWorktreeSidecar(SESSION_D, 'pr-3', 'worktree-pr-3');
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    const previousPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}${path.delimiter}${previousPath ?? ''}`;
+
+    try {
+      const result = await backfillWorkspaceSessionPrs(runtime);
+
+      expect(result).toMatchObject({ bound: 0, unresolved: 3 });
+      const spawns = (await fsp.readFile(spawnLog, 'utf8')).trim().split('\n');
+      expect(spawns).toEqual(['remote get-url origin']);
+    } finally {
+      process.env['PATH'] = previousPath;
+    }
   });
 
   it('falls back to the remote web URL when gh is unavailable', async () => {
@@ -359,9 +414,14 @@ describe('backfillWorkspaceSessionPrs', () => {
       pullRequests: [pr(123, 'worktree-pr-123')],
     });
 
+    const before = await readSessionPrs(prPath);
+
     const result = await backfillWorkspaceSessionPrs(runtime);
 
     expect(result).toMatchObject({ bound: 0, alreadyBound: 1 });
+    // A re-upsert would refresh createdAt and move the entry to latest,
+    // reshuffling which binding the UI renders — the file must be untouched.
+    expect(await readSessionPrs(prPath)).toEqual(before);
   });
 
   it('scans sessions without worktree sidecars without binding them', async () => {
@@ -640,6 +700,193 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(
       (await readSessionPrs(prPath))?.map((entry) => entry.number),
     ).toContain(50);
+  });
+
+  it('keeps the convention number bound across accumulating non-overflowing runs', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const appendBranch = async (i: number) =>
+      fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const fetchFor = (branchCount: number) =>
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [
+          pr(50, 'worktree-pr-50'),
+          ...Array.from({ length: branchCount }, (_, i) =>
+            pr(i + 1, `b-${i + 1}`),
+          ),
+        ],
+      });
+
+    // The first run stays under the cap; the convention number must land as
+    // the sidecar's newest entry, not its oldest...
+    fetchFor(1);
+    await backfillWorkspaceSessionPrs(runtime);
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([1, 50]);
+
+    // ...so the runs growing toward the cap append after it and never
+    // evict it (the pre-fix layout bound it first, making it the oldest).
+    for (let i = 2; i <= 9; i++) {
+      await appendBranch(i);
+      fetchFor(i);
+      await backfillWorkspaceSessionPrs(runtime);
+    }
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([1, 50, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+    // The run that crosses the cap evicts the oldest entry (a branch
+    // mapping); the convention number stays bound.
+    await appendBranch(10);
+    fetchFor(10);
+    const last = await backfillWorkspaceSessionPrs(runtime);
+    expect(last).toMatchObject({ bound: 1, alreadyBound: 9, overLimit: 1 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([50, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it('re-binds the convention number when a capped run evicts the oldest slot', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    for (let i = 2; i <= 11; i++) {
+      await fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    }
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    // A pre-fix run left the convention number in the oldest slot; this
+    // run's capped writes evict it mid-loop and must re-bind it.
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [50, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((number) => ({
+          number,
+          url: `https://github.com/o/r/pull/${number}`,
+          createdAt: '2026-08-01T00:00:00.000Z',
+        })),
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(50, 'worktree-pr-50'),
+        ...Array.from({ length: 11 }, (_, i) => pr(i + 1, `b-${i + 1}`)),
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 3, alreadyBound: 7, overLimit: 2 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 50]);
+  });
+
+  it('re-binds the convention number evicted by a non-overflowing run', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    for (let i = 2; i <= 9; i++) {
+      await fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    }
+    await seedWorktreeSidecar(SESSION_A, 'pr-50', 'worktree-pr-50');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    // Already at the cap, with the convention number in the oldest slot and
+    // a later dialog-bound entry at latest; one new binding evicts the
+    // convention number even though this run never overflows.
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          ...[50, 1, 2, 3, 4, 5, 6, 7, 8].map((number) => ({
+            number,
+            url: `https://github.com/o/r/pull/${number}`,
+            createdAt: '2026-08-01T00:00:00.000Z',
+          })),
+          {
+            number: 99,
+            url: 'https://github.com/o/r/pull/99',
+            createdAt: '2026-08-03T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(50, 'worktree-pr-50'),
+        ...Array.from({ length: 9 }, (_, i) => pr(i + 1, `b-${i + 1}`)),
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 2, alreadyBound: 8, overLimit: 0 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([2, 3, 4, 5, 6, 7, 8, 99, 9, 50]);
   });
 
   it('keeps backfilling other sessions when one sidecar write fails', async () => {

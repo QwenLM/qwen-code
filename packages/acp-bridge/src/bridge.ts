@@ -9761,7 +9761,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const bound = metadata.pr;
         const existing = entry.prs ?? [];
         const latest = existing[existing.length - 1];
-        if (latest?.number === bound.number && latest.url === bound.url) {
+        if (
+          latest?.number === bound.number &&
+          latest.url === bound.url &&
+          // A re-bind carrying a new state is a change: the live entry,
+          // the metadata event, and the catalog revision must all see it.
+          (bound.state === undefined || bound.state === latest.state)
+        ) {
           // Same binding repeated — no change, no event.
         } else {
           // Re-binding a number refreshes it and moves it to latest; an
