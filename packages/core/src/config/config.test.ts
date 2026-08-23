@@ -676,6 +676,33 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('restorable ask_user_question preservation', () => {
+    it('defaults to off when the restore switch is unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getRestoreAskUserQuestion()).toBe(false);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+    });
+
+    it('preserves by default when the restore switch is on', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(true);
+    });
+
+    it('stops preserving after suppression, without touching the restore switch', () => {
+      const config = new Config({
+        ...baseParams,
+        restoreAskUserQuestion: true,
+      });
+      config.suppressRestorableAskUserQuestionPreservation();
+      expect(config.getPreserveRestorableAskUserQuestion()).toBe(false);
+      expect(config.getRestoreAskUserQuestion()).toBe(true);
+    });
+  });
+
   describe('getVisionBridgeTimeoutMs', () => {
     it('returns undefined when unset', () => {
       expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
