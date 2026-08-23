@@ -59,8 +59,10 @@ import {
   movedSince,
   hashWorktreeFiles,
   readLocalCache,
+  revisionIdentities,
   stateIdOf,
   type LocalCacheCandidate,
+  type LocalReviewCache,
 } from './lib/local-anchor.js';
 import {
   dependentsOfChanged,
@@ -314,14 +316,15 @@ function resolveCachePath(
 }
 
 /**
- * How many blockers the cached ledger still holds open.
+ * The cache's still-open Critical entries — `{ file }` where the ledger
+ * names one, `{}` where it does not.
  *
- * A raw count — undated, and never a gate on its own: the ledger is
+ * A raw list — undated, and never a gate on its own: the ledger is
  * rewritten only by a round that writes the cache, and a stop round does
  * not, so a blocker the user has since FIXED and committed stays `open` in
  * it for ever. Mapped straight to an exit code it produced a failure no
- * action could clear. `run` gates on it only beside the DATED state the
- * sidecar carries (`blockersStand`, from `blockerStateStillMatchesTree`
+ * action could clear. `run` gates on the count only beside the DATED state
+ * the sidecar carries (`blockersStand`, from `blockerStateStillMatchesTree`
  * below), which tells the fixed-and-committed shape from the
  * committed-without-fixing one where the count cannot.
  *
@@ -335,63 +338,155 @@ function resolveCachePath(
  * inverse of its purpose.
  *
  * Read from the same file the skill's stop branches read. Unreadable, absent
- * or malformed answers 0 — the round is then no worse off than it was.
+ * or malformed answers empty — the round is then no worse off than it was.
  */
-function openBlockersInCache(
-  cacheArg: string | undefined,
-  target: string,
-  source: string | undefined,
-): number {
-  const path =
-    cacheArg !== undefined
-      ? resolveCachePath(cacheArg, target, source)
-      : cachePathFor(target, source);
-  if (path === null) return 0;
+function openCriticalsInCache(
+  cachePath: string | null,
+): Array<{ file?: string }> {
+  if (cachePath === null) return [];
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+    const raw = JSON.parse(readFileSync(cachePath, 'utf8')) as {
       findings?: unknown;
     };
-    if (!Array.isArray(raw.findings)) return 0;
-    return raw.findings.filter((f) => {
-      const e = f as { severity?: unknown; status?: unknown };
-      return e?.severity === 'Critical' && e?.status === 'open';
-    }).length;
+    if (!Array.isArray(raw.findings)) return [];
+    const open: Array<{ file?: string }> = [];
+    for (const f of raw.findings) {
+      const e = f as { severity?: unknown; status?: unknown; file?: unknown };
+      if (e?.severity !== 'Critical' || e?.status !== 'open') continue;
+      open.push(
+        typeof e.file === 'string' && e.file !== '' ? { file: e.file } : {},
+      );
+    }
+    return open;
   } catch {
-    return 0;
+    return [];
   }
 }
 
 /**
- * Whether the cache's recorded per-file state still byte-compares equal to
- * the working tree — the DATE a stop's open blockers are held against.
+ * Whether at least one of the cache's still-open blockers still stands in
+ * THIS tree — the DATE a stop's open blockers are held against.
  *
  * The ledger count alone cannot gate: a blocker fixed and committed stays
- * `open` in it for ever, because a stop never rewrites the ledger. The
- * state comparison tells the two shapes apart where the count cannot — a
- * fix moves the fixed file's bytes, a commit without the fix does not.
- * True only when EVERY cached path still hashes to its recorded identity;
- * an UNHASHABLE on either side, a deletion, or any moved byte withholds it.
- * An undatable blocker costs a false PASS beside the rendered blocker list,
- * never a false failure no action clears.
+ * `open` in it for ever, because a stop never rewrites the ledger. The date
+ * tells the fixed-and-committed shape from the committed-without-fixing one
+ * where the count cannot — and it is taken per BLOCKER, not per state. A
+ * whole-state comparison keyed the gate on bytes a blocker has no relation
+ * to, and failed permanently in BOTH directions: a fix that moved no cached
+ * byte (a new test file, a fix in a file the cached round never hashed)
+ * left every blocker "standing" for ever — a failure no action clears —
+ * while one cached path unhashable on both sides, or an empty files map,
+ * withheld every blocker for ever with the blocker's own file byte-equal.
+ *
+ * A blocker stands when its own file still byte-compares equal to the
+ * identity the cached round recorded for it — or, for a file that round
+ * never hashed (a no-diff whole-file review promotes an empty map), to its
+ * identity in the cached round's HEAD tree, where a no-diff capture's bytes
+ * stood. UNHASHABLE on both sides is "still unreadable", not "moved"
+ * (`movedSince` semantics). A blocker with no file, or one no baseline can
+ * date, is undatable and does not stand.
+ *
+ * A file ADDED to the captured population since the cached round withholds
+ * every blocker: a fix can land in a brand-new file no cached byte records,
+ * and a stop cannot attribute it. The residual is therefore a false PASS —
+ * an unrelated new file clears standing blockers — beside the rendered
+ * blocker list; never a false failure no action clears.
  */
 function blockerStateStillMatchesTree(
   repoRoot: string,
-  cacheArg: string | undefined,
-  target: string,
-  source: string | undefined,
+  cachePath: string | null,
 ): boolean {
-  const path =
-    cacheArg !== undefined
-      ? resolveCachePath(cacheArg, target, source)
-      : cachePathFor(target, source);
-  if (path === null) return false;
-  const cache = readLocalCache(path);
+  if (cachePath === null) return false;
+  const cache = readLocalCache(cachePath);
   if (cache === null) return false;
-  const paths = Object.keys(cache.files);
-  if (paths.length === 0) return false;
-  return (
-    changedSince(cache.files, hashWorktreeFiles(repoRoot, paths)).length === 0
+  const blockers = openCriticalsInCache(cachePath)
+    .map((b) => b.file)
+    .filter((f): f is string => f !== undefined);
+  if (blockers.length === 0) return false;
+  const added = filesAddedSince(repoRoot, cache);
+  if (added === null || added.length > 0) return false;
+  // A file the cached round never hashed — the no-diff whole-file review
+  // shape — dates against that round's HEAD tree instead.
+  const missing = blockers.filter((p) => !Object.hasOwn(cache.files, p));
+  const atRevision = revisionIdentities(repoRoot, cache.headSha, missing);
+  const current = hashWorktreeFiles(repoRoot, blockers);
+  return blockers.some((p) => {
+    const before = Object.hasOwn(cache.files, p)
+      ? cache.files[p]
+      : Object.hasOwn(atRevision, p)
+        ? atRevision[p]
+        : undefined;
+    if (before === undefined) return false; // undatable: does not stand
+    const then: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    const now: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    then[p] = before;
+    now[p] = current[p];
+    return movedSince(then, now).length === 0;
+  });
+}
+
+/**
+ * Files in the captured population now that were not there when the cache
+ * was written: tracked or untracked-but-not-ignored now, minus the cached
+ * HEAD's tree and every path the cache hashed. `.gitignore`d names are not
+ * subjects and never count.
+ *
+ * Null when the population cannot be listed — an undatable stop leans the
+ * same way an undatable blocker does (pass), never into a failure no action
+ * clears.
+ */
+function filesAddedSince(
+  repoRoot: string,
+  cache: LocalReviewCache,
+): string[] | null {
+  let listing: Buffer;
+  try {
+    listing = gitRaw(
+      '-C',
+      repoRoot,
+      'ls-files',
+      '-z',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+    );
+  } catch {
+    return null;
+  }
+  const current = new Set(
+    listing
+      .toString('utf8')
+      .split('\0')
+      .filter((p) => p !== ''),
   );
+  let treePaths: string[] = [];
+  if (cache.headSha !== null) {
+    try {
+      treePaths = gitRaw(
+        '-C',
+        repoRoot,
+        'ls-tree',
+        '-r',
+        '-z',
+        '--name-only',
+        cache.headSha,
+      )
+        .toString('utf8')
+        .split('\0')
+        .filter((p) => p !== '');
+    } catch {
+      // An unlistable revision contributes no baseline: whatever the capture
+      // sees beyond the cached paths then reads as added.
+    }
+  }
+  const baseline = new Set([...Object.keys(cache.files), ...treePaths]);
+  return [...current].filter((p) => !baseline.has(p));
 }
 
 /**
@@ -841,24 +936,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
   if (nothingToReview) {
-    const openBlockers = openBlockersInCache(args.cache, target, sourcePath);
+    const resolvedCache =
+      args.cache !== undefined
+        ? resolveCachePath(args.cache, target, sourcePath)
+        : cachePathFor(target, sourcePath);
+    const openCriticals = openCriticalsInCache(resolvedCache);
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
         {
           ...nothingToReview,
-          openBlockers,
-          // Dated, not counted: true only where the cache's recorded state
-          // still byte-compares equal to this tree — see
-          // `blockerStateStillMatchesTree`. An undated count never gates.
-          blockersStand:
-            openBlockers > 0 &&
-            blockerStateStillMatchesTree(
-              capture.repoRoot,
-              args.cache,
-              target,
-              sourcePath,
-            ),
+          openBlockers: openCriticals.length,
+          // Dated, not counted — and dated per BLOCKER, each against its own
+          // file plus files added since — see `blockerStateStillMatchesTree`.
+          // An undated count never gates.
+          blockersStand: blockerStateStillMatchesTree(
+            capture.repoRoot,
+            resolvedCache,
+          ),
           // The parent's stamp, echoed back. This file decides `completed`
           // and can carry a REQUEST_CHANGES event, while its NAME is the
           // flattened target token — not injective, so a concurrent review

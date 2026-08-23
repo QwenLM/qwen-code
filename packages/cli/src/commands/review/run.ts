@@ -228,10 +228,11 @@ interface StopVerdict {
   /** The cache ledger's open-Critical count — undated, never a gate alone. */
   openBlockers: number;
   /**
-   * The capture compared the cache's recorded per-file state with the
-   * working tree and found it byte-identical, so the open blockers still
-   * stand in THIS tree. False — or absent, a sidecar from before the field —
-   * leaves the count informational only.
+   * The capture dated the cache's open blockers against THIS tree — each
+   * against its own file's recorded identity (or the cached round's HEAD
+   * tree for a file it never hashed), never against the whole cached state —
+   * and at least one still stands. False — or absent, a sidecar from before
+   * the field — leaves the count informational only.
    */
   blockersStand: boolean;
 }
@@ -798,11 +799,14 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   //
   // The DATING is what keeps this from the stale-ledger false positive an
   // undated count fell to: the ledger is rewritten only by a round that
-  // writes the cache, a stop never does, and once the user FIXES the
-  // blocker and commits, the fixed bytes no longer match the recorded state
-  // — the count stops standing, and no action the user takes is blocked for
-  // ever. The residual is a false PASS (a blocker that still stands in a
-  // tree that ALSO moved elsewhere reads as undatable), never a false
+  // writes the cache, a stop never does, and the date is per BLOCKER — each
+  // open Critical is compared against its own file's recorded identity (or
+  // the cached round's HEAD tree, for a file that round reviewed without
+  // hashing), never against the whole cached state. A fix that moves no
+  // cached byte still clears the gate, because a file ADDED since the
+  // cached round withholds every blocker — the fix may be the new file. The
+  // residual is a false PASS — an unrelated new file withholds a standing
+  // blocker, and an undatable blocker leans the same way — never a false
   // failure no action clears, and the stop's rendered blocker list still
   // names it. A composed verdict on the stop path — the model re-ruling the
   // ledger — remains the stronger answer; this is the one the process can

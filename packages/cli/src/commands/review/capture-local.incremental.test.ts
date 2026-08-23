@@ -21,12 +21,14 @@ import {
   realpathSync,
   symlinkSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stateIdOf } from './lib/local-anchor.js';
+import { stateIdOf, UNHASHABLE } from './lib/local-anchor.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { safeTarget } from '../../utils/paths.js';
 import type { IncrementalScope } from './lib/report.js';
 
 // The refusal contract is "every reason is said out loud" and SKILL.md
@@ -712,6 +714,159 @@ describe('capture-local — the decided stops are machine-readable', () => {
     expect(sidecar['openBlockers']).toBe(1);
     // …but the recorded state moved, so the blockers do not stand.
     expect(sidecar['blockersStand']).toBe(false);
+  });
+
+  it('dates stop blockers: not standing once the fix lands in a NEW file', () => {
+    // R9-1, direction 1: a blocker's fix does not have to move the blocker's
+    // own bytes — "add the missing test" adds a file. The whole-state
+    // comparison keyed on the cached bytes alone: the new file was in neither
+    // `cache.files` nor the comparison, so the blocker "stood" for ever and
+    // `--fail-on request-changes` exited 3 on every stop round — a failure
+    // no action clears. A file added since the cached round is fix material a
+    // stop cannot attribute, so it withholds every blocker.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    write('src/changed.test.ts', 'export const t = 1;\n'); // fix = NEW file
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix by adding a file');
+
+    capture({ cache: cachePath, model: 'model-a' });
+    const sidecar = stopSidecar();
+    expect(sidecar['reason']).toBe('clean-tree');
+    expect(sidecar['openBlockers']).toBe(1);
+    expect(sidecar['blockersStand']).toBe(false);
+  });
+
+  it('dates stop blockers per blocker: an unhashable sibling does not withhold them', () => {
+    // R9-1, direction 2: a path UNHASHABLE on BOTH sides (here a pending
+    // deletion) never equals itself in `changedSince`, so the whole-state
+    // comparison withheld every blocker for ever — with the blocker's own
+    // file byte-equal. `movedSince` semantics: unhashable both sides is
+    // "still unreadable", not "moved", and a blocker dates against its OWN
+    // file, never a sibling's.
+    seedDirtyTree();
+    write('src/victim.ts', 'export const victim = 0;\n');
+    git('add', 'src/victim.ts'); // commit victim ONLY; the dirt stays dirty
+    git('commit', '-q', '--no-verify', '-m', 'base with victim');
+    rmSync(join(repo, 'src/victim.ts')); // a pending deletion, seen by r1
+
+    const first = capture({ model: 'model-a' });
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as { files: Record<string, string> };
+    expect(candidate.files['src/victim.ts']).toBe(UNHASHABLE);
+    const cachePath = promoteCandidate(first, 'model-a');
+    recordOpenCritical(cachePath);
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
+
+    capture({ cache: cachePath, model: 'model-a' });
+    const sidecar = stopSidecar();
+    expect(sidecar['reason']).toBe('clean-tree');
+    expect(sidecar['openBlockers']).toBe(1);
+    expect(sidecar['blockersStand']).toBe(true);
+  });
+
+  it('dates stop blockers: unhashable on BOTH sides of the blocker\u2019s own file still stands', () => {
+    // The comparison itself takes `movedSince` semantics: unhashable on both
+    // sides is "still unreadable", not "moved". Under `changedSince` such a
+    // blocker could never equal itself, so the gate exited 0 for ever while
+    // the stop rendered the blocker as standing.
+    seedDirtyTree();
+    write('src/victim.ts', 'export const victim = 0;\n');
+    git('add', 'src/victim.ts'); // commit victim ONLY; the dirt stays dirty
+    git('commit', '-q', '--no-verify', '-m', 'base with victim');
+    rmSync(join(repo, 'src/victim.ts')); // r1 hashes it UNHASHABLE
+
+    const first = capture({ model: 'model-a' });
+    const cachePath = promoteCandidate(first, 'model-a');
+    // The blocker is ON the unhashable path itself.
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    cache['findings'] = [
+      {
+        id: 'R1-1',
+        severity: 'Critical',
+        status: 'open',
+        file: 'src/victim.ts',
+        line: 1,
+        title: 'blocker',
+      },
+    ];
+    writeFileSync(cachePath, JSON.stringify(cache));
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
+
+    capture({ cache: cachePath, model: 'model-a' });
+    const sidecar = stopSidecar();
+    expect(sidecar['reason']).toBe('clean-tree');
+    expect(sidecar['openBlockers']).toBe(1);
+    expect(sidecar['blockersStand']).toBe(true);
+  });
+
+  it('dates stop blockers: an empty files map from a no-diff whole-file review', () => {
+    // R9-1, direction 2, second arm: a file review whose capture had no diff
+    // hashes no plan paths, so Step 8 promotes `files: {}` over a round that
+    // reviewed the file WHOLE. The whole-state date returned false
+    // unconditionally on the empty map — the gate exited 0 for ever while
+    // the stop rendered the blocker as standing. A no-diff round reviewed
+    // bytes equal to the cached HEAD's tree, so a file the empty map does not
+    // name dates against that tree instead.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/foo.ts', 'export const foo = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const headSha = git('rev-parse', 'HEAD');
+    const target = safeTarget('src/foo.ts');
+    const digest = createHash('sha256')
+      .update('src/foo.ts')
+      .digest('hex')
+      .slice(0, 8);
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(
+      join(repo, `.qwen/review-cache/file-${target}-${digest}.json`),
+      JSON.stringify({
+        v: 1,
+        target,
+        source: 'src/foo.ts',
+        headSha,
+        files: {},
+        stateId: stateIdOf(headSha, {}),
+        lastModelId: 'model-a',
+        untracked: true,
+        findings: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            file: 'src/foo.ts',
+            line: 1,
+            title: 'blocker',
+          },
+        ],
+      }),
+    );
+
+    capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    const sidecar = JSON.parse(
+      readFileSync(
+        join(repo, `.qwen/tmp/qwen-review-${target}-stop.json`),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(sidecar['reason']).toBe('unchanged-since-last-round');
+    expect(sidecar['openBlockers']).toBe(1);
+    expect(sidecar['blockersStand']).toBe(true);
   });
 
   it('marks a genuinely clean tree', () => {
