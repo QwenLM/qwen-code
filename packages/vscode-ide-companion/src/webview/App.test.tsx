@@ -22,6 +22,7 @@ const {
   mockAddMessage,
   mockEndStreaming,
   mockWebShellTranscriptProps,
+  mockWebShellLoadFailure,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -49,6 +50,7 @@ const {
   mockWebShellTranscriptProps: {
     current: null as null | Record<string, unknown>,
   },
+  mockWebShellLoadFailure: { current: false },
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -331,6 +333,15 @@ vi.mock('./components/layout/InputForm.js', () => ({
 
 vi.mock('@qwen-code/web-shell', () => ({
   WebShellTranscript: (props: Record<string, unknown>) => {
+    // Simulate the lazy chunk failing to load (e.g. a retained webview
+    // fetching a content-hashed chunk that an extension auto-update
+    // removed). Like a rejected dynamic import, the failure surfaces as a
+    // render error escaping Suspense, which only an ErrorBoundary catches.
+    if (mockWebShellLoadFailure.current) {
+      throw new Error(
+        'Failed to fetch dynamically imported module: chunks/web-shell.js',
+      );
+    }
     mockWebShellTranscriptProps.current = props;
     return null;
   },
@@ -432,6 +443,7 @@ describe('App /skills secondary picker', () => {
     mockInsightState.reportPath = null;
     mockMessageState.isStreaming = false;
     mockMessageState.isWaitingForResponse = false;
+    mockWebShellLoadFailure.current = false;
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -1030,6 +1042,39 @@ describe('App /skills secondary picker', () => {
       expect(mockWebShellTranscriptProps.current!.theme).toBe('light');
     } finally {
       document.body.removeAttribute('data-vscode-theme-kind');
+    }
+  });
+
+  it('shows a recoverable error state instead of blanking the panel when the transcript chunk fails to load', async () => {
+    mockMessageState.isStreaming = true;
+    mockWebShellLoadFailure.current = true;
+    // React logs errors that an error boundary catches; keep output clean.
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    try {
+      const rendered = renderApp();
+      root = rendered.root;
+      container = rendered.container;
+
+      await act(async () => {});
+
+      const fallback = rendered.container.querySelector(
+        '[data-testid="transcript-load-error"]',
+      );
+      expect(fallback).not.toBeNull();
+      expect(fallback?.textContent).toContain('failed to load');
+      expect(fallback?.textContent).toContain('Reload panel');
+
+      // The boundary must be scoped to the transcript subtree: the rest of
+      // the panel (here the composer) has to survive the chunk failure
+      // instead of being unmounted with the whole root.
+      expect(
+        rendered.container.querySelector('[data-testid="input-field"]'),
+      ).not.toBeNull();
+    } finally {
+      consoleErrorSpy.mockRestore();
     }
   });
 });
