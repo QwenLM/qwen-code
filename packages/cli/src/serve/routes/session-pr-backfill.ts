@@ -295,77 +295,78 @@ export async function backfillWorkspaceSessionPrs(
       const state = numberToState.get(number);
       if (state !== undefined) states.set(number, state);
     }
-    // Plan the final list before writing anything. The cap is shared with
-    // entries this run did not resolve and cannot re-resolve (dialog-created
-    // bindings, PRs that fell out of the gh window): reserve their slots
-    // first, then trim the resolved numbers, counting the displaced in
-    // overLimit. Sequential capped upserts instead cascaded — each write
-    // evicted an entry a later run re-bound by evicting the next one,
-    // rotating the list until it deleted bindings reported as preserved.
+    // The cap is shared with entries this run did not resolve and cannot
+    // re-resolve (dialog-created bindings, PRs that fell out of the gh
+    // window): they take their slots first, and the resolved numbers are
+    // trimmed around them, counting the displaced in overLimit. The plan is
+    // finalized inside the mutation queue, against the freshest list, so a
+    // binding that lands between the snapshot read and this write is never
+    // dropped and the slots are recomputed around it; sequential capped
+    // upserts instead cascaded evictions through the list.
     const droppable = new Set(
       numbers.filter(
         (number) => existingNumbers.has(number) || urls.has(number),
       ),
     );
-    const foreignCount = (existing ?? []).filter(
-      (entry) => !droppable.has(entry.number),
-    ).length;
-    const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
-    let planned = numbers.filter((number) => droppable.has(number));
-    if (planned.length > slots) {
-      result.overLimit += planned.length - slots;
-      const convention = candidate.conventionNumber;
-      if (slots === 0) {
-        planned = [];
-      } else if (
-        convention !== undefined &&
-        planned[planned.length - 1] === convention
-      ) {
-        // Keep the pr-<N> slug's PR and displace the oldest branch-mapped
-        // numbers instead.
-        const branchSlots = slots - 1;
-        planned = [
-          ...(branchSlots > 0 ? planned.slice(0, -1).slice(-branchSlots) : []),
-          convention,
-        ];
-      } else {
-        planned = planned.slice(-slots);
-      }
-    }
-    const plannedSet = new Set(planned);
-    result.alreadyBound += planned.filter((number) =>
-      existingNumbers.has(number),
-    ).length;
     const createdAt = new Date().toISOString();
-    const additions: SessionPr[] = planned
-      .filter((number) => !existingNumbers.has(number))
-      .map((number) => {
-        const state = states.get(number);
-        return {
-          number,
-          // A planned number that is not already bound was resolved above.
-          url: urls.get(number) as string,
-          createdAt,
-          ...(state !== undefined ? { state } : {}),
-        };
-      });
+    let added = 0;
     try {
       const persisted = await replaceSessionPrs(prPath, (fresh) => {
         const freshNumbers = new Set(fresh.map((entry) => entry.number));
+        // Only entries seen in the snapshot are subject to this plan; newer
+        // ones are bindings this run never planned for and must keep.
+        const plannedFor = (entry: SessionPr): boolean =>
+          droppable.has(entry.number) && existingNumbers.has(entry.number);
+        const foreignCount = fresh.filter((entry) => !plannedFor(entry)).length;
+        const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
+        let plan = numbers.filter((number) => droppable.has(number));
+        if (plan.length > slots) {
+          result.overLimit += plan.length - slots;
+          const convention = candidate.conventionNumber;
+          if (slots === 0) {
+            plan = [];
+          } else if (
+            convention !== undefined &&
+            plan[plan.length - 1] === convention
+          ) {
+            // Keep the pr-<N> slug's PR and displace the oldest branch-
+            // mapped numbers instead.
+            const branchSlots = slots - 1;
+            plan = [
+              ...(branchSlots > 0 ? plan.slice(0, -1).slice(-branchSlots) : []),
+              convention,
+            ];
+          } else {
+            plan = plan.slice(-slots);
+          }
+        }
+        const planSet = new Set(plan);
+        result.alreadyBound += plan.filter((number) =>
+          freshNumbers.has(number),
+        ).length;
         const kept = fresh.filter(
-          (entry) =>
-            plannedSet.has(entry.number) || !droppable.has(entry.number),
+          (entry) => planSet.has(entry.number) || !plannedFor(entry),
         );
-        const next = [
-          ...kept,
-          ...additions.filter((entry) => !freshNumbers.has(entry.number)),
-        ];
+        const additions: SessionPr[] = plan
+          .filter((number) => !freshNumbers.has(number))
+          .map((number) => {
+            const state = states.get(number);
+            return {
+              number,
+              // A planned number that is not already bound was resolved above.
+              url: urls.get(number) as string,
+              createdAt,
+              ...(state !== undefined ? { state } : {}),
+            };
+          });
+        added = additions.length;
+        const next = [...kept, ...additions];
         return next.length === fresh.length &&
           next.every((entry, index) => entry === fresh[index])
           ? null
           : next;
       });
-      if (persisted !== null) result.bound += additions.length;
+      if (persisted !== null) result.bound += added;
     } catch {
       // One unwritable sidecar must not abort the whole workspace.
       result.writeErrors = (result.writeErrors ?? 0) + 1;

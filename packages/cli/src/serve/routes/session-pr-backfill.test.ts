@@ -16,6 +16,7 @@ import {
   Storage,
   fetchGitHubPullRequests,
   readSessionPrs,
+  upsertSessionPr,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from '../server/error-response.js';
@@ -32,10 +33,34 @@ import {
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
-  fetchGitHubPullRequests: vi.fn(),
+const sidecarReadHook = vi.hoisted(() => ({
+  current: undefined as { path: string; run: () => Promise<void> } | undefined,
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...original,
+    fetchGitHubPullRequests: vi.fn(),
+    // Test seam: fires a concurrent writer between the backfill's
+    // out-of-queue snapshot read and its queued write, deterministically.
+    readSessionPrs: vi.fn(
+      async (
+        filePath: string,
+        options?: Parameters<typeof original.readSessionPrs>[1],
+      ) => {
+        const result = await original.readSessionPrs(filePath, options);
+        const hook = sidecarReadHook.current;
+        if (hook && hook.path === filePath) {
+          sidecarReadHook.current = undefined;
+          await hook.run();
+        }
+        return result;
+      },
+    ),
+  };
+});
 
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
@@ -161,6 +186,7 @@ describe('backfillWorkspaceSessionPrs', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    sidecarReadHook.current = undefined;
     runtimeDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-runtime-'),
     );
@@ -872,6 +898,131 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     expect(result).toMatchObject({ bound: 0, alreadyBound: 0, overLimit: 1 });
     expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
+  });
+
+  it('keeps a binding that lands between the snapshot read and the queued write', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 42, 43);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: 9 }, (_, i) => 101 + i),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'b-42'), pr(43, 'b-43')],
+    });
+    // The dialog binds #42 after the backfill's snapshot read and before
+    // its queued write. This run resolved 42 too, so a plan frozen from
+    // the snapshot sees a droppable-but-unplanned entry and must not
+    // delete the user's binding.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 42,
+          url: 'https://github.com/o/r/pull/42',
+        }).then(() => undefined),
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 108, 109, 42,
+    ]);
+    expect(result).toMatchObject({ bound: 0, overLimit: 2 });
+  });
+
+  it('re-plans around a concurrent foreign binding instead of exceeding the cap', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 2);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: 8 }, (_, i) => 101 + i),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'b-1'), pr(2, 'b-2')],
+    });
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 99,
+          url: 'https://github.com/o/r/pull/99',
+        }).then(() => undefined),
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 108, 99, 2,
+    ]);
+    expect(result).toMatchObject({ bound: 1, overLimit: 1 });
+  });
+
+  it('treats a concurrently bound planned number as already bound, not added', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 2);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: 8 }, (_, i) => 101 + i),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'b-1'), pr(2, 'b-2')],
+    });
+    // 2 wins the single free slot in the fresh plan and is already present,
+    // so the write adds nothing and bound must stay 0.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 2,
+          url: 'https://github.com/o/r/pull/2',
+        }).then(() => undefined),
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 108, 2,
+    ]);
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 1, overLimit: 1 });
+  });
+
+  it('counts in bound only the bindings the write actually persisted', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 3);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: 7 }, (_, i) => 101 + i),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'b-1'), pr(2, 'b-2'), pr(3, 'b-3')],
+    });
+    // The concurrent bind is a number this run also resolved: it must not
+    // be counted as bound again when the additions are deduped.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 1,
+          url: 'https://github.com/o/r/pull/1',
+        }).then(() => undefined),
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 1, 2, 3,
+    ]);
+    expect(result.bound).toBe(2);
   });
 
   it('keeps backfilling other sessions when one sidecar write fails', async () => {
