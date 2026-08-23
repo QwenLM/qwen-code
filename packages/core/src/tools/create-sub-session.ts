@@ -13,7 +13,12 @@
  * bridge via `spawnOrAttach` + `sendPrompt`) and registers this tool. In
  * interactive TUI / headless there is no bridge, so the tool is never
  * registered and never pollutes the model's action space. The
- * spawner-missing check in `execute()` stays as a defensive guard.
+ * spawner-missing check in `execute()` stays as a defensive guard for the
+ * one path that can still reach it — a daemon session whose spawner was
+ * cleared mid-flight (yielding `DAEMON_ONLY_MESSAGE`). In non-daemon
+ * sessions the tool is absent from the registry entirely, so a stale
+ * direct call is rejected by the registry-miss error before `execute()`
+ * is ever reached.
  *
  * Two completion modes:
  *  - `'sent'`      — resolve as soon as the prompt is dispatched (fire-and-
