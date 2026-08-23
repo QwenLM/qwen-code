@@ -84,10 +84,15 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2));
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
-  const totalChunks =
-    report.coveredChunks.length +
-    report.missingChunks.length +
-    report.uncoverableChunks.length;
+  // The denominator is the PLAN's chunk count, not the sum of the outcome
+  // sets. The two are equal — `coverageFromTranscripts` asserts the partition
+  // before returning — and that is exactly why the sum was the wrong thing to
+  // print: it moves with the sets, so "17 of 17 chunks reviewed" stayed
+  // self-consistent no matter what the sets did, and the one number a reader
+  // uses to judge whether the review read the change could never contradict
+  // itself. Read the sealed set, and let the assertion be what proves they
+  // agree.
+  const totalChunks = report.plannedChunks.length;
   const worked =
     report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
@@ -104,6 +109,19 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         ? `, ${report.idleAgents.length} made no tool call`
         : ''),
   );
+
+  // The plan no longer describes the diff its chunks index into. A NOTE, not
+  // an ERROR: nothing downstream caps on it yet, deliberately — the check is
+  // new and has never fired on a real run, so it reports for a while before
+  // anyone decides it may refuse a review. Printed before the agent-level
+  // findings because it changes how to read them: if the ranges moved, "chunk
+  // 7 was reviewed" is a statement about a chunk 7 that no longer exists.
+  if (report.selectionDrift !== null) {
+    writeStderrLine(
+      `NOTE: ${report.selectionDrift}. The chunk coverage below is reported ` +
+        `against the plan as written; it does not yet account for this.`,
+    );
+  }
 
   // The defect that actually happened, named as itself.
   if (report.blindAgents.length > 0) {

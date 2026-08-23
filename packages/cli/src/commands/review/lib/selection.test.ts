@@ -1,0 +1,142 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// The subject is a plan that stopped describing its own diff.
+//
+// Chunks are line ranges into a diff FILE, and coverage re-reads the plan from
+// its path long after the agents ran. Nothing tied the two together: the plan's
+// mtime fences the prompt records, and says nothing about the diff. Rewrite the
+// diff mid-run and every chunk id still matches while the lines behind it have
+// moved — the review certifies chunk 7 and the agent read a different one.
+
+import { describe, it, expect } from 'vitest';
+import {
+  buildSelectionIdentity,
+  selectionDigest,
+  selectionDrift,
+  SELECTION_SCHEMA_VERSION,
+} from './selection.js';
+import type { DiffChunk } from './diff-plan.js';
+
+const chunk = (id: number, startLine: number, endLine: number): DiffChunk => ({
+  id,
+  startLine,
+  endLine,
+  lines: endLine - startLine + 1,
+  chars: 0,
+  maxLineChars: 0,
+  oversized: false,
+  files: [],
+});
+
+const CHUNKS = [chunk(1, 1, 100), chunk(2, 101, 200)];
+const DIFF = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n';
+
+describe('selectionDigest', () => {
+  it('is stable across the order the chunks were emitted in', () => {
+    // The selection is a SET of ranges. A plan that listed the same chunks in
+    // another order selected the same scope, and a digest that disagreed would
+    // report drift on a plan nothing had touched.
+    expect(selectionDigest([...CHUNKS].reverse())).toBe(
+      selectionDigest(CHUNKS),
+    );
+  });
+
+  it('changes when a boundary moves', () => {
+    expect(selectionDigest([chunk(1, 1, 100), chunk(2, 101, 201)])).not.toBe(
+      selectionDigest(CHUNKS),
+    );
+  });
+
+  it('changes when an id changes, boundaries held', () => {
+    // The id is what a launch prompt, a prompt record and a coverage receipt
+    // are all keyed by. Two plans with the same ranges under different ids are
+    // not the same selection.
+    expect(selectionDigest([chunk(7, 1, 100), chunk(8, 101, 200)])).not.toBe(
+      selectionDigest(CHUNKS),
+    );
+  });
+
+  it('distinguishes one chunk from two that tile the same lines', () => {
+    expect(selectionDigest([chunk(1, 1, 200)])).not.toBe(
+      selectionDigest(CHUNKS),
+    );
+  });
+});
+
+describe('selectionDrift', () => {
+  const identity = buildSelectionIdentity(DIFF, CHUNKS, 200);
+
+  it('reports nothing when the diff and the chunks are unchanged', () => {
+    expect(selectionDrift(identity, DIFF, CHUNKS)).toBeNull();
+  });
+
+  it('reports nothing for a plan too old to carry an identity', () => {
+    // Absence of evidence, not evidence of drift. Every plan written before
+    // this field existed is old, not wrong, and narrating a defect at every
+    // reader on every pre-existing plan would be a false record.
+    expect(selectionDrift(undefined, DIFF, CHUNKS)).toBeNull();
+    expect(selectionDrift(null, DIFF, CHUNKS)).toBeNull();
+  });
+
+  it('names the diff when its content changed under the plan', () => {
+    const drifted = selectionDrift(identity, `${DIFF}+one more line\n`, CHUNKS);
+    expect(drifted).toMatch(/diff file has changed/);
+    // The repair is an operator's, and the message says which one: nothing an
+    // agent does can fix a moved line range.
+    expect(drifted).toMatch(/re-capture the diff and re-plan/);
+  });
+
+  it('names the boundaries when the plan was edited in place', () => {
+    const edited = [chunk(1, 1, 120), chunk(2, 121, 200)];
+    expect(selectionDrift(identity, DIFF, edited)).toMatch(
+      /chunk boundaries do not match/,
+    );
+  });
+
+  it('reports a count mismatch that survives an equal digest', () => {
+    // Reachable only through a hand-edited identity, which is the point: the
+    // count is a second, independent statement of the denominator, and a
+    // reader that trusted the digest alone would take a rewritten one at its
+    // word.
+    const lying = { ...identity, chunkCount: 99 };
+    expect(selectionDrift(lying, DIFF, CHUNKS)).toMatch(
+      /records 99 chunk\(s\) but carries 2/,
+    );
+  });
+
+  it('refuses an identity from a schema it cannot read', () => {
+    // A reader that cannot interpret a field must say so, not skip it: silently
+    // ignoring a future schema is how a check stops running without anyone
+    // noticing it stopped.
+    const future = { ...identity, schemaVersion: 'qwen.review-selection/v2' };
+    const said = selectionDrift(future, DIFF, CHUNKS);
+    expect(said).toMatch(/cannot read/);
+    expect(said).toContain(SELECTION_SCHEMA_VERSION);
+  });
+
+  it('refuses a `selection` that is not an object', () => {
+    expect(selectionDrift('nope', DIFF, CHUNKS)).toMatch(/not an object/);
+    expect(selectionDrift([identity], DIFF, CHUNKS)).toMatch(/not an object/);
+  });
+});
+
+describe('buildSelectionIdentity', () => {
+  it('records the denominator beside its digest', () => {
+    const id = buildSelectionIdentity(DIFF, CHUNKS, 200);
+    expect(id.schemaVersion).toBe(SELECTION_SCHEMA_VERSION);
+    expect(id.chunkCount).toBe(2);
+    expect(id.diffLines).toBe(200);
+    expect(id.sourceArtifactSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(id.selectionSha256).toBe(selectionDigest(CHUNKS));
+  });
+
+  it('digests the diff TEXT, so identical text hashes identically', () => {
+    const a = buildSelectionIdentity(DIFF, CHUNKS, 200);
+    const b = buildSelectionIdentity(`${DIFF}`, CHUNKS, 200);
+    expect(a.sourceArtifactSha256).toBe(b.sourceArtifactSha256);
+  });
+});

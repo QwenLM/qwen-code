@@ -79,10 +79,197 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
-import { chunkIdsProblem } from './diff-plan.js';
+import { chunkIdsProblem, type DiffChunk } from './diff-plan.js';
+import { selectionDrift, type SelectionDrift } from './selection.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
+
+/**
+ * What became of one planned chunk. The four values partition `plannedChunks`:
+ * every planned id lands in exactly one, and no id lands in two.
+ *
+ * `recovered` is a form of covered, split out rather than folded in because a
+ * resumed run's continuity note reports it and a reader deciding whether to
+ * trust a resume needs to see which chunks THIS attempt read. Nothing caps on
+ * the distinction — `assertChunkPartition` treats both as covered scope.
+ */
+export type ChunkOutcome = 'covered' | 'recovered' | 'uncoverable' | 'missing';
+
+/**
+ * Why a chunk was not covered — a closed set, so a consumer can switch on it.
+ *
+ * These are the coverage-walk's `continue` points, named. Each one already
+ * produced a prose entry in one of the agent-keyed arrays above; this is the
+ * same fact keyed by CHUNK instead, which is the key a reader asking "why was
+ * chunk 7 not reviewed" actually holds. Deriving it by parsing the prose back
+ * was the alternative, and a label is not a contract.
+ *
+ * Deliberately NOT in this set: a disclosed budget gap and an unread brief. A
+ * budget gap costs no coverage (the agent read its chunk and said where it
+ * stopped), and `unreadBriefs` is a roster fact about roles, not chunks.
+ * Putting either here would report a covered chunk as a failed one.
+ */
+export type ChunkFailureClass =
+  /** No record in this run was assigned to the chunk at all. */
+  | 'no-agent'
+  /** Launched with a prompt that never named the diff: it could not have read it. */
+  | 'blind-prompt'
+  /** Zero successful tool calls: it read nothing. */
+  | 'idle'
+  /** Worked, but never opened the diff it was pointed at. */
+  | 'unopened'
+  /** Delivered a prompt that is not the one the CLI built for it. */
+  | 'rewritten-prompt'
+  /** An agent declared the chunk unreachable (oversized line, no read can span it). */
+  | 'declared-uncoverable'
+  /**
+   * The chunk had records, none of them tripped a named cause, and it still
+   * came out uncovered. Mandatory catch-all: an unclassifiable gap must be
+   * reportable as one, not silently absent from the ledger.
+   */
+  | 'unknown';
+
+/** One planned chunk's entry in the coverage ledger. */
+export interface ChunkCoverageItem {
+  id: number;
+  /** The source files this chunk spans; empty on a plan written before chunks carried them. */
+  files: string[];
+  outcome: ChunkOutcome;
+  /** Set only on `missing` and `uncoverable`; absent on covered scope. */
+  classification?: ChunkFailureClass;
+  /**
+   * The agent labels this run recorded against the chunk, in walk order.
+   * Present on every outcome — on a covered chunk it says who read it, on a
+   * missing one it says who was supposed to.
+   */
+  agents: string[];
+}
+
+/**
+ * The chunk ledger contradicted the plan it was built from.
+ *
+ * Its own class because `compose-review` renders a coverage failure's cause to
+ * the reader, and the two it already distinguishes — an unusable plan and
+ * unreadable transcripts — are both facts about the environment. This is a
+ * defect in this file. All three cap the verdict; none may wear another's
+ * message.
+ */
+export class ChunkPartitionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChunkPartitionError';
+  }
+}
+
+/**
+ * Every planned chunk appears exactly once, and nothing else appears at all.
+ *
+ * Unreachable from any input: the sets this checks are built by one walk over
+ * one plan. That is the reason to assert it rather than the reason not to — an
+ * unreachable invariant is exactly the kind that stops holding silently, and
+ * every coverage figure downstream is a ratio whose denominator is this set.
+ */
+export function assertChunkPartition(
+  planned: readonly number[],
+  items: readonly ChunkCoverageItem[],
+  /**
+   * The three id arrays this report exports, cross-checked against the ledger.
+   *
+   * Without this the assertion would only prove the ledger self-consistent, and
+   * the ledger is built from the same sets it would be checking — a second
+   * derivation that cannot disagree with the first proves nothing, which is the
+   * defect this whole change exists to remove from `check-coverage`'s
+   * denominator. `missing` in particular is computed by its own filter over
+   * `planned`, so this is the one comparison that can catch that filter
+   * changing.
+   */
+  reported: {
+    covered: readonly number[];
+    missing: readonly number[];
+    uncoverable: readonly number[];
+  },
+): void {
+  const fail = (why: string): never => {
+    throw new ChunkPartitionError(
+      `coverage: chunk ledger does not partition the plan — ${why}. ` +
+        `planned=[${planned.join(', ')}] ` +
+        `ledger=[${items.map((i) => `${i.id}:${i.outcome}`).join(', ')}]`,
+    );
+  };
+  const seen = new Set<number>();
+  for (const item of items) {
+    if (seen.has(item.id)) fail(`chunk ${item.id} appears twice`);
+    seen.add(item.id);
+  }
+  const plannedSet = new Set(planned);
+  for (const id of seen) {
+    if (!plannedSet.has(id))
+      fail(`chunk ${id} is in the ledger but not the plan`);
+  }
+  for (const id of plannedSet) {
+    if (!seen.has(id)) fail(`chunk ${id} is in the plan but not the ledger`);
+  }
+  // An outcome outside the union is how a new value gets added to `ChunkOutcome`
+  // and forgotten here; a `missing`/`uncoverable` entry with no classification
+  // is the ledger declining to say why, which is the whole point of the field.
+  for (const item of items) {
+    if (
+      item.outcome !== 'covered' &&
+      item.outcome !== 'recovered' &&
+      item.outcome !== 'uncoverable' &&
+      item.outcome !== 'missing'
+    ) {
+      fail(
+        `chunk ${item.id} has an unknown outcome ${JSON.stringify(item.outcome)}`,
+      );
+    }
+    const needsCause =
+      item.outcome === 'missing' || item.outcome === 'uncoverable';
+    if (needsCause && item.classification === undefined) {
+      fail(`chunk ${item.id} is ${item.outcome} with no classification`);
+    }
+    if (!needsCause && item.classification !== undefined) {
+      fail(`chunk ${item.id} is ${item.outcome} but carries a failure class`);
+    }
+  }
+
+  // The ledger against the arrays every existing consumer reads. `covered`
+  // takes both covered outcomes: the recovered/live split is a provenance
+  // detail this report adds, not a change to what counts as reviewed.
+  const ledgerIds = (...outcomes: ChunkOutcome[]): number[] =>
+    items
+      .filter((i) => outcomes.includes(i.outcome))
+      .map((i) => i.id)
+      .sort((a, b) => a - b);
+  const sameIds = (a: readonly number[], b: readonly number[]): boolean =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+  const pairs: Array<[string, readonly number[], number[]]> = [
+    [
+      'covered',
+      [...reported.covered].sort((a, b) => a - b),
+      ledgerIds('covered', 'recovered'),
+    ],
+    [
+      'missing',
+      [...reported.missing].sort((a, b) => a - b),
+      ledgerIds('missing'),
+    ],
+    [
+      'uncoverable',
+      [...reported.uncoverable].sort((a, b) => a - b),
+      ledgerIds('uncoverable'),
+    ],
+  ];
+  for (const [name, exported, ledger] of pairs) {
+    if (!sameIds(exported, ledger)) {
+      fail(
+        `${name} disagrees with the ledger — ` +
+          `reported=[${exported.join(', ')}] ledger=[${ledger.join(', ')}]`,
+      );
+    }
+  }
+}
 
 export interface CoverageFromTranscripts {
   /** True only when every chunk was reviewed by an agent that could and did. */
@@ -241,6 +428,32 @@ export interface CoverageFromTranscripts {
    * before chunks carried them.
    */
   plannedChunks: Array<{ id: number; files: string[] }>;
+  /**
+   * The per-chunk ledger: one entry per `plannedChunks` id, carrying what
+   * became of it and — when it was not covered — why.
+   *
+   * `coveredChunks` / `missingChunks` / `uncoverableChunks` remain, and remain
+   * the fields every existing consumer reads. This adds nothing they cannot
+   * already be derived from except the CLASSIFICATION, which they cannot: the
+   * reason a chunk went uncovered lives in the agent-keyed prose arrays, and
+   * an id in `missingChunks` carries no pointer into them. A consumer asking
+   * "why was chunk 7 not reviewed" had to read stderr and match by hand.
+   *
+   * Ordered by chunk id, so a diff of two runs' ledgers lines up.
+   */
+  chunkItems: ChunkCoverageItem[];
+  /**
+   * Why the plan no longer describes the diff its chunks index into, or `null`
+   * when it still does — and on a plan too old to carry an identity at all,
+   * which is absence of evidence rather than evidence of drift.
+   *
+   * Disclosed, never capping. The check has never fired on a real run, and a
+   * predicate whose false-positive rate nobody has measured does not get to
+   * block a review; `check-coverage` prints it as a NOTE. When runs show what
+   * it costs, making it a cap — or dropping it — becomes a decision with
+   * evidence behind it.
+   */
+  selectionDrift: string | null;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -254,7 +467,11 @@ interface Plan {
   }>;
 }
 
-function readPlan(path: string): { plan: Plan; mtimeMs: number } {
+function readPlan(path: string): {
+  plan: Plan;
+  mtimeMs: number;
+  drift: SelectionDrift;
+} {
   const plan = JSON.parse(readFileSync(path, 'utf8')) as Plan;
   if (typeof plan?.diffPathAbsolute !== 'string' || !plan.diffPathAbsolute) {
     throw new Error(`coverage: ${path} has no diffPathAbsolute`);
@@ -269,7 +486,22 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   if (problem) {
     throw new Error(`coverage: ${path} has ${problem}`);
   }
-  return { plan, mtimeMs: statSync(path).mtimeMs };
+  // Does the plan still describe the diff it was planned over? Reported, never
+  // thrown — see `selectionDrift`'s own note on why an unmeasured predicate
+  // does not get to refuse a review. An unreadable diff file is not drift
+  // either: it is the same class as an unreadable plan, and the reads below
+  // fail on it in their own words.
+  let drift: SelectionDrift = null;
+  try {
+    drift = selectionDrift(
+      (plan as { selection?: unknown }).selection,
+      readFileSync(plan.diffPathAbsolute, 'utf8'),
+      plan.chunks as unknown as DiffChunk[],
+    );
+  } catch {
+    drift = null;
+  }
+  return { plan, mtimeMs: statSync(path).mtimeMs, drift };
 }
 
 /**
@@ -430,7 +662,7 @@ export function coverageFromTranscripts(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
-  const { plan, mtimeMs } = readPlan(planPath);
+  const { plan, mtimeMs, drift: selectionDriftReason } = readPlan(planPath);
   // The RUN's transcripts, not the session's: a resumed run (`--resume`)
   // continues in a new session, and the interrupted attempt's evidence lives
   // under the session id the run ledger recorded. Same fence (the plan's
@@ -488,6 +720,36 @@ export function coverageFromTranscripts(
   };
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
+  /**
+   * Chunks a record from THIS session covered — the `covered` set minus the
+   * chunks only a prior attempt's records earned. `liveRecords` keeps a prior
+   * record that returned, so it walks and can earn coverage like any other;
+   * the split is what lets the ledger say `recovered` instead of `covered`
+   * without a second walk.
+   */
+  const coveredLive = new Set<number>();
+  /**
+   * Every agent label the walk saw against a chunk, and every named cause a
+   * chunk's records tripped. Collected as the walk runs rather than recovered
+   * afterwards by parsing the prose arrays back: those entries are suppressed
+   * when a record is superseded, so a chunk whose only failing record lost to
+   * a relaunch would leave no trace to parse — while the chunk itself may
+   * still be uncovered for a different reason.
+   */
+  const chunkAgents = new Map<number, string[]>();
+  const chunkCauses = new Map<number, Set<ChunkFailureClass>>();
+  const noteChunkAgent = (c: number | null, name: string): void => {
+    if (c === null) return;
+    const seen = chunkAgents.get(c);
+    if (seen === undefined) chunkAgents.set(c, [name]);
+    else if (!seen.includes(name)) seen.push(name);
+  };
+  const noteChunkCause = (c: number | null, cls: ChunkFailureClass): void => {
+    if (c === null) return;
+    const seen = chunkCauses.get(c);
+    if (seen === undefined) chunkCauses.set(c, new Set([cls]));
+    else seen.add(cls);
+  };
 
   // Hoisted from the roster section below: when NO role was briefed at all, the
   // roster collapses to one line covering the whole run, and repeating "none was
@@ -667,9 +929,12 @@ export function coverageFromTranscripts(
     // record of what was asked of it. 23 of 23 real chunk agents were launched
     // without one, and every one of them then said the sentence its prompt had
     // handed it.
+    noteChunkAgent(chunk, name);
+
     const given = wasGivenTheDiff(rec, plan.diffPathAbsolute);
     if (chunk !== null && !given) {
       if (!superseded(rec, chunk)) blindAgents.push(name);
+      noteChunkCause(chunk, 'blind-prompt');
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
@@ -681,6 +946,7 @@ export function coverageFromTranscripts(
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
       if (!superseded(rec, chunk)) idleAgents.push(name);
+      noteChunkCause(chunk, 'idle');
       continue;
     }
 
@@ -746,6 +1012,13 @@ export function coverageFromTranscripts(
       }
     }
 
+    // Recorded whether or not this record goes on to cover its chunk: a
+    // rewritten launch that still read the diff earns the coverage, and the
+    // classification is only ever consulted for a chunk that ended up
+    // uncovered. A candidate cause that never gets read costs nothing; one
+    // that was never collected cannot be read at all.
+    if (rewrittenThisRecord) noteChunkCause(chunk, 'rewritten-prompt');
+
     const told = pointedAt(rec.launchPrompt, plan);
 
     // Pointed at lines, and never opened the file they live in. It did work, so it
@@ -757,6 +1030,14 @@ export function coverageFromTranscripts(
       if (!rewrittenThisRecord && !superseded(rec, chunk)) {
         unopenedAgents.push(name);
       }
+      // The cause the operator is handed is the one whose repair subsumes the
+      // other, matching the push above: a rewritten prompt is rebuilt, and a
+      // rebuild already relaunches. Reporting both would hand two conflicting
+      // repairs for one chunk.
+      noteChunkCause(
+        chunk,
+        rewrittenThisRecord ? 'rewritten-prompt' : 'unopened',
+      );
       continue;
     }
 
@@ -809,6 +1090,7 @@ export function coverageFromTranscripts(
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
         uncoverable.add(chunk);
+        noteChunkCause(chunk, 'declared-uncoverable');
       }
       continue;
     }
@@ -816,6 +1098,12 @@ export function coverageFromTranscripts(
     for (const c of plan.chunks) {
       if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
         covered.add(c.id);
+        // A whole-diff agent spans every chunk, so this credits chunks it was
+        // never assigned — which is the point, and why `chunkAgents` is fed
+        // from the assignment above rather than from here: the ledger's
+        // `agents` should name who OWNED the chunk, not everyone whose range
+        // happened to contain it.
+        if (!rec.fromPriorSession) coveredLive.add(c.id);
       }
     }
   }
@@ -824,7 +1112,13 @@ export function coverageFromTranscripts(
   // though a whole-diff agent's range formally spans it. Listing it as both would
   // be the report contradicting itself, which is the failure this whole file is a
   // response to.
-  for (const id of uncoverable) covered.delete(id);
+  for (const id of uncoverable) {
+    covered.delete(id);
+    // The live/prior split is a view of `covered`; it has to be reconciled the
+    // same way or the ledger reports a chunk as `covered` that this very loop
+    // just took out of coverage.
+    coveredLive.delete(id);
+  }
 
   // Who *should* have been here. Every other check in this file asks a question of
   // an agent that ran; an agent that never ran leaves no transcript to ask, so an
@@ -1066,6 +1360,93 @@ export function coverageFromTranscripts(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
 
+  // The per-chunk ledger. Built here, from the sets this walk produced, so it
+  // cannot disagree with them: the three id arrays and this are one derivation,
+  // not two.
+  const filesOfChunk = new Map<number, string[]>(
+    plan.chunks.map((c) => [
+      c.id,
+      (c.files ?? [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string' && p !== ''),
+    ]),
+  );
+  const classify = (id: number): ChunkFailureClass => {
+    const causes = chunkCauses.get(id);
+    if (causes === undefined || causes.size === 0) {
+      // No record was ever assigned to it, or every record that was assigned
+      // passed every guard and simply never spanned its lines.
+      return chunkAgents.has(id) ? 'unknown' : 'no-agent';
+    }
+    // Ordered by which repair subsumes which. A declaration is the agent's own
+    // verdict and outranks everything (nothing is repaired by relaunching);
+    // then the causes whose fix is a rebuilt prompt, then a plain relaunch.
+    for (const cls of [
+      'declared-uncoverable',
+      'blind-prompt',
+      'rewritten-prompt',
+      'idle',
+      'unopened',
+    ] as const) {
+      if (causes.has(cls)) return cls;
+    }
+    return 'unknown';
+  };
+  // Sorted by id, not left in plan order: the doc on `chunkItems` promises it,
+  // and `chunkIdsProblem` requires ids to be unique positive integers without
+  // requiring them to be ASCENDING. A hand-written or reordered plan would
+  // otherwise produce a ledger that two runs' diffs cannot be lined up against.
+  const chunkItems: ChunkCoverageItem[] = [...planned]
+    .sort((a, b) => a - b)
+    .map((id) => {
+      const files = filesOfChunk.get(id) ?? [];
+      const agents = chunkAgents.get(id) ?? [];
+      if (uncoverable.has(id)) {
+        return {
+          id,
+          files,
+          outcome: 'uncoverable' as const,
+          classification: classify(id),
+          agents,
+        };
+      }
+      if (covered.has(id)) {
+        return {
+          id,
+          files,
+          outcome: coveredLive.has(id)
+            ? ('covered' as const)
+            : ('recovered' as const),
+          agents,
+        };
+      }
+      return {
+        id,
+        files,
+        outcome: 'missing' as const,
+        classification: classify(id),
+        agents,
+      };
+    });
+
+  // The invariant every coverage number in this pipeline rests on, asserted
+  // rather than left to be inferred from the construction above.
+  //
+  // It holds today: `uncoverable` is subtracted from `covered` post-walk and
+  // `missingChunks` is the complement of both. But a partition that is only
+  // true by construction is one a future edit can break without anything
+  // saying so, and the number it would break is the denominator of "17 of 18
+  // chunks reviewed" — the one figure a reader uses to decide whether a review
+  // read the change. `check-coverage` used to derive that denominator by
+  // summing these same sets, which made it self-consistent and therefore
+  // unable to ever show a violation; it now reads `plannedChunks.length` and
+  // this is what proves the two agree.
+  assertChunkPartition(planned, chunkItems, {
+    covered: [...covered],
+    missing: missingChunks,
+    uncoverable: [...uncoverable],
+  });
+
   // Prior-attempt records that clear the SAME certification bar as a live
   // launch — the resumed run's recovered work. The bar is deliberately the
   // pairing predicates above, not "the file existed": a fabricated ledger
@@ -1150,10 +1531,10 @@ export function coverageFromTranscripts(
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({
       id: c.id,
-      files: (c.files ?? [])
-        .map((f) => f?.path)
-        .filter((p): p is string => typeof p === 'string' && p !== ''),
+      files: filesOfChunk.get(c.id) ?? [],
     })),
+    chunkItems,
+    selectionDrift: selectionDriftReason,
   };
 }
 

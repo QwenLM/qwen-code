@@ -1666,10 +1666,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
-      ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
-        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-        hasDeadline: hasReviewDeadline(process.env),
-      }),
+      ...buildPlanReport(
+        plan,
+        (path) => fileLineCount(fetchedSha, path),
+        {
+          operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+          hasDeadline: hasReviewDeadline(process.env),
+        },
+        diffText,
+      ),
       ...planEffortField(args.effort),
     };
 

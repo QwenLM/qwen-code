@@ -23,7 +23,13 @@ import {
 } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { CommandModule } from 'yargs';
-import type { ComposeReviewResult, ReviewEvent } from './compose-review.js';
+import type {
+  CapAxes,
+  ComposeReviewResult,
+  ReviewEvent,
+  TerminalState,
+} from './compose-review.js';
+import type { ChunkCoverageItem } from './lib/coverage.js';
 import {
   buildReport,
   type FindingsReport,
@@ -42,9 +48,29 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 interface PersistedVerdict
   extends Omit<
     ComposeReviewResult,
-    'postedInline' | 'postedFresh' | 'prevPostedInline'
+    | 'postedInline'
+    | 'postedFresh'
+    | 'prevPostedInline'
+    | 'terminalState'
+    | 'capAxes'
+    | 'chunkLedger'
   > {
   verdictLine: string;
+  /**
+   * The coverage state, ledger and cap-axis view — optional HERE, required on
+   * the composed result they are copies of, for the same reason
+   * `postedInline` is: an artifact written before the fields existed carries
+   * none of them, and defaulting the absence would invent a `complete` run
+   * out of an old file. Absence is preserved.
+   *
+   * These are the fields that make the persisted artifact and the terminal
+   * summary one record instead of two derivations — the reader of a saved
+   * review can answer "how much of the diff did this read" without re-running
+   * coverage against transcripts that may no longer exist.
+   */
+  terminalState?: TerminalState;
+  capAxes?: CapAxes;
+  chunkLedger?: ChunkCoverageItem[];
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
    * of: a live compose always knows how many comments the round posts, but
@@ -203,6 +229,108 @@ function stringArray(value: unknown, label: string): string[] {
     throw new Error(`${label} must be an array of strings.`);
   }
   return value as string[];
+}
+
+/**
+ * The coverage triple, read back from a composed file.
+ *
+ * All three are absent together on a file written before they existed, and
+ * present together on every file written since — `composeReview` returns them
+ * unconditionally. So the tolerance is at the group: none is old, all is
+ * current, and a partial set is malformed rather than ancient. Same shape of
+ * rule as `bodyTrim`'s, and for the same reason.
+ */
+function coverageTriple(verdict: Record<string, unknown>): {
+  terminalState?: TerminalState;
+  capAxes?: CapAxes;
+  chunkLedger?: ChunkCoverageItem[];
+} {
+  const raw = {
+    terminalState: verdict['terminalState'],
+    capAxes: verdict['capAxes'],
+    chunkLedger: verdict['chunkLedger'],
+  };
+  const present = Object.values(raw).filter((v) => v !== undefined).length;
+  if (present === 0) return {};
+  if (present !== 3) {
+    throw new Error(
+      'Composed verdict carries some but not all of `terminalState` / ' +
+        '`capAxes` / `chunkLedger`. They are written together; a partial set ' +
+        'is a malformed file, not one from an older CLI.',
+    );
+  }
+  if (
+    raw.terminalState !== 'complete' &&
+    raw.terminalState !== 'partial' &&
+    raw.terminalState !== 'failed' &&
+    raw.terminalState !== 'skipped'
+  ) {
+    throw new Error(
+      'Composed verdict.terminalState must be one of complete / partial / failed / skipped.',
+    );
+  }
+  const axes = object(raw.capAxes, 'Composed verdict.capAxes');
+  const capAxes: CapAxes = {
+    coverage: stringArray(
+      axes['coverage'],
+      'Composed verdict.capAxes.coverage',
+    ),
+    verification: stringArray(
+      axes['verification'],
+      'Composed verdict.capAxes.verification',
+    ),
+    posture: stringArray(axes['posture'], 'Composed verdict.capAxes.posture'),
+    other: stringArray(axes['other'], 'Composed verdict.capAxes.other'),
+  };
+  if (!Array.isArray(raw.chunkLedger)) {
+    throw new Error('Composed verdict.chunkLedger must be an array.');
+  }
+  const chunkLedger = raw.chunkLedger.map((entry, i) => {
+    const item = object(entry, `Composed verdict.chunkLedger[${i}]`);
+    if (!Number.isSafeInteger(item['id']) || (item['id'] as number) < 1) {
+      throw new Error(
+        `Composed verdict.chunkLedger[${i}].id must be a positive integer.`,
+      );
+    }
+    const outcome = item['outcome'];
+    if (
+      outcome !== 'covered' &&
+      outcome !== 'recovered' &&
+      outcome !== 'uncoverable' &&
+      outcome !== 'missing'
+    ) {
+      throw new Error(
+        `Composed verdict.chunkLedger[${i}].outcome must be one of covered / recovered / uncoverable / missing.`,
+      );
+    }
+    const parsed: ChunkCoverageItem = {
+      id: item['id'] as number,
+      files: stringArray(
+        item['files'],
+        `Composed verdict.chunkLedger[${i}].files`,
+      ),
+      outcome,
+      agents: stringArray(
+        item['agents'],
+        `Composed verdict.chunkLedger[${i}].agents`,
+      ),
+    };
+    // Preserved verbatim rather than re-derived: this reader has no plan and
+    // no transcripts, so the only honest source for why a chunk went
+    // uncovered is what the composing run wrote down.
+    if (item['classification'] !== undefined) {
+      if (typeof item['classification'] !== 'string') {
+        throw new Error(
+          `Composed verdict.chunkLedger[${i}].classification must be a string.`,
+        );
+      }
+      parsed.classification = item[
+        'classification'
+      ] as ChunkCoverageItem['classification'];
+    }
+    return parsed;
+  });
+  return { terminalState: raw.terminalState, capAxes, chunkLedger };
 }
 
 function event(value: unknown, label: string): ReviewEvent {
@@ -434,6 +562,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
               'srcDiffLines'
             ]!,
           },
+    ...coverageTriple(verdict),
     verdictLine: nonEmptyString(
       verdict['verdictLine'],
       'Composed verdict.verdictLine',

@@ -30,6 +30,8 @@ import {
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
+  ChunkPartitionError,
+  type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
   compressSummary,
@@ -125,6 +127,83 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * How much of the planned diff this run actually covered.
+ *
+ * Deliberately NOT a verdict: a `complete` run can still post Request changes,
+ * and a `partial` one can still be an Approve capped to Comment. The verdict
+ * answers "what should happen to this PR"; this answers "how much of it did
+ * the review read", which is the question `event` has never been able to.
+ */
+export type TerminalState = 'complete' | 'partial' | 'failed' | 'skipped';
+
+/**
+ * The three kinds of fact that can forbid an Approve, separated.
+ *
+ * Every entry here is also in `cappedBy`, which stays the single list the caps
+ * are computed into — this is a view, not a second source. A cap the grouping
+ * does not recognise lands in `other`, so adding one to `cappedBy` without
+ * classifying it is visible rather than silently dropped.
+ */
+export interface CapAxes {
+  /** The diff was not fully read. Repair: relaunch or rebuild agents. */
+  coverage: string[];
+  /** It was read, but a claim about it could not be settled. Repair: verify. */
+  verification: string[];
+  /** Read and verified; a posture or a missing context withheld the approval. */
+  posture: string[];
+  /** In `cappedBy` and not classified above. */
+  other: string[];
+}
+
+const CAP_AXIS_OF: Record<string, keyof CapAxes> = {
+  'chunk-nobody-read': 'coverage',
+  'uncoverable-chunk': 'coverage',
+  'unreviewed-dimension': 'coverage',
+  'cannot-tell-existing-critical': 'verification',
+  'criticals-unverified': 'verification',
+  'findings-unverified-at-compose': 'verification',
+  'context-unavailable': 'posture',
+  'unlicensed-deferral': 'posture',
+};
+
+export function groupCapAxes(cappedBy: readonly string[]): CapAxes {
+  const axes: CapAxes = {
+    coverage: [],
+    verification: [],
+    posture: [],
+    other: [],
+  };
+  for (const cap of cappedBy) axes[CAP_AXIS_OF[cap] ?? 'other'].push(cap);
+  return axes;
+}
+
+/**
+ * The run's coverage state, from the chunk ledger and the run-level failure.
+ *
+ * Reads nothing else — not the finding count, not `cappedBy`, not a warning
+ * list. The rule this mirrors is `ocr`'s `computeTerminal`, with one deliberate
+ * departure: there, a `waived` item does not stop a run being `complete`, and
+ * the nearest thing here — a chunk an agent declared unreachable — DOES. That
+ * is not a porting slip. This pipeline's existing position, stated where the
+ * set is built ("a disclosed gap, not coverage") and enforced in `ok`, is that
+ * a diff with a line no read can reach was not fully reviewed. A terminal state
+ * that called such a run `complete` would contradict the report it ships in.
+ */
+export function deriveTerminalState(
+  ledger: readonly ChunkCoverageItem[],
+  runFailure: string | null,
+): TerminalState {
+  if (runFailure !== null) return 'failed';
+  if (ledger.length === 0) return 'skipped';
+  const readIt = ledger.filter(
+    (i) => i.outcome === 'covered' || i.outcome === 'recovered',
+  ).length;
+  if (readIt === ledger.length) return 'complete';
+  if (readIt === 0) return 'failed';
+  return 'partial';
+}
 
 /**
  * The floor above which a zero-finding Approve is disclosed as low-signal,
@@ -784,6 +863,26 @@ export interface ComposeReviewInput {
 export interface ComposeReviewResult {
   event: ReviewEvent;
   body: string;
+  /**
+   * How much of the planned diff this run covered — derived from the chunk
+   * ledger alone. Never rendered into the posted body: the author is told what
+   * the review could not certify in prose, and a state code is an operator's
+   * and a caller's surface, not a PR comment's.
+   */
+  terminalState: TerminalState;
+  /**
+   * `cappedBy`, split by what kind of fact each cap is. A view over that
+   * array, so the two can never disagree about which caps fired.
+   */
+  capAxes: CapAxes;
+  /**
+   * The per-chunk coverage ledger this run computed, or `[]` when coverage
+   * could not be computed at all (which is what `terminalState: 'failed'`
+   * says). Carried so the persisted artifact and the terminal summary read the
+   * SAME object rather than each recomputing coverage — two derivations of one
+   * number is how they come to disagree.
+   */
+  chunkLedger: ChunkCoverageItem[];
   /** The table row before caps and downgrades — for the terminal report. */
   baseEvent: ReviewEvent;
   /** Which cap states applied (empty when none). */
@@ -2503,6 +2602,16 @@ function composeReviewBody(
   // zero-certified test falls to the `coverage` disclosure instead.
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
+  /**
+   * The per-chunk ledger, and why coverage could not be computed at all.
+   *
+   * `terminalState` is derived from these and from nothing else — not from the
+   * finding count, not from `cappedBy`, not from any warning. A run that read
+   * 17 of 18 chunks covered 17 of 18 chunks whether or not it found a bug in
+   * them, and whether or not something unrelated capped the verdict.
+   */
+  let chunkLedger: ChunkCoverageItem[] = [];
+  let coverageRunFailure: string | null = null;
 
   // The deterministic script-lint gate. `compose-review` is the authority here:
   // it reads the report the orchestrator's `qwen review script-lint` step wrote
@@ -2608,12 +2717,26 @@ function composeReviewBody(
       subjectZh: '覆盖情况',
       reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
+    coverageRunFailure = 'no plan was given';
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      chunkLedger = cov.chunkItems;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (compose-review folds every entry into the
+      // unreviewed-dimension cap and the posted "Not reviewed:" list), and a
+      // check this new must not be able to take an Approve away before anyone
+      // has seen how often it fires. The repair is an operator's — re-capture
+      // and re-plan — so it belongs where the other repairs are.
+      if (cov.selectionDrift !== null) {
+        remediation.push(
+          `selection drift: ${cov.selectionDrift}. The coverage below is ` +
+            `reported against the plan as written.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
@@ -2742,20 +2865,33 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      // A third: the chunk ledger contradicted its own plan. That is a defect
+      // in `coverage.ts`, not a fact about this environment or this caller's
+      // plan, and an operator handed "the plan could not be used" would go and
+      // re-capture a diff that was never the problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage ledger contradicted the plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率台账与 plan 自相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
         subjectZh: '覆盖情况',
         reasonZh: `${whyZh}，本次运行无法证明 diff 的任何部分被读过`,
       });
+      // The coverage machinery itself failed, so no per-chunk outcome exists to
+      // derive a state from. This is the run-level failure `terminalState`
+      // keys on — distinct from "every chunk failed", which is a coverage fact
+      // about a run that did compute one.
+      coverageRunFailure = why;
     }
 
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
@@ -2994,6 +3130,22 @@ function composeReviewBody(
   if (findingsUnverifiedAtCompose) {
     cappedBy.push('findings-unverified-at-compose');
   }
+
+  // What this run COVERED, as distinct from what it will POST.
+  //
+  // `event` is a posting decision and `cappedBy` is the list of reasons it was
+  // not allowed to be an Approve — and those reasons are three different kinds
+  // of fact wearing one label. A reader (or an automated caller) seeing
+  // `Approve -> Comment` cannot tell whether the diff was not fully read, or
+  // was read and the findings could not be verified, or was read and verified
+  // and the convergence posture withheld the approval. The three have three
+  // different repairs, and only the first is a coverage fact at all.
+  //
+  // So: a state derived from the chunk ledger and nothing else, and an axis
+  // view of the caps that leaves `cappedBy` itself untouched. Neither changes
+  // `event`. This is a reporting surface, not a new gate.
+  const terminalState = deriveTerminalState(chunkLedger, coverageRunFailure);
+  const capAxes = groupCapAxes(cappedBy);
 
   // Is there any doubt that the whole diff was READ? That is a narrower
   // question than "did anything cap the verdict", and it is the only one the
@@ -4214,6 +4366,9 @@ function composeReviewBody(
     return {
       event,
       body,
+      terminalState,
+      capAxes,
+      chunkLedger,
       baseEvent,
       cappedBy,
       downgraded,
@@ -4301,6 +4456,9 @@ function composeReviewBody(
     return {
       event,
       body,
+      terminalState,
+      capAxes,
+      chunkLedger,
       baseEvent,
       cappedBy,
       downgraded,
@@ -4539,6 +4697,9 @@ function composeReviewBody(
   return {
     event,
     body,
+    terminalState,
+    capAxes,
+    chunkLedger,
     baseEvent,
     cappedBy,
     downgraded,

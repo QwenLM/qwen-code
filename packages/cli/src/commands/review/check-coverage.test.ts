@@ -32,6 +32,8 @@ import {
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
+  assertChunkPartition,
+  type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
   promptRecordDir,
@@ -2889,5 +2891,243 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // green, silently dropping recovered whole-diff work (verify,
     // reverse-audit) from the continuity count.
     expect(r.recoveredAgents).toBe(3);
+    // The ledger's provenance split, on the run that produces it: chunks this
+    // session did not read, credited to the attempt that did. `recovered`
+    // rather than `covered` is the whole distinction — and it is covered
+    // scope, so the run is not reported as a gap.
+    expect(r.chunkItems.map((i) => i.outcome)).toEqual([
+      'recovered',
+      'recovered',
+    ]);
+  });
+});
+
+// The per-chunk ledger: the same walk's conclusions, keyed by CHUNK instead of
+// by agent.
+//
+// Before it, "why was chunk 7 not reviewed" had no machine answer. The reason
+// lived in one of six agent-keyed prose arrays, and an id in `missingChunks`
+// carried no pointer into them — an operator matched them up by reading stderr.
+describe('the chunk ledger', () => {
+  /** The ledger entry for one chunk, so a test names what it is asserting on. */
+  const entryFor = (
+    r: ReturnType<typeof coverageFromTranscripts>,
+    id: number,
+  ) => r.chunkItems.find((i) => i.id === id)!;
+
+  it('partitions the plan: one entry per chunk, no more and no fewer', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.chunkItems.map((i) => i.id)).toEqual([1, 2]);
+    expect(r.chunkItems.every((i) => i.outcome === 'covered')).toBe(true);
+    // Covered scope carries no failure class: the field is the ledger saying
+    // WHY it could not certify, and there is nothing to say about a chunk it
+    // certified.
+    expect(r.chunkItems.every((i) => i.classification === undefined)).toBe(
+      true,
+    );
+  });
+
+  it('names an idle agent as the reason its chunk went unread', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'idle',
+    });
+    // The agent-keyed array still says the same thing. The ledger adds the
+    // chunk key, it does not replace the prose.
+    expect(r.idleAgents).toEqual(['chunk 2']);
+  });
+
+  it('names a blind prompt, which is a different repair from an idle agent', () => {
+    // Relaunching an idle agent can work; relaunching a blind one produces a
+    // second agent that also cannot read the diff. One classification each, so
+    // a caller can tell the two repairs apart without parsing prose.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', blind(2), { calls: 0 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'blind-prompt',
+    });
+  });
+
+  it('marks a chunk nobody was assigned to as no-agent, not unknown', () => {
+    // The failure with no transcript to interrogate. Every other class is a
+    // question asked of an agent that ran; this one is the absence of one, and
+    // reporting it as `unknown` would hide that nothing was ever launched.
+    transcript('a1', good(1), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'no-agent',
+    });
+    expect(entryFor(r, 2).agents).toEqual([]);
+  });
+
+  it('carries an uncoverable chunk as its own outcome, with the declaration as the cause', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 1,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'uncoverable',
+      classification: 'declared-uncoverable',
+    });
+    // Not `missing`: an agent read it and said why no read can span it. The
+    // two are different facts and different repairs — one relaunches, the
+    // other cannot be repaired at all.
+    expect(entryFor(r, 1).outcome).toBe('covered');
+  });
+
+  it('names the agent that owned a chunk, on success as well as failure', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 1).agents).toEqual(['chunk 1']);
+    expect(entryFor(r, 2).agents).toEqual(['chunk 2']);
+  });
+
+  it('agrees with the three id arrays it is built beside', () => {
+    // The assertion inside `coverageFromTranscripts` enforces this on every
+    // call; this pins the agreement as a stated expectation rather than an
+    // internal one, so a change that removed the assertion still has to keep
+    // the property.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+
+    const r = coverageFromTranscripts(plan(3), ENV);
+    const byOutcome = (...want: string[]) =>
+      r.chunkItems
+        .filter((i) => want.includes(i.outcome))
+        .map((i) => i.id)
+        .sort((a, b) => a - b);
+    expect(byOutcome('covered', 'recovered')).toEqual(
+      [...r.coveredChunks].sort((a, b) => a - b),
+    );
+    expect(byOutcome('missing')).toEqual(
+      [...r.missingChunks].sort((a, b) => a - b),
+    );
+    expect(byOutcome('uncoverable')).toEqual(
+      [...r.uncoverableChunks].sort((a, b) => a - b),
+    );
+  });
+
+  it('reports no selection drift for a plan that carries no identity', () => {
+    // Every fixture here writes a plan without one — they stand in for plans
+    // written before the field existed, and those must not narrate a defect.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).selectionDrift).toBeNull();
+  });
+});
+
+describe('assertChunkPartition', () => {
+  const item = (
+    id: number,
+    outcome: ChunkCoverageItem['outcome'],
+    classification?: ChunkCoverageItem['classification'],
+  ): ChunkCoverageItem => ({
+    id,
+    files: [],
+    outcome,
+    agents: [],
+    ...(classification ? { classification } : {}),
+  });
+  const reported = (
+    covered: number[] = [],
+    missing: number[] = [],
+    uncoverable: number[] = [],
+  ) => ({ covered, missing, uncoverable });
+
+  it('accepts a ledger that covers the plan exactly once', () => {
+    expect(() =>
+      assertChunkPartition(
+        [1, 2],
+        [item(1, 'covered'), item(2, 'missing', 'idle')],
+        reported([1], [2]),
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses a planned chunk the ledger never mentions', () => {
+    expect(() =>
+      assertChunkPartition([1, 2], [item(1, 'covered')], reported([1])),
+    ).toThrow(/chunk 2 is in the plan but not the ledger/);
+  });
+
+  it('refuses a ledger entry for a chunk nobody planned', () => {
+    expect(() =>
+      assertChunkPartition(
+        [1],
+        [item(1, 'covered'), item(9, 'covered')],
+        reported([1, 9]),
+      ),
+    ).toThrow(/chunk 9 is in the ledger but not the plan/);
+  });
+
+  it('refuses the same chunk twice', () => {
+    expect(() =>
+      assertChunkPartition(
+        [1],
+        [item(1, 'covered'), item(1, 'missing', 'idle')],
+        reported([1], [1]),
+      ),
+    ).toThrow(/chunk 1 appears twice/);
+  });
+
+  it('refuses a gap that declines to say why', () => {
+    // The classification is the whole point of the entry: a `missing` with no
+    // cause is the ledger reporting a gap and withholding the one field that
+    // makes it actionable.
+    expect(() =>
+      assertChunkPartition([1], [item(1, 'missing')], reported([], [1])),
+    ).toThrow(/is missing with no classification/);
+  });
+
+  it('refuses a covered chunk carrying a failure class', () => {
+    expect(() =>
+      assertChunkPartition([1], [item(1, 'covered', 'idle')], reported([1])),
+    ).toThrow(/but carries a failure class/);
+  });
+
+  it('refuses a ledger that disagrees with the arrays the report exports', () => {
+    // The comparison that gives the assertion its teeth. Without it the check
+    // would only prove the ledger self-consistent — and the ledger is built
+    // from the same sets it would be checking, which is the exact
+    // can't-disagree-with-itself defect this change removed from
+    // `check-coverage`'s denominator.
+    expect(() =>
+      assertChunkPartition(
+        [1, 2],
+        [item(1, 'covered'), item(2, 'missing', 'idle')],
+        // The arrays say chunk 2 was covered; the ledger says nobody read it.
+        reported([1, 2], []),
+      ),
+    ).toThrow(/covered disagrees with the ledger/);
+  });
+
+  it('counts a recovered chunk as covered scope, not as a fourth set', () => {
+    // The live/prior split is provenance this report adds. It must not change
+    // what counts as reviewed, or a resumed run would read as a gap.
+    expect(() =>
+      assertChunkPartition(
+        [1, 2],
+        [item(1, 'covered'), item(2, 'recovered')],
+        reported([1, 2]),
+      ),
+    ).not.toThrow();
   });
 });

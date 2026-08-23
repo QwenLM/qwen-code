@@ -59,7 +59,10 @@ import {
   type ComposeReviewResult,
   type DeferredEntry,
   type PrBodyFetcher,
+  deriveTerminalState,
+  groupCapAxes,
 } from './compose-review.js';
+import type { ChunkCoverageItem } from './lib/coverage.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -4315,6 +4318,11 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
     verdictLine({
       event: 'COMMENT',
       body: '',
+      // `verdictLine` reads neither of these; they are here because the result
+      // type carries them and this literal stands in for a real compose.
+      terminalState: 'complete',
+      capAxes: { coverage: [], verification: [], posture: [], other: [] },
+      chunkLedger: [],
       baseEvent: 'COMMENT',
       cappedBy: [],
       downgraded: false,
@@ -11078,5 +11086,157 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
         critical({ path: 42 }),
       ]),
     ).toEqual([{ file: '' }, { file: '' }]);
+  });
+});
+
+// `event` answers "what should happen to this PR". It has never been able to
+// answer "how much of it did the review read" — and `cappedBy`, the list of
+// reasons an Approve was unavailable, mixes three kinds of fact under one
+// label. These two separate them, and neither moves the event.
+describe('terminalState — coverage, not verdict', () => {
+  const item = (
+    id: number,
+    outcome: ChunkCoverageItem['outcome'],
+    classification?: ChunkCoverageItem['classification'],
+  ): ChunkCoverageItem => ({
+    id,
+    files: [],
+    outcome,
+    agents: [],
+    ...(classification ? { classification } : {}),
+  });
+
+  it('is complete when every planned chunk was read', () => {
+    expect(
+      deriveTerminalState([item(1, 'covered'), item(2, 'covered')], null),
+    ).toBe('complete');
+  });
+
+  it('counts recovered work as read', () => {
+    // A resumed run that reused the interrupted attempt's evidence read the
+    // diff. Calling that `partial` would report a gap where there is none.
+    expect(
+      deriveTerminalState([item(1, 'covered'), item(2, 'recovered')], null),
+    ).toBe('complete');
+  });
+
+  it('is partial when some chunks were read and some were not', () => {
+    expect(
+      deriveTerminalState(
+        [item(1, 'covered'), item(2, 'missing', 'idle')],
+        null,
+      ),
+    ).toBe('partial');
+  });
+
+  it('is failed when nothing was read at all', () => {
+    expect(
+      deriveTerminalState(
+        [item(1, 'missing', 'no-agent'), item(2, 'missing', 'no-agent')],
+        null,
+      ),
+    ).toBe('failed');
+  });
+
+  it('is skipped when nothing was planned', () => {
+    expect(deriveTerminalState([], null)).toBe('skipped');
+  });
+
+  it('is failed when coverage itself could not be computed', () => {
+    // Distinct from "every chunk failed": that is a coverage fact about a run
+    // that produced a ledger. This is a run with no ledger to read.
+    expect(deriveTerminalState([], 'no plan was given')).toBe('failed');
+    expect(deriveTerminalState([item(1, 'covered')], 'no plan')).toBe('failed');
+  });
+
+  it('does not call a run with an uncoverable chunk complete', () => {
+    // A deliberate departure from `ocr`'s rule, where a waived item does not
+    // stop a run being complete. This pipeline's stated position — where the
+    // set is built, and in `ok` — is that a diff with a line no read can reach
+    // was not fully reviewed. A state that said `complete` would contradict
+    // the report it ships in.
+    expect(
+      deriveTerminalState(
+        [item(1, 'covered'), item(2, 'uncoverable', 'declared-uncoverable')],
+        null,
+      ),
+    ).toBe('partial');
+  });
+
+  it('reads nothing but the ledger — findings do not move it', () => {
+    // The property that makes it worth having. A run that read all 18 chunks
+    // covered 18 chunks whether it found a blocker in them or nothing at all.
+    const full = [item(1, 'covered'), item(2, 'covered')];
+    expect(deriveTerminalState(full, null)).toBe('complete');
+    const r = composeReview({
+      bodyCriticals: ['[build] `npm run build` failed'],
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // A blocker, and the diff was still fully read.
+    expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('capAxes — three kinds of cap, three repairs', () => {
+  it('sorts each known cap onto the axis whose repair it names', () => {
+    const axes = groupCapAxes([
+      'chunk-nobody-read',
+      'criticals-unverified',
+      'unlicensed-deferral',
+    ]);
+    expect(axes.coverage).toEqual(['chunk-nobody-read']);
+    expect(axes.verification).toEqual(['criticals-unverified']);
+    expect(axes.posture).toEqual(['unlicensed-deferral']);
+    expect(axes.other).toEqual([]);
+  });
+
+  it('puts an unclassified cap in `other` rather than dropping it', () => {
+    // A cap added to `cappedBy` and not classified here must be visible. A
+    // grouping that silently swallowed it would under-report the reason an
+    // Approve was unavailable — which is the whole thing this view exists to
+    // report.
+    expect(groupCapAxes(['some-future-cap']).other).toEqual([
+      'some-future-cap',
+    ]);
+  });
+
+  it('accounts for every entry in `cappedBy`, exactly once', () => {
+    const caps = [
+      'cannot-tell-existing-critical',
+      'chunk-nobody-read',
+      'uncoverable-chunk',
+      'unreviewed-dimension',
+      'context-unavailable',
+      'unlicensed-deferral',
+      'criticals-unverified',
+      'findings-unverified-at-compose',
+    ];
+    const axes = groupCapAxes(caps);
+    const all = [
+      ...axes.coverage,
+      ...axes.verification,
+      ...axes.posture,
+      ...axes.other,
+    ];
+    expect(all.sort()).toEqual([...caps].sort());
+    expect(axes.other).toEqual([]);
+  });
+
+  it('is a view of `cappedBy`, so the two cannot disagree', () => {
+    const r = composeReview({
+      planPath: undefined,
+      env: ENV,
+      modelId: MODEL,
+    });
+    const all = [
+      ...r.capAxes.coverage,
+      ...r.capAxes.verification,
+      ...r.capAxes.posture,
+      ...r.capAxes.other,
+    ];
+    expect(all.sort()).toEqual([...r.cappedBy].sort());
   });
 });
