@@ -698,9 +698,26 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
 
       expect(prompt).toContain('This is a non-interactive, single-turn run');
+      expect(prompt).toContain('specializing in software engineering tasks');
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
       expect(prompt).not.toContain('# Output Style: Learning');
       expect(prompt).not.toContain('TODO(human)');
       expect(prompt).not.toContain('until the user has written their piece');
+    });
+
+    it('keeps Learning in interactive prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+      expect(prompt).toContain('TODO(human)');
     });
 
     it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {
