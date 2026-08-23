@@ -155,6 +155,11 @@ describe('React performance measure guard', () => {
     // Identity: the non-React options object is forwarded as-is.
     expect(measure.mock.calls[49151]?.[0]).toBe('custom-measure');
     expect(measure.mock.calls[49151]?.[1]).toBe(customOptions);
+    // Value survival, not just reference: an in-place strip of the caller's
+    // options object must fail here.
+    expect(
+      (measure.mock.calls[49151]?.[1] as PerformanceMeasureOptions).detail,
+    ).toEqual({ source: 'web-shell' });
 
     // Mixed app + React traffic still reaches the budget: interleaved
     // non-React measures must not reset the counter.
