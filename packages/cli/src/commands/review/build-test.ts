@@ -1092,6 +1092,25 @@ export const buildTestCommand: CommandModule = {
  * runtime. What stays unpinned is only that `runBuildTest` calls it, which is
  * one visible line rather than a branch hiding in a long function.
  */
+/**
+ * Whether converting this report would destroy the run it was asked to
+ * continue.
+ *
+ * A predicate for the same reason `applyHandOffPolicy` is one: the conversion
+ * it guards returns a report, the handler writes whatever is returned, and a
+ * fresh refusal carries no run identity — so on a `--resume` it replaces the
+ * in-flight report and every later resume fails the identity check. The other
+ * two continuation exits enforce that invariant with a throw; this one was
+ * added after both and did not.
+ */
+export function resumeWouldDestroyReport(
+  report: BuildTestReport,
+  resume: boolean,
+  policy: SandboxPolicy = sandboxPolicy(),
+): boolean {
+  return resume && handOffRefused(report.toolchain, policy);
+}
+
 export function applyHandOffPolicy(
   report: BuildTestReport,
   policy: SandboxPolicy = sandboxPolicy(),
@@ -1107,5 +1126,28 @@ export function applyHandOffPolicy(
 }
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  return applyHandOffPolicy(runBuildTestUnguarded(args));
+  const report = runBuildTestUnguarded(args);
+  // The THIRD continuation exit, and the one the invariant had not reached.
+  // "A continuation must never answer with a FRESH report" is enforced by a
+  // throw at the refusal gate and at `!adapter`; this conversion was added
+  // after both and returns a report of its own, which the handler writes
+  // unconditionally — so a policy that tightened between the first call and
+  // the resume would replace the in-flight report with an identity-less
+  // refusal, and every later `--resume` would fail the identity check. That
+  // costs the round its whole build-test chain over a setting change.
+  //
+  // The trigger is ordinary: the policy is read per call, so an operator
+  // raising it — or a workflow's `env:` — between call one and the resume is
+  // enough, on the unscopeable repo shapes (yarn/pnpm/bun) that reach a
+  // hand-off in the first place.
+  if (resumeWouldDestroyReport(report, args.resume === true)) {
+    throw new Error(
+      `refusing to continue this run: this repository's toolchain cannot be ` +
+        `scoped, and review.sandbox is now "required", so continuing would ` +
+        `replace the report at ${args.out} with a refusal that records no run ` +
+        `identity — killing the resume chain. Re-run without --resume under ` +
+        `the new policy.`,
+    );
+  }
+  return applyHandOffPolicy(report);
 }

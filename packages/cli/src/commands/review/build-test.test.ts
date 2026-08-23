@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import {
   applyHandOffPolicy,
   run,
+  resumeWouldDestroyReport,
   runBuildTest,
   type BuildTestReport,
   trimOutput,
@@ -4519,6 +4520,28 @@ describe('applyHandOffPolicy', () => {
     for (const policy of ['off', 'auto'] as const) {
       expect(applyHandOffPolicy(handOff, policy)).toBe(handOff);
     }
+  });
+
+  it('refuses to convert on a --resume, which would destroy the report', () => {
+    // The invariant the other two continuation exits enforce with a throw:
+    // "a continuation must never answer with a FRESH report". This conversion
+    // was added after both and returns one — which the handler writes over the
+    // report the call was asked to continue, and that refusal carries no run
+    // identity, so every later resume fails the identity check. A policy
+    // tightened between the first call and the resume is enough to trigger it,
+    // on the unscopeable repo shapes that reach a hand-off in the first place.
+    expect(resumeWouldDestroyReport(handOff, true, 'required')).toBe(true);
+    // A fresh call converts normally — that is the whole point of the
+    // conversion.
+    expect(resumeWouldDestroyReport(handOff, false, 'required')).toBe(false);
+    // And a resume of a real run is never touched.
+    expect(
+      resumeWouldDestroyReport(
+        { ...handOff, toolchain: 'npm' },
+        true,
+        'required',
+      ),
+    ).toBe(false);
   });
 
   it('never converts a real run', () => {
