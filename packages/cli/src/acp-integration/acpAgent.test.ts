@@ -210,6 +210,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isTurnResultRecordPayload: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isTurnResultRecordPayload,
+  RUNTIME_SNAPSHOT_PREFIX: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).stripRuntimeSnapshotPrefix,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -238,6 +244,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SessionIdCaseConflictError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionIdCaseConflictError,
+  // The real helpers: `history-replay-page` is not mocked and calls them to
+  // compute the restore skip set when a replay is not suppress-driven.
+  lastHistoryContentFromRecords: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).lastHistoryContentFromRecords,
+  restorableAskUserQuestionCallIds: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).restorableAskUserQuestionCallIds,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -962,7 +976,10 @@ import {
   GoalInvalidTransitionError,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
+import {
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  SESSION_SOURCE_META_KEY,
+} from '@qwen-code/acp-bridge';
 import type {
   Agent,
   LoadSessionResponse,
@@ -1028,6 +1045,7 @@ function goalSnapshot(
       evidenceCursor: { recordId: 'cursor-1' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 123,
       updatedAt: 123,
       ...overrides,
@@ -3520,6 +3538,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not record a session model on an empty new daemon session', async () => {
+    const innerConfig = makeInnerConfig();
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+
+    expect(
+      innerConfig.getChatRecordingService().recordSessionModel,
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
     await setupSessionMocks('meta-session');
     const { agent, agentPromise } = await bootAcpAgent();
@@ -3894,6 +3953,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        recordSessionModel: vi.fn().mockResolvedValue(true),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn(),
         close: vi.fn().mockResolvedValue(undefined),
@@ -11704,6 +11764,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/session/loadUpdates finalizes a dangling ask_user_question even with the restore flag on', async () => {
+    const settings = makeCoreSettings();
+    mockConfig = {
+      ...mockConfig,
+      getRestoreAskUserQuestion: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-auq',
+                    name: 'ask_user_question',
+                    args: {
+                      questions: [
+                        {
+                          question: 'Which approach?',
+                          header: 'Approach',
+                          options: [
+                            { label: 'Polling', description: 'Poll the API' },
+                            { label: 'Webhook', description: 'Use a webhook' },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+    });
+    mockHistoryReplay.mockReset();
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    // The read-only dump never re-hangs the question, so the replayer must
+    // receive no skipFinalizeCallIds even though the restore flag is on and
+    // the transcript tail is a restorable ask_user_question.
+    expect(mockHistoryReplay).toHaveBeenCalled();
+    const replayOptions = mockHistoryReplay.mock.calls[0]?.[3] as
+      | Record<string, unknown>
+      | undefined;
+    expect(replayOptions?.['skipFinalizeCallIds']).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/status/session/transcript returns id-less replay events from transcript reader pages', async () => {
     const settings = makeCoreSettings();
     mockRunExitCleanup.mockResolvedValue(undefined);
@@ -16489,6 +16610,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       finalize: vi.fn(),
       close: vi.fn().mockResolvedValue(undefined),
       hasWriteOwnership: vi.fn().mockReturnValue(false),
+      recordSessionModel: vi.fn().mockResolvedValue(true),
       runWithWriteBarrier: vi.fn(
         async <T>(operation: () => Promise<T>): Promise<T> => operation(),
       ),
@@ -16505,6 +16627,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      switchModel: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
@@ -16540,6 +16663,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getSessionService: vi.fn(),
       consumeSessionRestoreProjection: vi.fn(),
+      suppressRestorableAskUserQuestionPreservation: vi.fn(),
       // load path reads back the persisted conversation here and feeds
       // it to `session.replayHistory`. resume path doesn't read this.
       getResumedSessionData: vi
@@ -16665,6 +16789,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const messages = data.conversation.messages as Array<
           Record<string, unknown>
         >;
+        const lastSessionModel = [...messages]
+          .reverse()
+          .find((message) => message['subtype'] === 'session_model');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -16677,6 +16804,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               lastCompletedUuid:
                 (messages.at(-1)?.['uuid'] as string | undefined) ?? '',
               turnParentUuids: [],
+              ...(lastSessionModel?.['systemPayload']
+                ? { sessionModel: lastSessionModel['systemPayload'] }
+                : {}),
             },
             artifactSnapshot: data.artifactSnapshot,
             goalRecords: messages,
@@ -16910,6 +17040,65 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   );
 
   it.each(['load', 'resume'] as const)(
+    '%s suppresses AUQ preservation when the daemon declines the re-hang',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+          },
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(
+          innerConfig.suppressRestorableAskUserQuestionPreservation,
+        ).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s keeps AUQ preservation without the suppress meta key',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(
+          innerConfig.suppressRestorableAskUserQuestionPreservation,
+        ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
     'profiles %s restore stages under the daemon trace context',
     async (action) => {
       bindRestoreMocks({
@@ -16952,6 +17141,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         'settings_load',
         'existence_check',
         'config_setup',
+        'restore_session_model',
         'auth',
         'file_system_setup',
         'session_register',
@@ -16984,6 +17174,92 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       await agentPromise;
     },
   );
+
+  it.each(['load', 'resume'] as const)(
+    'cold %s restores the recorded session model before auth',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              type: 'system',
+              subtype: 'session_model',
+              systemPayload: {
+                modelId: 'qwen3-coder-plus',
+                authType: 'openai',
+              },
+            },
+            { role: 'user', parts: [{ text: 'hello' }] },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(request);
+      } else {
+        await agent.unstable_resumeSession(request);
+      }
+
+      expect(innerConfig.switchModel).toHaveBeenCalledWith(
+        'openai',
+        'qwen3-coder-plus',
+        undefined,
+      );
+      expect(innerConfig.switchModel.mock.invocationCallOrder[0]).toBeLessThan(
+        innerConfig.refreshAuth.mock.invocationCallOrder[0],
+      );
+      expect(
+        innerConfig.getChatRecordingService().recordSessionModel,
+      ).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('cold resume still succeeds when restoring the session model fails', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          {
+            uuid: 'model-1',
+            type: 'system',
+            subtype: 'session_model',
+            systemPayload: {
+              modelId: 'missing-model',
+              authType: 'openai',
+            },
+          },
+        ],
+      },
+    });
+    innerConfig.switchModel.mockRejectedValue(new Error('unknown model'));
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.unstable_resumeSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        models: expect.any(Object),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it.each(['load', 'resume'] as const)(
     'profiles the live %s restore path without an existence check',
@@ -17038,6 +17314,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).toEqual(expect.any(Number));
         expect(
           attributes['qwen-code.daemon.session_restore.existence_check_ms'],
+        ).toBeUndefined();
+        expect(
+          attributes[
+            'qwen-code.daemon.session_restore.restore_session_model_ms'
+          ],
         ).toBeUndefined();
       } finally {
         mockConnectionState.resolve();
@@ -17838,6 +18119,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 0,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 1,
       },
