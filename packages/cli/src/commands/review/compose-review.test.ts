@@ -5577,6 +5577,47 @@ describe('buildLedger', () => {
     expect(l.findings.map((f) => f.id)).toEqual(['R1-2', 'R1-3']);
     expect(l.findings[0]?.title).toBe('still leaking');
   });
+
+  it('keeps the fix-induced marking out of the carried entry title', () => {
+    // The marking is machine vocabulary about how to COUNT the comment, not
+    // part of the claim. Left in, it rides the work list into the next round,
+    // where "R1-2 (fix-induced) the retry guard drops a valid case" is the
+    // text Step 6 re-locates the claim by and the text the status table
+    // prints — the token outliving the round it described, on every carried
+    // entry, forever.
+    const l = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** R1-2: (fix-induced) the guard drops a valid case',
+        },
+      ],
+      [],
+    );
+    expect(l.findings[0].id).toBe('R1-2');
+    expect(l.findings[0].title).toBe('the guard drops a valid case');
+    expect(l.findings[0].title).not.toContain('fix-induced');
+
+    // ...and the stripping happens ONLY beside an id. With no id there is no
+    // entry for the token to qualify, so it is ordinary claim text and must
+    // survive into the title — stripping it there would edit a finding's own
+    // words on the strength of a word it happened to open with.
+    const idless = buildLedger(
+      4,
+      [
+        {
+          path: 'src/retry.ts',
+          line: 9,
+          body: '**[Critical]** (fix-induced) a brand new hole',
+        },
+      ],
+      [],
+    );
+    expect(idless.findings[0].id).toBe('R4-1');
+    expect(idless.findings[0].title).toBe('(fix-induced) a brand new hole');
+  });
 });
 
 describe('the ledger marker reaches the POSTED body', () => {
@@ -7557,7 +7598,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // `contextUnavailableClause` is `keep: 1` so the rung-3 cut spends
     // blockers before the diff-only trust warning; no truncation fixture
     // carried the clause, so deleting the tag shipped green — the untagged
-    // clause sorted to rank 3 and the cut spent the warning first.
+    // clause sorted to `keep` 3 (the cut's axis, not a `trim` rank) and the
+    // cut spent the warning first.
     const r = composeReview(
       base({
         criticalsInline: 1,
@@ -9384,9 +9426,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // against a 56,830-character budget. Shed early it could pay for at
     // most 4% of an overflow, so any overflow bigger than itself spent it
     // AND went on to spend the disclosures — and the rounds this fires on
-    // are the high-volume ones where that is the normal case. It is rank 3
-    // now: the last rank to go, because it is the cheapest to keep and the
-    // only one whose reader is the PR author alone.
+    // are the high-volume ones where that is the normal case. It is trim
+    // rank 3 now: the last rank to go, because it is the cheapest to keep
+    // and the only one whose reader is the PR author alone.
     //
     // The blocker is sized to land in the window where the ladder sheds
     // rank 2 and stops. To retune after a body-copy change: raise it until
@@ -9424,9 +9466,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // notice say so instead of the paragraph vanishing silently.
     //
     // Sized one rung past the test above: the ladder sheds rank 2, still
-    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
-    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
-    // appears.
+    // does not fit, sheds trim rank 3, and stops before the hard cut. To
+    // retune: raise it until `Convergence:` disappears, and stop before
+    // `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -9728,6 +9770,48 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.findings.map((x) => x.id)).toEqual(['R2-1', 'R4-1']);
     expect(marker.fresh).toBe(1);
     expect(r.postedFresh).toBe(1);
+  });
+
+  it('counts a fix-induced re-report as first-time work', () => {
+    // Issue #9674. A carried id means two different things since the
+    // fix-induced disposition shipped: a claim re-asserted, and a NEW defect
+    // wearing the id of the entry whose fix produced it. Reading the id alone
+    // called both re-posts, so the trend's baseline fell on exactly the
+    // churning pull requests where new work was not falling.
+    //
+    // Both arms over ONE fixture: same id, same work list, same everything
+    // but the marking. Without the differential the assertion would pass on
+    // a count that simply never moves.
+    const round = (body: string) => {
+      sideFile({
+        round: 3,
+        posted: 1,
+        fresh: 1,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'src/p.ts', title: 'x' }],
+      });
+      return composeReview({
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        draftedComments: [{ path: 'src/p.ts', line: 1, body }],
+      });
+    };
+    const stillStands = round('**[Critical]** R2-1: still open');
+    expect(parseLedger(stillStands.body)!.fresh).toBe(0);
+    expect(stillStands.postedFresh).toBe(0);
+
+    const fixInduced = round(
+      '**[Critical]** R2-1: (fix-induced) the fix opened a new hole',
+    );
+    expect(parseLedger(fixInduced.body)!.fresh).toBe(1);
+    expect(fixInduced.postedFresh).toBe(1);
+    // ...and the id still carries, so the author still reads one thread for
+    // the site. Counting it first-time is a change to the COUNT, never to
+    // which finding the comment is.
+    const marker = parseLedger(fixInduced.body)!;
+    expect(marker.findings.map((x) => x.id)).toEqual(['R2-1']);
+    expect(marker.findings[0].title).toBe('the fix opened a new hole');
   });
 
   it('re-mints a stray id, and keeps one a shortened list may have shed', () => {
@@ -10761,9 +10845,13 @@ describe('the convergence census and the non-convergence finding', () => {
   it("never borrows the posting trend's words for its own count", () => {
     // The two counts in one body: this blocker counts DEFECTS newly
     // identified, the convergence diagnosis counts inline comments POSTED
-    // for the first time, and they legitimately differ — a fix-induced
-    // defect re-reported under a carried id is new here and a re-post
-    // there. They collided in VOCABULARY, not arithmetic: "findings first
+    // for the first time, and they legitimately differ — this one takes
+    // every finding the round newly identified, the trend only those that
+    // reached the pull request as a first-time comment. (A fix-induced
+    // re-report used to be the sharpest case of the two diverging; since
+    // #9674 the trend counts a MARKED one as first-time too, and an
+    // unmarked carried id is still a re-post there.) They collided in
+    // VOCABULARY, not arithmetic: "findings first
     // filed in round 4" sat beside "2 of them reported for the first time"
     // over the same round, so one body published two numbers under one
     // phrase and neither could be trusted. Pin the separation from both
@@ -11078,5 +11166,100 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
         critical({ path: 42 }),
       ]),
     ).toEqual([{ file: '' }, { file: '' }]);
+  });
+
+  it('reads the fix-induced marking beside the id it qualifies', () => {
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: (fix-induced) the new hole' }),
+    ]);
+    expect(d.carriedId).toBe('R1-2');
+    expect(d.fixInduced).toBe(true);
+    // A still-stands re-post is the SAME id shape without the marking, and
+    // must stay a re-post: the whole point of the token is that a carried id
+    // no longer answers the first-time question on its own.
+    const [plain] = draftedFindingsOf([
+      critical({ body: '**[Critical]** R1-2: the same old claim' }),
+    ]);
+    expect(plain.carriedId).toBe('R1-2');
+    expect(plain.fixInduced).toBeUndefined();
+  });
+
+  it('tolerates case and inner spacing in the marking', () => {
+    // It governs a COUNT, never which finding a comment is, so the reading is
+    // deliberately lenient. A spelling it still misses costs the count and
+    // nothing else — the id is already in hand by then.
+    for (const marked of [
+      '**[Critical]** R1-2: (Fix-Induced) x',
+      '**[Critical]** R1-2: ( fix-induced ) x',
+      '**[Critical]** R1-2: (FIX-INDUCED)- x',
+    ]) {
+      const [d] = draftedFindingsOf([critical({ body: marked })]);
+      expect(d.carriedId).toBe('R1-2');
+      expect(d.fixInduced).toBe(true);
+    }
+  });
+
+  it('ignores the marking where there is no id to qualify', () => {
+    // Nothing induced a defect that names no previous entry, and the comment
+    // is already counted first-time by the absent id. Honouring the token
+    // there would let a stray parenthetical speak about an entry the comment
+    // does not name.
+    const [d] = draftedFindingsOf([
+      critical({ body: '**[Critical]** (fix-induced) a brand new hole' }),
+    ]);
+    expect(d.carriedId).toBeUndefined();
+    expect(d.fixInduced).toBeUndefined();
+  });
+
+  it('never emits the marking without the id it qualifies', () => {
+    // The shape invariant, pinned where it is actually reachable: a SECOND
+    // draft under an id this round already spent has its `carriedId` dropped
+    // (the ledger mints it a fresh one), and the marking must go with it.
+    // Kept, the finding would claim to have been induced by an entry it no
+    // longer names — a shape this field's own contract forbids.
+    //
+    // This case is why the assertion above could not carry the whole rule:
+    // there the id is absent because the body has none, and the two gates
+    // that enforce this — the readback's and the projection's — masked each
+    // other, so neither could be reddened alone.
+    const both = draftedFindingsOf([
+      critical({ body: '**[Critical]** R2-1: (fix-induced) first' }),
+      critical({ body: '**[Critical]** R2-1: (fix-induced) second' }),
+    ]);
+    expect(both[0].carriedId).toBe('R2-1');
+    expect(both[0].fixInduced).toBe(true);
+    expect(both[1].carriedId).toBeUndefined();
+    expect(both[1].fixInduced).toBeUndefined();
+  });
+
+  it('never lets the marking cost the id', () => {
+    // The reason the token sits AFTER the separator instead of inside the id
+    // grammar. `LEDGER_ID_READBACK` is shared with `idFor`, so widening it to
+    // swallow a parenthetical would put the ledger's carry on the same regex
+    // as a model-written adjective: a spacing the wider grammar failed to
+    // anticipate would stop matching the id and the finding would be silently
+    // renumbered.
+    //
+    // Written as a DIFFERENTIAL rather than as a list of ids to expect. The
+    // first cut asserted `R1-2:(fix-induced) x` carries its id and reddened —
+    // correctly: `R1-2:claim` loses the id with no marking anywhere near it,
+    // because the shared grammar wants whitespace after the separator. That
+    // is pre-existing and not this token's business. What IS this token's
+    // business is that it changes nothing: every shape reads exactly the id
+    // it would have read with the marking deleted.
+    const idOf = (body: string) =>
+      draftedFindingsOf([critical({ body })])[0]?.carriedId;
+    for (const [marked, bare] of [
+      ['**[Critical]** R1-2: (fix-induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2 (fix-induced) x', '**[Critical]** R1-2 x'],
+      ['**[Critical]** R1-2: (fix induced) x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2: (fix-induced x', '**[Critical]** R1-2: x'],
+      ['**[Critical]** R1-2:(fix-induced) x', '**[Critical]** R1-2:x'],
+    ]) {
+      expect(idOf(marked)).toBe(idOf(bare));
+    }
+    // ...and the differential is not vacuously true because every arm is
+    // undefined: the prescribed shape does carry its id.
+    expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
   });
 });
