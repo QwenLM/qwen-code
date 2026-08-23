@@ -85,7 +85,7 @@ describe('useAcpTranscript', () => {
     expect(view.textContent).toContain('NEW CONTENT');
   });
 
-  it('binds the host scope when the feature is enabled at runtime', () => {
+  it('keeps the current session on legacy rendering when enabled at runtime', () => {
     const view = mount();
     post('webShellTranscriptSettingChanged', {
       enabled: true,
@@ -96,7 +96,15 @@ describe('useAcpTranscript', () => {
       update: textUpdate('RUNTIME CONTENT', 'runtime-1'),
     });
 
-    expect(view.textContent).toContain('RUNTIME CONTENT');
+    expect(view.textContent).not.toContain('RUNTIME CONTENT');
+    expect(view.textContent).toContain('"compatible":false');
+
+    post('qwenSessionSwitched', { sessionId: 'new-session' });
+    post('transcriptUpdate', {
+      sessionId: 'new-session',
+      update: textUpdate('NEW SESSION CONTENT', 'new-session-1'),
+    });
+    expect(view.textContent).toContain('NEW SESSION CONTENT');
   });
 
   it('resets stale blocks and binds the fresh scope after reconnect', () => {
@@ -129,5 +137,24 @@ describe('useAcpTranscript', () => {
     post('agentConnectionError', { message: 'connection failed' });
 
     expect(view.textContent).not.toContain('OLD CONTENT');
+  });
+
+  it('preserves the ACP scope but falls back after a snapshot restore', () => {
+    const view = mount();
+    post('qwenSessionSwitched', { sessionId: 'active-session' });
+    post('transcriptUpdate', {
+      sessionId: 'active-session',
+      update: textUpdate('OLD CONTENT', 'old-1'),
+    });
+
+    post('conversationLoaded', { id: 'snapshot', messages: [] });
+    post('transcriptUpdate', {
+      sessionId: 'active-session',
+      update: textUpdate('POST RESTORE CONTENT', 'restored-1'),
+    });
+
+    expect(view.textContent).not.toContain('OLD CONTENT');
+    expect(view.textContent).toContain('POST RESTORE CONTENT');
+    expect(view.textContent).toContain('"compatible":false');
   });
 });

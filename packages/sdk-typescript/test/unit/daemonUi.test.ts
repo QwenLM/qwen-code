@@ -7768,6 +7768,57 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('keeps live discrete user messages in separate blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'user.text.delta',
+          text: 'first',
+          meta: { qwenDiscreteMessage: true },
+        },
+        {
+          type: 'user.text.delta',
+          text: 'second',
+          meta: { qwenDiscreteMessage: true },
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'user', text: 'second' },
+    ]);
+  });
+
+  it('separates recorded user segments without duplicating existing newlines', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'user.text.delta',
+          text: 'first\n',
+          segmentId: 'record-1:0',
+          sourceRecordIds: ['record-1'],
+          meta: { qwenDiscreteMessage: true },
+        },
+        {
+          type: 'user.text.delta',
+          text: 'second',
+          segmentId: 'record-1:1',
+          sourceRecordIds: ['record-1'],
+          meta: { qwenDiscreteMessage: true },
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first\nsecond' },
+    ]);
+  });
+
   it('leaves file attachment references for lazy preview consumers', () => {
     const textEvents = normalizeDaemonEvent({
       id: 7,

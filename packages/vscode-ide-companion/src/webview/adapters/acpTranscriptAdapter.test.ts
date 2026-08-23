@@ -110,4 +110,15 @@ describe('ACP transcript adapter', () => {
     expect(result.blocks).toHaveLength(3);
     expect(result.compatible).toBe(false);
   });
+
+  it('does not silently trim long sessions at the SDK default block limit', () => {
+    const updates = Array.from({ length: 1_001 }, (_, index) =>
+      textUpdate(`block-${index}`, `record-${index}:0`),
+    );
+
+    const result = adaptAcpTranscriptUpdates(updates, scopeKey);
+
+    expect(result.compatible).toBe(true);
+    expect(result.blocks).toHaveLength(1_001);
+  });
 });

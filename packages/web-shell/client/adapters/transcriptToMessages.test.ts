@@ -2420,6 +2420,31 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it.each(['cancelled', 'canceled'])(
+    'keeps %s edits unapplied in safe projection',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('diff-cancelled', 'diff-call', status, 1, {
+            toolName: 'edit',
+            preview: {
+              kind: 'file_diff',
+              path: 'document.ts',
+              oldText: 'old content',
+              newText: 'attempted content',
+            },
+            resultPreview: { kind: 'text', text: 'Edit cancelled' },
+          }),
+        ],
+        { safeToolProjection: true },
+      );
+
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+      expect(tool).toMatchObject({ status: 'failed' });
+    },
+  );
+
   it('keeps raw tool data authoritative in the default projection', () => {
     const rawInput = {
       file_path: 'src/generated.ts',

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
@@ -28,6 +28,7 @@ const sharedFixtureHashes = {
   'schema/manifest.schema.json':
     'c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa',
 } as const;
+const casesRoot = resolve(fixtureRoot, 'cases');
 const caseRoot = resolve(fixtureRoot, 'cases/representative');
 const scopeKey = 'workspace-a:session-a';
 
@@ -84,10 +85,13 @@ function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function listFixtureEvidenceFiles(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
-    entry.isFile() && entry.name !== 'manifest.json' ? [entry.name] : [],
-  );
+function listFixtureFiles(directory: string, root = directory): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = resolve(directory, entry.name);
+    if (entry.isDirectory()) return listFixtureFiles(entryPath, root);
+    if (!entry.isFile()) return [];
+    return [relative(root, entryPath).split(sep).join('/')];
+  });
 }
 
 function expectManifestToMatchSchema(
@@ -283,14 +287,32 @@ describe('chat transcript cross-host contract', () => {
       ] as Record<string, unknown>;
       expect(typeof kind['const']).toBe('string');
     }
-    expect(Object.keys(manifest.hashes).sort()).toEqual(
-      listFixtureEvidenceFiles(caseRoot).sort(),
+    const declaredCaseFiles = readdirSync(casesRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) => {
+        const fixtureCaseRoot = resolve(casesRoot, entry.name);
+        const fixtureCaseManifest = readJson<FixtureManifest>(
+          resolve(fixtureCaseRoot, 'manifest.json'),
+        );
+        expectManifestToMatchSchema(fixtureCaseManifest, manifestSchema);
+        const evidenceFiles = Object.keys(fixtureCaseManifest.hashes);
+        expect(listFixtureFiles(fixtureCaseRoot).sort()).toEqual(
+          ['manifest.json', ...evidenceFiles].sort(),
+        );
+        for (const [relativePath, expectedHash] of Object.entries(
+          fixtureCaseManifest.hashes,
+        )) {
+          expect(sha256(resolve(fixtureCaseRoot, relativePath))).toBe(
+            expectedHash,
+          );
+        }
+        return ['manifest.json', ...evidenceFiles].map(
+          (path) => `cases/${entry.name}/${path}`,
+        );
+      });
+    expect(listFixtureFiles(fixtureRoot).sort()).toEqual(
+      [...Object.keys(sharedFixtureHashes), ...declaredCaseFiles].sort(),
     );
-    for (const [relativePath, expectedHash] of Object.entries(
-      manifest.hashes,
-    )) {
-      expect(sha256(resolve(caseRoot, relativePath))).toBe(expectedHash);
-    }
     for (const [relativePath, expectedHash] of Object.entries(
       sharedFixtureHashes,
     )) {

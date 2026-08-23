@@ -765,7 +765,16 @@ function appendTextDelta(
     existing.kind === kind &&
     canMergeTextDelta(existing, event)
   ) {
-    existing.text = appendBoundedText(state, existing, text);
+    const separator =
+      kind === 'user' &&
+      existing.text.length > 0 &&
+      text.length > 0 &&
+      existing.segmentId !== event.segmentId &&
+      !existing.text.endsWith('\n') &&
+      !text.startsWith('\n')
+        ? '\n'
+        : '';
+    existing.text = appendBoundedText(state, existing, separator + text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
@@ -843,7 +852,11 @@ function canMergeTextDelta(
   ) {
     return false;
   }
-  if (existing.kind !== 'user' && existing.meta?.qwenDiscreteMessage === true) {
+  const sameRecordedUser =
+    existing.kind === 'user' &&
+    (existing.sourceRecordIds?.length ?? 0) > 0 &&
+    (event.sourceRecordIds?.length ?? 0) > 0;
+  if (!sameRecordedUser && existing.meta?.qwenDiscreteMessage === true) {
     return false;
   }
   if (
@@ -852,14 +865,14 @@ function canMergeTextDelta(
     existing.promptId !== event.promptId
   )
     return false;
-  if (existing.kind !== 'user' && existing.segmentId !== event.segmentId) {
+  if (!sameRecordedUser && existing.segmentId !== event.segmentId) {
     return false;
   }
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
   return (
-    existing.kind === 'user' ||
+    sameRecordedUser ||
     !('meta' in event) ||
     event.meta?.qwenDiscreteMessage !== true
   );

@@ -1280,8 +1280,8 @@ function daemonToolBlockToToolCall(
     background: 'pending',
     completed: 'completed',
     failed: 'failed',
-    cancelled: 'completed',
-    canceled: 'completed',
+    cancelled: safeToolProjection ? 'failed' : 'completed',
+    canceled: safeToolProjection ? 'failed' : 'completed',
     in_progress: 'in_progress',
   };
   const isComplete =

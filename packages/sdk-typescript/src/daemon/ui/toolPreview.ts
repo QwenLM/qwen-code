@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import {
   capDetails,
+  detachString,
   getFirstString,
   isRecord,
   isSensitiveKey,
@@ -169,7 +170,7 @@ function detectTodoList(
       truncated = true;
       return;
     }
-    const content = rawContent.slice(0, remainingText);
+    const content = detachString(rawContent.slice(0, remainingText));
     if (content.length < rawContent.length) truncated = true;
     remainingText -= content.length;
     const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;

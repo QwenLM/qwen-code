@@ -851,6 +851,7 @@ describe('ExportTranscriptDocumentV1', () => {
                   '<javascript:CHAT_TRANSCRIPT_URL_CANARY>',
                   '<https://bob:password@example.com/autolink?CHAT_TRANSCRIPT_URL_CANARY>',
                   'https://carol:password@example.com/bare?CHAT_TRANSCRIPT_URL_CANARY#fragment',
+                  'www.example.com/path?CHAT_TRANSCRIPT_URL_CANARY',
                   '`[unequal](javascript:CHAT_TRANSCRIPT_URL_CANARY)``',
                   '> [evil]: javascript:CHAT_TRANSCRIPT_URL_CANARY',
                   '> [reference][evil]',
@@ -881,6 +882,7 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).toContain('[credential](https://example.com/private)');
     expect(text).toContain('https://example.com/autolink');
     expect(text).toContain('https://example.com/bare');
+    expect(text).toContain('http://www.example.com/path');
     expect(text).toContain(
       '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
     );
@@ -900,7 +902,7 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(document.diagnostics).toEqual(
       expect.arrayContaining([
         { code: 'url_rejected', severity: 'warning', count: 6 },
-        { code: 'url_sanitized', severity: 'warning', count: 4 },
+        { code: 'url_sanitized', severity: 'warning', count: 5 },
       ]),
     );
   });

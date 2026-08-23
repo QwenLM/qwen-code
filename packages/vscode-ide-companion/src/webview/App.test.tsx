@@ -26,6 +26,11 @@ const {
   mockMessageState: {
     isStreaming: false,
     isWaitingForResponse: false,
+    messages: [] as Array<{
+      role: 'user' | 'assistant';
+      content: string;
+      timestamp: number;
+    }>,
   },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
@@ -97,7 +102,7 @@ vi.mock('./hooks/file/useFileContext.js', () => ({
 
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
   useMessageHandling: () => ({
-    messages: [],
+    messages: mockMessageState.messages,
     isStreaming: mockMessageState.isStreaming,
     isWaitingForResponse: mockMessageState.isWaitingForResponse,
     loadingMessage: null,
@@ -220,7 +225,9 @@ vi.mock('./components/AccountInfoDialog.js', () => ({
 
 vi.mock('@qwen-code/webui', () => ({
   AssistantMessage: () => null,
-  UserMessage: () => null,
+  UserMessage: ({ content }: { content: string }) => (
+    <div data-testid="legacy-user-message">{content}</div>
+  ),
   ThinkingMessage: () => null,
   WaitingMessage: () => null,
   InterruptedMessage: () => null,
@@ -235,6 +242,10 @@ vi.mock('@qwen-code/webui', () => ({
   ZERO_WIDTH_SPACE: '\u200B',
   CloseSmallIcon: () => null,
   stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
+}));
+
+vi.mock('@qwen-code/web-shell', () => ({
+  WebShellTranscript: () => <div data-testid="web-shell-transcript" />,
 }));
 
 vi.mock('./components/layout/InputForm.js', () => ({
@@ -425,6 +436,8 @@ describe('App /skills secondary picker', () => {
     vi.clearAllMocks();
     mockMessageState.isStreaming = false;
     mockMessageState.isWaitingForResponse = false;
+    mockMessageState.messages = [];
+    delete document.body.dataset.webShellTranscript;
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -476,6 +489,50 @@ describe('App /skills secondary picker', () => {
       container.remove();
       container = null;
     }
+    delete document.body.dataset.webShellTranscript;
+  });
+
+  it('keeps legacy history visible when transcript rendering is enabled mid-session', async () => {
+    mockMessageState.messages = [
+      { role: 'user', content: 'LEGACY HISTORY', timestamp: 1 },
+    ];
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    expect(rendered.container.textContent).toContain('LEGACY HISTORY');
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellTranscriptSettingChanged',
+            data: { enabled: true, sessionId: 'session-1' },
+          },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'NEW ONLY' },
+                _meta: { qwenTranscript: { segmentId: 'new-1' } },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.container.textContent).toContain('LEGACY HISTORY');
+    expect(
+      rendered.container.querySelector('[data-testid="web-shell-transcript"]'),
+    ).toBeNull();
   });
 
   it('opens the secondary picker after selecting /skills', async () => {

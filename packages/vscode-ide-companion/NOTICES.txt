@@ -244,7 +244,7 @@ undici-types@5.26.5
 
 MIT License
 
-Copyright (c) Node.js contributors
+Copyright (c) Matteo Collina and Undici contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

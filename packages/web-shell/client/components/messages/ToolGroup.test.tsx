@@ -2,8 +2,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import { hasActiveAgents } from '../../adapters/toolClassification';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -1845,4 +1847,35 @@ describe('tool output logic', () => {
       ),
     ).toBe('');
   });
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted typed diff for a %s safe projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-edit',
+        kind: 'tool',
+        toolCallId: 'edit-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: {
+          kind: 'file_diff',
+          path: 'document.ts',
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block], {
+        safeToolProjection: true,
+      });
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
 });

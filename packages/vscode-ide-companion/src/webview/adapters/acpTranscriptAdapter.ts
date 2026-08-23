@@ -14,7 +14,10 @@ export interface AcpTranscriptAdapterState {
 }
 
 export function createAcpTranscriptAdapterState(): AcpTranscriptAdapterState {
-  const transcript = createDaemonTranscriptState({ now: 0 });
+  const transcript = createDaemonTranscriptState({
+    now: 0,
+    maxBlocks: Number.MAX_SAFE_INTEGER,
+  });
   return { transcript, blocks: transcript.blocks, compatible: true };
 }
 
@@ -29,10 +32,17 @@ export function reduceAcpTranscriptUpdate(
     type: 'session_update',
     data: { update },
   };
+  let truncated = false;
   const transcript = reduceDaemonTranscriptEvents(
     state.transcript,
     normalizeDaemonEvent(event),
-    { now },
+    {
+      now,
+      maxBlocks: Number.MAX_SAFE_INTEGER,
+      onTruncation: () => {
+        truncated = true;
+      },
+    },
   );
   const projected = projectStableTranscriptBlockIds(
     transcript.blocks,
@@ -41,7 +51,7 @@ export function reduceAcpTranscriptUpdate(
   return {
     transcript,
     blocks: projected.blocks,
-    compatible: state.compatible && projected.compatible,
+    compatible: state.compatible && !truncated && projected.compatible,
   };
 }
 

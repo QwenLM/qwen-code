@@ -44,7 +44,8 @@ const markdownParser = unified()
 function mayContainNavigableMarkdown(value: string): boolean {
   return (
     value.includes(']') ||
-    /(?:https?|mailto|javascript|data):/i.test(value) ||
+    value.includes('@') ||
+    /www\.|(?:https?|mailto|javascript|data):/i.test(value) ||
     (value.includes('<') && value.includes('>'))
   );
 }

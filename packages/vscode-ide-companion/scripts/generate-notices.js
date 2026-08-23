@@ -14,11 +14,12 @@ const projectRoot = path.resolve(
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
 const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
 const curatedCopyrightHolders = new Map([
-  ['undici-types', 'Node.js contributors'],
-  ['@xterm/headless', 'Microsoft Corporation'],
-  ['@simple-git/args-pathspec', 'Steve King'],
-  ['@simple-git/argv-parser', 'Steve King'],
+  ['undici-types@5.26.5', 'Matteo Collina and Undici contributors'],
+  ['@xterm/headless@5.5.0', 'Microsoft Corporation'],
+  ['@simple-git/args-pathspec@1.0.3', 'Steve King'],
+  ['@simple-git/argv-parser@1.1.1', 'Steve King'],
 ]);
+const missingLicenseText = 'License text not found.';
 
 const mitTerms = `Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -48,9 +49,18 @@ export function fallbackLicenseText(packageJson) {
   if (packageJson.license !== 'MIT') return undefined;
   const holder =
     authorName(packageJson.author) ??
-    curatedCopyrightHolders.get(packageJson.name);
+    curatedCopyrightHolders.get(`${packageJson.name}@${packageJson.version}`);
   if (!holder) return undefined;
   return `MIT License\n\nCopyright (c) ${holder}\n\n${mitTerms}`;
+}
+
+export function isMissingLicenseText(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return !normalized || normalized.startsWith(missingLicenseText);
+}
+
+export function normalizeLicenseText(value) {
+  return typeof value === 'string' && value.trim() ? value : missingLicenseText;
 }
 
 export async function findSupplementalNoticeFiles(packageDir, license) {
@@ -82,7 +92,7 @@ export async function findSupplementalNoticeFiles(packageDir, license) {
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
 async function getDependencyLicense(depName, depVersion, resolvedKey) {
-  let licenseContent = 'License text not found.';
+  let licenseContent = missingLicenseText;
   let repositoryUrl = 'No repository found';
 
   // Derive the on-disk path directly from the lockfile key
@@ -109,7 +119,8 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
 
     if (licenseFile) {
       try {
-        licenseContent = await fs.readFile(licenseFile, 'utf-8');
+        const content = await fs.readFile(licenseFile, 'utf-8');
+        licenseContent = normalizeLicenseText(content);
       } catch (e) {
         console.warn(
           `Warning: Failed to read license file for ${depName}: ${e.message}`,
@@ -130,7 +141,11 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     );
     for (const supplementalFile of supplementalFiles) {
       const supplemental = await fs.readFile(supplementalFile, 'utf8');
-      licenseContent += `\n\n----- ${path.relative(packageDir, supplementalFile)} -----\n\n${supplemental}`;
+      const label = path
+        .relative(packageDir, supplementalFile)
+        .split(path.sep)
+        .join('/');
+      licenseContent += `\n\n----- ${label} -----\n\n${supplemental}`;
     }
   } catch (e) {
     console.warn(
@@ -338,7 +353,7 @@ async function main() {
 
     const dependencyLicenses = await Promise.all(licensePromises);
     const missingLicenses = dependencyLicenses
-      .filter((dependency) => dependency.license === 'License text not found.')
+      .filter((dependency) => isMissingLicenseText(dependency.license))
       .map((dependency) => `${dependency.name}@${dependency.version}`);
     if (missingLicenses.length > 0) {
       throw new Error(

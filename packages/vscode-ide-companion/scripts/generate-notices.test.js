@@ -13,6 +13,8 @@ import {
   fallbackLicenseText,
   findLicenseFile,
   findSupplementalNoticeFiles,
+  isMissingLicenseText,
+  normalizeLicenseText,
 } from './generate-notices.js';
 
 describe('findLicenseFile', () => {
@@ -115,6 +117,31 @@ describe('license fallbacks and supplemental notices', () => {
     expect(
       fallbackLicenseText({ name: 'example', license: 'Apache-2.0' }),
     ).toBeUndefined();
+    expect(
+      fallbackLicenseText({
+        name: 'undici-types',
+        version: '5.26.5',
+        license: 'MIT',
+      }),
+    ).toContain('Copyright (c) Matteo Collina and Undici contributors');
+    expect(
+      fallbackLicenseText({
+        name: 'undici-types',
+        version: '6.0.0',
+        license: 'MIT',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects empty and sentinel-prefixed license text', () => {
+    expect(isMissingLicenseText('')).toBe(true);
+    expect(isMissingLicenseText('   \n')).toBe(true);
+    expect(isMissingLicenseText('License text not found.\n\nNOTICE')).toBe(
+      true,
+    );
+    expect(isMissingLicenseText('MIT License')).toBe(false);
+    expect(isMissingLicenseText('MIT License\n\nNOTICE')).toBe(false);
+    expect(normalizeLicenseText('   \n')).toBe('License text not found.');
   });
 
   it('collects NOTICE and Apache secondary license files', async () => {
@@ -128,7 +155,7 @@ describe('license fallbacks and supplemental notices', () => {
 
     expect(
       (await findSupplementalNoticeFiles(packageDir, 'Apache-2.0')).map(
-        (entry) => path.relative(packageDir, entry),
+        (entry) => path.relative(packageDir, entry).split(path.sep).join('/'),
       ),
     ).toEqual(['NOTICE', 'licenses/LICENSE-secondary']);
   });

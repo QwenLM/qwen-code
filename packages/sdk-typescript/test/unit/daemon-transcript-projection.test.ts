@@ -688,7 +688,7 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       (block) => block.kind === 'user',
     );
     expect(userBlocks.map((block) => block.text)).toEqual([
-      'look at this[Attachment is no longer available]',
+      'look at this\n[Attachment is no longer available]',
       '[Attachment is no longer available]',
     ]);
     expect(userBlocks.map((block) => block.sourceRecordIds)).toEqual([

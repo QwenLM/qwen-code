@@ -31,11 +31,19 @@ export function useAcpTranscript(): {
         type?: unknown;
         data?: { enabled?: unknown; sessionId?: unknown; update?: unknown };
       };
-      if (
-        message.type === 'agentConnectionError' ||
-        message.type === 'conversationLoaded'
-      ) {
-        setState((previous) => initialState(previous.enabled));
+      if (message.type === 'agentConnectionError') {
+        setState((previous) => ({
+          ...initialState(previous.enabled),
+          compatible: false,
+        }));
+        return;
+      }
+      if (message.type === 'conversationLoaded') {
+        setState((previous) => ({
+          ...initialState(previous.enabled),
+          compatible: false,
+          ...(previous.scopeKey ? { scopeKey: previous.scopeKey } : {}),
+        }));
         return;
       }
       if (message.type === 'agentConnected') {
@@ -51,13 +59,9 @@ export function useAcpTranscript(): {
       }
       if (message.type === 'webShellTranscriptSettingChanged') {
         const enabled = message.data?.enabled === true;
-        const scopeKey =
-          enabled && typeof message.data?.sessionId === 'string'
-            ? message.data.sessionId
-            : undefined;
         setState({
           ...initialState(enabled),
-          ...(scopeKey ? { scopeKey } : {}),
+          ...(enabled ? { compatible: false } : {}),
         });
         return;
       }
