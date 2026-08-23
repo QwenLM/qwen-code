@@ -56,6 +56,7 @@ export function mapProviderStatus(
       ].join('\0');
       if (seen.has(modelKey)) continue;
       seen.add(modelKey);
+      const reasoningPreview = mapReasoningControls(model.configOptions);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -70,6 +71,7 @@ export function mapProviderStatus(
         ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
+        ...(reasoningPreview ? { reasoningPreview } : {}),
       });
     }
   }
@@ -149,6 +151,7 @@ export function mapReasoningControls(
   });
   if (!values.includes('none')) return undefined;
   const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
   const selectableValues = values.filter((value) => value !== 'none');
