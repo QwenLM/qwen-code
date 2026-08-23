@@ -197,15 +197,33 @@ export function reduceDaemonTranscriptEvents(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
   if (events.length === 0) return state;
-  const next = cloneTranscriptState(state, opts);
+  const maxBlocks = opts.maxBlocks ?? state.maxBlocks;
+  const shareSideIndexes =
+    state.blocks.length + events.length <= maxBlocks &&
+    events.every(
+      (event) =>
+        (event.type === 'assistant.text.delta' ||
+          event.type === 'thought.text.delta') &&
+        event.parentToolCallId === undefined,
+    );
+  const next = cloneTranscriptState(state, opts, shareSideIndexes);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
-  const result = trimTranscriptState(next);
-  // With lazy COW, blocks and their index can be shared across snapshots.
-  // Freeze both at the dispatch boundary so external in-place mutation throws
-  // in strict mode instead of poisoning every snapshot sharing the reference.
+  const result = trimTranscriptState(next, shareSideIndexes);
+  // With lazy COW, these collections can be shared across snapshots. Freeze
+  // them at the dispatch boundary so external in-place mutation throws in
+  // strict mode instead of poisoning every snapshot sharing the reference.
   if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
+    Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.activeAssistantBlockByParent);
+    Object.freeze(result.activeThoughtBlockByParent);
+    Object.freeze(result.trimmedToolNotificationByCallId);
+    Object.freeze(result.permissionBlockByRequestId);
+    for (const progress of Object.values(result.toolProgress)) {
+      Object.freeze(progress);
+    }
+    Object.freeze(result.toolProgress);
   }
   return result;
 }
@@ -1540,6 +1558,7 @@ function createTextBlock(
 function cloneTranscriptState(
   state: DaemonTranscriptState,
   opts: DaemonTranscriptReducerOptions,
+  shareSideIndexes = false,
 ): DaemonTranscriptState {
   const next: DaemonTranscriptState = {
     ...state,
@@ -1560,26 +1579,32 @@ function cloneTranscriptState(
     // consumers + the WeakMap caches want.
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
-    toolBlockByCallId: createIndex(state.toolBlockByCallId),
-    activeAssistantBlockByParent: createIndex(
-      state.activeAssistantBlockByParent,
-    ),
-    activeThoughtBlockByParent: createIndex(state.activeThoughtBlockByParent),
-    trimmedToolNotificationByCallId: createIndex(
-      state.trimmedToolNotificationByCallId,
-    ),
-    permissionBlockByRequestId: createIndex(state.permissionBlockByRequestId),
-    // Deep-clone the inner progress records.
-    // The outer spread alone shares `{ ratio?, step? }` references between
-    // snapshots — once `tool.progress` event handlers start mutating in
-    // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
-    // by `Object.keys(state.toolProgress).length` which is small (only
-    // in-flight tools).
-    toolProgress: createIndex(
-      Object.fromEntries(
-        Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
-      ),
-    ),
+    // Top-level streamed text cannot mutate these side indexes. Sharing them
+    // avoids work proportional to historical tool count on every delta.
+    toolBlockByCallId: shareSideIndexes
+      ? state.toolBlockByCallId
+      : createIndex(state.toolBlockByCallId),
+    activeAssistantBlockByParent: shareSideIndexes
+      ? state.activeAssistantBlockByParent
+      : createIndex(state.activeAssistantBlockByParent),
+    activeThoughtBlockByParent: shareSideIndexes
+      ? state.activeThoughtBlockByParent
+      : createIndex(state.activeThoughtBlockByParent),
+    trimmedToolNotificationByCallId: shareSideIndexes
+      ? state.trimmedToolNotificationByCallId
+      : createIndex(state.trimmedToolNotificationByCallId),
+    permissionBlockByRequestId: shareSideIndexes
+      ? state.permissionBlockByRequestId
+      : createIndex(state.permissionBlockByRequestId),
+    // Other reducer events may mutate the inner progress records, so those
+    // paths still deep-clone them before applying updates.
+    toolProgress: shareSideIndexes
+      ? state.toolProgress
+      : createIndex(
+          Object.fromEntries(
+            Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+          ),
+        ),
     lastResyncRequired:
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
@@ -1612,6 +1637,7 @@ function sharesSourceRecordId(
 
 function trimTranscriptState(
   state: DaemonTranscriptState,
+  sideIndexesShared = false,
 ): DaemonTranscriptState {
   const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
   if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
@@ -1692,6 +1718,21 @@ function trimTranscriptState(
   // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
   ownedBlockIndexes.set(state, state.blockIndexById);
+  if (sideIndexesShared) {
+    state.toolBlockByCallId = createIndex(state.toolBlockByCallId);
+    state.activeAssistantBlockByParent = createIndex(
+      state.activeAssistantBlockByParent,
+    );
+    state.activeThoughtBlockByParent = createIndex(
+      state.activeThoughtBlockByParent,
+    );
+    state.trimmedToolNotificationByCallId = createIndex(
+      state.trimmedToolNotificationByCallId,
+    );
+    state.permissionBlockByRequestId = createIndex(
+      state.permissionBlockByRequestId,
+    );
+  }
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;

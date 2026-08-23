@@ -104,7 +104,7 @@ import {
 } from '../utils/markdownUtilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
