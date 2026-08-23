@@ -258,6 +258,28 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
+  it('escapes the classes JSON.stringify passes raw, not just C0', () => {
+    // This sink kept its own C0+DEL copy of the rule long after `inertText`
+    // was extracted "so the newer sinks cannot each re-derive it (and
+    // re-forget it)" — so U+2028 (a forged second line wherever the message
+    // is re-rendered), the 8-bit C1 introducers and the invisible Cf class
+    // all reached the terminal verbatim and UNQUOTED from here.
+    capture({
+      untracked: [
+        `evil${String.fromCodePoint(0x2028)}fake.ts`,
+        `bidi${String.fromCodePoint(0x202e)}.ts`,
+      ],
+      skipped: [],
+    });
+    run('plan.json');
+
+    const out = errs.join('');
+    expect(out).not.toContain(String.fromCodePoint(0x2028));
+    expect(out).not.toContain(String.fromCodePoint(0x202e));
+    expect(out).toContain('\\u2028');
+    expect(out).toContain('\\u202e');
+  });
+
   it('escapes a filename carrying terminal control characters', () => {
     // A filename is workspace-controlled, and git permits an ESC or a newline in
     // one. Printed raw it can forge a second warning line or drive the user's

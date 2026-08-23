@@ -37,6 +37,17 @@ import { LITERAL_PATHSPECS } from './diff-flags.js';
 /** A file absent on one side: created by the PR, or deleted by it. */
 export const NO_BLOB = 'absent';
 
+/**
+ * Stands in for a rendering the attribute probe could not report.
+ *
+ * The COMPARISON gives it its meaning, exactly as `local-anchor` does for
+ * `UNHASHABLE`: a plain constant is equal to itself, so recording one and
+ * leaving `changedPairs` to compare strings would keep the fail-open it is
+ * here to close — two rounds whose probes both failed would read as
+ * unchanged. `changedPairs` treats it as changed on either side.
+ */
+const UNANSWERED_ATTRS = 'unanswered';
+
 export interface BlobPair {
   base: string;
   head: string;
@@ -181,8 +192,15 @@ export function blobPairs(
     paths.filter((p) => out[p] !== undefined),
   );
   for (const p of paths) {
-    const a = attrs[p];
-    if (a !== undefined && out[p] !== undefined) out[p].attrs = a;
+    if (out[p] === undefined) continue;
+    // A path the probe could not answer for gets a never-equal sentinel, not
+    // an ABSENT component. `renderingAttributes` answers `{}` from a blanket
+    // catch when the probe itself fails, and skipping those paths recorded
+    // nothing — so two rounds whose probes both failed compared
+    // `undefined === undefined`, and a clean verdict transferred over a
+    // rendering neither round ever certified. Failing closed costs a
+    // re-review; failing open costs the review.
+    out[p].attrs = attrs[p] ?? UNANSWERED_ATTRS;
   }
   return out;
 }
@@ -221,11 +239,21 @@ export function readFileVerdicts(raw: unknown): FileVerdicts | null {
   }
   const out = nullProtoMap<BlobPair>();
   for (const [path, pair] of Object.entries(raw as Record<string, unknown>)) {
-    const p = pair as { base?: unknown; head?: unknown };
+    const p = pair as { base?: unknown; head?: unknown; attrs?: unknown };
     if (!p || typeof p.base !== 'string' || typeof p.head !== 'string') {
       return null;
     }
-    out[path] = { base: p.base, head: p.head };
+    // …and the third component. Dropping it here made the whole thing inert
+    // in the opposite direction: a round-tripped record arrived with no
+    // `attrs` while a freshly computed pair carries the probe's answer, so
+    // `changedPairs` saw a difference on every attrs-bearing file every
+    // round and no verdict ever transferred. A record written before the
+    // field legitimately has none, which reads as changed once.
+    out[path] = {
+      base: p.base,
+      head: p.head,
+      ...(typeof p.attrs === 'string' ? { attrs: p.attrs } : {}),
+    };
   }
   return out;
 }
@@ -311,7 +339,13 @@ export function changedPairs(
     // recorded. A record written before the field has none on the recorded
     // side, so it reads as changed once and is re-recorded — the safe
     // direction.
-    if (rec.attrs !== cur.attrs) return true;
+    if (
+      rec.attrs === UNANSWERED_ATTRS ||
+      cur.attrs === UNANSWERED_ATTRS ||
+      rec.attrs !== cur.attrs
+    ) {
+      return true;
+    }
     return rec.base !== cur.base || rec.head !== cur.head;
   });
 }

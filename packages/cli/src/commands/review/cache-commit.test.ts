@@ -393,5 +393,49 @@ describe('cache-commit', () => {
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
     const argv = seed({ v: 1, target: 'pr-7', lastModelId: '' }, {});
     expect(() => run(argv)).toThrow(/lastModelId/);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
+  it('carries a candidate field nobody enumerated — the recurring bug', () => {
+    // Three fields were forgotten from the old allowlist in three rounds —
+    // `lastModelId`, `source`, `untracked` — each silently: the promoted
+    // cache simply lacked it, the gate that read it saw `undefined` and fell
+    // open. The rule is inverted now, so a field the capture invents travels
+    // without anyone editing this command.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'pr-7',
+        lastModelId: 'm@1',
+        untracked: true,
+        somethingNewNobodyListed: 'x',
+      },
+      { round: 1 },
+    );
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['untracked']).toBe(true);
+    expect(cache['somethingNewNobodyListed']).toBe('x');
+  });
+
+  it('drops a ledger key outside the contract, anchor-shaped or not', () => {
+    // The ledger contributes only the names it owns. An anchor name this
+    // candidate does not carry is neither a ledger field nor a candidate key,
+    // so spreading the ledger whole would have let it write anchor state.
+    const argv = seed(
+      { v: 1, target: 'pr-7', lastModelId: 'm@1' },
+      { round: 1, fileVerdicts: { 'a.ts': { base: 'x', head: 'y' } }, junk: 1 },
+    );
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect('fileVerdicts' in cache).toBe(false);
+    expect('junk' in cache).toBe(false);
+    expect(cache['round']).toBe(1);
   });
 });

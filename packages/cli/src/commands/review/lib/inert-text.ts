@@ -42,6 +42,20 @@
 export const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
+ * The part of that class `JSON.stringify` does NOT escape on its own.
+ *
+ * Measured, not assumed: `JSON.stringify` escapes C0 (U+0000–U+001F) and
+ * passes DEL, the C1 range, the Cf class and U+2028/U+2029 through verbatim.
+ * Pre-escaping the whole class double-escaped the half it already handles —
+ * ESC came out as `\\u001b` where `\u001b` is what the sinks read — so the
+ * replacement covers exactly the remainder and `JSON.stringify` finishes the
+ * job. One class still decides WHETHER to quote; this one decides what the
+ * quoting cannot express by itself.
+ */
+// eslint-disable-next-line no-misleading-character-class
+const NEEDS_PRE_ESCAPE = /[\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
  * Render untrusted text inert for a terminal: quoted-and-escaped when it
  * carries control characters, verbatim otherwise (the overwhelming case, and
  * quoting every ordinary string would make every message harder to read).
@@ -65,7 +79,7 @@ export function inertText(value: string, maxChars = 200): string {
   // replaced.
   const rendered = CONTROL.test(clipped)
     ? JSON.stringify(
-        clipped.replace(new RegExp(CONTROL.source, 'gu'), (c) => {
+        clipped.replace(NEEDS_PRE_ESCAPE, (c) => {
           const hex = c.codePointAt(0)!.toString(16).padStart(4, '0');
           return `\\u${hex}`;
         }),

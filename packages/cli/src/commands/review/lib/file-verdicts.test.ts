@@ -323,3 +323,34 @@ describe('blobPairs — the rendering the reviewer actually gets', () => {
     expect(changedPairs(withAttr, withoutAttr, ['x.txt'])).toContain('x.txt');
   });
 });
+describe('the attrs component survives the cache, and fails closed', () => {
+  it('round-trips through readFileVerdicts, so a verdict can transfer', () => {
+    // The validated reader rebuilt each pair as `{base, head}` and dropped
+    // the component `changedPairs` compares — so a record read back from the
+    // cache always differed from a freshly computed one, every attrs-bearing
+    // file read as changed every round, and no verdict ever transferred. The
+    // fold and the comparison were both right; the reader made them inert.
+    write('x.txt', 'hello\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    const fresh = blobPairs(repo, base, base, ['x.txt'])!;
+    const roundTripped = readFileVerdicts(JSON.parse(JSON.stringify(fresh)))!;
+
+    expect(roundTripped['x.txt'].attrs).toBe(fresh['x.txt'].attrs);
+    expect(changedPairs(roundTripped, fresh, ['x.txt'])).toEqual([]);
+  });
+
+  it('never transfers a verdict over a rendering the probe could not report', () => {
+    // `renderingAttributes` answers `{}` from a blanket catch when the probe
+    // itself fails. Recording nothing for those paths let two rounds whose
+    // probes both failed compare `undefined === undefined` — a clean verdict
+    // over a rendering neither round certified. The sentinel is never equal,
+    // and the COMPARISON is what makes it so: a plain constant equals itself.
+    const unanswered = {
+      'x.txt': { base: 'b', head: 'h', attrs: 'unanswered' },
+    };
+    expect(changedPairs(unanswered, unanswered, ['x.txt'])).toEqual(['x.txt']);
+  });
+});

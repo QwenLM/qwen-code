@@ -56,6 +56,7 @@ import {
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt, gitRaw } from './lib/git.js';
+import { inertText } from './lib/inert-text.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -124,11 +125,16 @@ type CaptureLocalResult = PlanReport & {
  * characters and quotes the result; the machine-readable report keeps the real
  * bytes.
  */
-function display(path: string): string {
-  // eslint-disable-next-line no-control-regex
-  const CONTROL = /[\u0000-\u001f\u007f]/;
-  return CONTROL.test(path) ? JSON.stringify(path) : path;
-}
+// …and it is `inertText`, not a copy of it. This function used to carry its
+// own C0+DEL class, which is the narrow one `inertText` was extracted to stop
+// people re-deriving — so U+2028 (a forged second line), the 8-bit C1
+// introducers and the invisible Cf class all passed through here verbatim and
+// UNQUOTED, out of the very sink the extraction's header names as protected.
+// Wrapped, not aliased: `inertText(value, maxChars = 200)` takes a second
+// argument, and this is used as `paths.map(display)` — which hands `map`'s
+// INDEX to `maxChars` and clips the first element to zero characters. The
+// arity is the whole reason for the wrapper.
+const display = (path: string): string => inertText(path);
 
 /**
  * Cached paths that dropped out of THIS capture while still on disk — and

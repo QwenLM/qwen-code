@@ -35,6 +35,17 @@ export const PINNED_DIFF_CONFIG: readonly string[] = [
   'diff.suppressBlankEmpty=false',
   '-c',
   'core.quotePath=false',
+  // The HUNK SHAPE, which the flags above do not pin. `diff.algorithm` and
+  // `diff.indentHeuristic` change where a hunk starts and ends and which
+  // lines land inside it, with the blobs, the mode and the attributes all
+  // standing still — so a reviewer who sets either reads different hunks
+  // from the round that recorded the verdict, and the identity cannot see
+  // it. Pinned to git's own defaults so the rendering does not depend on
+  // whose checkout produced it.
+  '-c',
+  'diff.algorithm=myers',
+  '-c',
+  'diff.indentHeuristic=true',
 ];
 
 /**

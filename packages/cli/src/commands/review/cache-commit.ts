@@ -74,36 +74,34 @@ function readJsonObject(path: string, what: string): Record<string, unknown> {
  *  field the local flow wrote and this list omitted was silently dropped,
  *  and the next round's gate then refused its own anchor for ever, blaming
  *  a stale cache format. */
-const CANDIDATE_FIELDS = [
-  'v',
-  'target',
-  'headSha',
-  'files',
-  'stateId',
-  'lastCommitSha',
-  'mergeBaseSha',
-  'fileVerdicts',
-  // The path the target token was flattened from, on a file review. The next
-  // round's anchor gate compares it (`safeTarget` is not injective, so the
-  // token alone cannot tell two files apart), and this allowlist is what
-  // decides whether it survives promotion. Left out, every file-path review
-  // promoted through this command lost its anchor permanently: the promoted
-  // cache carried no `source`, the gate refused it as "an unrecorded path",
-  // and every later round degraded to a full review. The hand-merge this
-  // command replaced spread the whole candidate, so it survived there — the
-  // mechanical allowlist is precisely what dropped it.
-  'source',
-  // The identity that certified the round, and an ANCHOR field like the rest
-  // of this list even though it names a model rather than a tree. The capture
-  // records it from what the runtime published — provider-qualified,
-  // `<model>@<digest>` — because the alternative is a token routed through
-  // the orchestrator's output, and `{{model}}` interpolates the BARE model
-  // id: two provider configurations exposing one model name write the same
-  // string and pass each other's same-model gate, which is the whole contract
-  // the anchor rests on. Left out of this list, a hand-written ledger key
-  // would win the collision and put that bare token back in the cache.
-  'lastModelId',
+/**
+ * The names the LEDGER owns. Everything else the candidate carries is anchor
+ * state and travels with it.
+ *
+ * This was an allowlist of candidate fields, and it was forgotten three times
+ * in three rounds — `lastModelId`, then `source`, then `untracked` — each
+ * time silently: the promoted cache simply lacked the field, the gate that
+ * read it evaluated `undefined` and fell open, and nothing failed loudly. The
+ * capture is the only writer of anchor state, so anchor state is whatever the
+ * capture wrote; enumerating it here duplicates a fact that lives there and
+ * drifts from it. A DENY list cannot drift the same way: a new candidate
+ * field travels by default, and the thing that must not travel — a ledger key
+ * the candidate tries to smuggle — is the short, stable set.
+ */
+const LEDGER_FIELDS = [
+  'round',
+  'findings',
+  'findingsCount',
+  'verdict',
+  'lastReviewDate',
 ] as const;
+
+/** Every key the candidate carries that the ledger does not own. */
+function candidateFieldsOf(candidate: Record<string, unknown>): string[] {
+  return Object.keys(candidate).filter(
+    (k) => !(LEDGER_FIELDS as readonly string[]).includes(k),
+  );
+}
 
 function runCacheCommit(args: CacheCommitArgs): void {
   const candidate = readJsonObject(args.candidate, 'the cache candidate');
@@ -144,7 +142,7 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // line either way.
   const controlled = (v: unknown): boolean =>
     typeof v === 'string' && CONTROL.test(v);
-  for (const key of CANDIDATE_FIELDS) {
+  for (const key of candidateFieldsOf(candidate)) {
     if (controlled(candidate[key])) {
       throw new Error(
         `cache-commit: the candidate's \`${key}\` carries control ` +
@@ -196,11 +194,22 @@ function runCacheCommit(args: CacheCommitArgs): void {
     );
   }
 
-  const merged: Record<string, unknown> = { ...ledger };
-  for (const key of CANDIDATE_FIELDS) {
+  // The ledger contributes ONLY the names it owns. Spreading it whole and
+  // then overwriting the anchor names left a hole the deny list cannot see:
+  // an anchor name THIS candidate happens not to carry (`fileVerdicts` on a
+  // local candidate) is not a ledger field and not a candidate key, so a
+  // ledger carrying it would have written anchor state. Building from the
+  // owned set instead makes that unrepresentable — and a ledger key outside
+  // the contract SKILL.md states is dropped, which is the safe direction: it
+  // can be a typo or an attempt to write anchor state, and it is never
+  // something a reader needs.
+  const merged: Record<string, unknown> = {};
+  for (const key of LEDGER_FIELDS) {
+    if (key in ledger) merged[key] = ledger[key];
+  }
+  for (const key of candidateFieldsOf(candidate)) {
     // Candidate fields LAST: the anchor must win any collision (see header).
-    if (key in candidate) merged[key] = candidate[key];
-    else delete merged[key];
+    merged[key] = candidate[key];
   }
   // Command-owned, stamped at promotion: spread FIRST it was silently
   // overridable by a ledger key — the precedence inversion this command
