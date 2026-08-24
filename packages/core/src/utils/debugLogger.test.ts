@@ -17,6 +17,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { getTraceContext } from '../telemetry/trace-context.js';
+import { sessionIdContext } from './sessionIdContext.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -96,6 +97,27 @@ describe('debugLogger', () => {
       logger.info('visible outside context');
       await vi.runAllTimersAsync();
       expect(fs.appendFile).toHaveBeenCalledOnce();
+    });
+
+    it('prefers the daemon session id context over the global debug session', async () => {
+      setDebugLogSession({ getSessionId: () => 'session-b' });
+      const logger = createDebugLogger('ACP');
+
+      await sessionIdContext.run('session-a', async () => {
+        logger.info('session scoped line');
+        await vi.runAllTimersAsync();
+      });
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        Storage.getDebugLogPath('session-a'),
+        '2026-01-24T10:30:00.000Z [INFO] [ACP] session scoped line\n',
+        'utf8',
+      );
+      expect(fs.appendFile).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath('session-b'),
+        expect.any(String),
+        'utf8',
+      );
     });
 
     it('writes debug log without trace context when telemetry context is unset', async () => {

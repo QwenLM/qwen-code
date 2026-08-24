@@ -10,6 +10,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
+import { sessionIdContext } from './sessionIdContext.js';
 import {
   getTraceContext,
   type TraceContext,
@@ -45,7 +46,14 @@ export function isDebugLogFileEnabled(): boolean {
 function getActiveSession(): DebugLogSession | null {
   const contextSession = sessionContext.getStore();
   if (contextSession === false) return null;
-  return contextSession ?? globalSession;
+  if (contextSession) return contextSession;
+
+  const daemonSessionId = sessionIdContext.getStore();
+  if (daemonSessionId) {
+    return { getSessionId: () => daemonSessionId };
+  }
+
+  return globalSession;
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -204,7 +212,8 @@ export function runWithoutDebugLogSession<T>(fn: () => T): T {
  *
  * Session resolution order:
  * 1) async-local suppression or session
- * 2) process-wide session (setDebugLogSession)
+ * 2) daemon async-local session ID
+ * 3) process-wide session (setDebugLogSession)
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {
