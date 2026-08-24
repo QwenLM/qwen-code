@@ -2796,6 +2796,88 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
+    it('does not halt a parallel-batch task_list poller whose results keep changing (issue #9450)', () => {
+      // Parallel same-round identical requests: ALL of a round's requests
+      // stream through the always-on guard before ANY of that round's
+      // results is recorded (production ordering: requests → Finished →
+      // results). Pre-fix the exoneration gate assumed the prior N-1
+      // results of the Nth identical request had all landed — with rounds
+      // [poll], [poll, poll], [poll, poll] the 5th request saw only 3
+      // recorded results against expectedResults 4, the gate was skipped,
+      // and a productive changing-board poller halted
+      // CONSECUTIVE_IDENTICAL_TOOL_CALLS (the #9450 false positive
+      // re-entering via a parallel batch).
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const parallelService = new LoopDetectionService(makeConfig());
+      parallelService.reset('parallel-productive');
+
+      const roundSizes = [1, 2, 2];
+      let poll = 0;
+      let fired = false;
+      for (const roundSize of roundSizes) {
+        for (let i = 0; i < roundSize && !fired; i++) {
+          fired = parallelService.checkAlwaysOnSafeties(
+            taskListEvent(`poll-${poll}`),
+          );
+          poll++;
+        }
+        if (fired) break;
+        parallelService.checkAlwaysOnSafeties(finishedEvent);
+        for (let i = 0; i < roundSize; i++) {
+          fired = parallelService.recordToolResultByCallId(
+            `poll-${poll - roundSize + i}`,
+            taskListResult(
+              `board state v${poll - roundSize + i}`,
+              `poll-${poll - roundSize + i}`,
+            ),
+          );
+          if (fired) break;
+        }
+      }
+      expect(fired).toBe(false);
+      expect(parallelService.getLastLoopType()).toBeNull();
+    });
+
+    it('still halts a parallel-batch task_list poller on a frozen board (fail-safe)', () => {
+      // Fail-safe twin of the parallel-batch regression: with an unchanged
+      // board the recorded results corroborate the repetition, so the
+      // in-flight-aware gate still halts at the 5th identical request.
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const parallelService = new LoopDetectionService(makeConfig());
+      parallelService.reset('parallel-frozen');
+
+      const roundSizes = [1, 2, 2];
+      let poll = 0;
+      let fired = false;
+      for (const roundSize of roundSizes) {
+        for (let i = 0; i < roundSize && !fired; i++) {
+          fired = parallelService.checkAlwaysOnSafeties(
+            taskListEvent(`poll-${poll}`),
+          );
+          poll++;
+        }
+        if (fired) break;
+        parallelService.checkAlwaysOnSafeties(finishedEvent);
+        for (let i = 0; i < roundSize; i++) {
+          fired = parallelService.recordToolResultByCallId(
+            `poll-${poll - roundSize + i}`,
+            taskListResult('frozen board', `poll-${poll - roundSize + i}`),
+          );
+          if (fired) break;
+        }
+      }
+      expect(fired).toBe(true);
+      expect(parallelService.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     it('keeps productive polling alive past the adaptive per-turn cap', () => {
       // With the default (adaptive) cap, a turn beyond the soft cap halts
       // only on a stuck-repetition signal. Changed results must not build

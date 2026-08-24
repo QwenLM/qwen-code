@@ -529,15 +529,18 @@ export class LoopDetectionService {
   // its own requests produced.
   private statefulAlternationHistory = new Map<string, string[]>();
 
-  // Per-key count of stateful requests fed to the heuristic tier whose
-  // results have NOT landed yet (incremented in addAndCheckHeuristicLoops,
-  // decremented in recordToolResult). With parallel tool batches both
-  // requests of a round reach the guard before that round's results land,
-  // so a window judged on args alone would skip the exonerating result
-  // check for occurrences still in flight and false-halt a productive
-  // poller; the carve-out subtracts these from its expected results (issue
-  // #9450). Reduces to the sequential arithmetic when results land before
-  // the next request is fed.
+  // Per-key count of stateful requests streamed through the guards whose
+  // results have NOT landed yet (incremented in checkAlwaysOnSafeties,
+  // decremented in recordToolResult and noteSuppressedToolCallByCallId).
+  // With parallel tool batches ALL requests of a round reach the guards
+  // before that round's results land, so a guard judged on args alone would
+  // skip the exonerating result check for occurrences still in flight and
+  // false-halt a productive poller; both the always-on consecutive-identical
+  // gate and the alternating-pattern carve-out subtract these from their
+  // expected results (issue #9450). Maintained in the always-on path so the
+  // accounting works under the skipLoopDetection default too. Reduces to
+  // the sequential arithmetic when results land before the next request is
+  // fed.
   private statefulInFlight = new Map<string, number>();
 
   // Loop type of the most recent firing. Bubbled up through the
@@ -610,9 +613,9 @@ export class LoopDetectionService {
     this.statefulResultKeysSinceLastFinished.add(key);
 
     // One in-flight request for this key has landed: unreserve it for the
-    // alternating-pattern carve-out (see statefulInFlight). Floored at zero
-    // because results can be recorded without a heuristic feed when
-    // skipLoopDetection keeps the heuristic tier off.
+    // in-flight accounting (see statefulInFlight). Floored at zero because
+    // results can be recorded for calls that never streamed through the
+    // guards (direct recordToolResult callers).
     const inFlight = this.statefulInFlight.get(key) ?? 0;
     if (inFlight > 0) {
       this.statefulInFlight.set(key, inFlight - 1);
@@ -727,9 +730,10 @@ export class LoopDetectionService {
    * no result evidence and must not be recorded via recordToolResult /
    * recordToolResultByCallId. The request-time reservations the guards made
    * when the call streamed in must unwind: the callId pairing is dropped (no
-   * real result will land for it), the alternating-pattern carve-out's
-   * in-flight reservation is released (otherwise the carve-out over-subtracts
-   * in-flight counts and judges the window on too little evidence), and the
+   * real result will land for it), the per-key in-flight reservation is
+   * released (otherwise the consecutive-identical gate and the
+   * alternating-pattern carve-out over-subtract in-flight counts and judge
+   * on too little evidence), and the
    * key is marked as having produced activity since the last Finished
    * boundary — the model DID re-issue the poll; suppression is the runtime's
    * machinery, not abandonment, so the decay must not wipe a live
@@ -834,13 +838,10 @@ export class LoopDetectionService {
         const stateful = this.isStatefulReadTool(event.value.name);
         if (stateful) {
           this.statefulRepeatKeys.add(toolCallKey);
-          // This request is now in flight: its result has not landed yet,
-          // so the alternating-pattern carve-out must not expect it (see
-          // statefulInFlight). recordToolResult decrements when it lands.
-          this.statefulInFlight.set(
-            toolCallKey,
-            (this.statefulInFlight.get(toolCallKey) ?? 0) + 1,
-          );
+          // The per-key in-flight reservation for this request is made in
+          // the always-on path (checkAlwaysOnSafeties), which production
+          // and addAndCheck always run first — incrementing here too would
+          // double-count (see statefulInFlight).
         }
         const globalDup = stateful
           ? false
@@ -1010,6 +1011,14 @@ export class LoopDetectionService {
       // at this stream's own boundary: its result is recorded AFTER the
       // Finished event (see statefulRequestedKeysSinceLastFinished).
       this.statefulRequestedKeysSinceLastFinished.add(key);
+      // This request is now in flight: its result has not landed yet, so
+      // the consecutive-identical gate's exoneration check and the
+      // alternating-pattern carve-out must not expect it (see
+      // statefulInFlight). recordToolResult / noteSuppressedToolCallByCallId
+      // decrement when it lands or is suppressed. Kept here (always-on) so
+      // the accounting also works under the skipLoopDetection default,
+      // where the heuristic tier never runs (issue #9450).
+      this.statefulInFlight.set(key, (this.statefulInFlight.get(key) ?? 0) + 1);
     }
 
     // Pair requests with their later results (recordToolResultByCallId).
@@ -1087,16 +1096,28 @@ export class LoopDetectionService {
       if (this.isStatefulReadTool(toolCall.name)) {
         // Result-aware guard (issue #9450): identical arguments to a stateful
         // read do not imply an identical result, so only halt when the
-        // executed results corroborate the loop. By the Nth identical request
-        // the prior N-1 results have been recorded; if they were ALL observed
-        // and unchanged, the repetition is genuinely unproductive. If some
-        // result changed, the model's re-poll was productive — restart the
-        // streak instead of halting. Missing result evidence (results never
-        // recorded for this streak) fails safe and keeps the pre-#9450
+        // executed results corroborate the loop. With sequential rounds the
+        // prior N-1 results of the Nth identical request have been recorded;
+        // with parallel batches ALL of a round's identical requests stream
+        // through this guard before ANY of that round's results lands
+        // (dedupeToolCallsById collapses only same-callId duplicates, so
+        // distinct-callId twins both execute), and the still-in-flight
+        // requests cannot have recorded results yet. Subtract them from the
+        // expected count (floored at the recorded evidence) so the gate is
+        // judged on the results that CAN have landed; a changed recorded
+        // result still restarts the streak. Missing result evidence (results
+        // never recorded for this streak) fails safe and keeps the pre-#9450
         // behavior, so the DashScope protection (#5019) is never loosened by
         // a wiring gap.
         const state = this.statefulRepeatState.get(key);
-        const expectedResults = this.toolCallRepetitionCount - 1;
+        const inFlight = Math.min(
+          this.statefulInFlight.get(key) ?? 0,
+          this.toolCallRepetitionCount,
+        );
+        const expectedResults = Math.max(
+          this.toolCallRepetitionCount - inFlight,
+          state?.resultsObserved ?? 0,
+        );
         if (state && state.resultsObserved >= expectedResults) {
           if (state.unchangedStreak < expectedResults - 1) {
             this.toolCallRepetitionCount = 1;
