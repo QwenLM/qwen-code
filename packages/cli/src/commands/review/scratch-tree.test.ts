@@ -244,6 +244,27 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('Remove the include directive');
   });
 
+  it('refuses a branch-writing fetch refspec with the remediation that fits it', () => {
+    // A destination under refs/heads/ rewrites the user's own branches on
+    // any fetch that applies the configured refspec; the remedy is the
+    // refspec's, not the filter's — and the clone-default destination
+    // (refs/remotes/) must not refuse at all.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: worktree, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+    expect(run().available).toBe(true);
+    g('config', 'remote.origin.fetch', '+refs/heads/*:refs/heads/*');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('fetch refspec');
+    expect(r.note).toContain('remote.origin.fetch');
+    expect(r.note).toContain('its destination must not write into refs/heads/');
+    expect(r.note).not.toContain('Remove the filter config');
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses an unlistable worktrees admin dir with the remediation that fits it',
     () => {

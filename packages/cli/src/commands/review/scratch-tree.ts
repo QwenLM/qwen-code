@@ -343,6 +343,14 @@ const REFUSAL_REMEDIES: Array<[prefix: string, remedy: string]> = [
     "A newline in the repository's path leaves the screen unable to parse its own layout; it refuses rather than guess, and a path without a newline restores it.",
   ],
   [
+    "the repository's git directory could not be read",
+    'Restore the git directory — its readability, or the file standing in for its config — so the screen can read it and certify.',
+  ],
+  [
+    "the repository's local config names fetch refspec(s)",
+    'Remove or re-aim the fetch refspec — its destination must not write into refs/heads/ — if it is not yours.',
+  ],
+  [
     "the repository's linked worktrees could not be enumerated",
     'Restore the ability to list the worktrees admin directory under the common dir — its permissions, usually — so the screen can read every per-worktree config.',
   ],

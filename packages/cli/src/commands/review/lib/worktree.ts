@@ -561,9 +561,9 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 }
 
 /**
- * The `-c` overrides every checkout spawn in this pipeline carries. The
- * screen below reads repo-local config for filters and for the
- * transport-command keys a lazy-fetch EXECUTES; the surfaces the screen
+ * The `-c` overrides every checkout and fetch spawn in this pipeline
+ * carries. The screen below reads repo-local config for filters and for
+ * the transport-command keys a fetch EXECUTES; the surfaces the screen
  * cannot read, the spawn neutralizes — each carries the half the other
  * cannot. A probe plants every one of these into the never-wiped common
  * dir with the same facility as the filter plant — one write — so a spawn
@@ -618,6 +618,16 @@ function nameScreenKeys(
     : named;
 }
 
+// The destination a fetch refspec writes into, or null when it has none —
+// a refspec without a destination fetches into FETCH_HEAD alone and
+// rewrites no ref, so it cannot orphan a branch the way a destination
+// under `refs/heads/` can.
+function fetchRefspecDst(value: string): string | null {
+  const srcDst = value.startsWith('+') ? value.slice(1) : value;
+  const sep = srcDst.indexOf(':');
+  return sep === -1 ? null : srcDst.slice(sep + 1);
+}
+
 /**
  * The refusal for a checkout about to run through a repo-local content filter —
  * or through a repo-local config file the screen could not read or expand —
@@ -656,13 +666,30 @@ function nameScreenKeys(
  * with or without `extensions.partialClone` — makes a checkout that hits a
  * missing object fetch (measured: promisor alone suffices), and
  * `core.sshCommand`, `core.gitProxy`, `core.askpass`, bare and URL-scoped
- * `credential.*.helper`, `remote.<name>.uploadpack`, and `ext::` remote
+ * `credential.*.helper`, `remote.<name>.uploadpack`, `ext::` remote
  * URLs — `protocol.allow` lifts the default-deny beside the
- * `protocol.ext.allow` that names the protocol — are commands
- * `INERT_GIT_ARGS` cannot neutralize: two are list-valued or fall back
- * when emptied. Repo-local hits refuse fail-closed, the trigger keys
- * included (measured live through all three pipeline spawn shapes).
+ * `protocol.ext.allow` that names the protocol — and
+ * `core.alternateRefsCommand`, which every fetch runs once per registered
+ * alternate during ref negotiation, are commands `INERT_GIT_ARGS` cannot
+ * neutralize: two are list-valued or fall back when emptied. Repo-local
+ * hits refuse fail-closed, the trigger keys included (measured live through
+ * all three pipeline spawn shapes). Two keys ride the screen on their own
+ * terms: a planted `remote.<name>.fetch` refspec is applied beside the
+ * command-line one on every fetch and a destination outside
+ * `refs/remotes/` force-updates the user's own branches (measured:
+ * unpushed work orphaned; a glob aimed at the checked-out branch wedges
+ * every fetch), but the clone-default refspec has exactly that key in
+ * every clone's local config — so it is judged by VALUE, refusing only a
+ * destination under `refs/heads/`, never the key itself.
  */
+// A screen spawn must still END against a config that blocks in open(): a
+// FIFO planted at a candidate path — one mkfifo+rename into the never-wiped
+// common dir, the same write class as the filter plant — hangs an unbounded
+// spawnSync before any gate below runs, and every screen after it. SIGKILL,
+// because a child blocked in a syscall cannot be asked. Local reads only;
+// seconds are generous for them.
+export const SCREEN_SPAWN_TIMEOUT_MS = 5_000;
+
 export function localFilterRefusal(
   worktree: string,
   checkout: string,
@@ -670,10 +697,25 @@ export function localFilterRefusal(
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: SCREEN_SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return null;
+    // Fail CLOSED — this branch used to return null and certify, but a spawn
+    // a FIFO holds in open() read no config, and the checkout this screen
+    // guards opens the same file. A repository rev-parse cannot read is one
+    // the checkout cannot run in either, so refusing costs nothing.
+    return `the repository's git directory could not be read (${inertPath(
+      files.error
+        ? files.error.message
+        : (files.stderr ?? '').toString().trim() ||
+            `git rev-parse exited ${files.status}`,
+    )}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
   }
   const lines = files.stdout.trim().split('\n');
   // A newline in a directory component (legal in a path) splits one answer
@@ -716,6 +758,8 @@ export function localFilterRefusal(
   const filters: Array<{ key: string; file: string }> = [];
   const includes: Array<{ key: string; file: string }> = [];
   const transport: Array<{ key: string; file: string }> = [];
+  const fetchRefCandidates: Array<{ key: string; file: string }> = [];
+  const fetchRefspecs: Array<{ key: string; file: string }> = [];
   // Neither a config key nor a path can carry NUL, so the pair separator is
   // unambiguous — and an O(1) dedup, because a padded config can hand this
   // loop tens of thousands of keys.
@@ -729,11 +773,12 @@ export function localFilterRefusal(
     // screen that could not read a file cannot certify the checkout that will.
     try {
       accessSync(file, constants.R_OK);
-      // A FIFO passes both checks above and then blocks the `--file` spawn
-      // forever (no timeout on it, and none a writer answers), hanging every
-      // later review before its first checkout — one `mkfifo`+rename into the
-      // never-wiped common dir, the same write class as the filter plant.
-      // Git parses only regular files here, so anything else fails closed.
+      // A FIFO passes both checks above and then blocks in the `--file`
+      // spawn's open() — one `mkfifo`+rename into the never-wiped common
+      // dir, the same write class as the filter plant. The spawn's timeout
+      // bounds the block, but only this gate turns the shape into a named
+      // refusal instead of a timeout's bare error. Git parses only regular
+      // files here, so anything else fails closed.
       if (!lstatSync(file).isFile()) {
         unreadable.push({ file, detail: 'not a regular file' });
         continue;
@@ -764,11 +809,16 @@ export function localFilterRefusal(
         // Include directives ride along: `--file` does not expand them while
         // the checkout's merged read does, so anything behind one EXECUTES
         // unseen (the docstring's fail-closed interim, measured live). The
-        // transport-command keys a lazy-fetch EXECUTES join them for the
-        // reason the docstring gives — a checkout that hits a missing object
-        // in a promisor-configured repo fetches through whatever command
-        // these name (measured live on all three pipeline spawn shapes).
-        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|remote\\..+\\.promisor|core\\.sshcommand|core\\.gitproxy|core\\.askpass|credential(\\..+)?\\.helper|remote\\..+\\.uploadpack|protocol\\.(ext\\.)?allow)$',
+        // transport-command keys a fetch EXECUTES join them for the reason
+        // the docstring gives — a checkout that hits a missing object in a
+        // promisor-configured repo fetches through whatever command these
+        // name, and a plain fetch runs `core.alternateRefsCommand` against
+        // every registered alternate (measured live on all three pipeline
+        // spawn shapes, and on the fetch shapes). `remote.<name>.fetch`
+        // matches here too, but only a destination under refs/heads/
+        // fails the screen — the key itself is in every clone's local
+        // config (see the value read below the candidate loop).
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|remote\\..+\\.promisor|core\\.sshcommand|core\\.gitproxy|core\\.askpass|credential(\\..+)?\\.helper|remote\\..+\\.uploadpack|protocol\\.(ext\\.)?allow|remote\\..+\\.fetch|core\\.alternaterefscommand)$',
       ],
       {
         cwd: worktree,
@@ -779,11 +829,18 @@ export function localFilterRefusal(
         // 64 MiB ceiling the other readers in these files already use.
         maxBuffer: 64 * 1024 * 1024,
         env: sanitizedGitEnv(),
+        // A FIFO swapped in between the lstat gate above and the child's
+        // open() races the same hang that gate exists for; the bound turns
+        // it into the unreadable refusal below instead of a blocked event
+        // loop (a timeout kill lands as r.error, which fails closed there).
+        timeout: SCREEN_SPAWN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       },
     );
     // Exit 1 is the legitimate "no keys matched"; every other failure on a
     // file that EXISTS and was readable — a spawn error, a malformed config
-    // git exits 128 on — is a read the screen cannot vouch for.
+    // git exits 128 on, a timeout kill — is a read the screen cannot vouch
+    // for.
     if (r.status === 1) continue;
     if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
       unreadable.push({
@@ -806,7 +863,69 @@ export function localFilterRefusal(
         seen.add(pair);
         if (key.startsWith('filter.')) filters.push({ key, file });
         else if (key.startsWith('include')) includes.push({ key, file });
-        else transport.push({ key, file });
+        else if (key.startsWith('remote.') && key.endsWith('.fetch')) {
+          // Judged by VALUE below — refusing the key itself would refuse
+          // every clone, whose local config carries the clone-default
+          // refspec under it.
+          fetchRefCandidates.push({ key, file });
+        } else transport.push({ key, file });
+      }
+    }
+  }
+  // The VALUE read for any `remote.<name>.fetch` the loop matched, asked of
+  // the same files: a destination under `refs/heads/` rewrites the user's
+  // own branches on any fetch that applies the configured refspec — a
+  // planted `+refs/heads/*:refs/heads/*` force-updated local branches and
+  // orphaned unpushed work; aimed at the checked-out branch it wedges every
+  // fetch forever (both measured live). The clone-default refspec lives
+  // under the same key in every clone and maps into `refs/remotes/`, and
+  // PR-checkout mirrors (`refs/pull/*`) are ordinary in user clones, so
+  // the KEY can never refuse — only a destination under `refs/heads/`
+  // does.
+  const refspecSeen = new Set<string>();
+  for (const file of new Set(fetchRefCandidates.map((c) => c.file))) {
+    const v = spawnSync(
+      'git',
+      ['config', '--file', file, '--get-regexp', '^remote\\..+\\.fetch$'],
+      {
+        cwd: worktree,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+        timeout: SCREEN_SPAWN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      },
+    );
+    // Exit 1 here means the key the name match saw is gone — a swap between
+    // the two reads — so there is nothing left to judge in this file. Any
+    // other failure on the read is one the screen cannot vouch for, like
+    // the enumeration above.
+    if (v.status === 1) continue;
+    if (v.error || v.status !== 0 || typeof v.stdout !== 'string') {
+      unreadable.push({
+        file,
+        detail: v.error
+          ? v.error.message
+          : (v.stderr ?? '').toString().trim() ||
+            `git config exited ${v.status}`,
+      });
+      continue;
+    }
+    for (const line of v.stdout.split('\n')) {
+      if (!line) continue;
+      // A refspec carries no whitespace, so the first space ends the key.
+      const sep = line.indexOf(' ');
+      const key = sep === -1 ? line : line.slice(0, sep);
+      const value = sep === -1 ? '' : line.slice(sep + 1);
+      const dst = fetchRefspecDst(value);
+      const pair = `${file}\u0000${key}\u0000${value}`;
+      if (
+        dst !== null &&
+        dst.startsWith('refs/heads/') &&
+        !refspecSeen.has(pair)
+      ) {
+        refspecSeen.add(pair);
+        fetchRefspecs.push({ key, file });
       }
     }
   }
@@ -814,7 +933,8 @@ export function localFilterRefusal(
     filters.length === 0 &&
     unreadable.length === 0 &&
     includes.length === 0 &&
-    transport.length === 0
+    transport.length === 0 &&
+    fetchRefspecs.length === 0
   )
     return null;
   // Keys and paths arrive from config files a probe can write, so both go
@@ -846,6 +966,16 @@ export function localFilterRefusal(
         transport,
         'command-execution key',
       )} — a checkout that lazy-fetches EXECUTES the commands they name, and the screen cannot certify that ${checkout} would not`,
+    );
+  }
+  if (fetchRefspecs.length > 0) {
+    parts.push(
+      `the repository's local config names fetch refspec(s) ${nameScreenKeys(
+        fetchRefspecs,
+        'fetch refspec',
+      )} — a fetch that applies the configured refspec writes these ` +
+        `destinations into the user's own branches, so the screen cannot ` +
+        `certify that ${checkout} would not destroy local refs`,
     );
   }
   if (unreadable.length > 0) {

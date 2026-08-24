@@ -76,6 +76,7 @@ import {
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
+  SCREEN_SPAWN_TIMEOUT_MS,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -1504,8 +1505,21 @@ export function probeCleanupFailureDetail(
  * (measured live: the user's MAIN index staged the base blob for a
  * PR-modified file). Returns null when the tree is itself, or the reason it
  * is not.
+ *
+ * Pass the commit the pipeline checked this tree out at, and the gate also
+ * holds the tree to the pipeline's own shape: its `.git` must still be the
+ * gitfile `worktree add` wrote — a symlinked or directory `.git` there is a
+ * state only the suite creates, and a checkout discovered through it runs
+ * under whatever repository it names (measured live: the symlink shape
+ * rewrote the victim repository's index) — and its HEAD must still point at
+ * that commit, because the restore checks out HEAD and the suite can retarget
+ * the shared per-worktree HEAD without touching `.git` at all (measured
+ * live: every later restore wrote attacker-chosen content).
  */
-function probeTreeIdentityRefusal(probeTree: string): string | null {
+function probeTreeIdentityRefusal(
+  probeTree: string,
+  creationSha?: string,
+): string | null {
   const top = spawnSync(
     'git',
     [
@@ -1514,8 +1528,22 @@ function probeTreeIdentityRefusal(probeTree: string): string | null {
       '--show-toplevel',
       '--git-common-dir',
       '--git-dir',
+      // Only when a creation sha was passed: this spawn reads repo config,
+      // and the HEAD it resolves is only compared in that shape.
+      ...(creationSha !== undefined ? ['--verify', 'HEAD'] : []),
     ],
-    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: probeTree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      // This spawn reads repo config the way the screen's do: a FIFO planted
+      // at the common config blocks it in open(), and an unbounded spawnSync
+      // would hang every restore and revert this gate serves until run.ts's
+      // ceiling, with no refusal and no message. SIGKILL — a child blocked
+      // in a syscall cannot be asked; the error branch below already refuses.
+      timeout: SCREEN_SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    },
   );
   if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
     return top.error
@@ -1523,7 +1551,7 @@ function probeTreeIdentityRefusal(probeTree: string): string | null {
       : (top.stderr ?? '').toString().trim() ||
           `git rev-parse exited ${top.status}`;
   }
-  const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
+  const [toplevel, commonDir, gitDir, head] = top.stdout.trim().split('\n');
   try {
     // The LEAF first. Every comparison below realpaths both sides, so a probe
     // tree that is itself a symlink into the shared review worktree agrees
@@ -1532,20 +1560,33 @@ function probeTreeIdentityRefusal(probeTree: string): string | null {
     if (lstatSync(probeTree).isSymbolicLink()) {
       return `${probeTree} is a symlink, so the checkout would land wherever it points`;
     }
+    // `--show-toplevel` prints the directory the `.git` entry sits in,
+    // whatever that entry points at — so a rewritten gitfile naming another
+    // repository passes the comparison while a checkout run here writes THAT
+    // repository's content into this tree and certifies it.
     if (realpathSync(toplevel) !== realpathSync(probeTree)) {
       return `the tree at ${probeTree} is not the root of its own checkout`;
     }
-    // `--show-toplevel` prints the directory the `.git` FILE sits in, whatever
-    // that file points at — so a rewritten gitfile naming another repository
-    // passes the check above while a checkout run here writes THAT
-    // repository's content into this tree and certifies it. `scratch-tree`
-    // gates its own reset on the admin entry pointing back; this gate asks
-    // the same question — of the shape that HAS an answer. A probe tree the
-    // pipeline built is a linked worktree and carries its `.git` as a
-    // gitfile; a plain checkout has a `.git` DIRECTORY and no admin entry to
-    // round-trip, and demanding one there would refuse every ordinary
-    // repository.
-    if (lstatSync(join(probeTree, '.git')).isFile()) {
+    const gitStat = lstatSync(join(probeTree, '.git'));
+    if (creationSha !== undefined && !gitStat.isFile()) {
+      // A probe tree the pipeline built carries its `.git` as the gitfile
+      // `worktree add` wrote; every other shape here — a symlink or a
+      // directory the suite installed — is attacker-created, and discovery
+      // through it checks out whatever repository it names. Refuse the shape
+      // before asking anything of it. (The lenient answer below stays for
+      // callers without a creation sha — the suite's own plain-checkout
+      // fixtures — which a `.git` DIRECTORY is legitimate for.)
+      return `${probeTree}/.git is ${
+        gitStat.isSymbolicLink()
+          ? 'a symlink'
+          : gitStat.isDirectory()
+            ? 'a directory'
+            : 'not a regular file'
+      }, not the gitfile the pipeline wrote there — the checkout would run under whatever repository it names`;
+    }
+    if (gitStat.isFile()) {
+      // `scratch-tree` gates its own reset on the admin entry pointing back;
+      // this gate asks the same question of the gitfile shape.
       const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
       if (
         realpathSync(dirname(resolve(gitDir, backpointer))) !==
@@ -1567,6 +1608,9 @@ function probeTreeIdentityRefusal(probeTree: string): string | null {
       if (redirected !== null) {
         return `${redirected} is a symlink, so the checkout would land wherever it points`;
       }
+    }
+    if (creationSha !== undefined && head !== creationSha) {
+      return `${probeTree}'s HEAD no longer points at the commit the pipeline checked out there, so the restore would rewrite whatever it points at now`;
     }
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
@@ -1605,11 +1649,14 @@ function probeTreeIdentityRefusal(probeTree: string): string | null {
  * repository out into the tree, which is the hazard the residue probe's
  * identity gate exists for. Refusing is the only answer that is neither.
  */
-function restoreProbeTreeTracked(probeTree: string): string | null {
+function restoreProbeTreeTracked(
+  probeTree: string,
+  creationSha?: string,
+): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
   }
-  const identityRefusal = probeTreeIdentityRefusal(probeTree);
+  const identityRefusal = probeTreeIdentityRefusal(probeTree, creationSha);
   if (identityRefusal) return identityRefusal;
   // A pathspec checkout still fires `post-checkout` — measured for both the
   // `checkout <base> -- <file>` and the `--force HEAD -- .` shapes — but the
@@ -2123,6 +2170,7 @@ export function runOneHunkProbe(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  creationSha?: string,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2134,7 +2182,7 @@ export function runOneHunkProbe(
         'the probe target resolves through a symlink — the reverse patch and the restore would follow it out of the probe tree, so nothing was neutralised',
     };
   }
-  const stale = restoreProbeTreeTracked(probeTree);
+  const stale = restoreProbeTreeTracked(probeTree, creationSha);
   if (stale !== null) {
     return {
       ...meta,
@@ -2258,6 +2306,7 @@ export function runControlMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  creationSha?: string,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2268,7 +2317,7 @@ export function runControlMutant(
   // A control run on a tree an earlier run wrote into demonstrates that
   // tree's behaviour, not the suite's — and this is the run every survivor
   // verdict is conditioned on.
-  if (restoreProbeTreeTracked(probeTree) !== null) return null;
+  if (restoreProbeTreeTracked(probeTree, creationSha) !== null) return null;
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -2325,6 +2374,7 @@ export function runOneMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  creationSha?: string,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2335,7 +2385,7 @@ export function runOneMutant(
         'the probe target resolves through a symlink — the mutation and the restore would follow it out of the probe tree, so nothing was mutated',
     };
   }
-  const stale = restoreProbeTreeTracked(probeTree);
+  const stale = restoreProbeTreeTracked(probeTree, creationSha);
   if (stale !== null) {
     return {
       ...mutant,
@@ -2768,7 +2818,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // The probe tree is reused ACROSS reviews too (#6832), so the baseline
         // is not exempt: it can open on whatever the previous review's suite
         // left in it.
-        const staleBaseline = restoreProbeTreeTracked(probeTree);
+        const staleBaseline = restoreProbeTreeTracked(probeTree, headSha);
         if (staleBaseline !== null) {
           throw new Error(
             `the probe tree could not be put back to the commit: ${staleBaseline}`,
@@ -2834,6 +2884,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
+              headSha,
             );
             if (harnessValidated === null) {
               // The probe file could not be read, so no test was injected and
@@ -2901,6 +2952,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                headSha,
               ),
             );
           }
@@ -2952,6 +3004,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                headSha,
               ),
             );
           }
@@ -3001,7 +3054,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // config and writing its index (measured: the user's MAIN index
         // staged the base blob for a PR-modified file, silently, surviving
         // the cleanup).
-        const revertIdentityRefusal = probeTreeIdentityRefusal(probeTree);
+        const revertIdentityRefusal = probeTreeIdentityRefusal(
+          probeTree,
+          headSha,
+        );
         if (revertIdentityRefusal) throw new Error(revertIdentityRefusal);
         // Re-screen beside that re-check: the suite that ran between the entry
         // screen and this checkout has a shell in this repository and can plant

@@ -11,7 +11,7 @@
 // every review produces are gitignored.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -22,6 +22,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1686,4 +1687,138 @@ describe('localFilterRefusal', () => {
     expect(r).not.toContain('defines content filter(s)');
     expect(r).not.toContain('names include directive(s)');
   });
+
+  it('certifies a repository whose only remote.<name>.fetch is the clone-default refspec', () => {
+    // The clone-default `+refs/heads/*:refs/remotes/origin/*` lives under
+    // this key in EVERY clone's local config and maps only into
+    // refs/remotes/, so the key itself can never refuse — refusing it would
+    // put every repository into permanent refusal. Only a destination
+    // outside refs/remotes/ fails the screen (the next test).
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it('certifies a fetch refspec with no destination — FETCH_HEAD alone rewrites no ref', () => {
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+refs/heads/*');
+
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it('refuses a planted fetch refspec whose destination writes into refs/heads/', () => {
+    // A destination under refs/heads/ rewrites the user's own branches on
+    // any fetch that applies the configured refspec: a planted
+    // `+refs/heads/*:refs/heads/*` force-updated local branches and
+    // orphaned unpushed work, and a glob aimed at the checked-out branch
+    // fails every fetch forever (both measured live). Judged by VALUE,
+    // never by presence — the key itself is in every clone.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+refs/heads/*:refs/heads/*');
+    g('config', 'remote.evil.url', 'https://example.invalid/y');
+    g('config', 'remote.evil.fetch', 'refs/heads/main:refs/heads/main');
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('fetch refspec');
+    expect(r).toContain('remote.origin.fetch');
+    expect(r).toContain('remote.evil.fetch');
+    expect(r).toContain('the probe checkout');
+    // Not misfiled into the transport part — the remediation routing
+    // downstream keys on these exact part prefixes.
+    expect(r).not.toContain('command-execution key(s)');
+    expect(r).not.toContain('defines content filter(s)');
+  });
+
+  it('certifies a PR-mirror fetch refspec — refs/pull/ is not refs/heads/', () => {
+    // `refs/pull/*/head:refs/pull/*` is an ordinary clone-local config for
+    // checking out PR heads; it writes no branch, so the screen must not
+    // touch it — the rule keys on refs/heads/ for exactly this reason.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+refs/pull/*/head:refs/pull/*');
+
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it('refuses core.alternateRefsCommand — every fetch runs it against the alternates', () => {
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'core.alternateRefsCommand', 'evil-alternates');
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('command-execution key(s)');
+    expect(r).toContain('core.alternaterefscommand');
+    expect(r).toContain('the probe checkout');
+  });
+
+  it('fails CLOSED when rev-parse cannot read the repository — never certifies an unreadable layout', () => {
+    // A `.git` file whose gitdir target is gone makes `rev-parse` exit 128.
+    // The old branch certified that state (returned null); a spawn the
+    // screen cannot run reads no config, and the checkout it guards opens
+    // the same layout, so the answer is a refusal.
+    const broken = mkdtempSync(join(tmpdir(), 'qwen-filter-broken-'));
+    try {
+      writeFileSync(join(broken, '.git'), 'gitdir: /nonexistent-qwen-gitdir\n');
+      const r = localFilterRefusal(broken, 'the probe checkout');
+      expect(r).not.toBeNull();
+      expect(r).toContain('git directory could not be read');
+      expect(r).toContain('the probe checkout');
+    } finally {
+      rmSync(broken, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED when the common config is a FIFO — the spawn is bounded, not hung',
+    { timeout: 30_000 },
+    () => {
+      // The first spawn reads `<common>/config` itself, BEFORE the lstat
+      // gate ever sees a candidate: one mkfifo+rename over the common
+      // config blocks it in open(). The bounded spawn SIGKILLs at the
+      // screen timeout and the error branch refuses. The writer below
+      // proves the bound: an UNBOUNDED spawn would wait for its pulses,
+      // read the empty FIFO, and only then meet the lstat gate — a
+      // different refusal, arriving at the pulses, not at the bound.
+      const fifo = join(repo, '.git', 'config.fifo');
+      execFileSync('mkfifo', [fifo]);
+      renameSync(fifo, join(repo, '.git', 'config'));
+      // The writer PULSES — git opens the config several times in one
+      // command, and each open blocks until a writer arrives — starting
+      // only AFTER the screen's 5s bound: the bounded spawn refuses before
+      // the first pulse, while an unbounded one would wait for the pulses,
+      // read empty config, and certify past the rev-parse branch.
+      const writer = spawn(
+        process.execPath,
+        [
+          '-e',
+          "setTimeout(() => { const iv = setInterval(() => { try { const fd = require('fs').openSync(process.argv[1], 'r+'); require('fs').closeSync(fd); } catch {} if (Date.now() - t0 > 20000) { clearInterval(iv); process.exit(0); } }, 250); }, 6000); const t0 = Date.now();",
+          join(repo, '.git', 'config'),
+        ],
+        { stdio: 'ignore', detached: true },
+      );
+      writer.unref();
+
+      const started = Date.now();
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('git directory could not be read');
+      expect(r).toContain('the probe checkout');
+      // The bound, not the writer: the refusal arrives before the
+      // pulses start, which would unblock an unbounded spawn.
+      expect(Date.now() - started).toBeLessThan(7_500);
+    },
+  );
 });

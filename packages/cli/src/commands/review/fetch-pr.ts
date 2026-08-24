@@ -559,7 +559,9 @@ const gitProbe: GitProbe = {
   // arm below and SKILL.md's once-cap — never on the status.
   fetch: (remote, ref) =>
     gitExit(
+      ...INERT_GIT_ARGS,
       'fetch',
+      '--no-recurse-submodules',
       remote,
       '--',
       `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
@@ -917,9 +919,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       "the review worktree's head fetch",
     );
     if (headFetchRefusal) throw new Error(headFetchRefusal);
+    // INERT_GIT_ARGS + an explicit `--no-recurse-submodules` for the same
+    // reason the creation checkout carries them: `submodule.recurse = true`
+    // beside a transport key planted in an ABSORBED submodule config —
+    // `<common>/modules/*/config`, a probe write the screen's candidate set
+    // never reads — makes this fetch recurse and EXECUTE the plant, and the
+    // absorbed config persists in the never-wiped common dir (measured
+    // live: the certified fetch ran the planted command).
     try {
       git(
+        ...INERT_GIT_ARGS,
         'fetch',
+        '--no-recurse-submodules',
         remote,
         `${platform.fetchHeadRefSpec(Number(prNumber))}:${ref}`,
       );
@@ -1027,6 +1038,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
     //    the round trip does not do is normalise CRLF (that would rewrite
     //    every hunk of a CRLF file) or drop the trailing newline.
+    // Screen the base-branch fetch the way step 2 screens the head fetch:
+    // it runs later — the worktree-add phase sits between them — and
+    // EXECUTES the same command-valued repo-local keys (measured live: a
+    // planted core.sshCommand ran during a pipeline-shaped fetch). The
+    // spawn it drives carries INERT_GIT_ARGS and `--no-recurse-submodules`
+    // beside it — the absorbed-submodule plant the screen's candidate set
+    // cannot read — but a config swapped between step 2's read and this
+    // fetch must not certify.
+    const baseFetchRefusal = localFilterRefusal(
+      process.cwd(),
+      'the base branch fetch',
+    );
+    if (baseFetchRefusal) throw new Error(baseFetchRefusal);
     let mergeBaseSha: string | null;
     let baseFetchFailed: boolean;
     /** The merge-base probe threw: the surface, not the history. */

@@ -29,6 +29,7 @@ import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
+import { INERT_GIT_ARGS } from './lib/worktree.js';
 import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
@@ -680,6 +681,78 @@ describe('fetch-pr report assembly', () => {
     ]);
   });
 
+  it('runs the head fetch INERT and never recurses into submodules', async () => {
+    // The fetch EXECUTES what the creation checkout executes: a probe-planted
+    // `submodule.recurse = true` beside a transport key in an ABSORBED
+    // submodule config — `<common>/modules/*/config`, never a screen
+    // candidate — made the certified fetch recurse and run the plant
+    // (measured live). INERT_GIT_ARGS + an explicit `--no-recurse-submodules`
+    // — the override immune to git-version precedence fights.
+    await reportFor({});
+    const fetchCall = producerMocks.git.mock.calls.find((args: unknown[]) =>
+      args.includes('fetch'),
+    );
+    expect(fetchCall).toBeDefined();
+    expect(fetchCall!.slice(0, INERT_GIT_ARGS.length)).toEqual([
+      ...INERT_GIT_ARGS,
+    ]);
+    expect(fetchCall).toContain('--no-recurse-submodules');
+  });
+
+  it('runs the base branch fetch INERT and never recurses into submodules', async () => {
+    // Same spawn class as the head fetch: resolveMergeBase's fetch closure
+    // is a bare `git fetch` in the user's clone, seconds to minutes after
+    // the head screen, in a tree a detached writer can swap between the
+    // two. Drive the closure through the mocked resolveMergeBase and read
+    // the recorded argv.
+    producerMocks.resolveMergeBase.mockImplementation(
+      (_remote: unknown, _base: unknown, _head: unknown, probe: unknown) => {
+        (probe as { fetch: (r: string, ref: string) => boolean }).fetch(
+          'origin',
+          'main',
+        );
+        return { sha: null, baseFetchFailed: true };
+      },
+    );
+    await reportFor({});
+    const baseFetchCall = producerMocks.gitExit.mock.calls.find(
+      (args: unknown[]) => args.includes('fetch'),
+    );
+    expect(baseFetchCall).toBeDefined();
+    expect(baseFetchCall!.slice(0, INERT_GIT_ARGS.length)).toEqual([
+      ...INERT_GIT_ARGS,
+    ]);
+    expect(baseFetchCall).toContain('--no-recurse-submodules');
+  });
+
+  it('refuses the base branch fetch when the screen refuses — before resolveMergeBase', async () => {
+    // The base fetch runs later than the head screen and EXECUTES the same
+    // command-valued repo-local keys (measured live: a planted
+    // core.sshCommand ran during a pipeline-shaped fetch); a config swapped
+    // between the two must not certify it. The refusal is a hard stop, the
+    // way steps 2 and 4 refuse — merge-base never resolves.
+    producerMocks.localFilterRefusal.mockImplementation(
+      (_cwd: unknown, checkout: unknown) =>
+        checkout === 'the base branch fetch'
+          ? "the repository's local config names command-execution key(s) " +
+            'core.sshcommand (in /repo/.git/config) — a checkout that ' +
+            'lazy-fetches EXECUTES the commands they name'
+          : null,
+    );
+
+    await expect(reportFor({})).rejects.toThrow(/command-execution key/);
+    expect(producerMocks.localFilterRefusal).toHaveBeenCalledWith(
+      process.cwd(),
+      'the base branch fetch',
+    );
+    expect(producerMocks.resolveMergeBase).not.toHaveBeenCalled();
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
+    expect(clearReviewWorktreeLeaseIfOwned).toHaveBeenCalled();
+  });
+
   it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {
     // `--` ends option parsing, but a leading `+` or `src:dst` shape still
     // parses as a (force) refspec after it — same channels as
@@ -778,9 +851,10 @@ describe('fetch-pr report assembly', () => {
       }),
     );
     // The fetch itself exits 0 (tag shape), but no `origin/v1.0` tracking
-    // ref exists afterwards.
+    // ref exists afterwards. Match the SUBCOMMAND: the base fetch carries
+    // INERT_GIT_ARGS ahead of it.
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args[0] === 'fetch' ? '' : null,
+      args.includes('fetch') ? '' : null,
     );
     producerMocks.refExists.mockReturnValue(false);
     // Drive the seam the way the real resolveMergeBase does: the probe the
@@ -813,8 +887,10 @@ describe('fetch-pr report assembly', () => {
         body: '',
       }),
     );
+    // Match the SUBCOMMAND: the base fetch carries INERT_GIT_ARGS ahead
+    // of it.
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args[0] === 'fetch' ? '' : null,
+      args.includes('fetch') ? '' : null,
     );
     const checked: string[] = [];
     producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
@@ -850,8 +926,11 @@ describe('fetch-pr report assembly', () => {
     );
     const fetched: string[][] = [];
     producerMocks.gitOpt.mockImplementation((...args: string[]) => {
-      if (args[0] === 'fetch') fetched.push(args.slice(1));
-      return args[0] === 'fetch' ? '' : null;
+      // Match the SUBCOMMAND: the base fetch carries INERT_GIT_ARGS ahead
+      // of it. Record what follows it.
+      const i = args.indexOf('fetch');
+      if (i !== -1) fetched.push(args.slice(i + 1));
+      return i !== -1 ? '' : null;
     });
     producerMocks.refExists.mockImplementation((...refs: unknown[]) => {
       void refs;
@@ -864,7 +943,12 @@ describe('fetch-pr report assembly', () => {
     });
     await reportFor({});
     expect(fetched).toEqual([
-      ['origin', '--', '+refs/heads/v1.0:refs/remotes/origin/v1.0'],
+      [
+        '--no-recurse-submodules',
+        'origin',
+        '--',
+        '+refs/heads/v1.0:refs/remotes/origin/v1.0',
+      ],
     ]);
   });
 
@@ -1908,12 +1992,15 @@ describe('fetch-pr report assembly', () => {
       out: string | null;
       status: number | null;
     }) => {
+      // Match SUBCOMMANDS, not argv[0] — the base fetch carries
+      // INERT_GIT_ARGS ahead of it, the way the merge-base probe carries
+      // its `-c` pin.
       producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-        args[0] === 'fetch' ||
-        args[0] === 'cat-file' ||
-        args[0] === 'merge-base'
+        args.includes('fetch') ||
+        args.includes('cat-file') ||
+        args.includes('merge-base')
           ? ''
-          : args[0] === 'rev-parse'
+          : args.includes('rev-parse')
             ? ANCHOR
             : null,
       );
@@ -2856,11 +2943,15 @@ describe('fetch-pr report assembly', () => {
       // incremental path narrows.
       expect(writtenDiff()).toBe(NARROWED);
       // ...and the diff came from the Aone ref namespace, not GitHub's.
-      expect(producerMocks.git.mock.calls).toContainEqual([
-        'fetch',
-        'origin',
-        'refs/merge-requests/42/head:qwen-review/pr-42',
-      ]);
+      // The head fetch carries INERT_GIT_ARGS ahead of the subcommand, so
+      // match the refspec it fetched, not the exact argv.
+      const headFetchCall = producerMocks.git.mock.calls.find(
+        (args: unknown[]) =>
+          args.includes('refs/merge-requests/42/head:qwen-review/pr-42'),
+      );
+      expect(headFetchCall).toBeDefined();
+      expect(headFetchCall).toContain('fetch');
+      expect(headFetchCall).toContain('origin');
     });
 
     it('never asks an ancestry question on the Aone platform', async () => {

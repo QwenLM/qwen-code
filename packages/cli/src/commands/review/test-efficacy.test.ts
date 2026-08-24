@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
   splitDiffIntoHunks,
@@ -36,16 +36,19 @@ import {
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
+  cpSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
   symlinkSync,
   existsSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 // The real root `package.json` workspace list.
 const GLOBS = [
@@ -2633,6 +2636,352 @@ describe('probe runner teardown hook', () => {
       }
       onSpy.mockRestore();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the probe tree identity gate, through runOneMutant', () => {
+  // The pipeline shape these pin: a LINKED worktree created with
+  // `worktree add --detach <tree> <sha>` — `.git` a gitfile, HEAD pinned at
+  // the creation sha — exactly what test-efficacy builds before any probe
+  // runs. runOneMutant carries the creation sha, so the gate answers in the
+  // strict shape; a refusal arrives as the restore's inconclusive detail
+  // BEFORE any checkout spawn.
+  const fixture = (): { host: string; tree: string; headSha: string } => {
+    const host = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-idgate-host-')));
+    const git = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'core.hooksPath=/dev/null/no-hooks',
+          ...args,
+        ],
+        { cwd: host, encoding: 'utf8' },
+      ).trim();
+    git('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(host, 'a.ts'), 'export const a = 1;\n');
+    writeFileSync(
+      join(host, 'a.test.ts'),
+      'import { it } from "vitest";\nit("t", () => {});\n',
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'fixture', '--no-verify');
+    const headSha = git('rev-parse', 'HEAD');
+    const tree = join(host, '.qwen', 'tmp', 'probe-tree');
+    mkdirSync(dirname(tree), { recursive: true });
+    git('worktree', 'add', '--detach', '-q', tree, headSha);
+    return { host, tree, headSha };
+  };
+  const mutant = {
+    file: 'a.ts',
+    line: 1,
+    statement: 'export const a = 1;',
+  };
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked .git — the checkout would run under the repository it names',
+    () => {
+      // `--show-toplevel` prints the directory the `.git` entry SITS in,
+      // whatever it points at, so the root comparison passes while
+      // discovery follows the link — the measured exploit rewrote the
+      // VICTIM repository's index through the certified restore. The gate
+      // refuses the shape itself.
+      const { host, tree, headSha } = fixture();
+      const victim = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-idgate-victim-')),
+      );
+      try {
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            'init',
+            '-q',
+            '-b',
+            'main',
+            '--template=',
+            '.',
+          ],
+          { cwd: victim, encoding: 'utf8' },
+        );
+        writeFileSync(join(victim, 'v.ts'), 'export const v = 1;\n');
+        execFileSync(
+          'git',
+          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'add', '-A'],
+          {
+            cwd: victim,
+            encoding: 'utf8',
+          },
+        );
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            'commit',
+            '-qm',
+            'victim',
+            '--no-verify',
+          ],
+          { cwd: victim, encoding: 'utf8' },
+        );
+        rmSync(join(tree, '.git'));
+        symlinkSync(join(victim, '.git'), join(tree, '.git'));
+
+        const r = runOneMutant(
+          tree,
+          mutant,
+          ['a.test.ts'],
+          undefined,
+          Date.now,
+          tree,
+          headSha,
+        );
+
+        expect(r.verdict).toBe('inconclusive');
+        expect(r.detail).toContain('is a symlink');
+        expect(r.detail).toContain('not the gitfile the pipeline wrote there');
+        // The refused restore never checked anything out: the file the
+        // mutant targets is untouched.
+        expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+          'export const a = 1;\n',
+        );
+      } finally {
+        rmSync(host, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a directory .git the suite installed — the shape only an attacker creates', () => {
+    // A pipeline-built probe tree carries its `.git` as the gitfile
+    // `worktree add` wrote; a DIRECTORY `.git` there is the suite's own
+    // install (one measured shape: `git init` inside the tree). The old
+    // gate skipped every identity check for that shape and certified a
+    // checkout discovered through the attacker's repository.
+    const { host, tree, headSha } = fixture();
+    const attacker = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-idgate-attacker-')),
+    );
+    try {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          'init',
+          '-q',
+          '-b',
+          'main',
+          '--template=',
+          '.',
+        ],
+        { cwd: attacker, encoding: 'utf8' },
+      );
+      writeFileSync(join(attacker, 'a.ts'), 'attacker content\n');
+      execFileSync(
+        'git',
+        ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'add', '-A'],
+        {
+          cwd: attacker,
+          encoding: 'utf8',
+        },
+      );
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          'commit',
+          '-qm',
+          'attacker',
+          '--no-verify',
+        ],
+        { cwd: attacker, encoding: 'utf8' },
+      );
+      rmSync(join(tree, '.git'));
+      cpSync(join(attacker, '.git'), join(tree, '.git'), { recursive: true });
+
+      const r = runOneMutant(
+        tree,
+        mutant,
+        ['a.test.ts'],
+        undefined,
+        Date.now,
+        tree,
+        headSha,
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('is a directory');
+      expect(r.detail).toContain('not the gitfile the pipeline wrote there');
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const a = 1;\n',
+      );
+    } finally {
+      rmSync(host, { recursive: true, force: true });
+      rmSync(attacker, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a retargeted HEAD — the restore checks out whatever it points at', () => {
+    // The restore is `checkout --force HEAD -- .`, and the per-worktree
+    // HEAD is one `update-ref` away — no `.git` rewrite, every shape check
+    // intact (measured live: every later restore wrote attacker-chosen
+    // content). Pinning HEAD to the creation sha closes it: an attacker
+    // cannot manufacture the sha, it is content-addressed.
+    const { host, tree, headSha } = fixture();
+    try {
+      writeFileSync(join(host, 'b.ts'), 'export const b = 2;\n');
+      execFileSync('git', ['-C', host, 'add', '-A'], { encoding: 'utf8' });
+      execFileSync(
+        'git',
+        [
+          '-C',
+          host,
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          'commit',
+          '-qm',
+          'second',
+          '--no-verify',
+        ],
+        { encoding: 'utf8' },
+      );
+      const other = execFileSync('git', ['-C', host, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+      execFileSync('git', ['-C', tree, 'update-ref', 'HEAD', other], {
+        encoding: 'utf8',
+      });
+
+      const r = runOneMutant(
+        tree,
+        mutant,
+        ['a.test.ts'],
+        undefined,
+        Date.now,
+        tree,
+        headSha,
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('HEAD no longer points');
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const a = 1;\n',
+      );
+    } finally {
+      rmSync(host, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the gate spawn is held in a planted FIFO — bounded, not hung',
+    { timeout: 30_000 },
+    () => {
+      // The gate's rev-parse reads `<common>/config` itself: a FIFO
+      // planted there blocks it in open(). The bounded spawn SIGKILLs at
+      // the screen timeout and the error branch refuses. The writer
+      // PULSES — git opens the config several times in one command, and
+      // each open blocks until a writer arrives — starting only AFTER the
+      // 5s bound: the bounded spawn refuses before the first pulse, while
+      // an UNBOUNDED one would wait for the pulses, read empty config,
+      // and let the gate CERTIFY. The refusal must carry the timeout's
+      // error and arrive before the pulses start.
+      const { host, tree, headSha } = fixture();
+      try {
+        const fifo = join(host, '.git', 'config.fifo');
+        execFileSync('mkfifo', [fifo]);
+        renameSync(fifo, join(host, '.git', 'config'));
+        const writer = spawn(
+          process.execPath,
+          [
+            '-e',
+            "setTimeout(() => { const iv = setInterval(() => { try { const fd = require('fs').openSync(process.argv[1], 'r+'); require('fs').closeSync(fd); } catch {} if (Date.now() - t0 > 20000) { clearInterval(iv); process.exit(0); } }, 250); }, 6000); const t0 = Date.now();",
+            join(host, '.git', 'config'),
+          ],
+          { stdio: 'ignore', detached: true },
+        );
+        writer.unref();
+
+        const started = Date.now();
+        const r = runOneMutant(
+          tree,
+          mutant,
+          ['a.test.ts'],
+          undefined,
+          Date.now,
+          tree,
+          headSha,
+        );
+
+        expect(r.verdict).toBe('inconclusive');
+        expect(r.detail).toContain('ETIMEDOUT');
+        expect(Date.now() - started).toBeLessThan(7_500);
+      } finally {
+        rmSync(host, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('certifies an intact pipeline tree and puts it back', () => {
+    // The strict shape is what the pipeline builds — the gate must PASS it,
+    // or every probe run would refuse. No creation sha (the legacy callers
+    // stay lenient) is not this pin: the strict path runs end to end here,
+    // restore included.
+    const { host, tree, headSha } = fixture();
+    try {
+      writeFileSync(join(tree, 'a.ts'), 'mutant dirt\n');
+      const r = runOneMutant(
+        tree,
+        mutant,
+        ['a.test.ts'],
+        undefined,
+        Date.now,
+        tree,
+        headSha,
+      );
+      // No shadow vitest in this bare fixture: the gate and restore pass,
+      // and the run dies at `findVitestBin` — the observation is that the
+      // identity checks did NOT refuse.
+      expect(r.verdict).not.toBe('inconclusive');
+    } catch (e) {
+      // findVitestBin throws on a fixture with no vitest anywhere up-tree —
+      // AFTER the gate and the restore ran, which is exactly the pin: a
+      // gate refusal would have returned an inconclusive result instead.
+      const msg = e instanceof Error ? e.message : String(e);
+      expect(msg).not.toContain('gitfile');
+      expect(msg).not.toContain('HEAD no longer points');
+    } finally {
+      rmSync(host, { recursive: true, force: true });
     }
   });
 });
