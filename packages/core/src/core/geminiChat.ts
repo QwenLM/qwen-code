@@ -115,7 +115,7 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
 } from './prompts.js';
-import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { isRetryableStreamTransportError } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -3381,14 +3381,8 @@ export class GeminiChat {
             // output — and thinking models can spend minutes in that
             // phase, exactly when gateways close long-lived SSE
             // connections (#7832).
-            const isRetryableStreamTransportError =
-              classification.kind === 'transport' &&
-              classification.transportCode !== undefined &&
-              RETRYABLE_STREAM_TRANSPORT_CODES.has(
-                classification.transportCode,
-              );
             if (
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3450,7 +3444,7 @@ export class GeminiChat {
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
             const canContinueAfterTransportCut =
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3488,7 +3482,7 @@ export class GeminiChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError) {
+            if (isRetryableStreamTransportError(classification)) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
@@ -3638,7 +3632,9 @@ export class GeminiChat {
 
             if (
               error instanceof InvalidStreamError &&
-              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              (error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' ||
+                (error.type === 'NO_RESPONSE_TEXT' &&
+                  lastFinishReason === FinishReason.MAX_TOKENS)) &&
               !maxTokensEscalated &&
               !hasUserMaxTokensOverride &&
               shouldEscalateMaxOutputTokens
