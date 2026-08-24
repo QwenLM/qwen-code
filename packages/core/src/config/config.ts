@@ -4392,12 +4392,16 @@ export class Config {
    * configurations without publishing where they point. The bare id stays the
    * readable half, so a mismatch still names the model a human recognises.
    */
-  private resolvedModelIdentity(): string {
-    const model = this.getModel();
-    const authType = this.getContentGeneratorConfig()?.authType ?? '';
+  private resolvedModelIdentity(
+    model = this.getModel(),
+    generatorConfig = this.getContentGeneratorConfig(),
+  ): string {
+    const authType = generatorConfig?.authType ?? '';
     const baseUrl =
-      this.getContentGeneratorConfig()?.baseUrl ??
-      this.getCurrentModelRegistryBaseUrl() ??
+      generatorConfig?.baseUrl ??
+      (model === this.getModel()
+        ? this.getCurrentModelRegistryBaseUrl()
+        : undefined) ??
       '';
     if (authType === '' && baseUrl === '') return model;
     const digest = createHash('sha256')
@@ -4405,6 +4409,19 @@ export class Config {
       .digest('hex')
       .slice(0, 8);
     return `${model}@${digest}`;
+  }
+
+  /**
+   * Identity of the currently active model route for consumers that cache
+   * route-specific state and must invalidate it when a model/auth/endpoint
+   * switch swaps the content generator — e.g. GeminiChat's API-reported
+   * token counts (#9454). Same identity ⇒ same serialization target.
+   */
+  getModelRouteIdentity(
+    model?: string,
+    generatorConfig?: ContentGeneratorConfig,
+  ): string {
+    return this.resolvedModelIdentity(model, generatorConfig);
   }
 
   /**
