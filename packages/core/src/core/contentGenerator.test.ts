@@ -758,7 +758,7 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
       () =>
         ({
           models: {
-            countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+            embedContent: vi.fn().mockResolvedValue({ embeddings: [] }),
           },
         }) as unknown as GoogleGenAI,
     );
@@ -773,7 +773,10 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
         getSessionId: () => 'test-session',
       } as unknown as Config,
     );
-    await generator.countTokens({ model: 'gemini-2.5-pro', contents: 'hello' });
+    await generator.embedContent({
+      model: 'gemini-2.5-pro',
+      contents: 'hello',
+    });
 
     expect(GoogleGenAI).toHaveBeenCalledWith(
       expect.objectContaining({ vertexai: true, apiKey: undefined }),
