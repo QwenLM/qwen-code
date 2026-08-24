@@ -142,7 +142,7 @@ describe('ExportTranscriptDocumentV1', () => {
     });
   });
 
-  it('redacts home paths from visible text without corrupting image data', () => {
+  it('redacts host-sensitive text without corrupting safe URLs or image data', () => {
     const document = createExportTranscriptDocumentV1(
       [
         record('visible-paths', null, {
@@ -163,6 +163,9 @@ describe('ExportTranscriptDocumentV1', () => {
                   'Normalized /home//alice/private.txt /home/./alice/private.txt',
                   '--dir=/Users/alice/private.txt',
                   'encoded=%2Fhome%2Falice%2Fprivate.txt',
+                  'Credential URL https://oauth2:ghp_xxx@github.com/org/repo.git',
+                  'Database URL postgres://app:password@db/prod',
+                  'Safe URL https://example.com/path',
                   '![safe](data:image/png;base64,/home/AA)',
                 ].join('\n'),
               },
@@ -192,6 +195,11 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('C:\\Users\\alice');
     expect(text).not.toContain('/home/alice');
     expect(text).not.toContain('%2Fhome%2Falice');
+    expect(text).toContain('https://github.com/org/repo.git');
+    expect(text).toContain('postgres://db/prod');
+    expect(text).toContain('Safe URL https://example.com/path');
+    expect(text).not.toContain('ghp_xxx');
+    expect(text).not.toContain('app:password');
   });
 
   it('does not treat remote URL paths as local home paths', () => {
@@ -889,7 +897,7 @@ describe('ExportTranscriptDocumentV1', () => {
     });
   });
 
-  it('sanitizes active Markdown links without changing code examples', () => {
+  it('sanitizes Markdown resources and URL credentials inside code examples', () => {
     const document = createExportTranscriptDocumentV1(
       [
         record('markdown-links', null, {
@@ -938,17 +946,17 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).toContain('https://example.com/bare');
     expect(text).toContain('http://www.example.com/path');
     expect(text).toContain(
-      '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
+      '`https://example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
     );
     expect(text).toContain('https://example.com/repo.git');
     expect(text).toContain(
-      '> curl https://grace:password@example.com/api?CHAT_TRANSCRIPT_URL_CANARY',
+      '> curl https://example.com/api?CHAT_TRANSCRIPT_URL_CANARY',
     );
     expect(text).toContain(
-      'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
+      'https://example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
     );
     expect(text).not.toContain('javascript:');
-    expect(text).not.toContain('frank:password');
+    expect(text).not.toContain(':password@');
     expect(document.metadata).toMatchObject({
       complete: false,
       truncated: true,
@@ -1149,7 +1157,7 @@ describe('ExportTranscriptDocumentV1', () => {
     );
   });
 
-  it('rejects home paths in validated visible text without inspecting raster data', () => {
+  it('rejects host-sensitive text without inspecting raster data', () => {
     const envelope = {
       schemaVersion: 1,
       rendererVersion: '0.21.11-test.1',
@@ -1172,6 +1180,23 @@ describe('ExportTranscriptDocumentV1', () => {
             createdAt: 0,
             updatedAt: 0,
             text: 'Leaked /Users/alice/private.txt',
+            streaming: false,
+          },
+        ],
+      }),
+    ).toThrowError('home_path_forbidden');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...envelope,
+        blocks: [
+          {
+            id: 'user-url-credentials',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Leaked https://oauth2:ghp_xxx@github.com/org/repo.git',
             streaming: false,
           },
         ],
@@ -1360,7 +1385,7 @@ describe('ExportTranscriptDocumentV1', () => {
             streaming: false,
           }),
         ]),
-        error: 'invalid_markdown_url',
+        error: 'home_path_forbidden',
       },
       {
         value: envelope([], {

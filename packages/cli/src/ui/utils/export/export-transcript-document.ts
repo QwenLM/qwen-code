@@ -1832,10 +1832,23 @@ function redactHomePaths(value: string): string {
     result += redactStandaloneHomePaths(value.slice(cursor, index));
     result += /^file:/i.test(match[0])
       ? redactFileUrlHomePath(match[0])
-      : match[0];
+      : redactUrlCredentials(match[0]);
     cursor = index + match[0].length;
   }
   return result + redactStandaloneHomePaths(value.slice(cursor));
+}
+
+function redactUrlCredentials(value: string): string {
+  const schemeEnd = value.indexOf('://');
+  if (schemeEnd === -1) return value;
+  const authorityStart = schemeEnd + 3;
+  const suffixStart = value.slice(authorityStart).search(/[/?#]/);
+  const authorityEnd =
+    suffixStart === -1 ? value.length : authorityStart + suffixStart;
+  const userInfoEnd = value.lastIndexOf('@', authorityEnd - 1);
+  return userInfoEnd < authorityStart
+    ? value
+    : value.slice(0, authorityStart) + value.slice(userInfoEnd + 1);
 }
 
 function redactStandaloneHomePaths(value: string): string {
