@@ -29,7 +29,7 @@ Rename the local `Gemini` identifiers to `Llm`, with these exceptions:
 2. **UI spinners** — `GeminiRespondingSpinner` / `GeminiSpinner` drop the
    prefix. → `RespondingSpinner` / `Spinner`.
 3. **Gemini extension format (keep as-is)** — `packages/core/src/extension/
-   gemini-converter.ts` converts *upstream Gemini CLI extension* configs
+gemini-converter.ts` converts _upstream Gemini CLI extension_ configs
    (`GeminiExtensionConfig`, `convertGeminiToQwenConfig`,
    `convertGeminiExtensionPackage`, `isGeminiExtensionConfig`). The `Gemini`
    here denotes a real external format, not the generic LLM client. **Not part
@@ -43,51 +43,51 @@ Rename the local `Gemini` identifiers to `Llm`, with these exceptions:
 
 Local type/class/enum names (PascalCase, → `Llm*`):
 
-| Current | Definition | New |
-|---|---|---|
-| `GeminiClient` | `core/src/core/client.ts:375` class | `LlmClient` |
-| `GeminiChat` | `core/src/core/geminiChat.ts:1853` class | `LlmChat` |
-| `GeminiEventType` | `core/src/core/turn.ts:62` **and** `cli/src/ui/types.ts:42` (two enums) | `LlmEventType` |
-| `GeminiContentGenerator` | `core/src/core/geminiContentGenerator/geminiContentGenerator.ts:61` class | `LlmContentGenerator` |
-| `GeminiCodeRequest` | `core/src/core/geminiRequest.ts:15` type | `LlmCodeRequest` |
-| `GeminiChatSendOptions` | `core/src/core/geminiChat.ts:448` interface | `LlmChatSendOptions` |
-| `GeminiErrorEventValue` / `GeminiFinishedEventValue` | `core/src/core/turn.ts:112/122` | `LlmErrorEventValue` / `LlmFinishedEventValue` |
-| `GeminiRespondingSpinner` / `GeminiSpinner` | `cli/src/ui/components/GeminiRespondingSpinner.tsx:32/59` | `RespondingSpinner` / `Spinner` |
+| Current                                              | Definition                                                                | New                                            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------- |
+| `GeminiClient`                                       | `core/src/core/client.ts:375` class                                       | `LlmClient`                                    |
+| `GeminiChat`                                         | `core/src/core/geminiChat.ts:1853` class                                  | `LlmChat`                                      |
+| `GeminiEventType`                                    | `core/src/core/turn.ts:62` **and** `cli/src/ui/types.ts:42` (two enums)   | `LlmEventType`                                 |
+| `GeminiContentGenerator`                             | `core/src/core/geminiContentGenerator/geminiContentGenerator.ts:61` class | `LlmContentGenerator`                          |
+| `GeminiCodeRequest`                                  | `core/src/core/geminiRequest.ts:15` type                                  | `LlmCodeRequest`                               |
+| `GeminiChatSendOptions`                              | `core/src/core/geminiChat.ts:448` interface                               | `LlmChatSendOptions`                           |
+| `GeminiErrorEventValue` / `GeminiFinishedEventValue` | `core/src/core/turn.ts:112/122`                                           | `LlmErrorEventValue` / `LlmFinishedEventValue` |
+| `GeminiRespondingSpinner` / `GeminiSpinner`          | `cli/src/ui/components/GeminiRespondingSpinner.tsx:32/59`                 | `RespondingSpinner` / `Spinner`                |
 
 camelCase functions/variables (token-infix, → `Llm*`), highest-frequency first:
 
-| Current | New |
-|---|---|
-| `getGeminiClient` | `getLlmClient` |
-| `mockGeminiClient` | `mockLlmClient` |
-| `convertOpenAIChunkToGemini` | `convertOpenAIChunkToLlm` |
-| `convertGeminiRequestToOpenAI` | `convertLlmRequestToOpenAI` |
-| `convertOpenAIResponseToGemini` | `convertOpenAIResponseToLlm` |
-| `responseSubmittedToGemini` | `responseSubmittedToLlm` |
-| `useGeminiStream` | `useLlmStream` |
-| `convertGeminiRequestToAnthropic` | `convertLlmRequestToAnthropic` |
+| Current                                                                                                                            | New                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `getGeminiClient`                                                                                                                  | `getLlmClient`                                                                                                           |
+| `mockGeminiClient`                                                                                                                 | `mockLlmClient`                                                                                                          |
+| `convertOpenAIChunkToGemini`                                                                                                       | `convertOpenAIChunkToLlm`                                                                                                |
+| `convertGeminiRequestToOpenAI`                                                                                                     | `convertLlmRequestToOpenAI`                                                                                              |
+| `convertOpenAIResponseToGemini`                                                                                                    | `convertOpenAIResponseToLlm`                                                                                             |
+| `responseSubmittedToGemini`                                                                                                        | `responseSubmittedToLlm`                                                                                                 |
+| `useGeminiStream`                                                                                                                  | `useLlmStream`                                                                                                           |
+| `convertGeminiRequestToAnthropic`                                                                                                  | `convertLlmRequestToAnthropic`                                                                                           |
 | `setGeminiMdFilename` / `getAllGeminiMdFilenames` / `getCurrentGeminiMdFilename` / `getGeminiMdFileCount` / `setGeminiMdFileCount` | `setMemoryFilename` / `getAllMemoryFilenames` / `getCurrentMemoryFilename` / `getMemoryFileCount` / `setMemoryFileCount` |
-| `mockGeminiResponse` / `mockGeminiClientInstance` / `MockedGeminiClientClass` | `mockLlmResponse` / `mockLlmClientInstance` / `MockedLlmClientClass` |
-| `convertGeminiToolsToOpenAI` / `convertGeminiToolsToAnthropic` | `convertLlmToolsToOpenAI` / `convertLlmToolsToAnthropic` |
-| `convertGeminiToolParametersToOpenAI` | `convertLlmToolParametersToOpenAI` |
-| `newGeminiMessageBuffer` / `makeGeminiHistoryItem` / `extractGeminiContent` / `buildGeminiChunk` / `recordGeminiChunk` | `newLlmMessageBuffer` / `makeLlmHistoryItem` / `extractLlmContent` / `buildLlmChunk` / `recordLlmChunk` |
-| `createInitializedGeminiClient` / `createGeminiContentGenerator` | `createInitializedLlmClient` / `createLlmContentGenerator` |
-| `mapAnthropicFinishReasonToGemini` / `convertAnthropicResponseToGemini` | `mapAnthropicFinishReasonToLlm` / `convertAnthropicResponseToLlm` |
-| `pendingGeminiHistoryItems` / `skipGeminiInitialization` / `loadHierarchicalGeminiMemory` | `pendingLlmHistoryItems` / `skipLlmInitialization` / `loadHierarchicalLlmMemory` |
+| `mockGeminiResponse` / `mockGeminiClientInstance` / `MockedGeminiClientClass`                                                      | `mockLlmResponse` / `mockLlmClientInstance` / `MockedLlmClientClass`                                                     |
+| `convertGeminiToolsToOpenAI` / `convertGeminiToolsToAnthropic`                                                                     | `convertLlmToolsToOpenAI` / `convertLlmToolsToAnthropic`                                                                 |
+| `convertGeminiToolParametersToOpenAI`                                                                                              | `convertLlmToolParametersToOpenAI`                                                                                       |
+| `newGeminiMessageBuffer` / `makeGeminiHistoryItem` / `extractGeminiContent` / `buildGeminiChunk` / `recordGeminiChunk`             | `newLlmMessageBuffer` / `makeLlmHistoryItem` / `extractLlmContent` / `buildLlmChunk` / `recordLlmChunk`                  |
+| `createInitializedGeminiClient` / `createGeminiContentGenerator`                                                                   | `createInitializedLlmClient` / `createLlmContentGenerator`                                                               |
+| `mapAnthropicFinishReasonToGemini` / `convertAnthropicResponseToGemini`                                                            | `mapAnthropicFinishReasonToLlm` / `convertAnthropicResponseToLlm`                                                        |
+| `pendingGeminiHistoryItems` / `skipGeminiInitialization` / `loadHierarchicalGeminiMemory`                                          | `pendingLlmHistoryItems` / `skipLlmInitialization` / `loadHierarchicalMemory`                                            |
 
 ## File renames
 
 Non-test files; `gemini-converter.ts` is intentionally NOT renamed (see above).
 
-| Current | New |
-|---|---|
-| `packages/cli/src/gemini.tsx` | `packages/cli/src/llm.tsx` |
-| `packages/cli/src/ui/components/GeminiRespondingSpinner.tsx` | `packages/cli/src/ui/components/RespondingSpinner.tsx` |
-| `packages/cli/src/ui/hooks/useGeminiStream.ts` | `packages/cli/src/ui/hooks/use-llm-stream.ts` |
-| `packages/core/src/core/geminiChat.ts` | `packages/core/src/core/llm-chat.ts` |
+| Current                                                                   | New                                                                     |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `packages/cli/src/gemini.tsx`                                             | `packages/cli/src/llm.tsx`                                              |
+| `packages/cli/src/ui/components/GeminiRespondingSpinner.tsx`              | `packages/cli/src/ui/components/RespondingSpinner.tsx`                  |
+| `packages/cli/src/ui/hooks/useGeminiStream.ts`                            | `packages/cli/src/ui/hooks/use-llm-stream.ts`                           |
+| `packages/core/src/core/geminiChat.ts`                                    | `packages/core/src/core/llm-chat.ts`                                    |
 | `packages/core/src/core/geminiContentGenerator/geminiContentGenerator.ts` | `packages/core/src/core/llm-content-generator/llm-content-generator.ts` |
-| `packages/core/src/core/geminiContentGenerator/index.ts` | `packages/core/src/core/llm-content-generator/index.ts` |
-| `packages/core/src/core/geminiRequest.ts` | `packages/core/src/core/llm-request.ts` |
+| `packages/core/src/core/geminiContentGenerator/index.ts`                  | `packages/core/src/core/llm-content-generator/index.ts`                 |
+| `packages/core/src/core/geminiRequest.ts`                                 | `packages/core/src/core/llm-request.ts`                                 |
 
 ## Phasing
 
