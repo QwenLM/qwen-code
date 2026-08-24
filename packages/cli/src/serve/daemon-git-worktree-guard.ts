@@ -142,8 +142,12 @@ const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 // `%…%`/`!…!` rewriting (cmd.exe), backticks, here-strings, `-EncodedCommand`
 // (PowerShell) — none of which this guard's POSIX text model can read before
 // execution. An invocation of one carries a payload the analysis cannot
-// resolve, so it fails closed on every lane; nested spellings
-// (`bash -c 'cmd /c …'`) reach the same rule through the payload recursion.
+// resolve, so it fails closed on every Windows lane — including Git Bash
+// sessions, where cmd.exe and PowerShell remain reachable programs; nested
+// spellings (`bash -c 'cmd /c …'`) reach the same rule through the payload
+// recursion. On POSIX hosts cmd.exe and Windows PowerShell do not exist and
+// `pwsh` is an ordinary interpreter the guard does not model — the same
+// stance as python or node — so the rule stays off there.
 const WINDOWS_SHELL_PROGRAMS = new Set(['cmd', 'powershell', 'pwsh']);
 
 // `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
@@ -1335,7 +1339,10 @@ function readDefinition(
   return { name, body: joinArgvTexts(bodyTokens) };
 }
 
-function analyzeRun(run: GuardToken[]): RunAnalysis {
+function analyzeRun(
+  run: GuardToken[],
+  platform: string = process.platform,
+): RunAnalysis {
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
@@ -1414,7 +1421,7 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         propagatesCwd: true,
       };
     }
-    if (WINDOWS_SHELL_PROGRAMS.has(program)) {
+    if (platform === 'win32' && WINDOWS_SHELL_PROGRAMS.has(program)) {
       // The payload belongs to a grammar this analysis does not model; the
       // undecidable arm fails closed on the documented reason.
       return { kind: 'undecidable' };
@@ -2620,7 +2627,7 @@ async function evaluateCommandWithCwd(
         if (denial) return { denial, cwdAfter: trackedCwd };
         continue;
       }
-      const analysis = analyzeRun(run);
+      const analysis = analyzeRun(run, platformNow);
       switch (analysis.kind) {
         case 'cd': {
           const target =

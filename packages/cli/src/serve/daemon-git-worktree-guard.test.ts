@@ -985,20 +985,78 @@ it -C ${outsideRepo} reset --hard`,
   });
 
   // A Windows shell invocation hands everything after it to a grammar this
-  // analysis does not model, so it fails closed on every lane; nested
-  // spellings re-enter the same rule through the payload recursion.
-  describe('nested Windows shell invocations fail closed', () => {
+  // analysis does not model, so it fails closed on every Windows lane —
+  // including Git Bash sessions, where cmd.exe and PowerShell remain
+  // reachable programs; nested spellings re-enter the same rule through the
+  // payload recursion. Spoofed so every lane pins it — the merge_group
+  // Windows lane is otherwise the only lane that executes these paths.
+  describe('Windows shell invocations fail closed (spoofed win32 lanes)', () => {
     const encoded = Buffer.from(`git -C ${outsideRepo} reset --hard`).toString(
       'base64',
     );
+    const savedEnv: Record<string, string | undefined> = {};
+
+    const spoofWindows = (shell: 'cmd' | 'powershell' | 'bash'): void => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        delete process.env[key];
+      }
+      if (shell === 'powershell') process.env['ComSpec'] = 'powershell.exe';
+      if (shell === 'bash') process.env['MSYSTEM'] = 'MINGW64';
+    };
+
+    beforeEach(() => {
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        savedEnv[key] = process.env[key];
+      }
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    });
 
     it.each([
-      () => `cmd /c "git ^-C ${outsideRepo} reset --hard"`,
-      () => `CMD.EXE /c "git -C ${outsideRepo} reset --hard"`,
-      () => `powershell -EncodedCommand ${encoded}`,
+      () => ['cmd', `CMD.EXE /c "git -C ${outsideRepo} reset --hard"`],
+      () => ['cmd', `powershell -EncodedCommand ${encoded}`],
+      () => [
+        'powershell',
+        `pwsh -Command 'git -C ${outsideRepo} reset --hard'`,
+      ],
+      () => [
+        'powershell',
+        `bash -c 'cmd /c "git -C ${outsideRepo} reset --hard"'`,
+      ],
     ])(
       'denies the nested shell payload on its own reason %#',
       async (build) => {
+        const [lane, command] = build() as [
+          'cmd' | 'powershell' | 'bash',
+          string,
+        ];
+        spoofWindows(lane);
+        const guard = createDaemonToolGuard();
+
+        await expect(guard(request(command))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('could not be resolved'),
+        });
+      },
+    );
+
+    // On the win32 Git Bash lane the cmd-rewrite and divergent-syntax gates
+    // stay off, so only the program-level rule can deny these payloads.
+    it.each([
+      () => `cmd /c "git ^-C ${outsideRepo} reset --hard"`,
+      () => `bash -c 'cmd /c "git -C ${outsideRepo} reset --hard"'`,
+    ])(
+      'keeps the entrance closed on the win32 Git Bash lane %#',
+      async (build) => {
+        spoofWindows('bash');
         const guard = createDaemonToolGuard();
 
         await expect(guard(request(build()))).resolves.toMatchObject({
@@ -1008,23 +1066,31 @@ it -C ${outsideRepo} reset --hard`,
       },
     );
 
-    it.each([
-      () => `pwsh -Command 'git -C ${outsideRepo} reset --hard'`,
-      () => `bash -c 'cmd /c "git -C ${outsideRepo} reset --hard"'`,
-    ])('denies quoted nested shell shapes %#', async (build) => {
-      const guard = createDaemonToolGuard();
-
-      await expect(guard(request(build()))).resolves.toMatchObject({
-        allowed: false,
-      });
-    });
-
     it('keeps an ordinary mention of a Windows shell allowed', async () => {
+      spoofWindows('cmd');
       const guard = createDaemonToolGuard();
 
       await expect(guard(request('echo cmd powershell pwsh'))).resolves.toEqual(
         { allowed: true },
       );
+    });
+  });
+
+  // PowerShell Core is cross-platform, but cmd.exe and Windows PowerShell
+  // are not: on POSIX hosts `pwsh` is just another interpreter the guard
+  // does not model — the same stance as python or node — so the
+  // Windows-lane fail-closed rule must not reach these lanes. Gated off the
+  // lane-spoof harness, which executes this suite as win32/cmd.
+  describe.runIf(
+    process.platform !== 'win32' &&
+      process.env['QWEN_DAEMON_GUARD_LANE_SPOOF'] === undefined,
+  )('benign pwsh stays allowed on POSIX lanes', () => {
+    it('allows an ordinary pwsh invocation', async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request('pwsh -NoProfile -Command Write-Output hello')),
+      ).resolves.toEqual({ allowed: true });
     });
   });
 
