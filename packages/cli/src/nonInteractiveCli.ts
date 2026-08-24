@@ -160,6 +160,11 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
 
 import { normalizePartList } from './utils/normalize-part-list.js';
 import {
+  detectNestedFunctionResponseMedia,
+  replaceNestedFunctionResponseMedia,
+  clampNestedFunctionResponseMedia,
+} from './utils/nested-function-response-media.js';
+import {
   extractPartsFromUserMessage,
   buildSystemMessage,
   createToolProgressHandler,
@@ -1425,8 +1430,7 @@ export async function runNonInteractive(
         } else {
           if (hasAudioParts(initialParts)) {
             if (!supportsAudio) {
-              const reason =
-                'the active model override does not support audio';
+              const reason = 'the active model override does not support audio';
               initialParts = replaceAudioPartsWithUnavailable(
                 initialParts,
                 reason,
@@ -1843,6 +1847,79 @@ export async function runNonInteractive(
         responseParts: Part[];
         repeatedDuplicateProviderToolCall: boolean;
         terminateTurn: boolean;
+      };
+
+      // Headless counterpart of useGeminiStream's `applyToolResultMediaGate`.
+      // The trailing-NUL exact-route selector persists across every headless
+      // continuation send for the whole turn (the skill-tool setter refuses to
+      // displace a NUL-stamped value), so nested `functionResponse.parts` media
+      // returned by tools mid-turn is exact-routed to the override target on
+      // EVERY continuation — including modalities the first-turn capability
+      // probe never validated. Without a gate here (the TUI has one; headless
+      // did not), core's route slimming placeholder-substitutes the nested
+      // media silently: the model answers about tool-result media it never
+      // received, with no ERROR item and nothing on stderr or in the JSON
+      // stream. Detect nested media, fail-closed-resolve the selector,
+      // substitute unsupported modalities with a visible "was not sent" marker
+      // (disclosed via emitBridgeNotice), and clamp whatever survives.
+      const applyToolResultMediaGate = async (
+        parts: Part[],
+        overrideSelector: string | undefined,
+      ): Promise<Part[]> => {
+        const nested = detectNestedFunctionResponseMedia(parts);
+        if (!nested.hasImage && !nested.hasAudio) return parts;
+        // Only a NUL-terminated selector exact-routes the continuation; a bare
+        // override or none at all sends on the session route, where ordinary
+        // bridging/slimming applies. The NUL marker is NOT a bypass: strip it
+        // and fail-close-resolve the underlying selector.
+        if (!overrideSelector?.endsWith('\0')) return parts;
+        const routeSelector = overrideSelector.slice(0, -1);
+        let supportsImage = false;
+        let supportsAudio = false;
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(routeSelector, { failClosed: true });
+          supportsImage =
+            runtimeView.contentGeneratorConfig.modalities?.image === true;
+          supportsAudio =
+            runtimeView.contentGeneratorConfig.modalities?.audio === true;
+        } catch (error) {
+          // Fail closed: exact-routing an unresolvable selector would drop the
+          // media silently, so treat it as supporting nothing and surface the
+          // omission below.
+          debugLogger.warn(
+            `tool-result media gate could not resolve override '${routeSelector}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        let result: PartListUnion = parts;
+        if (nested.hasImage && !supportsImage) {
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'image',
+            '[Image content returned by a tool was not sent: the active model override does not support images.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'Image returned by a tool was not sent: the active model override does not support images.',
+          );
+        }
+        if (nested.hasAudio && !supportsAudio) {
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'audio',
+            '[Audio content returned by a tool was not sent: the active model override does not support audio.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'Audio returned by a tool was not sent: the active model override does not support audio.',
+          );
+        }
+        // Clamp whatever nested media survives the gate — the exact-route path
+        // would otherwise skip QWEN_CODE_MAX_INLINE_MEDIA_BYTES.
+        return normalizePartList(clampNestedFunctionResponseMedia(result));
       };
 
       const processToolCallBatch = async (
@@ -2584,7 +2661,7 @@ export async function runNonInteractive(
           // it; the drain turn updates a per-item `itemModelOverride`
           // scoped to that drain item.
           const {
-            responseParts: toolResponseParts,
+            responseParts: rawToolResponseParts,
             repeatedDuplicateProviderToolCall,
             terminateTurn,
           } = await processToolCallBatch(
@@ -2601,6 +2678,15 @@ export async function runNonInteractive(
               return true;
             },
             fullTurnRuntimeView,
+          );
+          // Gate nested tool-result media against the persisted exact-route
+          // selector before the continuation send (headless counterpart of the
+          // TUI's applyToolResultMediaGate — see its definition above). Both
+          // the goal-turn addHistory branch and the ordinary continuation send
+          // below consume the gated parts.
+          const toolResponseParts = await applyToolResultMediaGate(
+            rawToolResponseParts,
+            modelOverride,
           );
 
           if (structuredSubmission !== undefined) {
@@ -2890,7 +2976,7 @@ export async function runNonInteractive(
                 // while the main loop binds to the session-scoped
                 // `modelOverride`.
                 const {
-                  responseParts: itemToolResponseParts,
+                  responseParts: rawItemToolResponseParts,
                   repeatedDuplicateProviderToolCall,
                 } = await processToolCallBatch(
                   itemToolCallRequests,
@@ -2904,6 +2990,12 @@ export async function runNonInteractive(
                     itemModelOverride = override;
                     return true;
                   },
+                );
+                // Same nested-media gate as the main-turn loop, scoped to the
+                // per-item override selector.
+                const itemToolResponseParts = await applyToolResultMediaGate(
+                  rawItemToolResponseParts,
+                  itemModelOverride,
                 );
 
                 if (structuredSubmission !== undefined) {

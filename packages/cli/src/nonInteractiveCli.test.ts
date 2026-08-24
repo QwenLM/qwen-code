@@ -1990,9 +1990,10 @@ describe('runNonInteractive', () => {
 
     // The capability check passed, so the raw image rides the exact route
     // (trailing-NUL selector) and the target's own modalities apply.
-    expect(
-      mockGeminiClient.sendMessageStream.mock.calls[0]?.[0],
-    ).toEqual([{ text: 'inspect this image' }, imagePart]);
+    expect(mockGeminiClient.sendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'inspect this image' },
+      imagePart,
+    ]);
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBe('image-model\0');
@@ -2136,7 +2137,6 @@ describe('runNonInteractive', () => {
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBe('text-model');
   });
-
 
   it('fails closed when a slash prompt selects a text-only model', async () => {
     setupMetricsMock();
@@ -2420,6 +2420,110 @@ describe('runNonInteractive', () => {
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBeUndefined();
+  });
+
+  it('gates nested tool-result media against the persisted exact-route override', async () => {
+    // The trailing-NUL inline-override selector persists across every headless
+    // continuation send for the whole turn. A tool that returns media nested
+    // in functionResponse.parts mid-turn would be exact-routed to the override
+    // target and silently placeholder-substituted by core route slimming when
+    // the target lacks that modality. The headless loop must gate it like the
+    // TUI's applyToolResultMediaGate: fail the unsupported modality closed
+    // visibly (marker + bridge notice) instead of letting it vanish silently.
+    setupMetricsMock();
+    const nestedImageData = 'TkVTVEVESU1BR0U=';
+    const mockCommand = {
+      name: 'audio-model',
+      description: 'submit audio to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: headlessAudioParts,
+        modelOverride: 'audio-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }]);
+    // The override target supports audio but NOT image.
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    // The tool returns a functionResponse nesting an image the audio-only route
+    // cannot see.
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-call-nested-image',
+            name: 'custom_tool',
+            response: { output: 'screenshot attached' },
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: nestedImageData },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-call-nested-image',
+              name: 'custom_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-nested-gate',
+            },
+          },
+        ]);
+      }
+      return createStreamFromEvents(finishedEvents);
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/audio-model',
+      'prompt-nested-gate',
+    );
+
+    // First send: the audio prompt exact-routes to the override.
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('audio-model\0');
+    // Second send: the tool-result continuation. The nested image must be
+    // fail-closed (the audio-only route cannot see it), not shipped raw into
+    // silent route slimming.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const continuationSent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[0],
+    );
+    expect(continuationSent).not.toContain(nestedImageData);
+    expect(continuationSent).toContain('was not sent');
+    // The omission is disclosed on stderr, not silent.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Image returned by a tool was not sent'),
+    );
   });
 
   it('notices a failed audio bridge that never sent audio anywhere', async () => {

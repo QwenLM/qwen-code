@@ -106,6 +106,11 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import {
+  detectNestedFunctionResponseMedia,
+  replaceNestedFunctionResponseMedia,
+  clampNestedFunctionResponseMedia,
+} from '../../utils/nested-function-response-media.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -193,180 +198,6 @@ function clearModelOverride(
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
-
-/**
- * True when a nested tool-result part carries usable media bytes. Both
- * carriers count: core's `convertToFunctionResponse` nests `inlineData` AND
- * `fileData` parts into `functionResponse.parts` (tested at
- * coreToolScheduler's 'should handle llmContent with fileData'), and core's
- * slimming/microcompact treat `inlineData || fileData` as media. Policing
- * only `inlineData` would let an extension/custom tool's `fileData` media
- * slip past the gate into silent route slimming.
- */
-function nestedPartCarriesMedia(inner: Part): boolean {
-  const hasInline =
-    typeof inner.inlineData?.data === 'string' &&
-    inner.inlineData.data.length > 0;
-  const fileUri = (inner.fileData as { fileUri?: unknown } | undefined)
-    ?.fileUri;
-  return hasInline || (typeof fileUri === 'string' && fileUri.length > 0);
-}
-
-/** MIME types are case-insensitive (RFC 6838); MCP servers supply them verbatim. */
-function nestedPartMime(inner: Part): string | undefined {
-  const mime =
-    inner.inlineData?.mimeType ??
-    (inner.fileData as { mimeType?: unknown } | undefined)?.mimeType;
-  return typeof mime === 'string' ? mime : undefined;
-}
-
-/**
- * Detect inline media nested inside `functionResponse.parts` — the carrier
- * qwen-code uses for tool-result images/audio (see
- * `coreToolScheduler.createFunctionResponsePart`). The top-level
- * `hasImageParts`/`hasAudioParts` helpers only see top-level `inlineData`, so
- * a tool-result continuation's media is invisible to them.
- */
-function detectNestedFunctionResponseMedia(parts: PartListUnion): {
-  hasImage: boolean;
-  hasAudio: boolean;
-} {
-  const list = Array.isArray(parts) ? parts : [parts];
-  let hasImage = false;
-  let hasAudio = false;
-  for (const part of list) {
-    if (typeof part === 'string') continue;
-    const nested = (part.functionResponse as { parts?: unknown } | undefined)
-      ?.parts;
-    if (!Array.isArray(nested)) continue;
-    for (const inner of nested as Part[]) {
-      const mime = nestedPartMime(inner);
-      if (mime === undefined || !nestedPartCarriesMedia(inner)) {
-        continue;
-      }
-      // Case-insensitive, mirroring the audio bridge's own `isAudioPart`
-      // (which lowercases first): an 'AUDIO/WAV' tool result must be policed
-      // exactly like 'audio/wav'.
-      const lower = mime.toLowerCase();
-      if (lower.startsWith('image/')) hasImage = true;
-      else if (lower.startsWith('audio/')) hasAudio = true;
-    }
-  }
-  return { hasImage, hasAudio };
-}
-
-/**
- * Replace inline media nested inside `functionResponse.parts` with a text note
- * and append the note to the response text, so a fail-closed tool-result media
- * payload keeps its shape but carries no raw bytes. Returns the input unchanged
- * (identity) when no nested media matched.
- */
-function stringifyStructuredToolOutput(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function replaceNestedFunctionResponseMedia(
-  parts: PartListUnion,
-  match: 'image' | 'audio',
-  note: string,
-): Part[] {
-  const prefix = match === 'image' ? 'image/' : 'audio/';
-  const list = Array.isArray(parts) ? parts : [parts];
-  return list.map((part) => {
-    if (typeof part === 'string') return { text: part };
-    const functionResponse = part.functionResponse as
-      | ({ parts?: unknown } & Record<string, unknown>)
-      | undefined;
-    const nested = functionResponse?.parts;
-    if (!Array.isArray(nested)) return part;
-    let touched = false;
-    const retained: Part[] = [];
-    for (const inner of nested as Part[]) {
-      const mime = nestedPartMime(inner);
-      // Same predicate as `detectNestedFunctionResponseMedia` — both carriers
-      // (`inlineData` and `fileData`) and case-insensitive MIME matching.
-      const isMatch =
-        mime !== undefined &&
-        mime.toLowerCase().startsWith(prefix) &&
-        nestedPartCarriesMedia(inner);
-      if (isMatch) {
-        touched = true;
-      } else {
-        retained.push(inner);
-      }
-    }
-    if (!touched) return part;
-    const { parts: _dropped, ...rest } = functionResponse ?? {};
-    const response = (rest['response'] ?? {}) as Record<string, unknown>;
-    const key = typeof response['error'] === 'string' ? 'error' : 'output';
-    const current = response[key];
-    // A structured (non-string) output — core's convertToFunctionResponse
-    // passes tool-supplied functionResponse parts through verbatim — must be
-    // preserved, not erased: stringify it and append the note, so the tool
-    // result survives even though the nested media it carried is omitted.
-    const nextResponse = {
-      ...response,
-      [key]:
-        typeof current === 'string' && current.length > 0
-          ? `${current}\n\n${note}`
-          : current === undefined || current === null || current === ''
-            ? note
-            : `${stringifyStructuredToolOutput(current)}\n\n${note}`,
-    };
-    return {
-      ...part,
-      functionResponse: {
-        ...rest,
-        response: nextResponse,
-        ...(retained.length > 0 ? { parts: retained } : {}),
-      } as Part['functionResponse'],
-    };
-  });
-}
-
-/**
- * Clamp inline media nested inside `functionResponse.parts` with the same
- * `QWEN_CODE_MAX_INLINE_MEDIA_BYTES` ceiling every top-level routing path
- * applies (audio-route clamp, native-skip clamp, image-route clamp, R33-2
- * clamp, full-turn clamp; core's `clampNestedImages` covers the vision-bridge
- * path). Without this, a media-routed tool-result continuation carrying an
- * oversized supported-modality blob skips the clamp entirely — the exact
- * blowup `clampInlineMediaPart` documents. Returns the input unchanged
- * (identity) when nothing is oversized.
- */
-function clampNestedFunctionResponseMedia(parts: PartListUnion): PartListUnion {
-  const list = Array.isArray(parts) ? parts : [parts];
-  let touched = false;
-  const mapped: Part[] = list.map((part) => {
-    if (typeof part === 'string') return { text: part };
-    const functionResponse = part.functionResponse as
-      | ({ parts?: unknown } & Record<string, unknown>)
-      | undefined;
-    const nested = functionResponse?.parts;
-    if (!Array.isArray(nested)) return part;
-    let nestedTouched = false;
-    const clampedInner = (nested as Part[]).map((inner) => {
-      const clamped = clampInlineMediaPart(inner);
-      if (clamped !== inner) nestedTouched = true;
-      return clamped;
-    });
-    if (!nestedTouched) return part;
-    touched = true;
-    const { parts: _oversized, ...rest } = functionResponse ?? {};
-    return {
-      ...part,
-      functionResponse: {
-        ...rest,
-        parts: clampedInner,
-      } as Part['functionResponse'],
-    };
-  });
-  return touched ? mapped : parts;
-}
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
@@ -4701,6 +4532,12 @@ export const useGeminiStream = (
           // Ctrl+Y re-gate the tool media but resend '[Audio was not sent: …]'
           // for the steer forever — the marker-resend anti-pattern. The drain
           // capture is the same tool responses plus the pristine steer media.
+          //
+          // Capture the payload this continuation is about to supersede BEFORE
+          // overwriting the store: settle's `onAccept` (below) hands it back
+          // once the steer's push has landed, symmetric with the core-driven
+          // path's `handleResolvedSteer`.
+          const previousPayload = lastPromptRef.current;
           lastPromptRef.current =
             metadata?.preOverrideParts ?? preOverrideParts ?? finalQueryToSend;
           lastPromptErroredRef.current = false;
@@ -4717,6 +4554,28 @@ export const useGeminiStream = (
               metadata?.preOverrideParts !== undefined && steerInput.retryParts
                 ? steerInput.retryParts.length
                 : steerInput.parts.length;
+            // Settle fires `onAccept` once the steer's push has landed. From
+            // that point the composite (tool responses + pristine steer) is
+            // owned by the history, so the retry store must hand back the
+            // payload this continuation superseded — leaving the composite in
+            // the store would let Ctrl+Y re-inject the already-accepted steer
+            // when a LATER core-internal continuation of the same request
+            // (stop-hook / next-speaker recursion) fails. This mirrors the
+            // core-driven path's `handleResolvedSteer.onAccept`. The guard is
+            // load-bearing: a tool continuation is always preceded by the outer
+            // turn's prompt in production (so `previousPayload` is the payload
+            // to hand back), but when there is nothing to hand back the
+            // composite must stay the recovery channel instead of being nulled.
+            // (The already-landed tool responses themselves cannot duplicate on
+            // a Ctrl+Y re-send — core's `repairOrphanedToolUseTurns` drops
+            // duplicate `functionResponse` copies for the same callId — but the
+            // steer segment has no such dedup, which is what this prevents.)
+            if (previousPayload !== null) {
+              steerInput.onAccept = () => {
+                if (lastPromptRef.current !== storedPayload) return;
+                lastPromptRef.current = previousPayload;
+              };
+            }
             steerInput.onRestore = () => {
               if (lastPromptRef.current !== storedPayload) return;
               const stored = normalizePartList(storedPayload);
