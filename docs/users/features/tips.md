@@ -16,6 +16,10 @@ New users see onboarding-focused tips during their first sessions:
 
 After that, tips rotate through general features like `/compress`, `/approval-mode`, `/insight`, `/btw`, and more.
 
+## Version Upgrade Notices
+
+When a version has curated highlights, Qwen Code shows a What's New notice below the startup tip once for that version. The same version is not shown again after it has been recorded in the tip history.
+
 ## Post-Response Tips
 
 During a conversation, Qwen Code monitors your context window usage and shows tips when action may be needed:
@@ -34,12 +38,13 @@ Tip display history is persisted at `~/.qwen/tip_history.json`. This file tracks
 
 - Session count (used for new-user tip selection)
 - Which tips have been shown and when (used for LRU rotation and cooldown)
+- The last version whose curated highlights were shown (used to avoid repeating upgrade notices)
 
 You can safely delete this file to reset tip history.
 
 ## Disabling Tips
 
-To hide all tips (both startup and post-response), set `ui.hideTips` to `true` in `~/.qwen/settings.json`:
+To hide all tips and version upgrade notices, set `ui.hideTips` to `true` in `~/.qwen/settings.json`:
 
 ```json
 {
@@ -51,4 +56,4 @@ To hide all tips (both startup and post-response), set `ui.hideTips` to `true` i
 
 You can also toggle this in the settings dialog via the `/settings` command.
 
-Tips are also automatically hidden when screen reader mode is enabled.
+Tips and version upgrade notices are also automatically hidden when screen reader mode is enabled.

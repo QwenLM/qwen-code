@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
+import { WhatsNew } from './WhatsNew.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { resolveCustomBanner } from '../utils/customBanner.js';
@@ -84,7 +85,12 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           customBannerSubtitle={resolvedBanner?.subtitle}
         />
       )}
-      {showTips && <Tips />}
+      {showTips && (
+        <>
+          <Tips />
+          <WhatsNew version={version} />
+        </>
+      )}
     </Box>
   );
 };

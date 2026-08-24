@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, it, expect } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TipHistory } from './tipHistory.js';
 
 const tempPaths: string[] = [];
@@ -21,9 +22,19 @@ function tmpPath(): string {
   return p;
 }
 
+function tmpDir(): string {
+  const dir = join(
+    tmpdir(),
+    `test-tip-history-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  tempPaths.push(dir);
+  return dir;
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const p of tempPaths) {
-    rmSync(p, { force: true });
+    rmSync(p, { force: true, recursive: true });
   }
   tempPaths.length = 0;
 });
@@ -127,6 +138,71 @@ describe('TipHistory', () => {
     it('exposes sessionCount from data', () => {
       const history = createHistory(42);
       expect(history.sessionCount).toBe(42);
+    });
+  });
+
+  describe('load', () => {
+    it('retains a seen version across loads', () => {
+      const globalQwenDir = tmpDir();
+      vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(globalQwenDir);
+
+      const history = TipHistory.load();
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+
+      const reloaded = TipHistory.load();
+      expect(reloaded.hasSeenVersion('0.20.1')).toBe(true);
+    });
+
+    it('loads histories that predate lastSeenVersion', () => {
+      const globalQwenDir = tmpDir();
+      vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(globalQwenDir);
+      mkdirSync(globalQwenDir, { recursive: true });
+      writeFileSync(
+        join(globalQwenDir, 'tip_history.json'),
+        JSON.stringify({ sessionCount: 3, tips: {} }),
+      );
+
+      const history = TipHistory.load();
+
+      expect(history.sessionCount).toBe(4);
+      expect(history.hasSeenVersion('0.20.1')).toBe(false);
+    });
+  });
+
+  describe('markVersionSeen', () => {
+    it('persists a version when it has not been shown before', () => {
+      const filePath = tmpPath();
+      const history = new TipHistory({ sessionCount: 1, tips: {} }, filePath);
+
+      expect(history.hasSeenVersion('0.20.1')).toBe(false);
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+      expect(history.hasSeenVersion('0.20.1')).toBe(true);
+      expect(JSON.parse(readFileSync(filePath, 'utf8'))).toMatchObject({
+        lastSeenVersion: '0.20.1',
+      });
+    });
+
+    it('does not show an already-seen version again', () => {
+      const history = new TipHistory(
+        { sessionCount: 1, tips: {}, lastSeenVersion: '0.20.1' },
+        tmpPath(),
+      );
+
+      expect(history.hasSeenVersion('0.20.1')).toBe(true);
+      expect(history.markVersionSeen('0.20.1')).toBe(false);
+    });
+
+    it('shows and persists an upgraded version', () => {
+      const filePath = tmpPath();
+      const history = new TipHistory(
+        { sessionCount: 1, tips: {}, lastSeenVersion: '0.20.0' },
+        filePath,
+      );
+
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+      expect(JSON.parse(readFileSync(filePath, 'utf8'))).toMatchObject({
+        lastSeenVersion: '0.20.1',
+      });
     });
   });
 });

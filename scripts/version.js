@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { assertReleaseHighlights } from './check-whats-new-release.js';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -37,6 +38,22 @@ if (!versionType) {
     'Usage: npm run version <version> (e.g., 1.2.3 or patch|minor|major|prerelease)',
   );
   process.exit(1);
+}
+
+const releaseVersionArg = versionType.replace(/^v/, '');
+const versionBumpTypes = new Set([
+  'major',
+  'minor',
+  'patch',
+  'premajor',
+  'preminor',
+  'prepatch',
+  'prerelease',
+]);
+const validateAfterBump = versionBumpTypes.has(releaseVersionArg);
+
+if (!validateAfterBump) {
+  assertReleaseHighlights(releaseVersionArg);
 }
 
 // 2. Bump the version in the root and all workspace package.json files.
@@ -88,6 +105,10 @@ for (const workspaceName of workspacesToVersion) {
 // 4. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
+
+if (validateAfterBump) {
+  assertReleaseHighlights(newVersion);
+}
 
 // 5. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
