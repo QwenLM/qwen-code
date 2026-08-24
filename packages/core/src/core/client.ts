@@ -358,6 +358,14 @@ export class GeminiClient {
    * {@link armTelemetrySwapUndo} inside the replay branches.
    */
   private telemetrySwap?: {
+    /**
+     * The session the process was on when the transaction opened — the one
+     * a failed swap rolls back to. Captured at open time because
+     * `initializedSessionId` is unreliable by arm time: an earlier failed
+     * swap's abort clears it, and the next swap would then snapshot no
+     * outgoing bucket at all (#9844 review).
+     */
+    outgoingHint: string;
     undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
   };
   private sessionTurnCount = 0;
@@ -624,7 +632,11 @@ export class GeminiClient {
    */
   beginTelemetrySwap(): boolean {
     if (this.telemetrySwap) return false;
-    this.telemetrySwap = {};
+    // The hooks call this BEFORE config.startNewSession, so the config
+    // session id still names the session the process is on — capture it as
+    // the outgoing session now; initializedSessionId may already be stale
+    // or cleared by the time the undo arms.
+    this.telemetrySwap = { outgoingHint: this.config.getSessionId() };
     return true;
   }
 
@@ -675,8 +687,12 @@ export class GeminiClient {
    * of the parent runs while the failed swap's undo is still outstanding.
    * No-ops when no transaction is open (replay outside a swap).
    *
-   * The snapshot also covers the session the process is currently on
-   * (`initializedSessionId` still names it at arm time): the `/branch`
+   * The snapshot also covers the session the process is currently on — the
+   * one a failed swap rolls back to. That is the transaction's
+   * `outgoingHint`, captured at open time, NOT `initializedSessionId`: an
+   * earlier failed swap's abort clears `initializedSessionId`, so keying on
+   * it would snapshot no outgoing bucket and the rollback's re-initialize
+   * would wipe the live session's never-persisted state. The `/branch`
    * rollback re-initializes that session, and the re-initialize's
    * `resetSession` wipes its live bucket — only what the transcript persists
    * comes back (skill invocations never do), so the undo must put the
@@ -688,7 +704,7 @@ export class GeminiClient {
       sessionId,
       snapshot: uiTelemetryService.snapshotForReplay(
         sessionId,
-        this.initializedSessionId,
+        this.telemetrySwap.outgoingHint ?? this.initializedSessionId,
       ),
     };
   }

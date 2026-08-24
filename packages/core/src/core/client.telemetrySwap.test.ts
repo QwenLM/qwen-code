@@ -285,6 +285,52 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     client.commitTelemetrySwap();
   });
 
+  it('a swap after a failed swap still snapshots the live outgoing bucket', async () => {
+    // The outgoing session is captured at begin time (outgoingHint), not
+    // keyed on initializedSessionId: the FIRST swap's abort clears
+    // initializedSessionId (it names the abandoned session), and a next swap
+    // armed on the cleared field would snapshot no outgoing bucket — so the
+    // rollback's re-initialize would wipe the live session's
+    // never-persisted state (live events, skill invocations) for good.
+    const { config, client } = makeEnv();
+
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    await client.initialize();
+    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
+    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+
+    // First swap to B fails after its forward replay; abort restores the
+    // pre-swap state and forgets initializedSessionId (it names B).
+    expect(client.beginTelemetrySwap()).toBe(true);
+    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
+    await client.initialize();
+    expect(totalRequests()).toBe(3);
+    expect(client.abortTelemetrySwap()).toBe(true);
+    expect(totalRequests()).toBe(2);
+
+    // The hook rollback puts core back on A.
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+
+    // Second swap attempt: initializedSessionId is undefined now, so the
+    // outgoing session can only come from the begin-time hint.
+    expect(client.beginTelemetrySwap()).toBe(true);
+    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
+    await client.initialize();
+    expect(totalRequests()).toBe(3);
+
+    // /branch-shaped rollback: re-initialize the parent (its resetSession
+    // wipes A's live bucket), then abort puts the snapshot back.
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    await client.initialize();
+    expect(client.abortTelemetrySwap()).toBe(true);
+
+    expect(totalRequests()).toBe(2);
+    // A's bucket came back complete — including what is never persisted.
+    const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
+    expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
+    expect(bucketA.skills?.totalCalls).toBe(1);
+  });
+
   it('initialize with a SessionStartSource still honors the transaction', async () => {
     const { config, client } = makeEnv();
 

@@ -340,7 +340,10 @@ export class UiTelemetryService extends EventEmitter {
    * compensation available (no subtraction API).
    *
    * `outgoingSessionId` is the session the process was on when the replay
-   * begins (`GeminiClient.initializedSessionId` at arm time). Its bucket and
+   * begins — the swap transaction's begin-time `outgoingHint`, falling back
+   * to `GeminiClient.initializedSessionId`. An earlier failed swap's abort
+   * clears `initializedSessionId`, so keying on it alone would capture no
+   * outgoing session and lose the live bucket (#9844 review). Its bucket and
    * closed flag are captured too: the `/branch` rollback re-initializes that
    * session, and the re-initialize's `resetSession` wipes its live bucket —
    * only what the transcript persists comes back (skill invocations never
