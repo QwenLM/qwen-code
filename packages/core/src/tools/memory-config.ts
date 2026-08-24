@@ -16,4 +16,4 @@ export {
   getCurrentGeminiMdFilename,
   MEMORY_SECTION_HEADER,
   setGeminiMdFilename,
-} from '../memory/const.js';
+} from '../utils/memory-constants.js';

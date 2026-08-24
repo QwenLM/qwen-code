@@ -591,7 +591,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
-          npx tsc -p integration-tests/tsconfig.json --pretty false
+          npm run typecheck:integration
           npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
