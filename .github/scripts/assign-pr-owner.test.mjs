@@ -48,9 +48,20 @@ afterEach(() => {
 });
 
 describe('assign-pr-owner: pure routing', () => {
-  it('matches the first area whose paths prefix a changed file', () => {
+  it('routes module paths to their module area, everything else to the fallback', () => {
     const area = matchAreaByPath(policy, [{ path: 'packages/core/src/x.ts' }]);
     assert.equal(area?.name, 'core');
+    const module = matchAreaByPath(policy, [
+      { path: 'packages/core/src/skills/loader.ts' },
+    ]);
+    assert.equal(module?.name, 'core-skills');
+    // A module entry overrides the coarser fallback even when the PR also
+    // touches files only the fallback covers.
+    const mixed = matchAreaByPath(policy, [
+      { path: 'packages/core/src/index.ts' },
+      { path: 'packages/core/src/goals/goal.ts' },
+    ]);
+    assert.equal(mixed?.name, 'core-goals');
   });
 
   it('never matches outside the mapped prefixes', () => {
@@ -195,6 +206,19 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.doesNotMatch(log, /pr edit/);
     assert.match(stdout, /no area path matched/);
+  });
+
+  it('falls back to the coarser area when the module owner authored the PR', () => {
+    const module = policy.areas.find((area) => area.name === 'core-skills');
+    const { log, stdout } = runAssign(false, {
+      prJson: JSON.stringify({
+        ...corePr,
+        author: { login: module.owners[0] },
+      }),
+      files: 'packages/core/src/skills/loader.ts',
+    });
+    assert.match(stdout, /falling back to core/);
+    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
   });
 
   it('tolerates a read-only token instead of failing', () => {

@@ -5,8 +5,9 @@
 // PR-side companion to assign-issue-owner.mjs. The script never reads PR
 // title, body, or comments, so untrusted PR text cannot steer who gets
 // assigned. The diff's file paths are matched against the optional `paths`
-// list of each area in .github/issue-owners.json (first area wins, same
-// precedence as labels); the assignee is the area's least loaded eligible
+// list of each area in .github/issue-owners.json; the longest matching
+// prefix wins, so a module-level entry overrides the coarser fallback area
+// that contains it. The assignee is the area's least loaded eligible
 // owner, rotated by PR number on ties — the same load metric and rotation as
 // issue assignment. Push access is re-verified against the live collaborator
 // API before the write, and the run no-ops once any mapped owner is already
@@ -51,17 +52,26 @@ export function skipPrReason(pr) {
   return null;
 }
 
-// First area whose paths prefix any changed file wins — file order is the
-// documented precedence, identical to label matching. Areas without a paths
-// list never match.
+// The longest matching prefix wins, so a module entry overrides the coarser
+// area that contains it; ties keep the earlier area in file order. Areas
+// without a paths list never match.
+export function matchedAreasByPath(policy, files) {
+  const ranked = [];
+  for (const area of policy.areas) {
+    let length = 0;
+    for (const prefix of area.paths ?? []) {
+      if (files.some((file) => file.path.startsWith(prefix))) {
+        length = Math.max(length, prefix.length);
+      }
+    }
+    if (length > 0) ranked.push({ area, length });
+  }
+  ranked.sort((a, b) => b.length - a.length);
+  return ranked.map((entry) => entry.area);
+}
+
 export function matchAreaByPath(policy, files) {
-  return (
-    policy.areas.find((area) =>
-      area.paths?.some((prefix) =>
-        files.some((file) => file.path.startsWith(prefix)),
-      ),
-    ) ?? null
-  );
+  return matchedAreasByPath(policy, files)[0] ?? null;
 }
 
 // An assignee or a submitted review by any mapped owner means this routing
@@ -148,24 +158,36 @@ function main() {
     record(['Assignment: skipped — a mapped owner is already on the PR']);
     return;
   }
-  const area = matchAreaByPath(policy, pr.files);
-  if (!area) {
+  const matched = matchedAreasByPath(policy, pr.files);
+  if (matched.length === 0) {
     record(['Assignment: skipped — no area path matched']);
     return;
   }
 
-  // Never assign the PR author to their own work.
-  const eligible = area.owners.filter(
-    (owner) =>
-      owner.toLowerCase() !== pr.author.login.toLowerCase() &&
-      canWrite(repository, owner),
-  );
-  if (eligible.length === 0) {
-    console.warn(
-      `::warning::No owner of area ${area.name} besides the author has push access; check ${OWNERS_FILE}.`,
+  // Never assign the PR author to their own work. When a module's owner
+  // cannot take the PR (they authored it, or lost push access), fall back
+  // to the next coarser matching area instead of leaving the PR unassigned.
+  let area;
+  let eligible;
+  for (area of matched) {
+    eligible = area.owners.filter(
+      (owner) =>
+        owner.toLowerCase() !== pr.author.login.toLowerCase() &&
+        canWrite(repository, owner),
     );
-    record([`Assignment: skipped — no eligible owner for area ${area.name}`]);
+    if (eligible.length > 0) break;
+  }
+  if (!eligible || eligible.length === 0) {
+    console.warn(
+      `::warning::No eligible owner for the areas touched by this PR; check ${OWNERS_FILE}.`,
+    );
+    record(['Assignment: skipped — no eligible owner for the matched areas']);
     return;
+  }
+  if (area !== matched[0]) {
+    record([
+      `Area ${matched[0].name} has no eligible owner (author or no push access); falling back to ${area.name}`,
+    ]);
   }
 
   const loadByOwner = new Map(
