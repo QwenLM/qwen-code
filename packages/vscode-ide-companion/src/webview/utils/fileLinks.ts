@@ -27,15 +27,15 @@ const safeDecodePath = (value: string): string => {
 };
 
 export const normalizeExplicitFileLink = (raw: string): string => {
-  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
+  const value = raw.replace(/\\/g, '/');
 
   // file:// URIs (e.g. from vscode.Uri.file().toString()) encode special
-  // characters like # as %23 in the path component. After decoding the
-  // full URI we can strip the scheme and return the filesystem path
-  // directly — no fragment splitting needed, because any # in the
-  // decoded result is a literal filename character, not an anchor.
-  if (/^file:\/\//i.test(decoded)) {
-    let filePath = decoded.replace(/^file:\/\/\//i, '');
+  // characters like # as %23 in the path component. A raw # cannot appear
+  // inside the encoded path, so decode only the path part after stripping
+  // the scheme — any # in the decoded result is a literal filename
+  // character, not an anchor.
+  if (/^file:\/\//i.test(value)) {
+    let filePath = safeDecodePath(value.replace(/^file:\/\/\//i, ''));
     // On Unix the path should start with /
     if (!/^[a-zA-Z]:/.test(filePath) && !filePath.startsWith('/')) {
       filePath = '/' + filePath;
@@ -43,13 +43,19 @@ export const normalizeExplicitFileLink = (raw: string): string => {
     return filePath;
   }
 
-  const hashIndex = decoded.indexOf('#');
+  // A URL fragment is delimited by a raw #; %23 is an encoded literal # in
+  // the filename. Split on the raw # before percent-decoding and decode the
+  // path and fragment parts separately, so an encoded # in the filename is
+  // not mistaken for a fragment delimiter.
+  const hashIndex = value.indexOf('#');
+  const base = safeDecodePath(
+    hashIndex < 0 ? value : value.slice(0, hashIndex),
+  );
   if (hashIndex < 0) {
-    return decoded;
+    return base;
   }
 
-  const base = decoded.slice(0, hashIndex);
-  const fragment = decoded.slice(hashIndex + 1);
+  const fragment = value.slice(hashIndex + 1);
   const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
   if (lineMatch) {
     return `${base}:${parseInt(lineMatch[1], 10)}`;
@@ -79,9 +85,15 @@ export function resolveFileLinkFromAnchor(
 
   // Explicit markdown file-path links (e.g. [report](/tmp/report.md)).
   // Falls back to the anchor text for anchors whose href was stripped by
-  // markdown sanitizers, matching the legacy webui behavior.
+  // markdown sanitizers, matching the legacy webui behavior. Anchor text is
+  // a literal path, so it must not run through URL decoding or fragment
+  // splitting — a # in the text is a filename character (e.g. the
+  // `export (#1).html` links /export renders after the sanitizer strips the
+  // file: href).
   const text = (anchor.textContent || '').trim();
-  const candidate = normalizeExplicitFileLink(href || text);
+  const candidate = href
+    ? normalizeExplicitFileLink(href)
+    : text.replace(/\\/g, '/');
 
   const isAbsolutePath = /^(?:[a-zA-Z]:[/\\]|[/\\])/i.test(candidate);
   const isRelativeFile =

@@ -933,6 +933,59 @@ describe('App /skills secondary picker', () => {
     });
   });
 
+  it('copies the tool block under a tool-group row key on copyMessage', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+
+    // Feed a tool block through the real transcript reducer. Block ids use
+    // one shared ordinal across kinds, so the assistant block is
+    // `assistant-1` and this tool block becomes `tool-2`.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-1',
+                title: 'Read file',
+                status: 'completed',
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // MessageList keys tool-group rows as `msg:tg-<first block id>`.
+    const row = document.createElement('div');
+    row.setAttribute('data-message-row-key', 'msg:tg-tool-2');
+    row.textContent = 'Read file';
+    area.appendChild(row);
+
+    act(() => {
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyMessage' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'Read file' },
+    });
+  });
+
   it('renders /insight progress updates from the insightProgress setter', async () => {
     mockInsightState.progress = { stage: 'Analyzing', progress: 40 };
 

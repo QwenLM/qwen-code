@@ -53,13 +53,8 @@ export interface ContentGenerator {
   useSummarizedThinking(): boolean;
 }
 
-export enum AuthType {
-  USE_OPENAI = 'openai',
-  QWEN_OAUTH = 'qwen-oauth',
-  USE_GEMINI = 'gemini',
-  USE_VERTEX_AI = 'vertex-ai',
-  USE_ANTHROPIC = 'anthropic',
-}
+import { AuthType } from '../utils/auth-type.js';
+export { AuthType };
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
   /**

@@ -6,12 +6,14 @@
 
 import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
-import { pathToFileURL } from 'node:url';
 import * as fsp from 'fs/promises';
+import { pathToFileURL } from 'node:url';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import {
   getDisplayableImageMimeType,
+  MAX_IMAGE_SIZE,
+  splitMessageContentForImages,
   type ImageAttachment,
 } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
@@ -370,6 +372,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
             result.uri.fsPath,
           ),
           timestamp: Date.now(),
+          // Local confirmations never flow through ACP transcriptUpdate;
+          // without localOnly the WebShell transcript renders them nowhere.
+          localOnly: true,
         },
       });
     } catch (error) {
@@ -488,9 +493,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       try {
         const newConv = await this.conversationStore.createConversation();
         this.updateCurrentConversationId(newConv.id);
+        // Carry the live ACP session id so this boundary re-pins the
+        // transcript guard instead of re-opening the adopt-on-null window
+        // to stale frames of the abandoned session on a first send.
         this.sendToWebView({
           type: 'conversationLoaded',
-          data: newConv,
+          data: {
+            ...newConv,
+            ...(this.agentManager.currentSessionId
+              ? { sessionId: this.agentManager.currentSessionId }
+              : {}),
+          },
         });
       } catch (error) {
         const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
@@ -578,6 +591,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
     if (!this.agentManager.isConnected) {
       logger.warn('[SessionMessageHandler] Agent not connected');
 
+      // The send aborts before the transcript echo runs, so the user's own
+      // message would render nowhere; re-surface it as a local notice. The
+      // eager copy above is intentionally untagged because on successful
+      // sends the live transcript renders the prompt and a tagged copy here
+      // would double-render it.
+      this.sendToWebView({
+        type: 'message',
+        data: { ...userMessage, localOnly: true },
+      });
+
       // Show non-modal notification with Configure button
       await this.promptAuth(
         'You need to configure your provider to use Qwen Code.',
@@ -596,6 +619,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
           '[SessionMessageHandler] Failed to create session before sending message:',
           createErr,
         );
+        // Aborted before the transcript echo runs; re-surface the user's
+        // own message as a local notice (see the not-connected branch).
+        this.sendToWebView({
+          type: 'message',
+          data: { ...userMessage, localOnly: true },
+        });
         const errorMsg = this.getErrorMessage(createErr);
         if (this.shouldPromptAuth(createErr)) {
           await this.promptAuth(
@@ -639,14 +668,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // echo on the SSE bus). Posted before the prompt is dispatched so
       // the user block renders ahead of this turn's assistant frames.
       const transcriptEchoSessionId = this.agentManager.currentSessionId;
-      if (transcriptEchoSessionId && displayText) {
+      const transcriptDisplayText =
+        splitMessageContentForImages(displayText).text;
+      if (transcriptEchoSessionId && transcriptDisplayText) {
         this.sendToWebView({
           type: 'transcriptUpdate',
           data: {
             sessionId: transcriptEchoSessionId,
             update: {
               sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text: displayText },
+              content: { type: 'text', text: transcriptDisplayText },
             },
           },
         });
@@ -784,10 +815,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
             timestamp: Date.now(),
           };
 
-          // Send a timeout message to the WebView
+          // Send a timeout message to the WebView. The popup is suppressed on
+          // this path, so this notice is the only user feedback; tag it
+          // localOnly or the WebShell transcript renders it nowhere.
           this.sendToWebView({
             type: 'message',
-            data: timeoutMessage,
+            data: { ...timeoutMessage, localOnly: true },
           });
           this.sendStreamEnd('timeout', myRequestId);
         } else {
@@ -814,6 +847,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
     imagePath: string,
   ): Promise<string | null> {
     try {
+      const { size } = await fsp.stat(imagePath);
+      if (size > MAX_IMAGE_SIZE) {
+        logger.warn(
+          '[SessionMessageHandler] Skipping oversized image for transcript echo:',
+          imagePath,
+          size,
+        );
+        return null;
+      }
       const buffer = await fsp.readFile(imagePath);
       return buffer.toString('base64');
     } catch (error) {
@@ -849,9 +891,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.updateCurrentConversationId(null);
 
+      // Publish the fresh ACP session id with the boundary so the
+      // transcript guard drops trailing frames from the abandoned session
+      // (which may still be streaming) instead of adopting them into the
+      // new conversation.
       this.sendToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
 
       // Reset title flag when creating a new session

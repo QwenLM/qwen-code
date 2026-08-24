@@ -172,6 +172,98 @@ describe('useAcpTranscript', () => {
     expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'beta' });
   });
 
+  it('drops frames of the abandoned session after conversationCleared publishes the fresh id', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'old turn'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+
+    // New-session flow: the extension creates the fresh ACP session first
+    // and publishes its id with the boundary.
+    act(() => {
+      postToWebview({
+        type: 'conversationCleared',
+        data: { sessionId: 'session-b' },
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // The abandoned session may still be streaming on the CLI; its
+    // trailing frames must not be adopted into the fresh conversation.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification(
+          'session-a',
+          'STALE tail of old session',
+        ),
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'fresh'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'fresh' });
+  });
+
+  it('keeps the guard pinned when conversationLoaded carries the session id', () => {
+    act(() => {
+      postToWebview({
+        type: 'conversationCleared',
+        data: { sessionId: 'session-b' },
+      });
+    });
+
+    // First send of the new session: conversationLoaded resets the state
+    // but re-pins the guard via the carried session id, so a stale frame
+    // racing the boundary is still dropped.
+    act(() => {
+      postToWebview({
+        type: 'conversationLoaded',
+        data: { id: 'conv_1', messages: [], sessionId: 'session-b' },
+      });
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification(
+          'session-a',
+          'STALE tail of old session',
+        ),
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // The new session's echo and reply render normally.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'hello'),
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-b', 'reply'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(2);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'hello' });
+    expect(captured.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'reply',
+    });
+  });
+
   it('resets transcript state when conversationLoaded arrives on reconnect', () => {
     act(() => {
       postToWebview({
@@ -478,6 +570,121 @@ describe('useAcpTranscript', () => {
       kind: 'tool',
       status: 'in_progress',
     });
+  });
+
+  it('drops a stale untagged streamEnd while a tagged stream is active', () => {
+    act(() => {
+      postToWebview({
+        type: 'streamStart',
+        data: { timestamp: Date.now(), requestId: 'req-1' },
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'first half '),
+      });
+    });
+
+    // A foreign/stale turn-end (e.g. the abandoned previous request's
+    // streamEnd) arrives mid-stream; finalizing here would split the
+    // in-flight answer into two assistant blocks.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'user_cancelled' },
+      });
+    });
+
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first half ',
+      streaming: true,
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'second half'),
+      });
+    });
+
+    // The reply stays in a single block instead of rendering split.
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first half second half',
+      streaming: true,
+    });
+
+    // The matching tagged streamEnd still finalizes the turn.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn', requestId: 'req-1' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: false });
+  });
+
+  it('drops a streamEnd tagged for a different request while a tagged stream is active', () => {
+    act(() => {
+      postToWebview({
+        type: 'streamStart',
+        data: { timestamp: Date.now(), requestId: 'req-2' },
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'answer'),
+      });
+    });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn', requestId: 'req-1' },
+      });
+    });
+
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+  });
+
+  it('ignores background-notification end-turns so they do not finalize the live turn', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'streaming'),
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+
+    // Background-task completion posts an end-turn (untagged, with the
+    // background_notification source) while the interactive turn streams.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: {
+          timestamp: Date.now(),
+          reason: 'end_turn',
+          source: 'background_notification',
+        },
+      });
+    });
+
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+
+    // The live turn still finalizes on its own untagged end-turn when no
+    // tagged stream is active.
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: false });
   });
 
   it('does not seed the transcript when qwenSessionSwitched carries no messages field', () => {
