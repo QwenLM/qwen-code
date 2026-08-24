@@ -24,10 +24,12 @@ import {
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
+  TOOL_NAME_ALIASES,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
 
 const debugLoggerMock = vi.hoisted(() => ({
   isEnabled: vi.fn().mockReturnValue(false),
@@ -92,6 +94,41 @@ describe('resolveToolName', () => {
   it('returns unknown names unchanged', async () => {
     expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
+  });
+});
+
+// ─── resolveToolName exhaustiveness (#9827) ─────────────────────────────────
+
+describe('resolveToolName exhaustiveness (#9827)', () => {
+  // Every built-in tool's canonical name AND display name must resolve
+  // through TOOL_NAME_ALIASES. A tool added to tool-names.ts without a
+  // matching rule-parser alias entry silently never matches any permission
+  // rule — the exact #9827 bug class — and under the registry allowlist
+  // such a missed entry now also breaks allowlist coverage (the rule
+  // parses valid, activates the allowlist, yet covers nothing). Let drift
+  // fail CI instead of failing silently for a user.
+  it.each(
+    Object.entries(ToolDisplayNames).map(([key, displayName]) => ({
+      key,
+      displayName,
+      canonicalName: ToolNames[key as keyof typeof ToolNames],
+    })),
+  )(
+    'covers $key ($displayName -> $canonicalName)',
+    ({ displayName, canonicalName }) => {
+      expect(canonicalName).toBeDefined();
+      // The canonical name itself is a valid rule spelling.
+      expect(resolveToolName(canonicalName)).toBe(canonicalName);
+      // The /tools display name — the spelling users copy into rules —
+      // must resolve to the canonical tool.
+      expect(resolveToolName(displayName)).toBe(canonicalName);
+    },
+  );
+
+  it('registers every canonical tool name in the alias map', () => {
+    for (const canonicalName of Object.values(ToolNames)) {
+      expect(TOOL_NAME_ALIASES[canonicalName]).toBe(canonicalName);
+    }
   });
 });
 
