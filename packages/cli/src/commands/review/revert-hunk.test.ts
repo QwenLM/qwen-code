@@ -251,31 +251,106 @@ describe('runRevertHunk', () => {
     expect(() => statSync(join(dir, 'old.txt'))).toThrow();
   });
 
-  it('reverts a mode-changed file’s content hunk WITHOUT flipping the mode', () => {
-    // `old mode`/`new mode` lines carried into the patch would strip the +x
-    // the PR added while the note claims a content-only revert — the probe
-    // then fails because the script lost its execute bit.
-    const dir = tempDir('rh-mode-');
+  it.skipIf(process.platform === 'win32')(
+    'reverts a mode-changed file’s content hunk WITHOUT flipping the mode',
+    () => {
+      // `old mode`/`new mode` lines carried into the patch would strip the +x
+      // the PR added while the note claims a content-only revert — the probe
+      // then fails because the script lost its execute bit.
+      const dir = tempDir('rh-mode-');
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@t');
+      git(dir, 'config', 'user.name', 't');
+      writeFileSync(join(dir, 'run.sh'), '#!/bin/sh\necho old\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'base');
+      writeFileSync(join(dir, 'run.sh'), '#!/bin/sh\necho new\n');
+      chmodSync(join(dir, 'run.sh'), 0o755);
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'mode+edit');
+      const diffText = git(dir, 'diff', 'HEAD~1', 'HEAD');
+      expect(diffText).toContain('old mode');
+      const diffPath = join(dir, 'mode.diff');
+      writeFileSync(diffPath, diffText);
+
+      const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'run.sh:1' });
+      expect(r.applied).toBe(true);
+      expect(readFileSync(join(dir, 'run.sh'), 'utf8')).toContain('echo old');
+      // The execute bit the PR set survives the content revert.
+      expect(statSync(join(dir, 'run.sh')).mode & 0o111).not.toBe(0);
+    },
+  );
+
+  it('reverts a plain edit under a custom prefix WITHOUT moving the file', () => {
+    // stripSide mis-parses a custom/quoted prefix; the old tokens-disagree
+    // rewrite then turned a plain edit into a rename and git apply -R MOVED
+    // the file. Gated on move/copy metadata now, a plain edit never rewrites.
+    const dir = tempDir('rh-plainpfx-');
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
-    writeFileSync(join(dir, 'run.sh'), '#!/bin/sh\necho old\n');
+    writeFileSync(join(dir, 'caf\u00e9.txt'), 'top-old\nmid\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-qm', 'base');
-    writeFileSync(join(dir, 'run.sh'), '#!/bin/sh\necho new\n');
-    chmodSync(join(dir, 'run.sh'), 0o755);
+    writeFileSync(join(dir, 'caf\u00e9.txt'), 'top-new\nmid\n');
     git(dir, 'add', '.');
-    git(dir, 'commit', '-qm', 'mode+edit');
-    const diffText = git(dir, 'diff', 'HEAD~1', 'HEAD');
-    expect(diffText).toContain('old mode');
-    const diffPath = join(dir, 'mode.diff');
+    git(dir, 'commit', '-qm', 'edit');
+    const diffText = git(
+      dir,
+      'diff',
+      '--src-prefix=old/',
+      '--dst-prefix=new/',
+      'HEAD~1',
+      'HEAD',
+    );
+    const diffPath = join(dir, 'plainpfx.diff');
     writeFileSync(diffPath, diffText);
-
-    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'run.sh:1' });
+    const id = listHunks(diffText)[0].id;
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
     expect(r.applied).toBe(true);
-    expect(readFileSync(join(dir, 'run.sh'), 'utf8')).toContain('echo old');
-    // The execute bit the PR set survives the content revert.
-    expect(statSync(join(dir, 'run.sh')).mode & 0o111).not.toBe(0);
+    // The file is where it was, with its content reverted — not moved.
+    expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toContain(
+      'top-old',
+    );
+    expect(existsSync(join(dir, 'caf\u00e9.txt'))).toBe(true);
+  });
+
+  it('refuses an ambiguous hunk id — a path in more than one diff section', () => {
+    // format-patch --stdout concatenates per-commit sections; a path edited
+    // in two commits yields two `f.txt:1` rows and files.find would silently
+    // revert the FIRST. Refuse rather than mutate a section the caller could
+    // not have addressed.
+    const dir = tempDir('rh-ambig-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'f.txt'), 'v0\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'c0');
+    writeFileSync(join(dir, 'f.txt'), 'v1\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'c1');
+    writeFileSync(join(dir, 'f.txt'), 'v2\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'c2');
+    // Two sections for f.txt, concatenated.
+    const diffText = git(
+      dir,
+      'format-patch',
+      '--stdout',
+      'HEAD~2',
+      '--unified=1',
+    );
+    const diffPath = join(dir, 'fp.diff');
+    writeFileSync(diffPath, diffText);
+    const ids = listHunks(diffText).filter((h) => h.path === 'f.txt');
+    expect(ids.length).toBeGreaterThan(1); // the collision
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('ambiguous');
+    // The tree was not touched.
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe('v2\n');
   });
 
   it('refuses a copy section under a non-standard prefix instead of rewinding the copy', () => {

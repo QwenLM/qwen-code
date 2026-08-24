@@ -47,7 +47,6 @@ import {
   accessSync,
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   mkdirSync,
   mkdtempSync,
@@ -385,6 +384,20 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
    * single-threaded poll loop — `--timeout` defeated, kill-server never
    * reached, no report. O_NONBLOCK returns instead of blocking, and the
    * fstat guard reads nothing from a non-file.
+   *
+   * ACCEPTED RESIDUAL RISK, stated once for the whole capture channel: this
+   * hardens against a HANG, not against a same-uid process corrupting its
+   * OWN capture. The log is the arm's stdout, written by the arm's own
+   * process tree; that tree can truncate it, rm-and-recreate it, or fill it
+   * with anything, and because both arms run the same untrusted bytes such
+   * corruption is symmetric (a shared destroyed capture reads as
+   * identicalOutput:true). No file-based signal prevents this, because the
+   * attacker IS the producer — the same boundary the whole review pipeline
+   * lives with when it runs PR code same-uid (scratch-tree, base-tree, probe
+   * all do). A verdict from `ab-drive` is trustworthy exactly to the degree
+   * the driven `--script` is; it is a measurement tool for cooperative A/Bs,
+   * not a sandbox. Isolating an adversarial PR's own output from itself needs
+   * an OS boundary (a container, a separate uid), out of scope here.
    */
   const readIfThere = (p: string): string => {
     let fd: number | undefined;
@@ -433,18 +446,16 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   /** The CURRENT shared instance — its session name and sentinel path. */
   let shared: { name: string; rcPath: string } | null = null;
   /**
-   * Alive means BOTH signals agree: no exit sentinel AND the session still
-   * exists. The sentinel is one-directional — its presence proves an exit,
-   * but its absence proves nothing, because the wrapper's EXIT trap never
-   * fires under SIGKILL and an `exec`'d daemon (an idiomatic shared script)
-   * replaces the shell that holds the trap. Reading "no sentinel" as
-   * "alive" reported a crashed upstream as having outlived its arm — and
-   * `observed: true` then licensed captures taken against a corpse.
+   * Liveness is the SESSION, and only the session. A completed script's
+   * single-window session ends, a SIGKILLed or `exec`'d daemon's session
+   * ends, and neither depends on a sentinel file the driven code could write
+   * or withhold. An earlier version also read the sentinel, but that made a
+   * PLANTED sentinel — the arm's own code writing a fake rc for the shared
+   * daemon — report a live daemon as dead, a forged `observed: false`
+   * confound. `has-session` is not reachable through that file channel.
    */
   const sharedAlive = (): boolean =>
-    shared !== null &&
-    !existsSync(shared.rcPath) &&
-    tmux('has-session', '-t', shared.name).status === 0;
+    shared !== null && tmux('has-session', '-t', shared.name).status === 0;
   let note = '';
 
   try {
@@ -524,9 +535,9 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         );
         if (
           args.sharedCwd !== undefined &&
-          realpathOf(sharedCwd) !== realShared
+          (realpathOf(sharedCwd) !== realShared || !isDir(sharedCwd))
         ) {
-          note = `--shared-cwd ${JSON.stringify(args.sharedCwd)} no longer resolves to the directory validated at start — it vanished or was replaced mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
+          note = `--shared-cwd ${JSON.stringify(args.sharedCwd)} no longer resolves to the validated directory or is no longer searchable — it vanished, was replaced, or lost its search bit mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
           return mode === 'once' ? 'stop' : bail('unavailable', null);
         }
         const s = start(

@@ -100,6 +100,8 @@ function harness(opts: {
   rcBySession?: Record<string, number>;
   /** Per-session log content (default `${name} output\n`). */
   logBySession?: Record<string, string>;
+  /** Shared sessions whose rc is planted while the session stays alive. */
+  plantSharedSentinel?: string[];
   /** Called when a session starts — the TOCTOU hook. */
   onSession?: (name: string) => void;
 }) {
@@ -130,6 +132,9 @@ function harness(opts: {
     if (cmd === 'tmux' && args[2] === 'has-session') {
       const target = args[4];
       if ((opts.vanishedSessions ?? []).includes(target)) return fail();
+      // A dead-at-birth shared session has GONE — liveness is the session,
+      // not a sentinel file (which the arm's own code could plant).
+      if (target.startsWith('shared-') && sharedDies(target)) return fail();
       return endedSessions.has(target) ? fail() : ok();
     }
     if (cmd === 'tmux' && args[2] === 'new-session') {
@@ -142,15 +147,16 @@ function harness(opts: {
       if (m) {
         const rcPath = m[1].replace(/\.sh$/, '.rc');
         const logPath = m[2];
-        const write = name.startsWith('arm-')
-          ? !(opts.hang ?? []).includes(name)
-          : sharedDies(name);
-        if (write) {
+        // Arms write their sentinel and end; shared sessions are governed by
+        // has-session (a dead one is gone there), so they write no sentinel.
+        if (name.startsWith('arm-') && !(opts.hang ?? []).includes(name)) {
           const rc = opts.rcBySession?.[name] ?? 0;
           writeFileSync(rcPath, `${DRIVE_SENTINEL} rc=${rc}\n`);
-          // A session that produced its sentinel has ended — the completion
-          // gate reads `has-session` failing as the second half of "done".
-          if (name.startsWith('arm-')) endedSessions.add(name);
+          endedSessions.add(name);
+        }
+        if ((opts.plantSharedSentinel ?? []).includes(name)) {
+          // Plant a sentinel WITHOUT ending the session — the forgery shape.
+          writeFileSync(rcPath, `${DRIVE_SENTINEL} rc=0\n`);
         }
         if (name.startsWith('arm-')) {
           writeFileSync(
@@ -254,18 +260,21 @@ describe('runAbDrive, harnessed', () => {
     expect(r2.note).toContain('--shared-cwd');
   });
 
-  it('refuses a directory whose search bit is revoked — tmux -c would fall back', () => {
-    // A mode-000 dir passes isDirectory() but `tmux new-session -c` cannot
-    // chdir into it and silently starts elsewhere.
-    const locked = tempDir('ab-locked-');
-    chmodSync(locked, 0o000);
-    const h = harness({ server: 't' });
-    const r = runAbDrive(baseArgs({ armA: locked, exec: h.exec }));
-    chmodSync(locked, 0o755); // so afterAll can remove it
-    expect(r.observed).toBe(false);
-    expect(r.note).toContain('--arm-a');
-    expect(h.log).toEqual([]);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'refuses a directory whose search bit is revoked — tmux -c would fall back',
+    () => {
+      // A mode-000 dir passes isDirectory() but `tmux new-session -c` cannot
+      // chdir into it and silently starts elsewhere.
+      const locked = tempDir('ab-locked-');
+      chmodSync(locked, 0o000);
+      const h = harness({ server: 't' });
+      const r = runAbDrive(baseArgs({ armA: locked, exec: h.exec }));
+      chmodSync(locked, 0o755); // so afterAll can remove it
+      expect(r.observed).toBe(false);
+      expect(r.note).toContain('--arm-a');
+      expect(h.log).toEqual([]);
+    },
+  );
 
   it('refuses the same directory passed as both arms — an A/B needs two trees', () => {
     // A copy-pasted flag runs a self-comparison and returns observed: true,
@@ -310,6 +319,22 @@ describe('runAbDrive, harnessed', () => {
     expect(r.observed).toBe(false);
     expect(r.note).toContain('no longer resolves');
     expect(h.events()).not.toContain('new:arm-b');
+  });
+
+  it('re-validates --shared-cwd for a revoked search bit, not only deletion', () => {
+    const sharedCwd = tempDir('ab-shcwd3-');
+    const args = baseArgs({ shared: 'run-daemon', sharedCwd });
+    const h = harness({
+      server: args.server,
+      onSession: (name) => {
+        if (name === 'hold') chmodSync(sharedCwd, 0o000);
+      },
+    });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    chmodSync(sharedCwd, 0o755);
+    expect(r.a?.outcome).toBe('unavailable');
+    expect(r.note).toContain('--shared-cwd');
+    expect(r.note).toContain('searchable');
   });
 
   it('re-validates --shared-cwd at its use site too', () => {
@@ -629,6 +654,21 @@ describe('runAbDrive, harnessed', () => {
     expect(r.a?.sharedAliveAtEnd).toBe(false);
     expect(r.observed).toBe(false);
     expect(r.note).toContain('died');
+  });
+
+  it('a planted shared sentinel does not forge death — liveness is the session', () => {
+    // The arm's code could write a fake rc for the shared daemon; reading it
+    // as death would forge observed:false with a misdirecting note. The
+    // daemon's session is still alive, so it must read as alive.
+    const args = baseArgs({ shared: 'run-daemon' });
+    const h = harness({
+      server: args.server,
+      plantSharedSentinel: ['shared-a', 'shared-b'],
+    });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.a?.sharedAliveAtEnd).toBe(true);
+    expect(r.b?.sharedAliveAtEnd).toBe(true);
+    expect(r.observed).toBe(true);
   });
 
   it('a SIGKILLed or exec’d upstream — no sentinel, no session — reads as dead, not alive', () => {

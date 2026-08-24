@@ -162,9 +162,11 @@ export function extractHunkPatch(
 ): string {
   const lines = diffText.split('\n');
   const hunk = file.hunks[n - 1];
-  let header = lines
-    .slice(file.diffStart - 1, file.hunks[0].diffStart - 1)
-    .filter((l) => !FILE_LEVEL_METADATA_RE.test(l));
+  const rawHeader = lines.slice(
+    file.diffStart - 1,
+    file.hunks[0].diffStart - 1,
+  );
+  let header = rawHeader.filter((l) => !FILE_LEVEL_METADATA_RE.test(l));
   // A rename-with-edits OR copy-with-edits section names the OLD path in
   // `diff --git`'s first token and in `---`. With the rename/copy lines
   // stripped those tokens would send `git apply -R` to move the file back —
@@ -178,28 +180,26 @@ export function extractHunkPatch(
   // the same two-path shape with `copy from`/`copy to` instead. Creations
   // and deletions keep their `/dev/null` side untouched — neither token
   // carries an a/-and-b/ pair there, so the guard below skips them.
+  const isMoveOrCopy =
+    file.renameFrom !== undefined ||
+    rawHeader.some(
+      (l) => l.startsWith('copy from ') || l.startsWith('rename from '),
+    );
   const plusLine = header.find((l) => l.startsWith('+++ '));
-  const minusLine = header.find((l) => l.startsWith('--- '));
-  if (plusLine !== undefined && minusLine !== undefined) {
+  if (isMoveOrCopy && plusLine !== undefined) {
+    // Only reached for a move/copy the guard already confirmed uses standard
+    // a/ b/ (or "a/ "b/) prefixes, so the `"a/`-assuming slice is safe. A
+    // plain edit never enters here: git's own -p1 strips the one prefix
+    // component, so old and new resolve to the same file untouched.
     const bTok = plusLine.slice(4);
-    const aTokOld = minusLine.slice(4);
-    const stripSide = (tok: string): string | null => {
-      if (tok.startsWith('"')) return tok.slice(3);
-      if (/^[ab]\//.test(tok)) return tok.slice(2);
-      return null; // /dev/null, or an unprefixed shape we must not touch
-    };
-    const oldPath = stripSide(aTokOld);
-    const newPath = stripSide(bTok);
-    if (oldPath !== null && newPath !== null && oldPath !== newPath) {
-      const aTok = bTok.startsWith('"')
-        ? `"a/${bTok.slice(3)}`
-        : `a/${bTok.slice(2)}`;
-      header = header.map((l) => {
-        if (l.startsWith('diff --git ')) return `diff --git ${aTok} ${bTok}`;
-        if (l.startsWith('--- ')) return `--- ${aTok}`;
-        return l;
-      });
-    }
+    const aTok = bTok.startsWith('"')
+      ? `"a/${bTok.slice(3)}`
+      : `a/${bTok.slice(2)}`;
+    header = header.map((l) => {
+      if (l.startsWith('diff --git ')) return `diff --git ${aTok} ${bTok}`;
+      if (l.startsWith('--- ')) return `--- ${aTok}`;
+      return l;
+    });
   }
   const body = lines.slice(hunk.diffStart - 1, hunk.diffEnd);
   return `${[...header, ...body].join('\n')}\n`;
@@ -314,7 +314,15 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     };
   }
   const { files } = parseDiff(diffText);
-  const file = files.find((f) => f.path === sel.path);
+  const matches = files.filter((f) => f.path === sel.path);
+  if (matches.length > 1) {
+    return {
+      applied: false,
+      harnessFailure: true,
+      note: `hunk ${args.hunk} is ambiguous: ${sel.path} appears in ${matches.length} sections of this diff, so the <path>:<n> id cannot name one. This command needs a single git diff where each path appears once, not concatenated format-patches; recapture and retry. Nothing was changed.`,
+    };
+  }
+  const file = matches[0];
   if (!file || file.hunks.length < sel.n) {
     const have = file
       ? `${file.hunks.length} hunk(s)`
