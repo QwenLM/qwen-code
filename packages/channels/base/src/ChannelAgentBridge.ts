@@ -107,7 +107,13 @@ export interface ChannelAgentBridgeSessionOptions {
   sourceId?: string;
 }
 
+export interface ChannelPromptImage {
+  data: string;
+  mimeType: string;
+}
+
 export interface ChannelAgentBridgePromptOptions {
+  images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;
   /** User-authored text shown in transcripts when `text` includes hidden context.

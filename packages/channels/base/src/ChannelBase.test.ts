@@ -10189,7 +10189,7 @@ describe('ChannelBase', () => {
       expect(pathLine).not.toContain(rlo);
     });
 
-    it('extracts image from attachments', async () => {
+    it('forwards every image attachment in order', async () => {
       const ch = createChannel();
       await ch.handleInbound(
         envelope({
@@ -10200,13 +10200,20 @@ describe('ChannelBase', () => {
               data: 'base64data',
               mimeType: 'image/png',
             },
+            {
+              type: 'image',
+              data: 'second-image',
+              mimeType: 'image/jpeg',
+            },
           ],
         }),
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const options = (bridge.prompt as any).mock.calls[0][2];
-      expect(options.imageBase64).toBe('base64data');
-      expect(options.imageMimeType).toBe('image/png');
+      expect(options.images).toEqual([
+        { data: 'base64data', mimeType: 'image/png' },
+        { data: 'second-image', mimeType: 'image/jpeg' },
+      ]);
     });
 
     it('uses legacy imageBase64 when no attachment image', async () => {
@@ -10220,7 +10227,9 @@ describe('ChannelBase', () => {
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const options = (bridge.prompt as any).mock.calls[0][2];
-      expect(options.imageBase64).toBe('legacydata');
+      expect(options.images).toEqual([
+        { data: 'legacydata', mimeType: 'image/jpeg' },
+      ]);
     });
 
     it('prepends instructions on first message only', async () => {
