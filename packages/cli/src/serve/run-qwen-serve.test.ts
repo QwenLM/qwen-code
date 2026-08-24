@@ -74,6 +74,7 @@ import {
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -488,6 +489,99 @@ function makeRuntimeBridge(): HttpAcpBridge {
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
 }
+
+it('restores the Conversations runtime for a persisted scheduled task', async () => {
+  delete process.env['QWEN_RUNTIME_DIR'];
+  const tempRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-live-task-keepalive-')),
+  );
+  const workspace = path.join(tempRoot, 'workspace');
+  const physicalHome = path.join(tempRoot, 'home');
+  const linkedHome = path.join(tempRoot, 'home-link');
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(physicalHome);
+  fs.symlinkSync(
+    physicalHome,
+    linkedHome,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const liveConversationWorkspace = new ConversationWorkspace({
+    homeDir: linkedHome,
+  });
+  const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+  fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+  fs.writeFileSync(
+    path.join(canonicalRoot, '.qwen', 'settings.json'),
+    JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+  );
+  await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+    qwenCore.updateCronTasks(canonicalRoot, () => [
+      {
+        id: 'live-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: 'live-session',
+        sessionOwnedByTask: false,
+      },
+    ]),
+  );
+  const startKeepalive = vi
+    .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
+    .mockReturnValue({
+      stop: vi.fn(),
+      tick: vi.fn().mockResolvedValue(undefined),
+    });
+  vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+    () =>
+      ({
+        ...makeRuntimeBridge(),
+        recordHeartbeat: vi.fn(),
+        resumeSession: vi.fn().mockResolvedValue({}),
+        setLiveScreenContextCaptureHandler: vi.fn(),
+        setLiveTaskToolRequestHandler: vi.fn(),
+        setLiveSpeakToUserHandler: vi.fn(),
+      }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+  );
+  let handle: RunHandle | undefined;
+
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        liveConversationWorkspace,
+        // Isolate the Conversations-runtime ownership record from the
+        // machine-global ~/.qwen path: a concurrent live owner there
+        // (another worker / a developer's qwen serve) would fail this boot.
+        liveDiscoveryStableBaseDir: path.join(tempRoot, 'stable'),
+        resolveOnListen: true,
+      },
+    );
+    await handle.runtimeReady;
+    await vi.waitFor(() => {
+      expect(startKeepalive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          boundWorkspace: canonicalRoot,
+        }),
+      );
+    });
+  } finally {
+    await handle?.close();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  }
+});
 
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
