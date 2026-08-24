@@ -395,12 +395,52 @@ describe('TodoWriteTool', () => {
       expect(mockHookSystem.fireTodoCompletedEvent).not.toHaveBeenCalled();
     });
 
-    it('should still validate params before no-op short-circuit', () => {
-      expect(() =>
-        tool.build({ todos: [{ id: '1', content: '', status: 'pending' }] }),
-      ).toThrow('non-empty "content"');
+    it('should short-circuit with unchanged flag when modified_by_user yields identical todos', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+      ];
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      const modifiedContent = JSON.stringify({ todos: existingTodos });
+
+      const result = await tool
+        .build({
+          todos: [],
+          modified_by_user: true,
+          modified_content: modifiedContent,
+        })
+        .execute(mockAbortSignal);
 
       expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({ unchanged: true });
+    });
+
+    it('should return an error result if modified_content has invalid parsed todos', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+      ];
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      // Parsing an invalid todo list (empty content)
+      const modifiedContent = JSON.stringify({
+        todos: [{ id: '1', content: '', status: 'pending' }],
+      });
+
+      const result = await tool
+        .build({
+          todos: [],
+          modified_by_user: true,
+          modified_content: modifiedContent,
+        })
+        .execute(mockAbortSignal);
+
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      // execute catches validation errors and returns an error string
+      expect(result.returnDisplay).toContain('non-empty "content"');
     });
 
     it('should start a new plan after the previous plan completed', async () => {

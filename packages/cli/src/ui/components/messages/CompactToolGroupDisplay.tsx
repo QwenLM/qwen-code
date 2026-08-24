@@ -128,7 +128,7 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   FindFiles: 'search',
   ReadFolder: 'list',
   Task: 'agent',
-  TodoWrite: 'write',
+  TodoWrite: 'other',
 };
 
 type SummaryForms = { one: string; many: string };

@@ -305,7 +305,7 @@ const useResultDisplayRenderer = (
 const TodoResultRenderer: React.FC<{ data: TodoResultDisplay }> = ({
   data,
 }) => {
-  if ((data as TodoResultDisplay & { unchanged?: boolean }).unchanged) {
+  if (data.unchanged) {
     return null;
   }
   return <TodoDisplay todos={data.todos} />;
