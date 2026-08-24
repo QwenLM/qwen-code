@@ -278,6 +278,15 @@ export interface SessionTimelineRange {
   currentIndex: number;
 }
 
+function isAgentOnlyToolGroup(message: Message): boolean {
+  return (
+    message.role === 'tool_group' &&
+    !message.id.startsWith('summary-') &&
+    message.tools.length === 1 &&
+    isSubAgentToolCall(message.tools[0])
+  );
+}
+
 function isForceExpandGroup(
   msg: Message,
   pendingApproval: PermissionRequest | null,
