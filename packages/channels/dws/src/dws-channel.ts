@@ -729,6 +729,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.pairingNotifications = [];
+      this.cursor.inboundFailures = [];
       this.cursor.notificationWatermark = undefined;
       this.cursor.mentionWatermark = undefined;
       this.cursor.notificationCheckpoint = undefined;
@@ -1203,7 +1204,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.cursor.todoTasks = (this.cursor.todoTasks ?? []).filter((state) =>
       currentIds.has(state.taskId),
     );
-    const processedTaskIds = new Set<string>();
     for (const task of tasks) {
       if (signal.aborted || !this.connected) return;
       this.todoTargets.set(todoChatId(task.taskId), task.taskId);
@@ -1226,7 +1226,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         if (await this.processTodoTask(task, detail, fingerprint)) {
           this.clearInboundFailure(todoFailureKey(task.taskId));
           this.rememberTodoState(task.taskId, fingerprint);
-          processedTaskIds.add(task.taskId);
           this.saveCursor();
         }
       } catch (error) {
@@ -1243,20 +1242,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
     }
-
-    if (processedTaskIds.size === 0) return;
-    const refreshed = await this.client.listTodoTasks(signal);
-    for (const task of refreshed) {
-      if (!processedTaskIds.has(task.taskId)) continue;
-      try {
-        this.rememberTodoState(task.taskId, todoFingerprint(task));
-      } catch (error) {
-        process.stderr.write(
-          `[Channel:${this.name}] failed to fingerprint refreshed DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-        );
-      }
-    }
-    this.saveCursor();
   }
 
   private async processTodoTask(

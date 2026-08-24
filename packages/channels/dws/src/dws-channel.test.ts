@@ -335,6 +335,15 @@ class TestableDwsChannel extends DwsChannel {
     ];
     this.saveCursor();
   }
+
+  seedInboundFailure(key: string, attempts: number): void {
+    this.cursor.inboundFailures = [{ key, attempts }];
+    this.saveCursor();
+  }
+
+  inboundFailures(): unknown[] {
+    return this.cursor.inboundFailures ?? [];
+  }
 }
 
 class PolicyDwsChannel extends DwsChannel {
@@ -674,6 +683,21 @@ describe('DwsChannel', () => {
       ),
     );
     expect(second.inbound.map((item) => item.text)).toEqual(['peer text']);
+  });
+
+  it('drops inbound failure budgets after a profile switch', async () => {
+    const name = 'profile-inbound-failures-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity.profile = 'corp-one';
+    const first = await readyChannel(firstClient, makeConfig(), name);
+    first.seedInboundFailure('todo-failure:task-shared', 4);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity.profile = 'corp-two';
+    const second = await readyChannel(secondClient, makeConfig(), name);
+
+    expect(second.inboundFailures()).toEqual([]);
   });
 
   it('drops unverified direct targets after self identity becomes authoritative', async () => {
@@ -2077,6 +2101,27 @@ describe('DwsChannel', () => {
 
     expect(channel.inbound).toHaveLength(1);
     expect(client.getTodoTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('reprocesses an actionable todo edit made during its turn', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-1', 'Initial title')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+    client.todoTasks = [todoTask('task-1', 'First actionable edit')];
+    channel.inboundHandler = async () => {
+      client.todoTasks = [todoTask('task-1', 'Edit made during the turn')];
+    };
+
+    await channel.poll();
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(2);
+    expect(client.getTodoTask).toHaveBeenCalledTimes(2);
   });
 
   it('persists native todo fingerprints across restarts', async () => {

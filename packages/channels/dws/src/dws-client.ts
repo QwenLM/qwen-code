@@ -13,6 +13,7 @@ import {
 } from './dws-event-stream.js';
 
 const DWS_PROCESS_TIMEOUT_MS = 45_000;
+const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_MESSAGE_PAGES = 100;
@@ -192,7 +193,7 @@ function runDwsProcess(
   signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       executable,
       args,
       {
@@ -204,6 +205,7 @@ function runDwsProcess(
         signal,
       },
       (error, stdout, stderr) => {
+        clearTimeout(forceKillTimer);
         if (error) {
           const code = (error as NodeJS.ErrnoException & { code?: unknown })
             .code;
@@ -219,6 +221,10 @@ function runDwsProcess(
         resolve({ stdout: String(stdout), stderr: String(stderr) });
       },
     );
+    const forceKillTimer = setTimeout(() => {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }, DWS_PROCESS_TIMEOUT_MS + DWS_PROCESS_FORCE_KILL_DELAY_MS);
+    forceKillTimer.unref?.();
   });
 }
 

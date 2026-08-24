@@ -81,6 +81,43 @@ describe('DWS event process', () => {
     });
   });
 
+  it('preserves a terminal error across stdout buffered after exit', async () => {
+    let releaseFirstLine!: () => void;
+    const firstLineBlocked = new Promise<void>((resolve) => {
+      releaseFirstLine = resolve;
+    });
+    let markFirstLineStarted!: () => void;
+    const firstLineStarted = new Promise<void>((resolve) => {
+      markFirstLineStarted = resolve;
+    });
+    const onError = vi.fn();
+    const fixture = fileURLToPath(
+      new URL('./fixtures/dws-event-postmortem-source.mjs', import.meta.url),
+    );
+    const subscription = await startDwsEventProcess(
+      process.execPath,
+      [fixture],
+      async (line) => {
+        if (line === '{"sequence":1}') {
+          markFirstLineStarted();
+          await firstLineBlocked;
+        }
+      },
+      onError,
+    );
+
+    await firstLineStarted;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    releaseFirstLine();
+    await subscription.closed;
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      message: 'subscription denied',
+      retryable: false,
+    });
+  });
+
   it('serializes a burst of inbound event lines', async () => {
     let active = 0;
     let maxActive = 0;
