@@ -420,7 +420,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       modelEffortConfig['reasoning_effort'] = requestEffort;
     }
     const hasModelEffortConfig = Object.keys(modelEffortConfig).length > 0;
-    const shouldStripNestedEffort = hasModelEffortConfig || !!modelReasoning;
+    // A `reasoning` object the user put in `samplingParams` ships verbatim
+    // (the same guard clampConfiguredReasoningEffort uses); when the provider
+    // substitutes no knob of its own, stripping it would drop the override
+    // without replacement.
+    const shouldStripNestedEffort =
+      hasModelEffortConfig ||
+      (!!modelReasoning &&
+        this.contentGeneratorConfig.samplingParams?.['reasoning'] ===
+          undefined);
     // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve the
     // highest-priority layer once; when both fields are explicit in that
     // layer, reasoning_effort keeps the pre-existing provider behavior.

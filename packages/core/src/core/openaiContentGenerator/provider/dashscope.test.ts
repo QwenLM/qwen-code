@@ -904,6 +904,97 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it.each([
+      {
+        name: 'HIGH_MAX GLM 5.2 on the regional host',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      {
+        name: 'toggle-only Token Plan GLM 5.2',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      },
+    ])(
+      'ships a samplingParams reasoning override verbatim for $name without a configured effort',
+      ({ baseUrl }) => {
+        // The provider ships no effort knob of its own when none is
+        // configured, so the registry strip must not delete the user's
+        // documented verbatim samplingParams override without replacement.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            model: 'glm-5.2',
+            samplingParams: { reasoning: { effort: 'high' } },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model: 'glm-5.2',
+            reasoning: { effort: 'high' },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning']).toEqual({ effort: 'high' });
+        expect(result['reasoning_effort']).toBeUndefined();
+      },
+    );
+
+    it('ships a samplingParams reasoning override on the vision branch without a configured effort', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.6-plus',
+          samplingParams: { reasoning: { effort: 'high' } },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.6-plus',
+          reasoning: { effort: 'high' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'high' });
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['vl_high_resolution_images']).toBe(true);
+    });
+
+    it('keeps the substituted knob over a samplingParams reasoning override when an effort tier ships', () => {
+      // When the provider substitutes a top-level knob, the nested form is
+      // the competing knob the strip exists to prevent, even when the
+      // override arrived through samplingParams.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+          samplingParams: { reasoning: { effort: 'max' } },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning']).toBeUndefined();
+    });
+
     // 'qwen3.8-max' itself is covered by the reasoning registry, which
     // normalizes the tier silently; the wire-layer ceiling below applies to
     // the family variants that fall back to the tiered-wire mapping.
