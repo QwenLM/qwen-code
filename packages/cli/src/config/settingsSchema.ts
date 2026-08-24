@@ -1706,6 +1706,19 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          streamIdleTimeoutMs: {
+            type: 'integer',
+            label: 'Stream Idle Timeout',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
+            minimum: 0,
+            maximum: 2_147_483_647,
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           maxRetries: {
             type: 'number',
             label: 'Max Retries',
