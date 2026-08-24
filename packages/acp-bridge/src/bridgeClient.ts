@@ -55,11 +55,13 @@ import type {
   ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
+  CurrentSessionScheduledTaskCreateHandler,
   ExternalToolGuardHandler,
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
+
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
   LIVE_TASK_TOOL_NAMES,
@@ -93,6 +95,9 @@ import {
   type SessionAttachmentReference,
   type SessionAttachmentStore,
 } from './sessionAttachments.js';
+
+const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
+const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -617,6 +622,9 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
   attachments: SessionAttachmentStore;
@@ -849,6 +857,7 @@ export class BridgeClient implements Client {
      * source-compatible.
      */
     private readonly onGoalTurnEnded?: (sessionId: string) => void,
+    private readonly onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler,
   ) {}
 
   async requestPermission(
@@ -1236,6 +1245,11 @@ export class BridgeClient implements Client {
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
+    }
+    if (
+      method === SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask
+    ) {
+      return this.handleCreateCurrentSessionScheduledTask(params);
     }
     if (method === SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext) {
       return this.handleLiveScreenContextCapture(params);
@@ -1837,6 +1851,106 @@ export class BridgeClient implements Client {
         ? { parentSessionPersisted: result.parentSessionPersisted }
         : {}),
     };
+  }
+
+  private async handleCreateCurrentSessionScheduledTask(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onCreateCurrentSessionScheduledTask) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const promptId = params['promptId'];
+    const cron = params['cron'];
+    const prompt = params['prompt'];
+    const recurring = params['recurring'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` must name a session owned by this connection',
+      );
+    }
+    if (typeof promptId !== 'string' || promptId.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`promptId` must be a non-empty string',
+      );
+    }
+    if (
+      typeof cron !== 'string' ||
+      cron.length === 0 ||
+      cron.length > MAX_SCHEDULED_TASK_CRON_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`cron\` must be a non-empty string within the ${MAX_SCHEDULED_TASK_CRON_CHARS}-character limit`,
+      );
+    }
+    if (
+      typeof prompt !== 'string' ||
+      prompt.length === 0 ||
+      prompt.length > MAX_SCHEDULED_TASK_PROMPT_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`prompt\` must be non-empty and within the ${MAX_SCHEDULED_TASK_PROMPT_CHARS}-character limit`,
+      );
+    }
+    if (typeof recurring !== 'boolean') {
+      throw RequestError.invalidParams(
+        undefined,
+        '`recurring` must be a boolean',
+      );
+    }
+
+    const entry = this.resolveEntry(callerSessionId);
+    if (
+      !entry ||
+      entry.sessionId !== callerSessionId ||
+      entry.promptActive !== true ||
+      entry.activePromptId !== promptId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'The caller session does not own the active prompt',
+      );
+    }
+    if (
+      entry.parentSessionId !== undefined ||
+      entry.sourceId !== undefined ||
+      (entry.sourceType !== undefined && entry.sourceType !== 'default')
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'The caller session source cannot own a scheduled task',
+      );
+    }
+
+    const result = await this.onCreateCurrentSessionScheduledTask({
+      callerSessionId,
+      promptId,
+      cron,
+      prompt,
+      recurring,
+    });
+    if (
+      typeof result.id !== 'string' ||
+      result.id.length === 0 ||
+      typeof result.cron !== 'string' ||
+      result.cron.length === 0
+    ) {
+      throw RequestError.internalError(
+        undefined,
+        'Scheduled-task host returned an invalid result',
+      );
+    }
+    return { id: result.id, cron: result.cron };
   }
 
   private async handleLiveScreenContextCapture(

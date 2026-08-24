@@ -71,6 +71,23 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
+    currentSession?: {
+      sessionId: string;
+      workspaceCwd: string;
+      parentSessionId?: string;
+      sourceType?: string;
+      sourceId?: string;
+      hasActivePrompt?: boolean;
+      pendingInteractionCount?: number;
+    };
+    currentSessionSchedulingAvailable?: boolean;
+    lockedWorkspace?: {
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      kind: 'ordinary';
+    };
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -100,6 +117,11 @@ async function mount(
             onRunPrompt={opts.onRunPrompt ?? vi.fn()}
             onCreateViaChat={vi.fn()}
             onOpenSession={opts.onOpenSession}
+            currentSession={opts.currentSession}
+            currentSessionSchedulingAvailable={
+              opts.currentSessionSchedulingAvailable
+            }
+            lockedWorkspace={opts.lockedWorkspace}
             onError={opts.onError ?? vi.fn()}
           />
         </I18nProvider>
@@ -191,6 +213,130 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
+  const currentSession = {
+    sessionId: '10000000-0000-4000-8000-000000000001',
+    workspaceCwd: '/repo/main',
+    sourceType: 'default',
+  };
+
+  async function enterPromptAndCreate(value: string) {
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    act(() => {
+      prompt.textContent = value;
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+  }
+
+  it('hides session binding without the daemon capability', async () => {
+    await mount([], { currentSession });
+
+    click(findButton('New scheduled task'));
+
+    expect(document.body.textContent).not.toContain('Current conversation');
+  });
+
+  it('defaults to a dedicated task conversation and omits sessionId', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    expect(sessionSelect?.value).toBe('dedicated');
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.not.objectContaining({ sessionId: expect.anything() }),
+      undefined,
+    );
+  });
+
+  it('sends the outer current session only after an explicit selection', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    act(() => {
+      sessionSelect!.value = 'current';
+      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: currentSession.sessionId }),
+      undefined,
+    );
+  });
+
+  it.each([
+    ['missing', undefined, [], undefined],
+    ['busy', { ...currentSession, hasActivePrompt: true }, [], undefined],
+    [
+      'pending interaction',
+      { ...currentSession, pendingInteractionCount: 1 },
+      [],
+      undefined,
+    ],
+    [
+      'child session',
+      { ...currentSession, parentSessionId: 'parent-1' },
+      [],
+      undefined,
+    ],
+    [
+      'channel source',
+      { ...currentSession, sourceType: 'channel' },
+      [],
+      undefined,
+    ],
+    [
+      'workspace mismatch',
+      currentSession,
+      [],
+      {
+        id: 'other',
+        cwd: '/repo/other',
+        primary: false,
+        trusted: true,
+        kind: 'ordinary' as const,
+      },
+    ],
+    [
+      'existing task binding',
+      currentSession,
+      [baseTask({ sessionId: currentSession.sessionId })],
+      undefined,
+    ],
+  ])(
+    'disables current-session binding for %s',
+    async (_name, session, tasks, lockedWorkspace) => {
+      await mount(tasks, {
+        currentSession: session,
+        currentSessionSchedulingAvailable: true,
+        lockedWorkspace,
+      });
+
+      click(findButton('New scheduled task'));
+      const option = document.querySelector<HTMLOptionElement>(
+        'option[value="current"]',
+      );
+      expect(option?.disabled).toBe(true);
+    },
+  );
+
   it('keeps the prompt placeholder outside the editable textbox', async () => {
     await mount([]);
 

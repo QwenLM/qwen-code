@@ -193,24 +193,21 @@ tool maps to `current_session_scheduling_unavailable`.
 
 The host callback and the REST route share a focused
 `createScheduledTaskWithExistingSession` command extracted from the #9361
-provided-session branch. The command accepts an internal binding context:
+provided-session branch. The command accepts the internal creation source:
 
 ```ts
-type ExistingSessionBindingContext =
-  | { source: 'rest' }
-  | {
-      source: 'cron-tool';
-      callerSessionId: string;
-      callerPromptId: string;
-    };
+type ExistingSessionCreateOptions = {
+  source: 'rest' | 'cron-tool';
+};
 ```
 
-Both paths apply the same session-id normalization, selected-runtime and
-workspace ownership, archive state, scheduled-task-source, capacity,
-generation, and unique-binding checks. Only the prompt-matched trusted
-cron-tool path may skip the idle rejection, and only after the bridge matched
-the internally stamped caller session and prompt ids to the live active prompt.
-Public REST never skips the idle check.
+The `cron-tool` source is supplied only by the private host callback after the
+bridge has matched the internally stamped caller session and prompt ids to the
+live active prompt. Both paths apply the same selected-runtime and workspace
+ownership, archive state, scheduled-task-source, capacity, generation, and
+unique-binding checks. Only that prompt-matched trusted path may skip the active
+prompt rejection; pending interactions remain ineligible. Public REST never
+skips either idle check.
 
 The final write-lock check remains authoritative. It revalidates that the
 session is live and not task-reserved, rejects a concurrent binding, and writes

@@ -1545,6 +1545,7 @@ describe('runQwenServe telemetry validation', () => {
       expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
+      expect(body.features).toContain('scheduled_task_session_reuse');
       expect(body.limits.maxTotalSessions).toBe(2);
       expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
@@ -1564,6 +1565,9 @@ describe('runQwenServe telemetry validation', () => {
         index,
         [bridgeOptions],
       ] of createBridge.mock.calls.entries()) {
+        expect(bridgeOptions.onCreateCurrentSessionScheduledTask).toBeTypeOf(
+          'function',
+        );
         const target = path.join(
           tmpDir,
           `static-runtime-external-${index}.txt`,
@@ -1847,6 +1851,12 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0].onChannelDelivery).toBeTypeOf(
         'function',
       );
+      expect(
+        createBridge.mock.calls[0]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
+      expect(
+        createBridge.mock.calls[1]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
         sessionRestoreTimeoutMs: 90_000,

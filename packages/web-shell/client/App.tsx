@@ -47,6 +47,7 @@ import type {
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
+  DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
   GoalSnapshotV2,
@@ -2395,6 +2396,9 @@ export function App({
   const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
     string | undefined
   >(undefined);
+  const [currentSessionSummary, setCurrentSessionSummary] = useState<
+    DaemonSessionSummary | undefined
+  >(undefined);
   // Tracks the logical session from the latest effect run. In-flight fetches
   // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -2405,6 +2409,7 @@ export function App({
     setSessionWorktree(undefined);
     setSessionBranch(undefined);
     setSessionStatusDisplayName(undefined);
+    setCurrentSessionSummary(undefined);
   }, [logicalSessionKey]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -2420,6 +2425,7 @@ export function App({
       setSessionWorktree(undefined);
       setSessionBranch(undefined);
       setSessionStatusDisplayName(undefined);
+      setCurrentSessionSummary(undefined);
       return;
     }
     if (
@@ -2436,6 +2442,7 @@ export function App({
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
           setSessionStatusDisplayName(summary.displayName);
+          setCurrentSessionSummary(summary);
         }
         return loadSessionCatalogOnce(
           workspace.client,
@@ -2467,6 +2474,7 @@ export function App({
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
           setSessionStatusDisplayName(undefined);
+          setCurrentSessionSummary(undefined);
         }
       });
   }, [
@@ -12507,6 +12515,19 @@ export function App({
                           : ordinaryWorkspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
+                      currentSession={
+                        currentSessionSummary
+                          ? {
+                              ...currentSessionSummary,
+                              hasActivePrompt:
+                                currentSessionSummary.hasActivePrompt === true ||
+                                sessionHasActivePrompt,
+                            }
+                          : undefined
+                      }
+                      currentSessionSchedulingAvailable={workspace.capabilities?.features.includes(
+                        'scheduled_task_session_reuse',
+                      )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current

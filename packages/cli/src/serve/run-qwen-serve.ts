@@ -150,6 +150,7 @@ import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type {
   ChannelDeliveryHandler,
   ChannelDeliveryHostResult,
+  CurrentSessionScheduledTaskCreateHandler,
   ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
@@ -1258,6 +1259,7 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
@@ -1276,6 +1278,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
@@ -1298,6 +1301,7 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
@@ -1312,6 +1316,7 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.currentSessionSchedulingAvailable,
       input.env,
     ),
     modelServices: [],
@@ -1505,6 +1510,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1523,6 +1529,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1588,6 +1595,7 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
       }),
@@ -1727,6 +1735,7 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          currentSessionSchedulingAvailable,
           process.env,
         ),
       },
@@ -4281,9 +4290,49 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const { createSubSessionLauncher } = await import(
-      './create-sub-session.js'
-    );
+    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
+      await Promise.all([
+        import('./create-sub-session.js'),
+        import('./routes/scheduled-tasks.js'),
+      ]);
+    const createCurrentSessionScheduledTaskHandler =
+      (
+        workspaceCwd: string,
+        runtimeBaseDir: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        assertGenerationOpen: () => void,
+      ): CurrentSessionScheduledTaskCreateHandler =>
+      async ({ callerSessionId, cron, prompt, recurring }) => {
+        const targetBridge = getBridge();
+        if (!targetBridge) {
+          throw new Error(
+            'Current-session scheduling is unavailable while the workspace runtime is starting.',
+          );
+        }
+        const task =
+          await scheduledTaskRoutes.createScheduledTaskWithExistingSession(
+            {
+              workspaceCwd,
+              runtimeBaseDir,
+              bridge: targetBridge,
+              assertGenerationOpen,
+              resolveLiveSessionOwner: (sessionId) =>
+                workspaceRegistryForPersistence.current === undefined
+                  ? { kind: 'unavailable' }
+                  : workspaceRegistryForPersistence.current.resolveLiveSessionOwner(
+                      sessionId,
+                    ),
+            },
+            {
+              sessionId: callerSessionId,
+              cron,
+              prompt,
+              recurring,
+            },
+            { source: 'cron-tool' },
+          );
+        return { id: task.id, cron: task.cron };
+      };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
     // brings its own options.
@@ -4305,6 +4354,13 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            boundWorkspace,
+            primarySessionRuntimeBaseDir,
+            () => bridgeRef,
+            () => primaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           boundWorkspace,
           () => channelWorkerManager,
@@ -4750,6 +4806,13 @@ async function runQwenServeImpl(
         ),
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            workspaceInput.cwd,
+            secondaryEnv.sessionRuntimeBaseDir,
+            () => secondaryBridgeRef,
+            () => secondaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           workspaceInput.cwd,
           () => channelWorkerManager,
@@ -5322,6 +5385,13 @@ async function runQwenServeImpl(
           ),
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onCreateCurrentSessionScheduledTask:
+            createCurrentSessionScheduledTaskHandler(
+              cwd,
+              wsEnv.sessionRuntimeBaseDir,
+              () => wsBridgeRef,
+              () => generationGuard.assertOpen(),
+            ),
           onChannelDelivery: createBoundChannelDeliveryHandler(
             cwd,
             () => channelWorkerManager,
@@ -6016,6 +6086,7 @@ async function runQwenServeImpl(
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
       manageScheduledTaskSessions: true,
+      currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
@@ -6384,6 +6455,7 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable: deps.bridge === undefined,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,

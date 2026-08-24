@@ -859,6 +859,8 @@ describe('Session', () => {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      setCurrentSessionScheduledTaskCreator: vi.fn(),
+      getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
@@ -7666,6 +7668,7 @@ describe('Session', () => {
 
       delete process.env['QWEN_CODE_SERVE'];
       vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator).mockClear();
       const standalone = new Session(
         'standalone-acp-session',
         mockConfig,
@@ -7674,6 +7677,56 @@ describe('Session', () => {
       );
       expect(standalone).toBeDefined();
       expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
+      expect(
+        mockConfig.setCurrentSessionScheduledTaskCreator,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('stamps the current-session task request with its own session id', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '5 9 * * *',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).resolves.toEqual({ id: 'cron-1', cron: '5 9 * * *' });
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        {
+          callerSessionId: 'test-session-id',
+          promptId: 'prompt-1',
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+      );
+    });
+
+    it('reports an explicit unavailable error for an older daemon bridge', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32601,
+        message: 'Method not found',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(/current_session_scheduling_unavailable/);
     });
 
     it('drops oldest background notifications when the queue reaches its cap', () => {
