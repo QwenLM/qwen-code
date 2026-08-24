@@ -5641,6 +5641,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
+      fixedFindings: [],
       bodyTrim: {
         sections: 0,
         deferralList: false,
@@ -5754,6 +5755,100 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       'Verdict: Approve — low signal: none of the 11 review agents reported ' +
         'a finding on a non-trivial diff (642 source diff lines)',
     );
+  });
+});
+
+// `fixedFindings` decides nothing in the verdict — a fixed entry weighs
+// nothing by its absence from every findings channel — but it rides the
+// result for `submit`'s thread lifecycle, so the boundary validates its
+// shape: one acceptance table for the state JSON and the artifact read-back.
+describe('composeReview — fixedFindings', () => {
+  it('passes valid rulings through, unchanged by the verdict', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
+  });
+
+  it('reads absent and null as no rulings', () => {
+    expect(composeReview(base({})).fixedFindings).toEqual([]);
+    expect(
+      composeReview(base({ fixedFindings: null as never })).fixedFindings,
+    ).toEqual([]);
+  });
+
+  it('trims and caps `by` — the clause becomes a one-line PR reply', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `  ${'x'.repeat(300)}  ` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toHaveLength(240);
+  });
+
+  it('refuses a non-array field', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: 'R1-2' as never })),
+    ).toThrow(/`fixedFindings` must be an array/);
+  });
+
+  it('refuses an entry with no ledger id — a ruling must name what it retires', () => {
+    for (const id of [
+      'not-a-ledger-id',
+      'R1-2 extra',
+      '',
+      42,
+      undefined,
+    ] as const) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id } as never] })),
+      ).toThrow(/carries no ledger id/);
+    }
+  });
+
+  it('refuses a `by` that is not one non-empty line', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: '' }] })),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'line one\nline two' }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
+    ).toThrow(/ONE non-empty line/);
+  });
+
+  it('refuses a non-object entry', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: ['R1-2'] as never })),
+    ).toThrow(/is not an object/);
+  });
+
+  it('keeps the FIRST ruling per id — a duplicate would reply and resolve twice', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R1-2', by: 'the revert' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
   });
 });
 

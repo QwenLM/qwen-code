@@ -289,6 +289,63 @@ export const LEDGER_ID_READBACK = new RegExp(
  */
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
+/**
+ * The fix-induced marking, read from the head of the CLAIM — after the id and
+ * its separator, never inside the id grammar.
+ *
+ * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
+ * `readClaim`, so widening it to swallow a parenthetical would put the
+ * ledger's carry on the same regex as a model-written adjective: a spelling
+ * or spacing the wider grammar failed to anticipate (`R1-2(Fix-Induced):`)
+ * would stop matching the id at all, and the finding would be silently
+ * renumbered — the exact failure "one finding, one name" exists to prevent.
+ * Read here, the id is already in hand and nothing about this token can cost
+ * it: an unrecognised marking leaves the draft counted as a re-post, which is
+ * what every round did before this existed.
+ *
+ * Case-insensitive, and tolerant of inner spacing, because it governs only
+ * whether a comment counts as first-time work — never which finding it is.
+ */
+export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+
+/**
+ * The id a claim line carries, whether that id fronts a NEW defect, and the
+ * claim itself with both stripped.
+ *
+ * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
+ * re-reports two different things under a previous entry's id: a finding that
+ * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
+ * is new work wearing the id of the entry whose fix produced it. The volume
+ * trend counts comments posted for the first time, and reading the id alone
+ * called both of them re-posts, so the trend's baseline fell on exactly the
+ * churning pull requests where new work was not falling at all. The thread
+ * lifecycle reads the same pair to keep that new defect on its OWN thread:
+ * only a still-standing re-assertion belongs in the original one.
+ *
+ * Shared by every consumer of a carried id — compose-review's ledger builder,
+ * the convergence diagnosis, and submit's thread lifecycle — so one end can
+ * never call a comment carried while another calls it new.
+ */
+export function readClaim(rest: string): {
+  id?: string;
+  fixInduced: boolean;
+  title: string;
+} {
+  const line = rest.split('\n')[0].trim();
+  const carried = LEDGER_ID_READBACK.exec(line);
+  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
+  // Only ever a marking on a CARRIED id. On a fresh finding there is no
+  // entry for the defect to have been induced by, so the token would be
+  // decoration — and honouring it there would let a stray parenthetical add
+  // a first-time count the round already gets for that comment anyway.
+  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
+  return {
+    id: carried?.[1],
+    fixInduced: marked !== null,
+    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
+  };
+}
+
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
  *  the serializer so the write side is bounded, the parser so a hand-edited

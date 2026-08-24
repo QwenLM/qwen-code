@@ -51,6 +51,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import {
+  currentUser,
   ghWithInput,
   HOSTNAME_RE,
   isOwnerRepo,
@@ -70,7 +71,15 @@ import {
   tryIngestBodyCriticals,
   tryToCount,
   type ComposeReviewInput,
+  type FixedFinding,
 } from './compose-review.js';
+import {
+  carriedFindingOf,
+  fetchReviewThreads,
+  planThreadActions,
+  postReviewReply,
+  resolveReviewThread,
+} from './lib/thread-lifecycle.js';
 import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
@@ -387,6 +396,13 @@ function compose(
    * `payload.comments`, so the indices line up by construction.
    */
   floorEnforced: number[];
+  /**
+   * Step 6's `fixed` rulings, validated by the compose — the thread
+   * lifecycle's resolve list. Rides the composed result rather than being
+   * re-read from the raw state, so the validation and the consumption are
+   * one list.
+   */
+  fixedFindings: FixedFinding[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -437,6 +453,7 @@ function compose(
     body: r.body,
     cappedBy: r.cappedBy,
     floorEnforced: r.floorEnforced,
+    fixedFindings: r.fixedFindings,
   };
 }
 
@@ -614,9 +631,49 @@ function inconsistencies(
    * JSON, not its post-removal position.
    */
   authoredIndices?: number[],
+  /**
+   * Step 6's `fixed` rulings (validated by the compose). A comment that
+   * re-posts an id a ruling retires is the payload contradicting itself:
+   * the finding is either still standing (re-reported) or fixed
+   * (retired), and posting both copies would reply "fixed" into the very
+   * thread the re-report just revived.
+   */
+  fixedFindings: FixedFinding[] = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
+
+  if (fixedFindings.length > 0) {
+    const fixedIds = new Set(fixedFindings.map((f) => f.id));
+    const contradiction = (at: string, id: string): string =>
+      `${at} re-posts ${id}, which \`state.fixedFindings\` rules fixed — ` +
+      `a finding is either still standing (re-reported under its id) or ` +
+      `fixed (retired); rule it one way`;
+    comments.forEach((c, i) => {
+      const carried =
+        typeof c.body === 'string' ? carriedFindingOf(c.body) : null;
+      if (carried !== null && fixedIds.has(carried.id)) {
+        problems.push(
+          contradiction(`comments[${authoredIndices?.[i] ?? i}]`, carried.id),
+        );
+      }
+    });
+    // The still-standing re-report's OTHER channel (Step 6's still-stands
+    // rule: an unanchorable carried finding goes to the body with its id,
+    // and buildLedger reads it back there). Checking only the inline
+    // channel would let one payload resolve a finding's thread as fixed
+    // while its body lists the same id as a standing blocker.
+    const bodyCriticals = payload.state?.bodyCriticals;
+    if (Array.isArray(bodyCriticals)) {
+      bodyCriticals.forEach((entry, i) => {
+        const carried =
+          typeof entry === 'string' ? carriedFindingOf(entry) : null;
+        if (carried !== null && fixedIds.has(carried.id)) {
+          problems.push(contradiction(`state.bodyCriticals[${i}]`, carried.id));
+        }
+      });
+    }
+  }
 
   if (!EVENTS.has(event)) {
     // Unreachable through `composeReview`, which returns one of the three. Kept
@@ -1232,8 +1289,9 @@ function submit(
   let body: string;
   let cappedBy: string[];
   let floorEnforced: number[];
+  let fixedFindings: FixedFinding[];
   try {
-    ({ event, body, cappedBy, floorEnforced } = compose(
+    ({ event, body, cappedBy, floorEnforced, fixedFindings } = compose(
       payload,
       cliVersion,
       attribution,
@@ -1281,6 +1339,7 @@ function submit(
     event,
     attribution,
     authoredIndices,
+    fixedFindings,
   );
   if (problems.length > 0) {
     throw new Error(
@@ -1321,11 +1380,115 @@ function submit(
         };
       });
 
+  // The thread lifecycle (GitHub only — #9906). Two postings this pass
+  // makes BEYOND the review itself, both into threads this account opened
+  // in earlier rounds:
+  //
+  //  - A carried finding — Step 6's `still stands`, re-drafted under its
+  //    original id — REPLIES into that id's original thread instead of
+  //    riding the Create Review `comments[]`: the API opens a NEW thread
+  //    per comment, so re-posting multiplied one finding into one
+  //    unresolved thread per round it survived (#9659's R1-15 had four).
+  //    Only an UNRESOLVED own-account thread qualifies — a resolved or
+  //    foreign original leaves the re-post inline, where a still-standing
+  //    finding belongs — and a `(fix-induced)` re-report is never
+  //    diverted: it is a NEW defect wearing the id (the ledger's fresh
+  //    count reads it as first-time work), and new work gets its own
+  //    thread.
+  //  - A Step 6 `fixed` ruling replies its one line (`R1-2 fixed by
+  //    <what>`) into every live own thread under the id and resolves it,
+  //    so the unresolved list reads as "still standing" again.
+  //
+  // The read runs BEFORE the write: a failed thread query aborts the
+  // submit (retryable, nothing posted) rather than planning half a pass.
+  // First rounds short-circuit — no carried id, no fixed ruling, no
+  // extra API call at all.
+  let reviewComments = finalComments;
+  let carriedReplies: Array<{ commentId: number; body: string }> = [];
+  let fixedResolves: Array<{
+    threadId: string;
+    commentId: number;
+    body: string;
+  }> = [];
+  if (aoneWrite) {
+    if (fixedFindings.length > 0) {
+      writeStderrLine(
+        `Note: ${fixedFindings.length} fixed ruling(s) name threads to ` +
+          `resolve, but the thread lifecycle is GitHub-only — Aone's MR ` +
+          `discussions stay as posted.`,
+      );
+    }
+  } else {
+    const carried = finalComments
+      .map((c, index) => ({ index, finding: carriedFindingOf(c.body) }))
+      .filter(
+        (
+          x,
+        ): x is {
+          index: number;
+          finding: { id: string; fixInduced: boolean };
+        } => x.finding !== null && !x.finding.fixInduced,
+      );
+    if (carried.length > 0 || fixedFindings.length > 0) {
+      const threads = fetchReviewThreads(args.repo, args.pr);
+      const plan = planThreadActions(
+        threads,
+        currentUser(),
+        carried.map(({ index, finding }) => ({ index, id: finding.id })),
+        fixedFindings,
+      );
+      if (plan.replies.length > 0) {
+        const diverted = new Set(plan.replies.map((r) => r.index));
+        reviewComments = finalComments.filter((_, i) => !diverted.has(i));
+        carriedReplies = plan.replies.map((r) => ({
+          commentId: r.commentId,
+          // The normalized drafted body, footer and all — the same text
+          // the re-post would have carried inline.
+          body: finalComments[r.index].body ?? '',
+        }));
+        writeStderrLine(
+          `Thread lifecycle: ${plan.replies.length} carried finding(s) ` +
+            `reply into their original thread instead of opening a new ` +
+            `one (one finding, one thread).`,
+        );
+      }
+      if (plan.resolves.length > 0) {
+        // The footer the inline comments carry, so the reply is attributed
+        // the same way everything else this account posts is.
+        const modelId = payload.state?.modelId;
+        const footer =
+          attribution && typeof modelId === 'string' && modelId.trim() !== ''
+            ? reviewFooter(modelId, cliVersion)
+            : undefined;
+        fixedResolves = plan.resolves.map((r) => ({
+          threadId: r.threadId,
+          commentId: r.commentId,
+          body:
+            (r.by === undefined
+              ? `${r.id} fixed`
+              : `${r.id} fixed by ${r.by}`) +
+            (footer === undefined ? '' : `\n\n${footer}`),
+        }));
+        writeStderrLine(
+          `Thread lifecycle: ${plan.resolves.length} thread(s) resolved ` +
+            `for ${fixedFindings.length} fixed ruling(s).`,
+        );
+      }
+      for (const id of plan.unmatchedFixed) {
+        writeStderrLine(
+          `Thread lifecycle: fixed ruling ${id} matched no live thread ` +
+            `this account opened — already resolved, or never posted. ` +
+            `Nothing to resolve.`,
+        );
+      }
+    }
+  }
+
   const post = {
     commit_id: payload.commit_id,
     event,
     body,
-    comments: finalComments,
+    comments: reviewComments,
   };
 
   const target = aoneWrite
@@ -1353,6 +1516,12 @@ function submit(
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
+          ...(carriedReplies.length > 0
+            ? { carriedRepliesPlanned: carriedReplies.length }
+            : {}),
+          ...(fixedResolves.length > 0
+            ? { threadsResolvedPlanned: fixedResolves.length }
+            : {}),
           // Aone-only gate counts — the GitHub server performs this
           // validation itself; the fields exist only where the gate ran.
           ...(aoneWrite && !anchorsUnchecked
@@ -1677,6 +1846,55 @@ function submit(
       '.' +
       (reviewUrl ? ` ${reviewUrl}` : ''),
   );
+  // The thread bookkeeping, after the atomic verdict landed. Replies and
+  // resolves are N independent calls — unlike the review, there is no
+  // all-or-nothing — so each failure is named and counted, never silently
+  // dropped and never fatal to the review that already posted. A failed
+  // carried reply leaves the finding on the ledger marker (the next round
+  // re-rules it); a failed fixed REPLY skips that thread's resolve too —
+  // resolving without the `fixed by` note would close the thread with no
+  // record of why.
+  let carriedRepliesPosted = 0;
+  let threadsResolved = 0;
+  let threadActionFailures = 0;
+  for (const reply of carriedReplies) {
+    try {
+      postReviewReply(args.repo, args.pr, reply.commentId, reply.body);
+      carriedRepliesPosted++;
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: carried reply into thread comment ${reply.commentId} ` +
+          `failed: ${(err as Error).message} — the finding stays on the ` +
+          `ledger and is re-ruled next round.`,
+      );
+    }
+  }
+  for (const resolve of fixedResolves) {
+    try {
+      postReviewReply(args.repo, args.pr, resolve.commentId, resolve.body);
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: fixed-ruling reply into thread comment ` +
+          `${resolve.commentId} failed: ${(err as Error).message} — the ` +
+          `thread is left UNRESOLVED; resolve it by hand or let the next ` +
+          `round's ruling retry.`,
+      );
+      continue;
+    }
+    try {
+      resolveReviewThread(resolve.threadId);
+      threadsResolved++;
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: resolveReviewThread(${resolve.threadId}) failed: ` +
+          `${(err as Error).message} — the reply landed; resolve the ` +
+          `thread by hand.`,
+      );
+    }
+  }
   writeStdoutLine(
     JSON.stringify(
       {
@@ -1685,6 +1903,11 @@ function submit(
         cappedBy,
         inlineComments: post.comments.length,
         floorEnforced: floorEnforced.length,
+        ...(carriedRepliesPosted > 0
+          ? { carriedReplies: carriedRepliesPosted }
+          : {}),
+        ...(threadsResolved > 0 ? { threadsResolved } : {}),
+        ...(threadActionFailures > 0 ? { threadActionFailures } : {}),
         ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,

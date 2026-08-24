@@ -280,6 +280,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 
@@ -368,6 +369,28 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
+  it('a fixed ruling on an Aone target is NAMED as GitHub-only — no thread read, no resolve', () => {
+    // The thread lifecycle is GitHub-only: an Aone submit carrying Step 6
+    // `fixed` rulings must not fire a GitHub GraphQL read at the wrong
+    // platform, and must say the rulings were not applied.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }],
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('thread lifecycle is GitHub-only');
+    expect(stderr).toContain('1 fixed ruling(s)');
+  });
+
   it('the contextUnavailable claim crosses the Aone seam unchanged, in BOTH directions', () => {
     // true stays true — a run that never read the MR keeps its cap.
     expect(() =>
@@ -393,6 +416,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     authMock.mockReturnValue({
       ok: true,
@@ -1422,6 +1446,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
       ...AONE_RESULT,
@@ -1452,6 +1477,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
       ...AONE_RESULT,
@@ -1615,6 +1641,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 
@@ -2681,6 +2708,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [0],
+      fixedFindings: [],
     });
     const renumbered = {
       commit_id: 'abc123',
@@ -2845,6 +2873,7 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 

@@ -32,6 +32,9 @@ const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
 const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
+// The thread lifecycle matches threads by the reviewing account; pin who
+// that is — the real currentUser() would spawn `gh api user` under vitest.
+const currentUserMock = vi.hoisted(() => vi.fn(() => 'qwen-bot'));
 // The Aone write seam — an Aone-routed post must reach THIS, never a real
 // `a1` (a platform write is never a test fixture), and never gh.
 const aoneSubmitMock = vi.hoisted(() => vi.fn());
@@ -41,6 +44,7 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ...actual,
     ghWithInput: ghMock,
     gh: ghViewMock,
+    currentUser: currentUserMock,
     setGhHost: vi.fn(),
   };
 });
@@ -3609,5 +3613,509 @@ describe('the posted-review link', () => {
       .find((l) => l.startsWith('Posted '));
     expect(postedLine).toBeDefined();
     expect(postedLine).not.toContain('https://');
+  });
+});
+
+// The thread lifecycle (#9906): a carried finding REPLIES into its original
+// thread instead of opening a new one per round, and a Step 6 `fixed` ruling
+// replies `R<id> fixed by <what>` and resolves the thread — same posting
+// pass, one finding one thread. ghMock routes by URL: the Create Review and
+// the replies are both ghWithInput writes; the threads read and the resolve
+// mutation are gh calls.
+describe('the thread lifecycle', () => {
+  const authorizedPost = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const stdoutJson = () =>
+    JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string);
+  /** The ghWithInput calls whose URL is the replies endpoint. */
+  const replyCalls = () =>
+    ghMock.mock.calls.filter((c) => String(c[2]).includes('/replies'));
+  /** The gh calls running the resolveReviewThread mutation. */
+  const resolveCalls = () =>
+    ghViewMock.mock.calls.filter((c) =>
+      String(c[3]).includes('resolveReviewThread'),
+    );
+  /** The gh calls reading the thread list. */
+  const threadReadCalls = () =>
+    ghViewMock.mock.calls.filter((c) => String(c[3]).includes('reviewThreads'));
+  /** What the Create Review call carried. */
+  const reviewPost = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  interface ThreadSeed {
+    id: string;
+    commentId: number;
+    body: string;
+    author?: string;
+    resolved?: boolean;
+    createdAt?: string;
+  }
+
+  function seedThreads(threads: ThreadSeed[]): void {
+    const json = JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: threads.map((t) => ({
+                id: t.id,
+                isResolved: t.resolved ?? false,
+                comments: {
+                  nodes: [
+                    {
+                      databaseId: t.commentId,
+                      body: t.body,
+                      createdAt: t.createdAt ?? '2026-08-01T00:00:00Z',
+                      author: { login: t.author ?? 'qwen-bot' },
+                    },
+                  ],
+                },
+              })),
+            },
+          },
+        },
+      },
+    });
+    ghViewMock.mockImplementation((...a: string[]) =>
+      String(a[3]).includes('reviewThreads') ? json : '{}',
+    );
+  }
+
+  /** A review payload: the comments given, plus a state that composes. */
+  function payload(
+    comments: Array<{ path: string; line: number; body: string }>,
+    state: Record<string, unknown> = {},
+  ) {
+    return file(`lifecycle-${seq++}.json`, {
+      commit_id: 'abc123',
+      comments,
+      state: { suggestionsDiscarded: 1, modelId: 'qwen3.7-max', ...state },
+    });
+  }
+
+  beforeEach(() => {
+    ghMock.mockImplementation(() => '{}');
+  });
+  afterEach(() => {
+    // Outer mockClear keeps implementations — restore the hoisted defaults
+    // so a seeded read/reply router cannot leak into later describes.
+    ghMock.mockImplementation(() => '');
+    ghViewMock.mockImplementation(() => '');
+  });
+
+  it('a carried finding replies into its original thread instead of posting inline', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD — the retry guard drops a valid case',
+      },
+      {
+        path: 'src/bar.ts',
+        line: 30,
+        body: '**[Suggestion]** a brand new finding',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    // The Create Review carries only the FRESH finding — the carried one
+    // was diverted to a reply in the thread its id names.
+    const comments = reviewPost().comments as Array<{ body: string }>;
+    expect(comments).toHaveLength(1);
+    expect(comments[0]!.body).toContain('a brand new finding');
+    expect(replyCalls()).toHaveLength(1);
+    expect(String(replyCalls()[0]![2])).toContain('/comments/1001/replies');
+    expect(replyCalls()[0]![0]).toContain('R1-2: still stands at HEAD');
+    expect(resolveCalls()).toHaveLength(0);
+    expect(stdoutJson()).toMatchObject({ posted: true, carriedReplies: 1 });
+  });
+
+  it('a fixed ruling replies `R<id> fixed by <what>` and resolves the thread', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-9', by: 'the switch to the real parser' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(reviewPost().comments).toEqual([]);
+    expect(replyCalls()).toHaveLength(1);
+    expect(replyCalls()[0]![0]).toContain(
+      'R1-9 fixed by the switch to the real parser',
+    );
+    expect(String(replyCalls()[0]![2])).toContain('/comments/1009/replies');
+    expect(resolveCalls()).toHaveLength(1);
+    expect(String(resolveCalls()[0]![5])).toBe('threadId=T9');
+    expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 1 });
+  });
+
+  it('a fixed ruling resolves EVERY live own thread under the id — the multiplied-lineage cleanup', () => {
+    // #9659's shape: one finding, four threads from the pre-fix re-post
+    // behaviour. One ruling retires all of them.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-5: same finding',
+        createdAt: '2026-08-01T00:00:00Z',
+      },
+      {
+        id: 'T2',
+        commentId: 1002,
+        body: '**[Critical]** R1-5: (carried) same finding',
+        createdAt: '2026-08-02T00:00:00Z',
+      },
+      {
+        id: 'T3',
+        commentId: 1003,
+        body: '**[Critical]** R1-5: same finding',
+        resolved: true,
+        createdAt: '2026-08-03T00:00:00Z',
+      },
+    ]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-5', by: 'the guard rewrite' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(resolveCalls()).toHaveLength(2);
+    expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 2 });
+  });
+
+  it('a fixed ruling with no live thread is named, not resolved', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-9: already resolved by hand',
+        resolved: true,
+      },
+    ]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-9', by: 'the fix' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(replyCalls()).toHaveLength(0);
+    expect(resolveCalls()).toHaveLength(0);
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('R1-9 matched no live thread');
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
+  it('a foreign thread is never replied into or resolved', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-2: a human filed this under a review id',
+        author: 'someone-else',
+      },
+    ]);
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      {},
+    );
+    runSubmit(authorizedPost({ review }));
+
+    // The carried finding stayed inline — no reply into the foreign thread.
+    expect(reviewPost().comments).toHaveLength(1);
+    expect(replyCalls()).toHaveLength(0);
+  });
+
+  it('a resolved original leaves the carried re-post inline — still standing deserves an open thread', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: resolved but not fixed',
+        resolved: true,
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    expect(reviewPost().comments).toHaveLength(1);
+    expect(replyCalls()).toHaveLength(0);
+    expect(stdoutJson()).toMatchObject({ posted: true });
+    expect(stdoutJson().carriedReplies).toBeUndefined();
+  });
+
+  it('a (fix-induced) re-report is never diverted — new work gets its own thread', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the original defect',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: (fix-induced) the fix opened a new hole',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    expect(reviewPost().comments).toHaveLength(1);
+    expect(replyCalls()).toHaveLength(0);
+  });
+
+  it('refuses a payload that re-posts an id it also rules fixed', () => {
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    // The contradiction is caught before any thread read, too.
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('refuses a malformed fixedFindings at compose time', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'not-a-ledger-id' }],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /does not compose into a verdict/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('a first round — no carried id, no fixed ruling — pays no thread read at all', () => {
+    runSubmit(authorizedPost());
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(ghViewMock).not.toHaveBeenCalled();
+  });
+
+  it('dry-run plans the thread actions without writing them', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-9', by: 'the real parser' }] },
+    );
+    runSubmit(authorizedPost({ review, dryRun: true }));
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(resolveCalls()).toHaveLength(0);
+    expect(stdoutJson()).toMatchObject({
+      posted: false,
+      carriedRepliesPlanned: 1,
+      threadsResolvedPlanned: 1,
+    });
+  });
+
+  it('a body-Critical re-report of a fixed id is the same contradiction, refused', () => {
+    // Step 6's still-stands rule sends an UNANCHORABLE carried finding to
+    // the body with its id — the refusal covers that channel too, or one
+    // payload would resolve the thread while its body blocks on it.
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      bodyCriticals: ['R1-2 still stands — the guard drops a valid case'],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('a by-less fixed ruling replies `R<id> fixed`, never `fixed by undefined`', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    const review = payload([], { fixedFindings: [{ id: 'R1-9' }] });
+    runSubmit(authorizedPost({ review }));
+
+    expect(replyCalls()).toHaveLength(1);
+    expect(replyCalls()[0]![0]).toContain('R1-9 fixed');
+    expect(replyCalls()[0]![0]).not.toContain('undefined');
+  });
+
+  it('a failed fixed-ruling REPLY skips that thread’s resolve — no record, no close', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    ghMock.mockImplementation((...a: string[]) => {
+      if (String(a[2]).includes('/replies')) throw new Error('HTTP 500');
+      return '{}';
+    });
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-9', by: 'the real parser' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(resolveCalls()).toHaveLength(0);
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain(
+      'fixed-ruling reply into thread comment 1009 failed',
+    );
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      threadActionFailures: 1,
+    });
+  });
+
+  it('a failed resolve is counted — the reply landed, the thread stays open', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    ghViewMock.mockImplementation((...a: string[]) => {
+      if (String(a[3]).includes('resolveReviewThread')) {
+        throw new Error('HTTP 502');
+      }
+      return JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: 'T9',
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 1009,
+                          body: '**[Critical]** R1-9: the parser trusts unbounded input',
+                          createdAt: '2026-08-01T00:00:00Z',
+                          author: { login: 'qwen-bot' },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+    });
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-9', by: 'the real parser' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(replyCalls()).toHaveLength(1);
+    expect(resolveCalls()).toHaveLength(1);
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('resolveReviewThread(T9) failed');
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      threadActionFailures: 1,
+    });
+    expect(stdoutJson().threadsResolved).toBeUndefined();
+  });
+
+  it('a failed carried reply is named and non-fatal — the finding rides the marker into next round', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    ghMock.mockImplementation((...a: string[]) => {
+      if (String(a[2]).includes('/replies')) throw new Error('HTTP 500');
+      return '{}';
+    });
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('carried reply into thread comment 1001 failed');
+    expect(stderr).toContain('re-ruled next round');
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      threadActionFailures: 1,
+    });
+    expect(stdoutJson().carriedReplies).toBeUndefined();
+  });
+
+  it('a failed thread read aborts BEFORE the write — nothing posts half-planned', () => {
+    ghViewMock.mockImplementation(() => {
+      throw new Error('HTTP 503');
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-9' }] },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(/HTTP 503/);
+    expect(ghMock).not.toHaveBeenCalled();
   });
 });

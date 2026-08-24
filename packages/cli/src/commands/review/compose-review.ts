@@ -73,6 +73,7 @@ import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
+  LEDGER_ID_SHAPE,
   LEDGER_MAX_ID,
   isLedgerFinding,
   isStandInName,
@@ -80,6 +81,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_ROUND,
   LEDGER_UNKNOWN_FILE,
+  readClaim,
   serializeLedger,
   streakOf,
   volumeOf,
@@ -636,6 +638,17 @@ export function floorEnforcedReroute(
  */
 export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
 
+/**
+ * One Step 6 `fixed` ruling: the retired entry's ledger id, and what closed
+ * its mechanism — the `<what>` of the status table's `R1-2 fixed by <what>`.
+ * `by` is a single line, capped like a ledger title: it becomes PR-facing
+ * text (the reply `submit` leaves in the thread it resolves).
+ */
+export interface FixedFinding {
+  id: string;
+  by?: string;
+}
+
 export interface ComposeReviewInput {
   /**
    * Critical findings anchored as inline `comments` entries.
@@ -737,6 +750,24 @@ export interface ComposeReviewInput {
    * presence forbids an approval.
    */
   cannotTellCriticals?: string[];
+  /**
+   * Step 6's `fixed` rulings on previous-round ledger entries — one
+   * `{id, by}` per entry whose mechanism can no longer fire, the same
+   * ruling the status table renders as `R1-2 fixed by <what>`.
+   *
+   * Decides nothing HERE: a fixed entry already weighs nothing in the
+   * verdict by its absence from every findings channel. The field exists
+   * for `submit`'s thread lifecycle, which turns each ruling into the
+   * one-line reply `R1-2 fixed by <what>` in the finding's original
+   * thread and resolves that thread, in the same posting pass — without
+   * it, a fixed finding retired from the ledger but left its thread open
+   * forever, and the PR's unresolved list stopped meaning "still
+   * standing" (#9906). Only a `fixed` ruling rides it — never a
+   * `still stands`, `cannot tell`, `superseded`, or `fix-induced`
+   * disposition, and never an id this round also re-reports (submit
+   * refuses that contradiction).
+   */
+  fixedFindings?: FixedFinding[];
   /** Uncoverable chunks, e.g. `"chunk 5 (src/big.min.js)"`. */
   uncoverableChunks?: string[];
   /**
@@ -873,6 +904,14 @@ export interface ComposeReviewResult {
    * beside the total so the next round can compare like with like.
    */
   postedFresh: number;
+  /**
+   * Step 6's `fixed` rulings, validated — the field decides nothing in the
+   * verdict, but `submit` consumes exactly this list for its thread
+   * lifecycle (reply `R<id> fixed by <by>` + resolve), so it rides the
+   * result rather than being re-read from the raw state: one validation,
+   * one list, and the two consumers can never disagree about its shape.
+   */
+  fixedFindings: FixedFinding[];
   /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
@@ -2323,6 +2362,78 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
   }
 }
 
+/**
+ * The longest `by` a fixed ruling carries — the clause becomes the one-line
+ * reply `R<id> fixed by <by>` that `submit` leaves in the thread it
+ * resolves, and that channel cannot carry an essay. Sliced, not refused:
+ * the ruling itself — the id — is the load-bearing half, and refusing the
+ * round over a verbose one would lose it.
+ */
+export const FIXED_BY_MAX = 240;
+
+/**
+ * `fixedFindings` through the boundary's shape gate: an array of
+ * `{id, by?}` where the id is a WHOLE ledger id (`LEDGER_ID_SHAPE` — the
+ * same admission test the marker's serializer applies) and `by`, when
+ * present, is one non-empty line. Anything else is a malformed state and
+ * refuses the compose, like a NaN count — a ruling that cannot name the
+ * entry it retires must not silently resolve nothing, or everything it
+ * half-matched.
+ *
+ * One ruling per id: a model that records the same entry fixed twice
+ * (once per location of a multi-site finding, say) would otherwise post
+ * two near-identical `fixed by` replies into the thread and resolve it
+ * twice. Well-shaped duplicates are not a refusal — the FIRST ruling
+ * stands, exactly the dedup the ledger builder applies to a second draft
+ * under a carried id.
+ */
+export function ingestFixedFindings(value: unknown): FixedFinding[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(
+      'compose-review: `fixedFindings` must be an array of ' +
+        '`{"id": "R<round>-<n>", "by": "<what fixed it>"}` entries — one ' +
+        'per Step 6 `fixed` ruling.',
+    );
+  }
+  const seen = new Set<string>();
+  const out: FixedFinding[] = [];
+  value.forEach((entry, i) => {
+    const at = `fixedFindings[${i}]`;
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(
+        `compose-review: ${at} is not an object — a fixed ruling is ` +
+          '`{"id": "R<round>-<n>", "by": "<what fixed it>"}`.',
+      );
+    }
+    const { id, by } = entry as { id?: unknown; by?: unknown };
+    if (typeof id !== 'string' || !LEDGER_ID_SHAPE.test(id)) {
+      throw new Error(
+        `compose-review: ${at} carries no ledger id — a fixed ruling ` +
+          `names the entry it retires (R<round>-<n>), got ` +
+          `${JSON.stringify(id)}.`,
+      );
+    }
+    if (
+      by !== undefined &&
+      (typeof by !== 'string' || by.trim() === '' || /[\r\n]/.test(by))
+    ) {
+      throw new Error(
+        `compose-review: ${at}.by must be ONE non-empty line — it ` +
+          `becomes the reply \`${id} fixed by <by>\` left in the resolved ` +
+          `thread.`,
+      );
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push({
+      id,
+      ...(by === undefined ? {} : { by: by.trim().slice(0, FIXED_BY_MAX) }),
+    });
+  });
+  return out;
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -2455,6 +2566,7 @@ function composeReviewBody(
     input.cannotTellCriticals,
     'cannotTellCriticals',
   );
+  const fixedFindings = ingestFixedFindings(input.fixedFindings);
   // The same gate in the same order: an entry the render leg would reduce
   // to nothing must fail the draft, not vanish — silently dropping it lifts
   // the `cannot-tell-existing-critical` cap and flips the verdict.
@@ -4653,6 +4765,7 @@ function composeReviewBody(
       floorEnforced: reroute.indices,
       postedInline,
       postedFresh,
+      fixedFindings,
       ...(convergenceNote === undefined
         ? {}
         : { convergence: convergenceNote }),
@@ -4742,6 +4855,7 @@ function composeReviewBody(
       floorEnforced: reroute.indices,
       postedInline,
       postedFresh,
+      fixedFindings,
       ...(convergenceNote === undefined
         ? {}
         : { convergence: convergenceNote }),
@@ -4994,6 +5108,7 @@ function composeReviewBody(
     floorEnforced: reroute.indices,
     postedInline,
     postedFresh,
+    fixedFindings,
     ...(convergenceNote === undefined ? {} : { convergence: convergenceNote }),
     ...(recommendations === undefined ? {} : { recommendations }),
     ...(healthNote === null || healthNote === undefined
@@ -5810,63 +5925,6 @@ export const composeReviewCommand: CommandModule = {
     writeStderrLine(verdictLine(result));
   },
 };
-
-/**
- * The fix-induced marking, read from the head of the CLAIM — after the id and
- * its separator, never inside the id grammar.
- *
- * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
- * `idFor`, so widening it to swallow a parenthetical would put the ledger's
- * carry on the same regex as a model-written adjective: a spelling or spacing
- * the wider grammar failed to anticipate (`R1-2(Fix-Induced):`) would stop
- * matching the id at all, and the finding would be silently renumbered — the
- * exact failure "one finding, one name" exists to prevent. Read here, the id
- * is already in hand and nothing about this token can cost it: an unrecognised
- * marking leaves the draft counted as a re-post, which is what every round did
- * before this existed.
- *
- * Case-insensitive, and tolerant of inner spacing, because it governs only
- * whether a comment counts as first-time work — never which finding it is.
- */
-const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
-
-/**
- * The id a claim line carries, whether that id fronts a NEW defect, and the
- * claim itself with both stripped.
- *
- * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
- * re-reports two different things under a previous entry's id: a finding that
- * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
- * is new work wearing the id of the entry whose fix produced it. The volume
- * trend counts comments posted for the first time, and reading the id alone
- * called both of them re-posts, so the trend's baseline fell on exactly the
- * churning pull requests where new work was not falling at all.
- *
- * Module-level rather than a closure inside the ledger builder, because the
- * builder is no longer its only consumer: the convergence diagnosis reads the
- * same id to tell a re-posted still-standing finding from fresh activity, and
- * a second restatement would let one end call a comment carried while the
- * other calls it new.
- */
-function readClaim(rest: string): {
-  id?: string;
-  fixInduced: boolean;
-  title: string;
-} {
-  const line = rest.split('\n')[0].trim();
-  const carried = LEDGER_ID_READBACK.exec(line);
-  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
-  // Only ever a marking on a CARRIED id. On a fresh finding there is no
-  // entry for the defect to have been induced by, so the token would be
-  // decoration — and honouring it there would let a stray parenthetical add
-  // a first-time count the round already gets for that comment anyway.
-  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
-  return {
-    id: carried?.[1],
-    fixInduced: marked !== null,
-    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
-  };
-}
 
 /**
  * A drafted comment's claim line, projected the way every id consumer must
