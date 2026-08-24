@@ -13,75 +13,6 @@ const projectRoot = path.resolve(
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
 const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
-const curatedCopyrightHolders = new Map([
-  ['undici-types@5.26.5', 'Matteo Collina and Undici contributors'],
-  ['@xterm/headless@5.5.0', 'Microsoft Corporation'],
-  ['@simple-git/args-pathspec@1.0.3', 'Steve King'],
-  ['@simple-git/argv-parser@1.1.1', 'Steve King'],
-]);
-const missingLicenseText = 'License text not found.';
-
-const mitTerms = `Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.`;
-
-function authorName(author) {
-  if (typeof author === 'string') return author;
-  if (author && typeof author.name === 'string') return author.name;
-  return undefined;
-}
-
-export function fallbackLicenseText(packageJson) {
-  if (packageJson.license !== 'MIT') return undefined;
-  const holder =
-    authorName(packageJson.author) ??
-    curatedCopyrightHolders.get(`${packageJson.name}@${packageJson.version}`);
-  if (!holder) return undefined;
-  return `MIT License\n\nCopyright (c) ${holder}\n\n${mitTerms}`;
-}
-
-export function isMissingLicenseText(value) {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return !normalized || normalized.startsWith(missingLicenseText);
-}
-
-export function normalizeLicenseText(value) {
-  return typeof value === 'string' && value.trim() ? value : missingLicenseText;
-}
-
-export async function findSupplementalNoticeFiles(packageDir, license) {
-  const files = [];
-  const rootEntries = await fs.readdir(packageDir, { withFileTypes: true });
-  for (const entry of rootEntries) {
-    if (entry.isFile() && /^notice(?:\.(?:md|txt))?$/i.test(entry.name)) {
-      files.push(path.join(packageDir, entry.name));
-    }
-  }
-  if (license === 'Apache-2.0') {
-    const licensesDir = path.join(packageDir, 'licenses');
-    const licenseEntries = await fs
-      .readdir(licensesDir, { withFileTypes: true })
-      .catch(() => []);
-    for (const entry of licenseEntries) {
-      if (entry.isFile()) files.push(path.join(licensesDir, entry.name));
-    }
-  }
-  return files.sort();
-}
 
 /**
  * Read license information for a dependency from its on-disk location.
@@ -92,7 +23,7 @@ export async function findSupplementalNoticeFiles(packageDir, license) {
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
 async function getDependencyLicense(depName, depVersion, resolvedKey) {
-  let licenseContent = missingLicenseText;
+  let licenseContent = 'License text not found.';
   let repositoryUrl = 'No repository found';
 
   // Derive the on-disk path directly from the lockfile key
@@ -119,33 +50,14 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
 
     if (licenseFile) {
       try {
-        const content = await fs.readFile(licenseFile, 'utf-8');
-        licenseContent = normalizeLicenseText(content);
+        licenseContent = await fs.readFile(licenseFile, 'utf-8');
       } catch (e) {
         console.warn(
           `Warning: Failed to read license file for ${depName}: ${e.message}`,
         );
       }
     } else {
-      const fallback = fallbackLicenseText(depPackageJson);
-      if (fallback) {
-        licenseContent = fallback;
-      } else {
-        console.warn(`Warning: Could not find license file for ${depName}`);
-      }
-    }
-
-    const supplementalFiles = await findSupplementalNoticeFiles(
-      packageDir,
-      depPackageJson.license,
-    );
-    for (const supplementalFile of supplementalFiles) {
-      const supplemental = await fs.readFile(supplementalFile, 'utf8');
-      const label = path
-        .relative(packageDir, supplementalFile)
-        .split(path.sep)
-        .join('/');
-      licenseContent += `\n\n----- ${label} -----\n\n${supplemental}`;
+      console.warn(`Warning: Could not find license file for ${depName}`);
     }
   } catch (e) {
     console.warn(
@@ -352,14 +264,6 @@ async function main() {
     );
 
     const dependencyLicenses = await Promise.all(licensePromises);
-    const missingLicenses = dependencyLicenses
-      .filter((dependency) => isMissingLicenseText(dependency.license))
-      .map((dependency) => `${dependency.name}@${dependency.version}`);
-    if (missingLicenses.length > 0) {
-      throw new Error(
-        `License text missing for: ${missingLicenses.join(', ')}`,
-      );
-    }
 
     let noticeText =
       'This file contains third-party software notices and license terms.\n\n';

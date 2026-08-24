@@ -18,8 +18,6 @@ import { useFileContext } from './hooks/file/useFileContext.js';
 import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
-import { useAcpTranscript } from './hooks/useAcpTranscript.js';
-import { useWebviewTheme } from './hooks/useWebviewTheme.js';
 import {
   shouldSendMessage,
   useMessageSubmit,
@@ -73,7 +71,6 @@ import {
   buildSlashCommandItems,
   isExpandableSlashCommand,
 } from './utils/slashCommandUtils.js';
-import { WebShellTranscript } from '@qwen-code/web-shell';
 
 /**
  * Memoized message list that only re-renders when messages or callbacks change,
@@ -296,9 +293,6 @@ function findMessageIndex(
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
-  const acpTranscript = useAcpTranscript();
-  const webShellTranscriptEnabled = acpTranscript.enabled;
-  const webviewTheme = useWebviewTheme();
 
   // Core hooks
   const sessionManagement = useSessionManagement(vscode);
@@ -349,7 +343,6 @@ export const App: React.FC = () => {
   // Maps DOM child position → allMessages index. Built during render by
   // MessageList, only includes items that actually produce DOM elements.
   const childIndexMapRef = useRef<number[]>([]);
-  const contextMenuTranscriptTextRef = useRef<string | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
@@ -1310,11 +1303,6 @@ export const App: React.FC = () => {
     );
   }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
 
-  const useWebShellTranscript =
-    webShellTranscriptEnabled &&
-    acpTranscript.compatible &&
-    acpTranscript.blocks.length > 0;
-
   const handleFileClick = useCallback(
     (path: string): void => {
       vscode.postMessage({
@@ -1391,14 +1379,6 @@ export const App: React.FC = () => {
     const trackTarget = (e: MouseEvent) => {
       const container = messagesContainerRef.current;
       if (container && e.target instanceof Element) {
-        const transcriptRow = e.target.closest('[data-message-row-key]');
-        const sourceBlockIds = transcriptRow?.getAttribute(
-          'data-source-block-ids',
-        );
-        contextMenuTranscriptTextRef.current =
-          sourceBlockIds && transcriptRow?.textContent
-            ? transcriptRow.textContent.trim()
-            : null;
         contextMenuMsgIdxRef.current = findMessageIndex(
           e.target,
           container,
@@ -1431,12 +1411,6 @@ export const App: React.FC = () => {
       const { action } = message.data as { action: string };
 
       if (action === 'copyMessage') {
-        if (useWebShellTranscript) {
-          if (contextMenuTranscriptTextRef.current !== null) {
-            copyToClipboard(contextMenuTranscriptTextRef.current);
-          }
-          return;
-        }
         const idx = contextMenuMsgIdxRef.current;
         if (idx >= 0 && idx < allMessages.length) {
           const item = allMessages[idx];
@@ -1504,12 +1478,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [
-    allMessages,
-    copyToClipboard,
-    formatToolCallForCopy,
-    useWebShellTranscript,
-  ]);
+  }, [allMessages, copyToClipboard, formatToolCallForCopy]);
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -1593,26 +1562,16 @@ export const App: React.FC = () => {
         ) : (
           <>
             {/* Render all messages and tool calls */}
-            {useWebShellTranscript ? (
-              <WebShellTranscript
-                blocks={acpTranscript.blocks}
-                renderMode="readonly"
-                compactThinking
-                collapseCompletedTurns={false}
-                theme={webviewTheme}
-              />
-            ) : (
-              <MessageList
-                allMessages={allMessages}
-                onFileClick={handleFileClick}
-                onEditUserMessage={handleEditUserMessage}
-                canEditMessages={
-                  !messageHandling.isStreaming &&
-                  !messageHandling.isWaitingForResponse
-                }
-                childIndexMap={childIndexMapRef}
-              />
-            )}
+            <MessageList
+              allMessages={allMessages}
+              onFileClick={handleFileClick}
+              onEditUserMessage={handleEditUserMessage}
+              canEditMessages={
+                !messageHandling.isStreaming &&
+                !messageHandling.isWaitingForResponse
+              }
+              childIndexMap={childIndexMapRef}
+            />
 
             {insightProgress && (
               <InsightProgressCard

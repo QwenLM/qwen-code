@@ -3,19 +3,17 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
 import { DAEMON_ERROR_KINDS, type DaemonEvent } from '@qwen-code/sdk/daemon';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import { createExportTranscriptDocumentV1 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
-import { TranscriptUpdateIdentityProjector } from '../packages/cli/src/acp-integration/session/transcript-update-identity.js';
 import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 import {
+  adaptAcpTranscriptUpdates,
   adaptDirectDaemonEvents,
   readJsonLines,
   stableTailIdentity,
 } from './helpers/chat-transcript-contract.js';
-import { adaptAcpTranscriptUpdates } from '../packages/vscode-ide-companion/src/webview/adapters/acpTranscriptAdapter.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = resolve(
@@ -24,7 +22,7 @@ const fixtureRoot = resolve(
 );
 const sharedFixtureHashes = {
   'capability-matrix.md':
-    'beebee1595b78ad82bc178523b0a440b6709df027987c57ebf4879a70d1a99f1',
+    'f726f64d41152f0a31636d14d40f34d9d9acab0636143719d60f31df477928cc',
   'schema/manifest.schema.json':
     'c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa',
 } as const;
@@ -319,11 +317,11 @@ describe('chat transcript cross-host contract', () => {
       expect(sha256(resolve(fixtureRoot, relativePath))).toBe(expectedHash);
     }
     expect(matrix).toContain('pass; stable under append/prepend/replay');
-    expect(matrix).toContain('pass; selected product path, rollout pending');
+    expect(matrix).toContain('deferred; product selection moves to MR2B');
     expect(matrix).not.toMatch(/\b(?:TBD|unknown)\b/i);
     expect(expectedGate).toMatchObject({
       overall: 'fail',
-      selectedVscodePath: 'acp',
+      selectedVscodePath: null,
       candidates: {
         directDaemon: { status: 'pass' },
         acp: { status: 'pass' },
@@ -466,19 +464,6 @@ describe('chat transcript cross-host contract', () => {
     const acp = adaptAcpTranscriptUpdates(acpUpdates, scopeKey);
     const acpTail = adaptAcpTranscriptUpdates(acpUpdates.slice(1), scopeKey);
 
-    const liveIdentity = new TranscriptUpdateIdentityProjector();
-    const liveAcp = adaptAcpTranscriptUpdates(
-      [
-        liveIdentity.project(
-          {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'live answer' },
-          } as SessionUpdate,
-          'session-a########1',
-        ),
-      ],
-      scopeKey,
-    );
     const taggedAcpSegments = ['first ', 'second'].map((text, index) => ({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
@@ -516,7 +501,5 @@ describe('chat transcript cross-host contract', () => {
     expect(stableTailIdentity(acp, acpTail)).toBe(true);
     expect(stableTailIdentity(completeTaggedAcp, tailTaggedAcp)).toBe(true);
     expect(stableTailIdentity(completeDelta, tailDelta, 0)).toBe(true);
-    expect(liveAcp.compatible).toBe(true);
-    expect(liveAcp.blocks[0]?.segmentId).toMatch(/^live:[0-9a-f]{32}$/);
   });
 });

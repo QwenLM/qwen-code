@@ -127,7 +127,6 @@ export class QwenAgentManager {
 
     // Set ACP connection callbacks
     this.connection.onSessionUpdate = (data: SessionNotification) => {
-      this.callbacks.onTranscriptUpdate?.(data);
       // If we are rehydrating a loaded session, map message chunks into
       // discrete messages for the UI instead of streaming behavior.
       // During rehydration the webview is NOT in streaming mode, so
@@ -1324,13 +1323,6 @@ export class QwenAgentManager {
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 
-  onTranscriptUpdate(
-    callback: (notification: SessionNotification) => void,
-  ): void {
-    this.callbacks.onTranscriptUpdate = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
   /**
    * Register stream chunk callback
    *
@@ -1519,10 +1511,6 @@ export class QwenAgentManager {
    */
   get currentSessionId(): string | null {
     return this.connection.currentSessionId;
-  }
-
-  get rehydratingTranscriptSessionId(): string | null {
-    return this.rehydratingSessionId;
   }
 
   private applySessionStateFromResult(result: unknown): void {
