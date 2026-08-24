@@ -440,6 +440,23 @@ describe('git extension helpers', () => {
       );
     });
 
+    it('rejects an option-shaped ref before creating a credentialed Git client', async () => {
+      await expect(
+        cloneFromGit(
+          {
+            source: 'https://git.example.com/owner/remote.uploadpack.git',
+            ref: '--upload-pack=attacker-command',
+            type: 'git',
+          },
+          '/dest',
+          undefined,
+          { username: 'user', password: 'token' },
+        ),
+      ).rejects.toThrow('Git refs must not start with "-".');
+      expect(simpleGit).not.toHaveBeenCalled();
+      expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
     it('injects GITHUB_TOKEN without adding it to the clone URL', async () => {
       vi.stubEnv('GITHUB_TOKEN', 'ambient-token');
       vi.spyOn(dns, 'lookup').mockResolvedValue([
@@ -1547,6 +1564,25 @@ describe('git extension helpers', () => {
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
+    });
+
+    it('rejects an option-shaped ref before a credentialed remote check', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'ambient-token');
+      const result = await checkForExtensionUpdate(
+        createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/owner/remote.uploadpack.git',
+            gitCommit: 'local-hash',
+            ref: '--upload-pack=attacker-command',
+          },
+        }),
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.ERROR);
+      expect(simpleGit).not.toHaveBeenCalled();
+      expect(mockGit.listRemote).not.toHaveBeenCalled();
     });
 
     it('fails a stored update check before Git when its selector is missing', async () => {

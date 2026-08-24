@@ -24,6 +24,17 @@ interface ExtensionGitClientOptions {
 
 type UnsafeOptions = NonNullable<SimpleGitOptions['unsafe']>;
 
+function assertCredentialedHttpsSource(source: string): void {
+  try {
+    if (new URL(source).protocol === 'https:') return;
+  } catch {
+    // Use the same redacted error for malformed and non-HTTPS sources.
+  }
+  throw new Error(
+    'Credentialed Git operations require a valid HTTPS repository URL.',
+  );
+}
+
 const generatedConfigKeyAllowances = [
   [/alias/, 'allowUnsafeAlias'],
   [/core.askpass/, 'allowUnsafeAskPass'],
@@ -72,6 +83,7 @@ export function createExtensionGitClient(
     authentication,
   }: ExtensionGitClientOptions,
 ): SimpleGit {
+  if (authentication) assertCredentialedHttpsSource(authentication.source);
   const restrictEnvironment =
     networkPolicy === 'public' || authentication !== undefined;
   const hasNetworkConfig = networkConfig.length > 0;

@@ -66,6 +66,23 @@ describe('createExtensionGitClient', () => {
   });
 
   it.each([
+    'http://git.example.com/owner/repo.git',
+    '--upload-pack=attacker-command',
+  ])('rejects credentialed non-HTTPS Git source %s', (source) => {
+    expect(() =>
+      createExtensionGitClient(simpleGit, {
+        baseDir: tempDir,
+        authentication: {
+          source,
+          credential: { username: 'user', password: 'token' },
+        },
+      }),
+    ).toThrow(
+      'Credentialed Git operations require a valid HTTPS repository URL.',
+    );
+  });
+
+  it.each([
     ['alias', 'https://github.com/owner/alias-service.git'],
     [
       'credential helper',

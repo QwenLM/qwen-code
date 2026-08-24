@@ -219,6 +219,14 @@ function createPinnedGitConfig(curlResolve: string): string[] {
  * @param installMetadata The metadata for the extension to install.
  * @param destination The destination path to clone the repository to.
  */
+function resolveGitRef(ref: string | undefined): string {
+  const resolvedRef = ref || 'HEAD';
+  if (resolvedRef.startsWith('-')) {
+    throw new Error('Git refs must not start with "-".');
+  }
+  return resolvedRef;
+}
+
 export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
@@ -230,6 +238,7 @@ export async function cloneFromGit(
     ? 'credentialed HTTPS Git source'
     : redactUrlCredentials(installMetadata.source);
   try {
+    const refToFetch = resolveGitRef(installMetadata.ref);
     const { simpleGit } = await loadSimpleGit();
     let networkConfig: string[] = [];
     if (installMetadata.networkPolicy === 'public') {
@@ -273,8 +282,6 @@ export async function cloneFromGit(
     if (remotes.length === 0) {
       throw new Error(`Unable to find any remotes for repo ${redactedSource}`);
     }
-
-    const refToFetch = installMetadata.ref || 'HEAD';
 
     const remoteUrl = remotes[0].refs.fetch;
     if (!remoteUrl) {
@@ -668,6 +675,7 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
+      const refToCheck = resolveGitRef(installMetadata.ref);
       const storedCredential =
         installMetadata.credentialPersistence === 'stored'
           ? (await resolveStoredGitCredential(extension.path)).credential
@@ -682,7 +690,7 @@ export async function checkForExtensionUpdate(
         const remoteSha = await resolvePublicGitHubCommitSha(
           owner,
           repo,
-          installMetadata.ref || 'HEAD',
+          refToCheck,
           signal,
         );
         return remoteSha === installMetadata.gitCommit
@@ -751,7 +759,6 @@ export async function checkForExtensionUpdate(
           ? { source: remoteUrl, credential: effectiveCredential }
           : undefined,
       });
-      const refToCheck = installMetadata.ref || 'HEAD';
       const refPatterns = installMetadata.ref
         ? [refToCheck, `${refToCheck}^{}`]
         : [refToCheck];
