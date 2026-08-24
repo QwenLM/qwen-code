@@ -9663,7 +9663,13 @@ export class Session implements SessionContext {
       // calls only), and decayAbandonedDaemonStreaks wiped the live
       // frozen-board streak — keeping statefulMaxResultRepeat below the
       // stuck threshold indefinitely and drifting from core (issue #9450
-      // requirement #6).
+      // requirement #6). This mark protects the replay batch's OWN
+      // boundary (recordDaemonToolCalls runs after batch construction and
+      // consumes it there); emitDuplicateBatch re-adds the key during the
+      // execution phase for the NEXT boundary, mirroring core's timing —
+      // core's mark lands when the fabricated response is submitted with
+      // the next round's ToolResult, after the replay stream's Finished
+      // boundary (issue #9450 requirement #6).
       if (toolLoopState && isStatefulReadTool(request.name)) {
         (toolLoopState.statefulResultKeysSinceLastBatch ??=
           new Set<string>()).add(
@@ -9681,6 +9687,22 @@ export class Session implements SessionContext {
 
     const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
       const { request, response } = batch;
+      // Next-boundary protection for the suppressed stateful replay: the
+      // mark pushDuplicateBatch added was consumed by THIS batch's own
+      // boundary decay (recordDaemonToolCalls ran after construction), so
+      // without a fresh mark a gap batch following a mixed replay batch
+      // would find the key in neither skip set and decay the live
+      // frozen-board streak — one boundary earlier than core's twin, whose
+      // suppression mark lands with the fabricated response AFTER the
+      // replay round's Finished boundary. Runs in the execution phase (the
+      // boundary has already run), so the mark survives to the next
+      // batch's decay (issue #9450 requirement #6).
+      if (toolLoopState && isStatefulReadTool(request.name)) {
+        (toolLoopState.statefulResultKeysSinceLastBatch ??=
+          new Set<string>()).add(
+          getToolCallRepeatKey(request.name, request.args),
+        );
+      }
       try {
         if (request.name === ToolNames.TODO_WRITE) {
           const provenance = ToolCallEmitter.resolveToolProvenance(

@@ -11589,6 +11589,107 @@ describe('Session', () => {
           expect(loopState.totalToolCalls).toBe(21);
         });
 
+        it('still halts a frozen daemon poller when a MIXED replay batch is followed by a gap batch (issue #9450)', async () => {
+          // Mixed replay batch, then a GAP batch (other work, no
+          // task_list), then the next poll — the shape the consecutive
+          // mixed-batch control above cannot see. Pre-fix the suppression
+          // mark was added during batch construction and consumed by the
+          // replay batch's OWN boundary decay (which the previous poll's
+          // result mark already protected), leaving the NEXT boundary —
+          // the gap batch's — exposed: decayAbandonedDaemonStreaks wiped
+          // the live frozen-board streak there, one boundary earlier than
+          // core's twin, whose noteSuppressedToolCallByCallId mark lands
+          // with the fabricated response AFTER the replay round's
+          // Finished boundary. The streak restarted every cycle and never
+          // reached the stuck threshold, so the turn ran past the soft
+          // cap toward the hard backstop instead of halting (issue #9450
+          // requirement #6).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          const fingerprint = core.getToolCallFingerprint(
+            'task_list',
+            TASK_LIST_ARGS,
+          );
+          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+            new Map(
+              Array.from({ length: 25 }, (_, index) => [
+                `replayed_task_list_${index}`,
+                fingerprint,
+              ]),
+            ),
+          );
+          const loopState = freshLoopState();
+
+          let replayOrdinal = 0;
+          const runRound = (round: number) => {
+            const calls =
+              round % 3 === 0
+                ? [
+                    {
+                      id: `task_list_${round}`,
+                      name: 'task_list',
+                      args: TASK_LIST_ARGS,
+                    },
+                  ]
+                : round % 3 === 1
+                  ? [
+                      {
+                        id: `replayed_task_list_${replayOrdinal++}`,
+                        name: 'task_list',
+                        args: TASK_LIST_ARGS,
+                      },
+                      {
+                        id: `generic_${round}`,
+                        name: 'generic_tool',
+                        args: { step: round },
+                      },
+                    ]
+                  : [
+                      {
+                        id: `generic_${round}`,
+                        name: 'generic_tool',
+                        args: { step: round },
+                      },
+                    ];
+            return (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-mixed-gap-${round}`,
+              calls,
+              loopState,
+            );
+          };
+
+          let fired = false;
+          for (let round = 0; round < 60 && !fired; round++) {
+            const result = await runRound(round);
+            fired = result.loopDetected ?? false;
+          }
+
+          // The emit-phase mark gives the replayed key next-boundary
+          // protection, so the streak survives the mixed→gap cycles and
+          // arms the stuck signal: the halt lands at totalToolCalls 21
+          // (soft cap 20 + 1), far below the hard backstop (200).
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBe(21);
+        });
+
         it('still halts a frozen daemon poller interleaved every other batch with other work (issue #9450)', async () => {
           // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
           // cap's stateful stuck signal is the ONLY live halt path. A
