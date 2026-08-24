@@ -17990,6 +17990,123 @@ describe('createServeApp', () => {
       expect(bridge.listCalls).toHaveLength(0);
     });
 
+    describe('standalone conversation filter', () => {
+      const standaloneId = (n: number) =>
+        `650e8400-e29b-41d4-a716-44665544${String(n).padStart(4, '0')}`;
+
+      it('filters explicit and legacy top-level rows before pagination', async () => {
+        const rows = [
+          { id: standaloneId(1), sourceType: 'standalone' },
+          { id: standaloneId(2) },
+          { id: standaloneId(3), sourceType: 'default' },
+          {
+            id: standaloneId(4),
+            sourceType: 'default',
+            sourceId: 'realtime_voice:call-1',
+          },
+          { id: standaloneId(5), sourceType: 'scheduled_task' },
+          {
+            id: standaloneId(6),
+            sourceType: 'standalone',
+            parentSessionId: standaloneId(1),
+          },
+        ];
+        for (const [index, row] of rows.entries()) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, index, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: row.id,
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `row ${index}`,
+            mtime: new Date(timestamp),
+            ...(row.sourceType ? { sourceType: row.sourceType } : {}),
+            ...(row.sourceId ? { sourceId: row.sourceId } : {}),
+            ...(row.parentSessionId
+              ? { parentSessionId: row.parentSessionId }
+              : {}),
+          });
+        }
+
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { conversationKind: 'standalone-top-level', size: 2 },
+        );
+        const page2 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          {
+            conversationKind: 'standalone-top-level',
+            size: 2,
+            cursor: page1.nextCursor,
+          },
+        );
+
+        expect(page1.sessions).toHaveLength(2);
+        expect(page2.nextCursor).toBeUndefined();
+        expect(
+          new Set(
+            [...page1.sessions, ...page2.sessions].map(
+              (session) => session.sessionId,
+            ),
+          ),
+        ).toEqual(new Set([standaloneId(1), standaloneId(2), standaloneId(3)]));
+      });
+
+      it('excludes case-conflicting UUIDs before pagination and live merge', async () => {
+        const ambiguousId = standaloneId(10);
+        const uniqueId = standaloneId(11);
+        const makeItem = (id: string, minute: number): SessionListItem => ({
+          sessionId: id,
+          cwd: WS_BOUND,
+          startTime: new Date(Date.UTC(2026, 4, 17, 12, minute)).toISOString(),
+          mtime: Date.UTC(2026, 4, 17, 12, minute),
+          prompt: id,
+          filePath: `/transcripts/${id}.jsonl`,
+          sourceType: 'standalone',
+        });
+        const listSessionsSpy = vi
+          .spyOn(SessionService.prototype, 'listSessions')
+          .mockResolvedValue({
+            items: [
+              makeItem(ambiguousId.toUpperCase(), 2),
+              makeItem(ambiguousId, 1),
+              makeItem(uniqueId, 0),
+            ],
+            nextCursor: undefined,
+            hasMore: false,
+          });
+
+        try {
+          const result = await listWorkspaceSessionsForResponse(
+            fakeBridge({
+              listImpl: () => [
+                {
+                  sessionId: ambiguousId,
+                  workspaceCwd: WS_BOUND,
+                  createdAt: '2026-05-17T12:03:00.000Z',
+                  sourceType: 'standalone',
+                  clientCount: 1,
+                  hasActivePrompt: false,
+                },
+              ],
+            }),
+            WS_BOUND,
+            { conversationKind: 'standalone-top-level', size: 1 },
+          );
+
+          expect(result.sessions.map((session) => session.sessionId)).toEqual([
+            uniqueId,
+          ]);
+          expect(result.nextCursor).toBeUndefined();
+        } finally {
+          listSessionsSpy.mockRestore();
+        }
+      });
+    });
+
     describe('parentSessionId filter', () => {
       const PARENT = '00000000-0000-4000-8000-0000000000aa';
       const OTHER_PARENT = '00000000-0000-4000-8000-0000000000bb';
