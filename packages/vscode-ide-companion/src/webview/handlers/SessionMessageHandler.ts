@@ -23,7 +23,7 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '../../utils/inputPlaceholder.js';
 import {
   exportSessionToFile,
   parseExportSlashCommand,
@@ -33,6 +33,40 @@ import {
   DISCONTINUED_MESSAGES,
   isDiscontinuedModel,
 } from '../utils/discontinuedModel.js';
+import type { InlineFilePayload } from '../../types/webviewMessageTypes.js';
+
+const INLINE_FILE_ATTRIBUTE_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&apos;',
+};
+
+function escapeInlineFileAttribute(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => INLINE_FILE_ATTRIBUTE_ESCAPES[character] ?? character,
+  );
+}
+
+function appendInlineFiles(
+  promptText: string,
+  inlineFiles: readonly InlineFilePayload[],
+): string {
+  if (inlineFiles.length === 0) {
+    return promptText;
+  }
+
+  const fileBlocks = inlineFiles
+    .map(
+      (file) =>
+        `<attached_file name="${escapeInlineFileAttribute(file.name)}" media_type="${escapeInlineFileAttribute(file.mediaType)}">\n${file.text}\n</attached_file>`,
+    )
+    .join('\n\n');
+
+  return promptText.length > 0 ? `${promptText}\n\n${fileBlocks}` : fileBlocks;
+}
 
 function formatExportSuccessMessage(
   formatLabel: string,
@@ -105,6 +139,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+          data?.inlineFiles as InlineFilePayload[] | undefined,
         );
         break;
 
@@ -407,6 +442,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    inlineFiles?: InlineFilePayload[],
   ): Promise<void> {
     logger.log('[SessionMessageHandler] handleSendMessage called', {
       textLength: text.length,
@@ -417,7 +453,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // or model-selector interactions clear the input but still trigger a submit.
     const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
-    if (!trimmedText && !hasAttachments) {
+    const hasInlineFiles = (inlineFiles?.length ?? 0) > 0;
+    if (!trimmedText && !hasAttachments && !hasInlineFiles) {
       logger.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
@@ -471,6 +508,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     }
     promptText = formattedText;
+    promptText = appendInlineFiles(promptText, inlineFiles ?? []);
     displayText = updatedDisplayText;
 
     if (hasAttachments && !trimmedText && savedImageCount === 0) {

@@ -28,10 +28,10 @@ describe('imageSupport browser bundling', () => {
     expect(output).not.toContain('supportedImageFormats.js');
   });
 
-  it('does not leave qwen-code-core runtime imports in the App webview bundle', async () => {
+  it('does not leave qwen-code-core runtime imports in the embedded webview bundle', async () => {
     const result = await esbuild.build({
       entryPoints: [
-        fileURLToPath(new URL('../webview/App.tsx', import.meta.url)),
+        fileURLToPath(new URL('../webview/EmbeddedApp.tsx', import.meta.url)),
       ],
       bundle: true,
       format: 'iife',

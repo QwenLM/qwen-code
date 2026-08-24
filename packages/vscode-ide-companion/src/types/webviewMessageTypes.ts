@@ -23,3 +23,9 @@ export interface AskUserQuestionResponseMessage {
   type: string;
   data: AskUserQuestionResponsePayload;
 }
+
+export interface InlineFilePayload {
+  name: string;
+  mediaType: string;
+  text: string;
+}

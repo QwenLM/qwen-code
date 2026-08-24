@@ -5,8 +5,25 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { ToolCallData } from '../components/messages/toolcalls/ToolCall.js';
 import type { ToolCallUpdate } from '../../types/chatTypes.js';
+
+interface ToolCallData {
+  toolCallId: string;
+  kind: string;
+  title: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  rawInput?: string | object;
+  rawOutput?: unknown;
+  content?: Array<{
+    type: 'content' | 'diff';
+    content?: { type?: string; text?: string; [key: string]: unknown };
+    path?: string;
+    oldText?: string | null;
+    newText?: string;
+  }>;
+  locations?: Array<{ path: string; line?: number | null }>;
+  timestamp?: number;
+}
 
 /**
  * Tool call management Hook
