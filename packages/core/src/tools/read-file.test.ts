@@ -125,6 +125,13 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
+    it('advertises audio and video support to the model', () => {
+      expect(tool.description).toContain('audio, video');
+      expect(tool.description).toContain(
+        'selected model to support the corresponding modality',
+      );
+    });
+
     it('should return an invocation for valid params (absolute path within root)', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
@@ -1701,74 +1708,6 @@ describe('ReadFileTool', () => {
         const invocation = tool.build(params);
         expect(typeof invocation).not.toBe('string');
       });
-    });
-  });
-
-  describe('schema description (omni media)', () => {
-    const omniTool = (
-      modalities: Record<string, boolean>,
-      omniEnabled = true,
-    ) =>
-      new ReadFileTool({
-        isOmniEnabled: () => omniEnabled,
-        getContentGeneratorConfig: () => ({
-          // A bare IP is never DashScope-compatible, so activation here can
-          // only come from the self-hosted OMNI_OSS_* branch.
-          baseUrl: 'http://10.0.0.1:22002/v1',
-          apiKey: 'sk-test',
-          modalities,
-        }),
-      } as unknown as Config);
-
-    beforeEach(() => {
-      vi.stubEnv('OMNI_OSS_ENDPOINT', 'oss-cn-shanghai-internal.aliyuncs.com');
-      vi.stubEnv('OMNI_OSS_BUCKET', 'bucket');
-      vi.stubEnv('OMNI_OSS_ACCESS_KEY_ID', 'ak');
-      vi.stubEnv('OMNI_OSS_ACCESS_KEY_SECRET', 'sk');
-    });
-
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
-    it('advertises both modalities when both are enabled', () => {
-      const description = omniTool({ video: true, audio: true }).schema
-        .description!;
-      expect(description).toContain('video (MP4, MOV, WebM, MKV, AVI)');
-      expect(description).toContain('audio (WAV, MP3, M4A, FLAC, OGG)');
-      expect(description).toContain('1 GiB');
-    });
-
-    it('advertises only the enabled modality', () => {
-      const description = omniTool({ audio: true }).schema.description!;
-      expect(description).toContain('audio (WAV');
-      expect(description).not.toContain('video (MP4');
-    });
-
-    it('says nothing when omni is disabled', () => {
-      const description = omniTool({ video: true, audio: true }, false).schema
-        .description!;
-      expect(description).not.toContain('1 GiB');
-    });
-
-    it('says nothing when the delivery bucket is not configured', () => {
-      vi.stubEnv('OMNI_OSS_ACCESS_KEY_SECRET', '');
-      const description = omniTool({ video: true, audio: true }).schema
-        .description!;
-      expect(description).not.toContain('1 GiB');
-    });
-
-    it('says nothing when neither media modality is enabled', () => {
-      const description = omniTool({ image: true }).schema.description!;
-      expect(description).not.toContain('1 GiB');
-    });
-
-    it('keeps the base description intact', () => {
-      const base = omniTool({}, false).schema.description!;
-      const withMedia = omniTool({ video: true, audio: true }).schema
-        .description!;
-      expect(withMedia.startsWith(base)).toBe(true);
-      expect(base).toContain('Reads and returns the content of a specified');
     });
   });
 });

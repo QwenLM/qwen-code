@@ -54,6 +54,7 @@ import type { NormalizedFixedPolicy } from './policy/types.js';
 import { MediaMemoryService } from '../services/media-memory/index.js';
 import { formatDisclosureText } from './disclosure.js';
 import { isOmniDeliveryActive } from './delivery-gate.js';
+import { requireEffectiveOmniUploadConfig } from './upload-config.js';
 
 const debugLogger = createDebugLogger('omni:reactive-degrade');
 
@@ -342,17 +343,18 @@ export async function degradeOmniMediaAfterServerReject(
   const refs = collectOssMediaRefs(contents);
   if (refs.length === 0) return none;
 
-  const model = config.getModel();
+  const inferenceModel = config.getModel();
   if (options?.observedLimitTokens !== undefined) {
-    recordObservedServerInputLimit(model, options.observedLimitTokens);
+    recordObservedServerInputLimit(inferenceModel, options.observedLimitTokens);
   }
 
-  const cgc = config.getContentGeneratorConfig();
+  const uploadConfig = requireEffectiveOmniUploadConfig(config);
+  const uploadModel = uploadConfig.model;
   const store = new OmniObjectStore(config.storage.getQwenDir());
   // Same scope fingerprint as the delivery pipeline: entries minted for
   // one (origin, apiKey) pair never serve another.
   const cacheScope = createHash('sha256')
-    .update(`${cgc.baseUrl ?? ''}|${cgc.apiKey ?? ''}`)
+    .update(`${uploadConfig.baseUrl}|${uploadConfig.apiKey}`)
     .digest('hex')
     .slice(0, 16);
   const uploadCache = new OmniUploadCache(
@@ -434,7 +436,7 @@ export async function degradeOmniMediaAfterServerReject(
 
       const derivedSha =
         delivery.sha256 ?? (await hashFileSha256(delivery.filePath, signal));
-      let fileUri = await uploadCache.get(derivedSha, model);
+      let fileUri = await uploadCache.get(derivedSha, uploadModel);
       if (!fileUri) {
         const { objectPath: derivedPath } = await store.putFile(
           delivery.filePath,
@@ -442,18 +444,15 @@ export async function degradeOmniMediaAfterServerReject(
           extensionForMime(delivery.recognized.detectedMimeType),
           signal,
         );
-        const uploader = createOmniUploader({
-          apiKey: cgc.apiKey ?? '',
-          baseUrl: cgc.baseUrl,
-        });
+        const uploader = createOmniUploader(uploadConfig);
         fileUri = await uploader.uploadFile({
           filePath: derivedPath,
-          model,
+          model: uploadModel,
           mimeType: delivery.recognized.detectedMimeType,
           sha256: derivedSha,
           signal,
         });
-        await uploadCache.put(derivedSha, model, fileUri);
+        await uploadCache.put(derivedSha, uploadModel, fileUri);
       }
       if (fileUri === ref.fileUri) continue; // no progress
 

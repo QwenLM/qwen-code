@@ -139,6 +139,8 @@ describe('OmniClipVideoTool', () => {
     );
 
     expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(`Output file: ${outputPath}`);
+    expect(result.llmContent).toContain('Use read_file');
     expect(result.artifacts).toEqual([
       {
         kind: 'video',

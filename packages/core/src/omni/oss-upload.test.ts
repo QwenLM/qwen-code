@@ -12,7 +12,6 @@ import {
   OssDirectUploader,
   createOmniUploader,
   isOmniDeliveredUri,
-  isSelfHostedOssConfigured,
   mentionsOmniDeliveredUri,
   readSelfHostedOssConfig,
 } from './oss-upload.js';
@@ -83,7 +82,6 @@ describe('readSelfHostedOssConfig', () => {
         missing,
         config: null,
       });
-      expect(isSelfHostedOssConfigured()).toBe(false);
     }
   });
 
@@ -114,7 +112,7 @@ describe('readSelfHostedOssConfig', () => {
 
   it('picks up env set after module load', () => {
     stubOssEnv({ OMNI_OSS_BUCKET: undefined });
-    expect(isSelfHostedOssConfigured()).toBe(false);
+    expect(readSelfHostedOssConfig()).toBeNull();
     vi.stubEnv('OMNI_OSS_BUCKET', 'late-bucket');
     expect(readSelfHostedOssConfig()?.bucket).toBe('late-bucket');
   });
@@ -285,12 +283,18 @@ describe('mentionsOmniDeliveredUri', () => {
 });
 
 describe('createOmniUploader', () => {
-  it('prefers the self-hosted bucket and falls back to DashScope', () => {
+  it('branches on the resolved channel, not on the environment', () => {
+    // The bucket stays configured across both halves on purpose: a factory
+    // that re-read the environment would upload somewhere the resolved
+    // channel never chose, and nothing downstream would notice.
     stubOssEnv();
     expect(
-      createOmniUploader({ apiKey: 'sk', baseUrl: 'https://x/v1' }),
+      createOmniUploader({
+        apiKey: 'sk',
+        baseUrl: 'https://x/v1',
+        selfHostedOss: readSelfHostedOssConfig()!,
+      }),
     ).toBeInstanceOf(OssDirectUploader);
-    stubOssEnv({ OMNI_OSS_BUCKET: undefined });
     expect(
       createOmniUploader({ apiKey: 'sk', baseUrl: 'https://x/v1' }),
     ).toBeInstanceOf(DashScopeUploader);

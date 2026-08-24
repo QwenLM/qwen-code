@@ -1,6 +1,6 @@
 # Omni 媒体策略编排
 
-> 实验特性:仅在 omni 实验分支可用,且仅支持 DashScope OpenAI 兼容模式(`qwen3.5-omni-*` 系列模型)。配置格式可能随实验推进调整,不承诺向后兼容。
+> 实验特性:仅在 omni 实验分支可用。媒体临时上传仍使用 DashScope 通道;推理既可使用 DashScope OpenAI 兼容模式,也可通过独立上传配置接入自部署的 OpenAI 兼容 Omni 模型。配置格式可能随实验推进调整,不承诺向后兼容。
 
 当你把图片、音频、视频交给多模态模型时,原始文件往往过大(一部 1080p 电影约 1GB)或过长(81 分钟的音轨),直接投递要么超出上传通道限制,要么烧掉整个上下文窗口。**媒体策略编排**让你用配置声明"什么媒体、满足什么条件时、用哪个工具、降质成什么样再投递",整条流水线是:
 
@@ -42,6 +42,29 @@
 
 零配置时 `fixedPolicies` 为空,预处理完全不运行——只有强制的传输守卫(见下文)在媒体超出上传通道限制时兜底。
 
+### 自定义推理与 DashScope 上传解耦
+
+当 Omni 推理走自部署地址、媒体仍需上传到 DashScope 时,配置独立上传通道:
+
+```json
+{
+  "omni": {
+    "enabled": true,
+    "delivery": {
+      "upload": {
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "apiKeyEnv": "DASHSCOPE_API_KEY",
+        "model": "qwen3.5-omni-plus"
+      }
+    }
+  }
+}
+```
+
+`apiKeyEnv` 填环境变量名,不填明文 key;启动 Qwen Code 前需确保该变量已有值。三个字段必须同时设置,否则启动失败。上传 endpoint/key/model 只用于 `getPolicy`、文件上传和上传缓存;自部署推理的 endpoint/key 仍按原有模型配置使用,两套凭据不会交叉发送。
+
+如果三个字段都不设置,则保留旧行为:当前推理配置本身必须是带静态 API key 的 DashScope 兼容配置,并同时作为上传配置。
+
 ---
 
 ## 配置总览
@@ -53,6 +76,9 @@ omni.processing.transportGuard.policies.<id>     传输守卫策略(有系统默
 omni.processing.transportGuard.maxUploadFileBytes  单文件上传上限(≤ 1GiB)
 omni.processing.policyTools.<toolName>           工具级设置 / 超时 / 模型可见性
 omni.processing.limits                           每根资源的派生预算
+omni.delivery.upload.baseUrl                     DashScope 上传 endpoint
+omni.delivery.upload.apiKeyEnv                   上传 key 的环境变量名
+omni.delivery.upload.model                       获取上传 policy 使用的模型
 omni.delivery.upload.urlTtlHours                 上传 URL 缓存时长(≤ 48)
 ```
 
@@ -199,6 +225,8 @@ extract-audio (origins:[user],  reprocessMedia:true, source:keep)
 
 多产物工具(关键帧)在一次调用事务里逐帧提升为独立产物;转写产物走 `【媒体转写】` 文本通道而非媒体通道。
 
+模型直接调用这些工具时,成功结果会列出每个产物的绝对路径,模型可立即用 `read_file` 读取剪辑、音频、关键帧或转写结果。
+
 ---
 
 ## transportGuard:传输守卫
@@ -250,7 +278,7 @@ extract-audio (origins:[user],  reprocessMedia:true, source:keep)
 ## 缓存与存储
 
 - **内容寻址库** `.qwen/omni/objects/sha256/<xx>/<hash>.<ext>` —— 所有派生产物按内容哈希入库,同输入同策略永不重复派生(降质缓存键 = 源哈希 + 策略身份);
-- **上传缓存** —— 投递 URL 按 `urlTtlHours`(≤ 48h)复用,重复投递不重复上传。默认走 DashScope 临时上传通道拿 `oss://` URL(仅 DashScope 自己能解析);配齐 `OMNI_OSS_*` 环境变量(endpoint / bucket / prefix / AK / SK)后改走自建 OSS 直传,返回预签名 https URL,供只接受可直接下载 URL 的自建推理端点使用;
+- **上传缓存** —— 投递 URL 按文件哈希、上传模型、上传 endpoint/key 隔离,并在 `urlTtlHours`(≤ 48h)内复用;只修改推理地址不会导致重复上传。默认走 DashScope 临时上传通道拿 `oss://` URL(仅 DashScope 自己能解析);配齐 `OMNI_OSS_*` 环境变量(endpoint / bucket / prefix / AK / SK)后改走自建 OSS 直传,返回预签名 https URL,供只接受可直接下载 URL 的自建推理端点使用;
 - **隔离区** `quarantine/<invocationId>/` —— 失败派生的暂存残留连同 `reason.json` 移入隔离区,按保留天数和体积预算惰性清扫;崩溃留下的未提交 staging 超过 1 小时宽限窗后被回收。
 
 ---

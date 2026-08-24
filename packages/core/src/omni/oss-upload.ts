@@ -79,10 +79,6 @@ export function readSelfHostedOssConfig(): SelfHostedOssConfig | null {
   };
 }
 
-export function isSelfHostedOssConfigured(): boolean {
-  return readSelfHostedOssConfig() !== null;
-}
-
 /**
  * Whether a fileUri came out of an omni delivery channel. Matching only the
  * `oss://` prefix would miss self-hosted deliveries, which silently
@@ -229,14 +225,17 @@ export class OssDirectUploader implements OmniUploader {
 }
 
 /**
- * Pick the delivery channel. A fully configured self-hosted bucket wins:
- * it is only ever set when the endpoint cannot resolve `oss://` itself.
+ * Build the uploader for an already-resolved upload channel. The choice is
+ * `selfHostedOss` being present, never a fresh environment read: resolution
+ * and construction disagreeing would upload to the wrong place silently.
+ *
+ * Takes the fields structurally rather than importing `OmniUploadConfig`,
+ * which would close an import cycle through `upload-config.ts`.
  */
 export function createOmniUploader(
-  options: DashScopeUploaderOptions,
+  upload: DashScopeUploaderOptions & { selfHostedOss?: SelfHostedOssConfig },
 ): OmniUploader {
-  const config = readSelfHostedOssConfig();
-  return config
-    ? new OssDirectUploader(config)
-    : new DashScopeUploader(options);
+  return upload.selfHostedOss
+    ? new OssDirectUploader(upload.selfHostedOss)
+    : new DashScopeUploader(upload);
 }

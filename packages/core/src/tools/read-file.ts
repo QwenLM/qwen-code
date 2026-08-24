@@ -17,7 +17,7 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
-import type { FunctionDeclaration, PartListUnion } from '@google/genai';
+import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
@@ -48,28 +48,8 @@ import {
   normalizeParts,
   splitImageParts,
 } from '../services/visionBridge/image-part-utils.js';
-import { isOmniDeliveryActive } from '../omni/delivery-gate.js';
 
 const debugLogger = createDebugLogger('READ_FILE_CACHE');
-
-/**
- * Media formats the omni content sniffer recognizes (recognition.ts).
- * Naming a format it rejects would advertise a file that silently falls
- * back to the inline path and its 10MB hard cap.
- */
-const OMNI_VIDEO_FORMATS = 'video (MP4, MOV, WebM, MKV, AVI)';
-const OMNI_AUDIO_FORMATS = 'audio (WAV, MP3, M4A, FLAC, OGG)';
-
-function omniMediaDescriptionSuffix(config: Config): string {
-  if (!isOmniDeliveryActive(config)) return '';
-  const modalities = config.getContentGeneratorConfig?.()?.modalities ?? {};
-  const kinds = [
-    ...(modalities.video ? [OMNI_VIDEO_FORMATS] : []),
-    ...(modalities.audio ? [OMNI_AUDIO_FORMATS] : []),
-  ];
-  if (kinds.length === 0) return '';
-  return ` Also handles ${kinds.join(' and ')} up to 1 GiB per file: the media itself is delivered to the model, so read it with this tool to perceive it directly rather than transcoding, sampling frames or transcribing it with shell commands.`;
-}
 
 /**
  * Parameters for the ReadFile tool
@@ -556,24 +536,11 @@ export class ReadFileTool extends BaseDeclarativeTool<
     return Number.POSITIVE_INFINITY;
   }
 
-  // The base description is a static constructor argument, but whether
-  // audio/video reach the model is per-session config. Omitting them is not
-  // a missing hint but a false enumeration: a model reading "Handles text,
-  // images, PDF" concludes read_file cannot take an mp4 and transcodes with
-  // shell tools instead.
-  override get schema(): FunctionDeclaration {
-    const base = super.schema;
-    const suffix = omniMediaDescriptionSuffix(this.config);
-    return suffix
-      ? { ...base, description: `${base.description}${suffix}` }
-      : base;
-  }
-
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), audio, video, PDF files, and Jupyter notebooks (.ipynb). Audio and video require the selected model to support the corresponding modality. For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {

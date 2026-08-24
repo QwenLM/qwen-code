@@ -17,16 +17,20 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isOmniDeliveryActive } from './index.js';
 import { effectiveMaxDownloadFileBytes } from './index.js';
 import { sanitizeErrorMessage } from './index.js';
+import type { OmniUploadConfig } from './upload-config.js';
 
 function stubConfig(overrides: {
   omniEnabled?: boolean;
   trusted?: boolean | undefined;
   cgc?: Record<string, unknown> | undefined;
+  upload?: OmniUploadConfig;
 }): Config {
   return {
     isOmniEnabled: vi.fn().mockReturnValue(overrides.omniEnabled ?? true),
     isTrustedFolder: vi.fn().mockReturnValue(overrides.trusted),
     getContentGeneratorConfig: vi.fn().mockReturnValue(overrides.cgc),
+    getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
+    getOmniUploadConfig: vi.fn().mockReturnValue(overrides.upload),
   } as unknown as Config;
 }
 
@@ -171,6 +175,26 @@ describe('isOmniDeliveryActive', () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it('is active for custom inference when a dedicated DashScope upload channel is configured', () => {
+    expect(
+      isOmniDeliveryActive(
+        stubConfig({
+          trusted: true,
+          cgc: {
+            authType: AuthType.USE_OPENAI,
+            apiKey: 'inference-key',
+            baseUrl: 'http://127.0.0.1:22002/v1',
+          },
+          upload: {
+            apiKey: 'upload-key',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            model: 'qwen3.5-omni-plus',
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 
   it('is inactive without a content generator config', () => {
@@ -602,6 +626,8 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
   function cacheConfig(overrides?: {
     cgc?: Record<string, unknown>;
     ttlHours?: number;
+    inferenceModel?: string;
+    upload?: OmniUploadConfig;
   }): Config {
     return {
       isOmniEnabled: vi.fn().mockReturnValue(true),
@@ -609,7 +635,10 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
       getContentGeneratorConfig: vi
         .fn()
         .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
-      getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
+      getModel: vi
+        .fn()
+        .mockReturnValue(overrides?.inferenceModel ?? 'qwen3.5-omni-plus'),
+      getOmniUploadConfig: vi.fn().mockReturnValue(overrides?.upload),
       getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
       getOmniUploadUrlTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
@@ -625,6 +654,7 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
       .fn()
       .mockResolvedValue({ objectPath: '/tmp/obj.mp3', deduped: false });
     const uploadFileMock = vi.fn().mockResolvedValue('oss://bucket/cached');
+    const uploaderOptionsMock = vi.fn();
     vi.doMock('./ffmpeg.js', () => ({
       isFfmpegAvailable: vi.fn().mockResolvedValue(true),
       isFfprobeAvailable: vi.fn().mockResolvedValue(true),
@@ -650,12 +680,15 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
     }));
     vi.doMock('./upload.js', () => ({
       DashScopeUploader: class {
+        constructor(options: unknown) {
+          uploaderOptionsMock(options);
+        }
         uploadFile = uploadFileMock;
       },
       OSS_URL_PREFIX: 'oss://',
     }));
     const mod = await import('./index.js');
-    return { putFileMock, uploadFileMock, mod };
+    return { putFileMock, uploadFileMock, uploaderOptionsMock, mod };
   }
 
   function mockRecognizedFor(
@@ -740,6 +773,62 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
     const back = await mod.processMediaForOmniDelivery(filePath, cacheConfig());
     expect(back.uploadCacheHit).toBe(true);
     expect(uploadFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses only the dedicated upload endpoint, key, and model', async () => {
+    const { uploadFileMock, uploaderOptionsMock, mod } = await armPipeline();
+    const upload: OmniUploadConfig = {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'upload-key',
+      model: 'dashscope-upload-model',
+    };
+    await mod.processMediaForOmniDelivery(
+      await realFile('song.mp3'),
+      cacheConfig({
+        cgc: {
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'inference-key',
+          baseUrl: 'http://127.0.0.1:22002/v1',
+        },
+        inferenceModel: 'qwen4-omni-120b-think',
+        upload,
+      }),
+    );
+
+    expect(uploaderOptionsMock).toHaveBeenCalledWith(upload);
+    expect(uploadFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({ model: upload.model }),
+    );
+  });
+
+  it('keeps a dedicated upload cache hit when only inference changes', async () => {
+    const { uploadFileMock, mod } = await armPipeline();
+    const upload: OmniUploadConfig = {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'upload-key',
+      model: 'dashscope-upload-model',
+    };
+    const filePath = await realFile('song.mp3');
+
+    await mod.processMediaForOmniDelivery(
+      filePath,
+      cacheConfig({
+        cgc: { baseUrl: 'http://inference-a/v1', apiKey: 'inference-a' },
+        inferenceModel: 'custom-a',
+        upload,
+      }),
+    );
+    const second = await mod.processMediaForOmniDelivery(
+      filePath,
+      cacheConfig({
+        cgc: { baseUrl: 'http://inference-b/v1', apiKey: 'inference-b' },
+        inferenceModel: 'custom-b',
+        upload,
+      }),
+    );
+
+    expect(second.uploadCacheHit).toBe(true);
+    expect(uploadFileMock).toHaveBeenCalledTimes(1);
   });
 
   it('runs startup recovery: an expired download .part is swept on first delivery', async () => {

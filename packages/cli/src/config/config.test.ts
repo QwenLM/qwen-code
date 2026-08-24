@@ -4780,6 +4780,13 @@ describe('loadCliConfig omni settings key validation', () => {
     const argv = await parseArguments();
     const settings: Settings = {
       omni: {
+        delivery: {
+          upload: {
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'DASHSCOPE_API_KEY',
+            model: 'qwen3.5-omni-plus',
+          },
+        },
         storage: { retentionDays: 7, maxTotalBytes: 1024 * 1024 * 1024 },
         memory: { recall: { mode: 'active' } },
         processing: {

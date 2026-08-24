@@ -2268,6 +2268,9 @@ export async function loadCliConfig(
     omniUrlDownloadMaxFileBytes:
       settings.omni?.ingestion?.localization?.url?.maxFileBytes,
     omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniUploadBaseUrl: settings.omni?.delivery?.upload?.baseUrl,
+    omniUploadApiKeyEnv: settings.omni?.delivery?.upload?.apiKeyEnv,
+    omniUploadModel: settings.omni?.delivery?.upload?.model,
     omniPolicyTools: settings.omni?.processing?.policyTools as
       | OmniPolicyToolsSettings
       | undefined,
