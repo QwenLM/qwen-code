@@ -60,6 +60,14 @@ describe('resolveContainedCwd', () => {
     );
   });
 
+  it('returns the resolved path for a contained directory starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
   it('accepts the workspace root itself', () => {
     expect(resolveContainedCwd(fakeReq(workspace), workspace)).toBe(
       fs.realpathSync(workspace),
@@ -116,6 +124,14 @@ describe('resolveContainedCwdOrFail', () => {
 
   it('returns the resolved path for a valid contained cwd', () => {
     const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
+  it('returns the resolved path for a contained cwd starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
     fs.mkdirSync(sub);
     expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
       fs.realpathSync(sub),
