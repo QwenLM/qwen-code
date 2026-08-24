@@ -155,14 +155,15 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
-  it('refuses while repo-local config defines ANY command-valued key — git executes their values', () => {
+  it('refuses the command-valued keys the value check cannot certify — git executes their values', () => {
     // A recipe step running `git config core.fsmonitor CMD` from the copy
     // lands in the host's COMMON config — textually an in-copy write,
     // actually a plant that outlives the copy's removal and executes at the
     // user's own next git operations (R12-1, measured live for fsmonitor and
-    // alias plants). The screen that began with smudge/clean filters covers
-    // the whole command-valued class now: an indistinguishable-from-a-plant
-    // state is a refusal, whatever key carries it.
+    // alias plants). The fail-closed screen refuses every one of these: the
+    // command-carrying shapes among them are not certifiable from their
+    // values, and a state indistinguishable from a plant is a refusal,
+    // whatever key carries it.
     for (const [key, value] of [
       ['core.fsmonitor', 'node fsmon.js'],
       ['core.pager', 'evil-pager'],
@@ -175,12 +176,158 @@ describe('runScratchTree', () => {
       const r = run();
 
       expect(r.available).toBe(false);
-      expect(r.note).toContain('command-valued');
+      expect(r.note).toContain('fail-closed screen');
       expect(
         existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
       ).toBe(false);
 
       // The key is the user's to remove — once gone, a tree stands again.
+      git(worktree, 'config', '--unset', key);
+      expect(run().available).toBe(true);
+      rmSync(scratchWorktreePath(worktree, 'verify--round-1--abc123'), {
+        recursive: true,
+        force: true,
+      });
+      git(worktree, 'worktree', 'prune');
+    }
+  });
+
+  it('fails CLOSED on key shapes it cannot certify as inert — known-executable misses included', () => {
+    // The screen used to be a blocklist of command-valued shapes, and the
+    // class is git-defined and open: probe-demonstrated entrances sat
+    // outside it — `core.editor` executes at the user's own next commit,
+    // `gpg.program` at the next signed commit, `diff.<driver>.textconv` at
+    // the next diff, the per-URL `credential.<url>.helper` at the next
+    // credential fill (R12-1). An enumeration of the EXECUTED family never
+    // converges across git versions, so the screen now admits a repo-local
+    // key only when its inertness IS established, and refuses everything
+    // else — including shapes no git version executes, because their
+    // inertness is just as uncertifiable.
+    for (const key of [
+      'core.editor',
+      'sequence.editor',
+      'gpg.program',
+      'diff.evil.textconv',
+      'merge.evil.driver',
+      'credential.https://x.example.helper',
+      'sendemail.sendmailcmd',
+      'sometool.custom.setting',
+    ]) {
+      git(worktree, 'config', key, 'evil-command');
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain(key);
+      expect(
+        existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+      ).toBe(false);
+
+      // The key is the user's to remove — once gone, a tree stands again.
+      git(worktree, 'config', '--unset', key);
+    }
+    expect(run().available).toBe(true);
+  });
+
+  it('refuses an include.* key — the imported file is invisible to a per-file scan', () => {
+    // `git config --file` reads do not follow includes, so one planted
+    // `include.path` importing a command key was invisible to the screen
+    // while the merged config the authorised checkouts read resolved and
+    // executed it (R12-1). The include directive itself IS visible to the
+    // same scan, and a key that can import arbitrary other keys is not
+    // certifiable as inert.
+    const imported = join(repo, 'imported-config');
+    writeFileSync(imported, '[core]\n\tsshCommand = evil\n');
+    git(worktree, 'config', 'include.path', imported);
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include.path');
+  });
+
+  it('screens the MAIN worktree’s own per-worktree config', () => {
+    // With `extensions.worktreeConfig` on, the main checkout's per-worktree
+    // config is `<common>/config.worktree` — honored by every checkout, and
+    // never among the scanned candidates, so a planted `core.fsmonitor`
+    // there fired at the user's own `git status` while the screen reported
+    // clean (R12-1).
+    git(worktree, 'config', 'extensions.worktreeConfig', 'true');
+    execFileSync('git', ['config', '--worktree', 'core.fsmonitor', 'evil'], {
+      cwd: repo,
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('core.fsmonitor');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an EXECUTABLE hook in the hooks dir — the config screen cannot see it',
+    () => {
+      // A hook carries no config key, so a key screen passes whatever the
+      // dir holds; the file fires at the user's own next commit and survives
+      // the copy's discard (R12-1). This command's own git runs with hooks
+      // disabled — the refusal is for the persistence, planted in the common
+      // dir the report calls shared.
+      const hook = join(repo, '.git', 'hooks', 'pre-commit');
+      writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(hook, 0o755);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('pre-commit');
+      expect(existsSync(join(repo, 'PWNED'))).toBe(false);
+
+      // Non-executable, git does not run it — and a `.sample` never.
+      chmodSync(hook, 0o644);
+      expect(run().available).toBe(true);
+      writeFileSync(join(repo, '.git', 'hooks', 'evil.sample'), '#!/bin/sh\n');
+      chmodSync(join(repo, '.git', 'hooks', 'evil.sample'), 0o755);
+      expect(run().available).toBe(true);
+    },
+  );
+
+  it('certifies the inert VALUES of value-checked keys — fail-closed is not value-blind', () => {
+    // The old blocklist was value-blind: a boolean `core.fsmonitor` selects
+    // git's builtin daemon, a plain alias never reaches a shell, and an
+    // `https://` fetch address names no program — yet all of them refused.
+    // The fail-closed screen reads the value where inertness is decidable
+    // from it, so benign user config does not block the tree (R12-1's fix).
+    git(worktree, 'config', 'core.fsmonitor', 'true');
+    git(worktree, 'config', 'alias.st', 'status -s');
+    git(worktree, 'config', 'remote.origin.url', 'https://example.com/r.git');
+    git(
+      worktree,
+      'config',
+      'remote.origin.fetch',
+      '+refs/heads/*:refs/remotes/origin/*',
+    );
+    git(worktree, 'config', 'submodule.vendor.url', '/srv/vendor.git');
+    git(worktree, 'config', 'submodule.vendor.update', 'merge');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+  });
+
+  it('refuses the executable VALUE shapes of the value-checked keys', () => {
+    for (const [key, value] of [
+      ['alias.evil', '!sh -c evil'],
+      ['remote.origin.url', 'ext::sh -c evil'],
+      ['remote.origin.url', 'evilhelper::addr'],
+      ['submodule.vendor.update', '!sh -c evil'],
+      ['submodule.vendor.url', 'ext::evil'],
+    ] as Array<[string, string]>) {
+      git(worktree, 'config', key, value);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain(key);
+
       git(worktree, 'config', '--unset', key);
       expect(run().available).toBe(true);
       rmSync(scratchWorktreePath(worktree, 'verify--round-1--abc123'), {
@@ -328,16 +475,25 @@ describe('runScratchTree', () => {
     // The scratch tree is a LINKED worktree, so its hooks resolve to the common
     // dir — the user's own `.git/hooks`. `worktree add` and `checkout` both run
     // `post-checkout` from there, which would make creating or resetting a
-    // scratch tree execute whatever that repository holds.
+    // scratch tree execute whatever that repository holds. The hooks screen
+    // refuses while an executable hook stands in that dir, so no tree is
+    // created or reset with one present; `NO_HOOKS` stays as the backstop for
+    // the window between the screen and the checkout. Either way the hook
+    // never fires from this command.
     const log = join(repo, 'hook.log');
     const hook = join(repo, '.git', 'hooks', 'post-checkout');
     mkdirSync(dirname(hook), { recursive: true });
     writeFileSync(hook, `#!/bin/sh\necho fired >> ${log}\n`);
     chmodSync(hook, 0o755);
 
-    run(); // creation path
-    run(); // reset path
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('post-checkout');
     expect(existsSync(log)).toBe(false);
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
   });
 
   it('replaces a node_modules it did not build rather than trusting it', () => {

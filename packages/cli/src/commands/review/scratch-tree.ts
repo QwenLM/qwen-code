@@ -44,6 +44,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -141,38 +142,109 @@ export interface ScratchTreeArgs {
  * that repository has (and whatever a probe managed to write into it) as a side
  * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
  * that holds no hooks covers the HOOKS; it does not cover config-driven
- * COMMANDS — `filter.<name>.smudge|clean` values, which a checkout runs
- * whenever an attributes file selects them, and pager, alias, fsmonitor,
- * ssh-command and credential-helper values, which the user's own next git
- * operations run. `runScratchTree` detects that surface in the repository's
- * own config and refuses rather than run it (see `localCommandConfig`). What
- * a probe does with its own shell is the probe's business, and the report
- * says plainly that the common dir is shared rather than isolated.
+ * COMMANDS — values git executes from repo-local config (content filters,
+ * fsmonitor, pager, editor, ssh and gpg programs, aliases, credential
+ * helpers, and more), which the user's own next git operations run as well.
+ * The key shapes that carry them are git-defined and grow across git
+ * versions, so `runScratchTree` screens the repo-local config FAIL-CLOSED
+ * and refuses rather than run it (see `localCommandConfig`) — and screens
+ * the executable hooks a key screen cannot see (see `localExecutableHooks`).
+ * What a probe does with its own shell is the probe's business, and the
+ * report says plainly that the common dir is shared rather than isolated.
  */
 const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
+// Repo-local key shapes git never executes, whatever value they hold — the
+// fail-closed half of the screen in `localCommandConfig`. A shape listed here
+// must stay inert for EVERY value; anything executable, or uncertifiable,
+// belongs out of it — a miss costs a refusal, never an execution.
+const INERT_KEY_SHAPES: RegExp[] = [
+  // Written by `git init`, `git clone` and `git worktree add` itself.
+  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository)$/,
+  // Identity and per-branch plumbing — names, addresses, refs, booleans.
+  /^(user|author|committer)\./,
+  /^branch\./,
+  // Capability flags: they change which FILES git reads, and every file this
+  // screen reads is one of the candidates below.
+  /^extensions\./,
+  /^gc\./,
+  // A remote's refspecs and behaviour flags; its url shapes are value-checked
+  // below — `ext::` and `<helper>::` schemes execute.
+  /^remote\..+\.(fetch|push|tagopt|mirror)$/,
+  // Submodule registration flags; url and update are value-checked below.
+  /^submodule\..+\.(active|branch)$/,
+];
+
+// Key shapes whose inertness the VALUE decides, and the decision. Composed
+// routes stay closed: an alias expanding to a builtin that honors another
+// config command still needs that command's key planted repo-locally, and
+// the key fails this same screen.
+const VALUE_CHECKED_SHAPES: Array<{
+  shape: RegExp;
+  valueIsInert: (value: string) => boolean;
+}> = [
+  {
+    // Boolean values select git's builtin fsmonitor daemon (true) or nothing
+    // (false); only a command string executes.
+    shape: /^core\.fsmonitor$/,
+    valueIsInert: (value) =>
+      /^(true|false|yes|no|on|off|1|0)$/i.test(value.trim()),
+  },
+  {
+    // Only a leading `!` hands an alias to a shell; a leading `-` expands to
+    // command-line OPTIONS on git versions without the hardening against
+    // option-bearing aliases, so neither shape is certifiable — every other
+    // value expands to a builtin's arguments.
+    shape: /^alias\./,
+    valueIsInert: (value) => {
+      const lead = value.trimStart();
+      return !lead.startsWith('!') && !lead.startsWith('-');
+    },
+  },
+  {
+    // A fetch address executes a program only when it names one: the `ext::`
+    // transport and any custom `<helper>::` scheme spawn `git-remote-<helper>`.
+    // The standard schemes and plain paths name nothing the config itself runs.
+    shape: /^(remote\..+\.(url|pushurl)|submodule\..+\.url)$/,
+    valueIsInert: (value) => !/^[a-z][a-z0-9+.-]*::/i.test(value.trim()),
+  },
+  {
+    // Update strategies are checkout, rebase, merge, none — or `!command`.
+    shape: /^submodule\..+\.update$/,
+    valueIsInert: (value) => !value.trimStart().startsWith('!'),
+  },
+];
+
 /**
- * The repo-local config keys whose VALUES git executes, when any are defined.
+ * The repo-local config entries this screen cannot certify as inert.
  *
- * The reset's and rebuild's checkouts EXECUTE smudge/clean filters — hooks are
- * disabled above, config commands are not — and a `core.fsmonitor` command
- * runs at the rebuild's `worktree add` and at the residue probe's status
- * reads (measured live on both). The planting surface is plain writes into
- * the COMMON dir this command's report calls shared: `git config
- * filter.evil.smudge CMD` plus one line appended to `$(git rev-parse
- * --git-path info/attributes)` — or, one step removed, `git config
- * core.fsmonitor CMD` from the copy, which lands in the host's common config
- * (measured live). Pager, alias, ssh-command and credential-helper values are
- * the same persistence class: they execute at the user's OWN next git
- * operations in that repository. discard and cleanup never wipe the common
- * dir, so a key planted while reviewing one PR survives the copy's removal —
+ * The screen is FAIL-CLOSED: a repo-local key is admitted only when its
+ * inertness is established — a known-inert shape, or a value-checked shape
+ * holding only inert values — and everything else is a refusal. The former
+ * shape of this function, a blocklist of command-valued keys, enumerated the
+ * family git EXECUTES; that family is git-defined, parameterized
+ * (`diff.<driver>.textconv`, `merge.<driver>.driver`, the per-URL
+ * `credential.<url>.helper`) and grows across git versions, so an
+ * enumeration of it never converges — `core.editor` executes at the user's
+ * own next commit, `gpg.program` at the next signed commit, a textconv at
+ * the next diff, and every one of them passed the blocklist (R12-1, probed
+ * live against this command). Enumerating the known-INERT shapes instead
+ * fails safe: a miss costs a refusal the note explains, never an execution.
+ *
+ * The planting surface the refusal covers is plain writes into the COMMON
+ * dir this command's report calls shared: discard and cleanup never wipe it,
+ * so a key planted while reviewing one PR survives the copy's removal and
+ * executes at the user's OWN next git operations in that repository —
  * persistence planted by reviewing a malicious PR, measured live. The
- * repo-local config files are checked with `--file` rather than merged config
- * because command values in the user's global config (git-lfs is the common
- * one) are the user's own contract, exactly like any git command they run —
- * while the planting surface is the repo-local files. The state cannot be
- * told apart from a key the user set deliberately, and cannot be safely
- * wiped, so a hit is a refusal upstream, not a cleanup here.
+ * repo-local config files are read one file at a time (`--file`, includes
+ * not followed) rather than as merged config because command values in the
+ * user's global config (git-lfs is the common one) are the user's own
+ * contract, exactly like any git command they run — while the planting
+ * surface is the repo-local files. An `include.*` key is refused for the
+ * same reason: the file it imports is invisible to a per-file scan, so its
+ * inertness is uncertifiable by construction. The state cannot be told apart
+ * from a key the user set deliberately, and cannot be safely wiped, so a hit
+ * is a refusal upstream, not a cleanup here.
  */
 function localCommandConfig(worktree: string): string[] {
   const files = spawnSync(
@@ -181,12 +253,18 @@ function localCommandConfig(worktree: string): string[] {
     { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    // Fail closed: with the candidates unknowable, nothing can be certified.
+    return ['(the repository’s git dir could not be read)'];
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
+    // The MAIN worktree's own per-worktree config: honored by every checkout
+    // once extensions.worktreeConfig is on, and never one of these
+    // candidates until a planted core.fsmonitor there fired at the user's
+    // own status read while this screen reported the repository clean.
+    join(common, 'config.worktree'),
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
@@ -201,26 +279,117 @@ function localCommandConfig(worktree: string): string[] {
       candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
     }
   } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
+    // No linked worktrees registered: the candidates above are all of it.
   }
   const found: string[] = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--get-regexp',
-        '^(filter\\..*\\.(smudge|clean)|core\\.(fsmonitor|pager|sshcommand)|credential\\.helper|alias\\..*)$',
-      ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-    );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+    const keys = configKeysIn(file, worktree);
+    if (keys === null) {
+      found.push(`${file} (unreadable or malformed)`);
+      continue;
+    }
+    for (const key of keys) {
+      if (INERT_KEY_SHAPES.some((shape) => shape.test(key))) continue;
+      const checked = VALUE_CHECKED_SHAPES.find(({ shape }) => shape.test(key));
+      if (checked) {
+        const values = configValuesIn(file, key, worktree);
+        if (
+          values !== null &&
+          values.length > 0 &&
+          values.every(checked.valueIsInert)
+        ) {
+          continue;
+        }
+      }
+      if (!found.includes(key)) found.push(key);
+    }
+  }
+  return found;
+}
+
+function configKeysIn(file: string, worktree: string): string[] | null {
+  const r = spawnSync(
+    'git',
+    ['config', '--file', file, '--list', '--name-only', '-z'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
+  return r.stdout.split('\0').filter(Boolean);
+}
+
+function configValuesIn(
+  file: string,
+  key: string,
+  worktree: string,
+): string[] | null {
+  const r = spawnSync(
+    'git',
+    ['config', '--file', file, '--get-all', '--null', key],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
+  return r.stdout.split('\0').filter(Boolean);
+}
+
+/**
+ * The executable hooks standing in the repository's own hooks dir, when any.
+ *
+ * A hook carries no config key, so the screen above passes whatever the dir
+ * holds — and the dir lives in the common dir this report calls shared: a
+ * planted `pre-commit` fires at the user's own next commit and survives the
+ * copy's discard (R12-1). This command's own git runs with hooks disabled;
+ * the refusal is for the persistence, which cannot be told apart from a hook
+ * the user set deliberately and cannot be safely wiped — an upstream refusal,
+ * not a cleanup. Only the repository's OWN hooks dir is this surface: a
+ * repo-local `core.hooksPath` is refused by the config screen (its inertness
+ * is not established), and one set globally resolves elsewhere — the user's
+ * own contract, like their global config.
+ */
+function localExecutableHooks(worktree: string): string[] {
+  const r = spawnSync(
+    'git',
+    ['rev-parse', '--git-common-dir', '--git-path', 'hooks'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    // Fail closed, like the config screen.
+    return ['(the hooks directory could not be resolved)'];
+  }
+  const [commonDir, hooksPath] = r.stdout.trim().split('\n');
+  const common = resolve(worktree, commonDir);
+  const ownHooksDir = join(common, 'hooks');
+  // The resolved path honors any hooksPath redirect; only the default dir
+  // is the planting surface this screen owns (see the doc comment).
+  try {
+    if (!existsSync(ownHooksDir)) return [];
+    if (
+      realpathSync(resolve(worktree, hooksPath)) !== realpathSync(ownHooksDir)
+    ) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(ownHooksDir);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of entries) {
+    if (name.endsWith('.sample')) continue;
+    let stats;
+    try {
+      stats = statSync(join(ownHooksDir, name));
+    } catch {
+      continue;
+    }
+    if (!stats.isFile()) continue;
+    // Windows has no exec bit git honors — any standing file can run.
+    if (process.platform === 'win32' || (stats.mode & 0o111) !== 0) {
+      found.push(`hooks/${name}`);
     }
   }
   return found;
@@ -498,22 +667,39 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   }
 
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters, and a configured
-  // `core.fsmonitor` runs at that add and at the residue probe's status reads.
+  // `worktree add` both execute whatever repo-local config those checkouts
+  // honor (smudge/clean filters, a configured fsmonitor), and the user's own
+  // next git operations execute the rest — so both screens run first.
   const commandKeys = localCommandConfig(worktree);
   if (commandKeys.length > 0) {
     return unavailable(
-      `the repository's local config defines command-valued key(s) ${commandKeys
+      `the repository's local config failed this command's fail-closed screen: ${commandKeys
         .map(inertPath)
-        .join(', ')} — ` +
-        'git EXECUTES their values (hooks are disabled, config commands are not): ' +
-        'the checkouts this command runs execute smudge/clean filters and a ' +
-        'configured fsmonitor, and pager, alias, ssh-command and credential-helper ' +
-        "values execute at the user's own next git operations in this repository. " +
-        'Two plain writes into the common dir are enough to plant any of them, and ' +
-        'the common dir is never wiped, so what is planted survives this review. ' +
-        'Remove a key that is not yours; until then no scratch tree is safe to ' +
-        'create or reset.',
+        .join(', ')}. ` +
+        'Git EXECUTES the values of several config families — content filters, ' +
+        'fsmonitor, pager, editor, ssh and gpg programs, aliases, credential ' +
+        'helpers, textconv and merge drivers, remote addresses that name a ' +
+        'program — and the family grows across git versions, so a repo-local ' +
+        'key is admitted only when its inertness IS established; a key this ' +
+        'screen cannot certify is indistinguishable from one a malicious ' +
+        'review planted. The common dir is never wiped, so what is planted ' +
+        "survives this review and executes at the user's own next git " +
+        'operations. Remove an entry that is not yours (or move it to your ' +
+        'global config, which this screen does not read); until then no ' +
+        'scratch tree is safe to create or reset.',
+    );
+  }
+  const hooks = localExecutableHooks(worktree);
+  if (hooks.length > 0) {
+    return unavailable(
+      `the repository's hooks directory carries ${
+        hooks.length === 1 ? 'an executable hook' : 'executable hooks'
+      } ${hooks.map(inertPath).join(', ')} — this command runs its own git ` +
+        'with hooks disabled, but a hook planted in the common dir survives ' +
+        "the copy's discard and fires at the user's own next git operations, " +
+        'and an executable hook cannot be told apart from one the user set ' +
+        'deliberately. Remove a hook that is not yours; until then no ' +
+        'scratch tree is safe to create or reset.',
     );
   }
 
