@@ -709,11 +709,14 @@ describe('UpdateGoalTool', () => {
       }),
     );
 
-    await invocation.execute(new AbortController().signal);
+    const result = await invocation.execute(new AbortController().signal);
 
     expect(recordTerminalProposal).toHaveBeenCalledWith(
       permit,
       expect.objectContaining({ evidenceRefs: ['tool-result-1'] }),
+    );
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'autoCitedCurrentDeliveredOutput',
     );
   });
 
