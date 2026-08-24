@@ -2180,6 +2180,18 @@ export async function runNonInteractive(
             structuredSubmission !== undefined,
           );
           for (const call of unexecutedCalls) {
+            // Never executed: the fabricated skipped-output response
+            // carries no result evidence, so unwind the request-side
+            // reservations the loop guards made when the call streamed in —
+            // mirroring the daemon's not_started filter and agent-core's
+            // neverExecutedCallIds exclusion. Without this the constant
+            // fabricated fingerprint passes client.ts's recording feed
+            // (isDuplicateProviderToolCallResponse is false for it) and
+            // counts as a "changed" result every round, exonerating a
+            // stuck frozen-board poller (issue #9450 requirement #6).
+            geminiClient
+              .getLoopDetectionService()
+              .noteSuppressedToolCallByCallId(call.callId);
             const responseParts: Part[] = [
               {
                 functionResponse: {
