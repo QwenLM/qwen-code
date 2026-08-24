@@ -129,7 +129,10 @@ export class WorkflowRunner {
       compileWorkflowScript(script);
     } catch (error) {
       throw new WorkflowScriptNotLaunchedError(
-        describeWorkflowCompileError(error),
+        describeWorkflowCompileError(
+          error,
+          script.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        ),
       );
     }
 

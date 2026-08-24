@@ -2750,7 +2750,10 @@ describe('createWorkflowSandbox primitives', () => {
       try {
         compileWorkflowScript(source);
       } catch (e) {
-        return describeWorkflowCompileError(e);
+        return describeWorkflowCompileError(
+          e,
+          source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        );
       }
       throw new Error('expected the source to fail compilation');
     }
@@ -2775,6 +2778,12 @@ const x: string = 1;`);
       expect(rendered).toContain('const x: string = 1;');
     });
 
+    it('does not attribute a closing-wrapper error to the author', () => {
+      const rendered = renderFor('await agent(');
+      expect(rendered).not.toContain('line 2');
+      expect(rendered).not.toContain('})()');
+    });
+
     it('carries the offending source line and a caret under it', () => {
       const rendered = renderFor('const x: string = 1;');
       const lines = rendered.split('\n');
@@ -2797,7 +2806,7 @@ const x: string = 1;`);
 
     it('falls back to the plain message when there is no source frame', () => {
       expect(
-        describeWorkflowCompileError(new Error('meta must be an object')),
+        describeWorkflowCompileError(new Error('meta must be an object'), 1),
       ).toBe('meta must be an object');
     });
   });

@@ -259,7 +259,10 @@ const COMPILE_ERROR_LINE_WIDTH = 80;
  *
  * Falls back to the bare message when the stack carries no source frame.
  */
-export function describeWorkflowCompileError(error: unknown): string {
+export function describeWorkflowCompileError(
+  error: unknown,
+  authorLineCount: number,
+): string {
   const err = error instanceof Error ? error : new Error(String(error));
   const stack = typeof err.stack === 'string' ? err.stack : '';
   const frame: string[] = [];
@@ -274,10 +277,10 @@ export function describeWorkflowCompileError(error: unknown): string {
     return err.message;
   }
 
-  // Undo the wrapper's one-line offset. A body line of 0 would mean the error
-  // is on the wrapper itself, which is ours, not the author's — fall back.
+  // Undo the wrapper's one-line offset. A line outside the author's source is
+  // on the wrapper itself, which is ours, not the author's — fall back.
   const bodyLine = Number(match[1]) - 1;
-  if (bodyLine < 1) return err.message;
+  if (bodyLine < 1 || bodyLine > authorLineCount) return err.message;
 
   const rendered = clampSourceFrame(frame[1] ?? '', frame[2] ?? '');
   const tail = frame
