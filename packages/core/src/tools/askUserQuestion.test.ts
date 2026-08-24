@@ -312,6 +312,40 @@ describe('AskUserQuestionTool', () => {
       expect(result.llmContent).toContain('declined to answer');
     });
 
+    it('should return the confirmation cancellation reason when provided', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Test?',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'Option A' },
+              { label: 'B', description: 'Option B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'Cannot render approval UI in this client.',
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(
+        'Cannot render approval UI in this client.',
+      );
+      expect(result.returnDisplay).toBe(
+        'Cannot render approval UI in this client.',
+      );
+    });
+
     it('should return formatted answers when user provides them', async () => {
       const params = {
         questions: [
