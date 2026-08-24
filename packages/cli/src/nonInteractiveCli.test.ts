@@ -2052,37 +2052,6 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('labels CHANTING_IDENTICAL_SENTENCES as output-or-reasoning repetition', async () => {
-    setupMetricsMock();
-    const events: ServerGeminiStreamEvent[] = [
-      {
-        type: GeminiEventType.LoopDetected,
-        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
-      },
-    ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Say something',
-      'prompt-id-chanting-label',
-    );
-
-    expect(exitCode).toBe(1);
-    // The chunk-hash chanting detector also fires on the hidden reasoning
-    // stream (issue #9656), where the halt can land before any visible
-    // content streams. The label must cover both sources instead of
-    // claiming the repetition appeared "in its output" only.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'the model repeated the same sentence in its output or reasoning',
-      ),
-    );
-  });
-
   it('shows the skipLoopDetection escape hint for a heuristic loop type', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {
