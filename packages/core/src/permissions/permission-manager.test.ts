@@ -2843,6 +2843,48 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('send_message')).toBe(false);
     });
 
+    it('removing a startup allow rule mid-session keeps its tools registered (restart-scoped, #9827)', async () => {
+      // Registry membership is monotonic for the session: activation and
+      // registration are snapshotted at startup ("Requires restart"), so a
+      // mid-session removal (/permissions or a qwen serve live settings
+      // sync) must not hard-block tools that were legitimately registered.
+      // Pre-fix, every call failed EXECUTION_DENIED citing no deny rule.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Shell', 'read_file'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+
+      expect(pm.removePersistentRule('Shell', 'allow')).toBe(true);
+      // Still a registry member...
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+      // ...but the removal revokes auto-approval at runtime (the call
+      // falls back to the normal confirmation flow instead of being
+      // permission-errored).
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe(
+        'default',
+      );
+      // Unlisted tools stay gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('removing ALL startup allow rules mid-session keeps registered tools enabled (#9827)', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Shell', 'ReadFile'] }),
+      );
+      pm.initialize();
+      expect(pm.removePersistentRule('Shell', 'allow')).toBe(true);
+      expect(pm.removePersistentRule('ReadFile', 'allow')).toBe(true);
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      // A tool never covered at startup stays gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
     it('AUTO-mode-stripped allow rules still activate the allowlist and keep membership', async () => {
       // Starting in AUTO strips dangerous allow rules from runtime
       // evaluation; they are still configured rules, so their tools must

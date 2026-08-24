@@ -175,6 +175,24 @@ export class PermissionManager {
    */
   private permissionsAllowListActive = false;
 
+  /**
+   * Frozen snapshot of the allow rules in force at startup, captured at
+   * the end of `initialize()`.
+   *
+   * Registry membership must be monotonic within a session: activation and
+   * registration are snapshotted at startup ("Requires restart"), so
+   * REMOVING an allow rule mid-session — `/permissions` →
+   * `removePersistentRule`, or a `qwen serve` settings edit →
+   * `syncLivePermissionManagers` — must not hard-block a tool that was
+   * legitimately registered (it is still listed in `/tools` and its schema
+   * is still sent to the model; blocking every call with EXECUTION_DENIED
+   * until restart contradicts the restart-scoped contract). Removals take
+   * effect at restart; membership is the union of this frozen startup set
+   * and the live rule set, so mid-session GRANTS still extend coverage
+   * (#9827).
+   */
+  private startupAllowRules: PermissionRule[] = [];
+
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
@@ -218,6 +236,13 @@ export class PermissionManager {
     this.permissionsAllowListActive = parseRules(
       this.config.getRegistryAllowList?.() ?? [],
     ).some((rule) => !rule.invalid);
+
+    // Freeze the startup allow-rule set AFTER the AUTO-mode strip above so
+    // stripped (stashed) rules count toward membership too. Registry
+    // membership is the union of this frozen set and the live rule set —
+    // monotonic within the session, removals take effect at restart (see
+    // `startupAllowRules`, #9827).
+    this.startupAllowRules = this.getEffectiveAllowRules();
   }
 
   // ---------------------------------------------------------------------------
@@ -768,15 +793,21 @@ export class PermissionManager {
    * registered) and honours meta-categories (`Read` covers grep/glob/...,
    * `Bash` covers monitor) via `toolMatchesRuleToolName`.
    *
-   * Session-granted rules count toward membership even though they cannot
-   * ACTIVATE the allowlist — so skill `allowedTools` grants and mid-session
-   * "Always allow" choices keep their tools available under an active
-   * allowlist.
+   * Membership is monotonic within the session: the union of the frozen
+   * startup rule set (`startupAllowRules`) and the live rule set. Removing
+   * a STARTUP rule mid-session therefore never deregisters an
+   * already-registered tool (removals take effect at restart, matching the
+   * documented "Requires restart" contract), while rules granted
+   * mid-session — skill `allowedTools`, "Always allow", `/permissions`
+   * writes — extend membership live even though they can never ACTIVATE
+   * the allowlist (#9827).
    */
   private isCoveredByAllowRule(canonicalName: string): boolean {
-    return this.getEffectiveAllowRules().some(
-      (rule) =>
-        !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName),
+    const covered = (rule: PermissionRule): boolean =>
+      !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName);
+    return (
+      this.startupAllowRules.some(covered) ||
+      this.getEffectiveAllowRules().some(covered)
     );
   }
 
