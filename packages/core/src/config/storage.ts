@@ -9,13 +9,14 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import lockfile from 'proper-lockfile';
 import {
   getProjectHash,
   QWEN_DIR,
   sanitizeCwd,
   isTempDirPath,
 } from '../utils/paths.js';
-import { FatalConfigError } from '../utils/errors.js';
+import { FatalConfigError, isNodeError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -390,10 +391,40 @@ export class Storage {
 
   /**
    * Marker file recording when an entry's non-temp cwds were first seen
-   * gone. Written once (its mtime is the grace anchor — never rewrite),
-   * deleted only together with the entry itself.
+   * gone. Its mtime is the grace anchor; a resume claim renews the grace
+   * episode before reading the transcript.
    */
   private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
+
+  /**
+   * Claims a local transcript for reading by refreshing an existing cleanup
+   * marker. Cleanup takes the same cross-process lock before its final checks,
+   * so it either deletes first or observes the renewed grace window.
+   */
+  async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
+    const entryPath = this.getProjectDir();
+    const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
+    try {
+      if (!fs.statSync(entryPath).isDirectory() || !fs.existsSync(markerPath)) {
+        return operation();
+      }
+    } catch {
+      return operation();
+    }
+    const release = await Storage.acquireProjectDirLock(entryPath, true);
+    if (!release) return operation();
+    try {
+      if (fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath)) {
+        const now = new Date();
+        fs.utimesSync(markerPath, now, now);
+      }
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) throw error;
+    } finally {
+      await release().catch(() => {});
+    }
+    return operation();
+  }
 
   /**
    * Per-transcript scan budget. Sweeps stream every record-bearing file
@@ -563,30 +594,80 @@ export class Storage {
         // Salvage failures must never block removal.
       }
     }
-    // The salvage await reads every transcript of the doomed entry,
-    // widening the check-then-delete window: a cwd may reappear (media
-    // plugged back in) and a new session may start writing into this
-    // very entry during that time. Re-run the cheap gates before the
-    // irreversible step and bail out if the entry is protected again.
-    if (cwds) {
-      if (!fs.existsSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))) {
-        // A concurrent sweep cleared the marker because this entry
-        // became current or live again — its absence is the newest
-        // ownership signal.
+    const releaseLock = await Storage.acquireProjectDirLock(entryPath, false);
+    if (!releaseLock) return;
+
+    try {
+      // The salvage await widens the check-then-delete window. Re-run every
+      // cheap gate while holding the same lock as transcript readers.
+      if (cwds) {
+        const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
+        if (!fs.existsSync(markerPath)) {
+          return;
+        }
+        if (
+          Date.now() - fs.statSync(markerPath).mtimeMs <=
+          Storage.ORPHAN_STALE_AGE_MS
+        ) {
+          return;
+        }
+        if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+          Storage.removeOrphanMarker(entryPath);
+          return;
+        }
+      }
+      if (Storage.hasLiveSession(entryPath, false)) {
         return;
       }
-      if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+      const newest = Storage.newestFileMtimeMs(entryPath);
+      if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
         Storage.removeOrphanMarker(entryPath);
         return;
       }
+      fs.rmSync(entryPath, { recursive: true, force: true });
+      result.removed.push(entry);
+    } finally {
+      await releaseLock().catch(() => {});
     }
-    const newest = Storage.newestFileMtimeMs(entryPath);
-    if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
-      Storage.removeOrphanMarker(entryPath);
-      return;
+  }
+
+  private static async acquireProjectDirLock(
+    entryPath: string,
+    waitForLock: boolean,
+  ): Promise<(() => Promise<void>) | undefined> {
+    const runtimeBaseDir = path.dirname(path.dirname(entryPath));
+    const lockRoot = path.join(
+      runtimeBaseDir,
+      TMP_DIR_NAME,
+      'orphan-cleanup-locks',
+    );
+    try {
+      fs.mkdirSync(lockRoot, { recursive: true });
+      return await lockfile.lock(
+        path.join(lockRoot, path.basename(entryPath)),
+        {
+          realpath: false,
+          stale: Storage.ORPHAN_STALE_AGE_MS,
+          update: 60_000,
+          retries: waitForLock
+            ? { retries: 20, minTimeout: 10, maxTimeout: 100 }
+            : 0,
+        },
+      );
+    } catch (error) {
+      if (
+        waitForLock &&
+        !(
+          isNodeError(error) &&
+          (error.code === 'EACCES' ||
+            error.code === 'EPERM' ||
+            error.code === 'EROFS')
+        )
+      ) {
+        throw error;
+      }
+      return undefined;
     }
-    fs.rmSync(entryPath, { recursive: true, force: true });
-    result.removed.push(entry);
   }
 
   /** Newest mtime among the entry's files (depth ≤ 2); 0 when none. */

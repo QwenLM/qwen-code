@@ -811,6 +811,70 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(result.errors).toEqual([]);
   });
 
+  it('keeps a stale entry read by a resume during salvage', async () => {
+    const resumeStorage = new Storage(goneCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, goneCwd);
+    ageEntry(entryName);
+
+    const result = await sweepPastMarkerGrace(entryName, async () => {
+      await resumeStorage.runWithProjectDirReadClaim(async () => {
+        expect(
+          actualFs.readFileSync(
+            path.join(projectsDir, entryName, 'chats', 'session-1.jsonl'),
+            'utf8',
+          ),
+        ).toContain(goneCwd);
+      });
+    });
+
+    expect(actualFs.existsSync(resumeStorage.getProjectDir())).toBe(true);
+    expect(result.removed).not.toContain(entryName);
+    expect(result.errors).toEqual([]);
+    expect(
+      actualFs.existsSync(
+        path.join(resumeStorage.getProjectDir(), '.qwen-orphan-since'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not mark a healthy entry when reading its transcript', async () => {
+    const resumeStorage = new Storage(aliveCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, aliveCwd);
+
+    await resumeStorage.runWithProjectDirReadClaim(async () => {
+      expect(
+        actualFs.readFileSync(
+          path.join(projectsDir, entryName, 'chats', 'session-1.jsonl'),
+          'utf8',
+        ),
+      ).toContain(aliveCwd);
+    });
+
+    expect(
+      actualFs.existsSync(
+        path.join(resumeStorage.getProjectDir(), '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not remove an entry after a resume renews its grace', async () => {
+    const resumeStorage = new Storage(goneCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, goneCwd);
+    ageEntry(entryName);
+    await Storage.cleanOrphanProjectDirs('current');
+    ageFile(path.join(projectsDir, entryName, '.qwen-orphan-since'));
+
+    const result = await resumeStorage.runWithProjectDirReadClaim(() =>
+      Storage.cleanOrphanProjectDirs('current'),
+    );
+
+    expect(actualFs.existsSync(resumeStorage.getProjectDir())).toBe(true);
+    expect(result.removed).not.toContain(entryName);
+  });
+
   it('keeps fresh entries even when their cwd is gone (grace window)', async () => {
     writeSession('-fresh-gone-sess', goneCwd);
     await Storage.cleanOrphanProjectDirs('current');

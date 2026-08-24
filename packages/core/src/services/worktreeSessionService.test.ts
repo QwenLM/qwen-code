@@ -17,7 +17,10 @@ import {
   type WorktreeSession,
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
-import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
+import {
+  releaseRuntimeStatus,
+  writeRuntimeStatus,
+} from '../utils/runtimeStatus.js';
 
 const fsMocks = vi.hoisted(() => ({
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
@@ -180,6 +183,25 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       isSessionRuntimeActive('owner-session', [repoRoot, worktreePath]),
     ).resolves.toBe(true);
+  });
+
+  it('treats a cleanly released pid-0 runtime status as dead', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
+      'owner-session',
+    );
+    await writeRuntimeStatus(statusPath, {
+      sessionId: 'owner-session',
+      workDir: repoRoot,
+      pid: process.pid,
+    });
+
+    await releaseRuntimeStatus(statusPath);
+
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(false);
   });
 
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {

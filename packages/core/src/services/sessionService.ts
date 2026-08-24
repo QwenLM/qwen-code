@@ -1395,20 +1395,24 @@ export class SessionService {
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionRestoreProjection | undefined> {
-    return this.transcriptReader.readRestoreProjection(sessionId, options, {
-      validateFirstRecord: (record) =>
-        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
-    });
+    return this.storage.runWithProjectDirReadClaim(() =>
+      this.transcriptReader.readRestoreProjection(sessionId, options, {
+        validateFirstRecord: (record) =>
+          this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+      }),
+    );
   }
 
   async readLiveRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionLiveRestoreProjection | undefined> {
-    return this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
-      validateFirstRecord: (record) =>
-        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
-    });
+    return this.storage.runWithProjectDirReadClaim(() =>
+      this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
+        validateFirstRecord: (record) =>
+          this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+      }),
+    );
   }
 
   /**
@@ -1446,6 +1450,16 @@ export class SessionService {
   }
 
   private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+    stats?: fs.Stats,
+  ): Promise<ResumedSessionData | undefined> {
+    const load = () =>
+      this.loadSessionFromStateAfterClaim(sessionId, state, stats);
+    return this.storage.runWithProjectDirReadClaim(load);
+  }
+
+  private async loadSessionFromStateAfterClaim(
     sessionId: string,
     state: SessionArchiveState,
     stats?: fs.Stats,

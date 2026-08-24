@@ -28,6 +28,7 @@ import {
 } from './sessionService.js';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptReader,
   SessionTranscriptTooLargeError,
 } from './session-transcript-reader.js';
 import {
@@ -38,6 +39,7 @@ import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { Storage } from '../config/storage.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
@@ -805,6 +807,56 @@ describe('SessionService', () => {
   });
 
   describe('loadSession', () => {
+    it('claims the project entry before reading an active transcript', async () => {
+      const callOrder: string[] = [];
+      vi.spyOn(
+        Storage.prototype,
+        'runWithProjectDirReadClaim',
+      ).mockImplementation(async (operation) => {
+        callOrder.push('claim');
+        return operation();
+      });
+      vi.mocked(jsonl.read).mockImplementation(async () => {
+        callOrder.push('read');
+        return [recordB1, recordB2];
+      });
+
+      await sessionService.loadSession(sessionIdB);
+
+      expect(callOrder).toEqual(['claim', 'read']);
+    });
+
+    it('claims the project entry before restore projection reads', async () => {
+      const callOrder: string[] = [];
+      vi.spyOn(
+        Storage.prototype,
+        'runWithProjectDirReadClaim',
+      ).mockImplementation(async (operation) => {
+        callOrder.push('claim');
+        return operation();
+      });
+      vi.spyOn(
+        SessionTranscriptReader.prototype,
+        'readRestoreProjection',
+      ).mockImplementation(async () => {
+        callOrder.push('restore');
+        return undefined;
+      });
+      vi.spyOn(
+        SessionTranscriptReader.prototype,
+        'readLiveRestoreProjection',
+      ).mockImplementation(async () => {
+        callOrder.push('live');
+        return undefined;
+      });
+
+      const options = { replay: { kind: 'none' as const } };
+      await sessionService.readRestoreProjection(sessionIdB, options);
+      await sessionService.readLiveRestoreProjection(sessionIdB, options);
+
+      expect(callOrder).toEqual(['claim', 'restore', 'claim', 'live']);
+    });
+
     it('should load a session by id and reconstruct history', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({

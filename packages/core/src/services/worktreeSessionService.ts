@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
@@ -336,15 +337,7 @@ async function getRuntimeStatusPathState(
     return 'active';
   }
 
-  try {
-    process.kill(status.pid, 0);
-    return 'active';
-  } catch (error) {
-    if (isNodeError(error) && error.code === 'ESRCH') {
-      return 'dead';
-    }
-    return 'active';
-  }
+  return isPidAlive(status.pid) ? 'active' : 'dead';
 }
 
 function uniquePaths(paths: readonly string[]): string[] {
