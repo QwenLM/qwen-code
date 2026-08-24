@@ -41,7 +41,7 @@ import {
 } from './workspace-registry.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './conversations/session-source.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../runtime/live-session-source.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
@@ -2037,6 +2037,57 @@ describe('multi-workspace session dispatch', () => {
         );
       },
     );
+  });
+
+  it('reads exact active/archive conflicts from the active copy in an internal workspace', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived internal copy',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'active internal copy',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+      const { app } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+
+      const transcript = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      const exported = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export?format=json`)
+        .set('Host', host());
+      const archive = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] });
+
+      expect(transcript.status).toBe(200);
+      expect(JSON.stringify(transcript.body)).toContain('active internal copy');
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'archived internal copy',
+      );
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain('active internal copy');
+      expect(exported.text).not.toContain('archived internal copy');
+      expect(archive.status).toBe(409);
+      expect(archive.body.code).toBe('session_conflict');
+    });
   });
 
   it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
@@ -4647,11 +4698,8 @@ describe('multi-workspace session dispatch', () => {
       const conflict = await request(trusted.app)
         .get(`/workspaces/secondary-id/session/${conflictId}/export`)
         .set('Host', host());
-      expect(conflict.status).toBe(409);
-      expect(conflict.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: conflictId,
-      });
+      expect(conflict.status).toBe(200);
+      expect(conflict.text).toContain('conflicting secondary');
 
       const invalidFormat = await request(trusted.app)
         .get(

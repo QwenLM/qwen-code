@@ -173,9 +173,9 @@ describe('slash completion during commandContext churn (#9494)', () => {
   });
 
   it('argument completion still receives the latest commandContext', async () => {
-    const completionSpy = vi.fn<
-      (context: CommandContext, argString: string) => Promise<string[]>
-    >().mockResolvedValue(['arg-a', 'arg-b']);
+    const completionSpy = vi
+      .fn<(context: CommandContext, argString: string) => Promise<string[]>>()
+      .mockResolvedValue(['arg-a', 'arg-b']);
     const markerOf = (callIndex: number): string =>
       (
         completionSpy.mock.calls[callIndex]![0] as unknown as {

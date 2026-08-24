@@ -23,8 +23,9 @@ import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
+import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -305,6 +306,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_model'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -367,6 +369,7 @@ export interface ChatRecord {
     | CustomTitleRecordPayload
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
+    | SessionModelRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -571,6 +574,54 @@ export interface ParentSessionRecordPayload {
 export interface SessionSourceRecordPayload {
   sourceType: string;
   sourceId?: string;
+}
+
+/** Last-wins binding of the model a daemon session should restore. */
+export interface SessionModelRecordPayload {
+  modelId: string;
+  authType: string;
+  baseUrl?: string;
+  isRuntime?: boolean;
+}
+
+export function isValidSessionModelPayload(
+  payload: unknown,
+): payload is SessionModelRecordPayload {
+  const candidate = payload as SessionModelRecordPayload | null | undefined;
+  return (
+    typeof candidate?.modelId === 'string' &&
+    Boolean(candidate.modelId.trim()) &&
+    typeof candidate.authType === 'string' &&
+    Boolean(candidate.authType.trim())
+  );
+}
+
+export function normalizeSessionModelPayload(
+  payload: SessionModelRecordPayload,
+): SessionModelRecordPayload {
+  const normalized: SessionModelRecordPayload = {
+    modelId: stripRuntimeSnapshotPrefix(payload.modelId.trim()),
+    authType: payload.authType.trim(),
+  };
+  if (payload.baseUrl !== undefined) {
+    normalized.baseUrl = payload.baseUrl;
+  }
+  if (payload.isRuntime) {
+    normalized.isRuntime = true;
+  }
+  return normalized;
+}
+
+export function sessionModelPayloadsEqual(
+  a: SessionModelRecordPayload,
+  b: SessionModelRecordPayload,
+): boolean {
+  return (
+    a.modelId === b.modelId &&
+    a.authType === b.authType &&
+    (a.baseUrl ?? '') === (b.baseUrl ?? '') &&
+    Boolean(a.isRuntime) === Boolean(b.isRuntime)
+  );
 }
 
 /**
@@ -821,6 +872,7 @@ export interface ChatRecordingRestoreState {
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+  sessionModel?: SessionModelRecordPayload;
 }
 
 /**
@@ -913,6 +965,8 @@ export class ChatRecordingService {
   /** Immutable creator attribution once recorded. */
   private currentSourceType: string | undefined;
   private currentSourceId: string | undefined;
+  /** Last-wins daemon session model binding, used to skip duplicate writes. */
+  private currentSessionModel: SessionModelRecordPayload | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
@@ -1090,6 +1144,7 @@ export class ChatRecordingService {
     this.currentParentSessionId = undefined;
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
+    this.currentSessionModel = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
@@ -1120,6 +1175,12 @@ export class ChatRecordingService {
           | undefined;
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
+      } else if (record.subtype === 'session_model') {
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          this.currentSessionModel = normalizeSessionModelPayload(
+            record.systemPayload,
+          );
+        }
       }
     }
     if (persistedTitleInfo !== undefined) {
@@ -1148,6 +1209,9 @@ export class ChatRecordingService {
     this.currentParentSessionId = state.parentSessionId;
     this.currentSourceType = state.sourceType;
     this.currentSourceId = state.sourceId;
+    this.currentSessionModel = state.sessionModel
+      ? normalizeSessionModelPayload(state.sessionModel)
+      : undefined;
     if (this.currentCustomTitle) {
       this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
     }
@@ -1919,6 +1983,43 @@ export class ChatRecordingService {
   }
 
   /**
+   * Tokens billed to the Goal turn that is currently open.
+   *
+   * One entry, not a map: the Goal runtime holds a single permit at a time, so
+   * a record stamped with a different turn id means the previous turn is over
+   * and its total was either already taken or is no longer wanted.
+   */
+  private goalTurnSpend?: { turnId: string; tokens: number };
+
+  private accumulateGoalTurnTokens(
+    turnId: string,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    const total = usage.totalTokenCount;
+    if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
+      return;
+    }
+    if (this.goalTurnSpend?.turnId !== turnId) {
+      this.goalTurnSpend = { turnId, tokens: 0 };
+    }
+    this.goalTurnSpend.tokens += total;
+  }
+
+  /**
+   * The tokens billed to `turnId`, consuming them so a turn is counted once.
+   *
+   * Answers zero for a turn that spent nothing, that was never opened, or
+   * whose total has already been taken — a Goal with no model calls in a turn
+   * bills nothing rather than guessing.
+   */
+  takeGoalTurnTokens(turnId: string): number {
+    if (this.goalTurnSpend?.turnId !== turnId) return 0;
+    const { tokens } = this.goalTurnSpend;
+    this.goalTurnSpend = undefined;
+    return tokens;
+  }
+
+  /**
    * Records an assistant turn with all available data.
    * Queues the write immediately on the serialized async writer.
    *
@@ -1950,6 +2051,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.goalContext) {
+          this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
+        }
       }
 
       if (data.contextWindowSize !== undefined) {
@@ -2293,6 +2397,17 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
 
+      // Last-wins session_model may now sit on the abandoned branch. Re-append
+      // the live binding so cold restore still sees the model Config is on.
+      if (this.currentSessionModel) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_model',
+          systemPayload: this.currentSessionModel,
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -2510,6 +2625,49 @@ export class ChatRecordingService {
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving session source:', error);
+      }
+      return false;
+    }
+  }
+
+  /** Persist the daemon session's current model so load/resume can restore it. */
+  async recordSessionModel(
+    payload: SessionModelRecordPayload,
+  ): Promise<boolean> {
+    if (!isValidSessionModelPayload(payload)) {
+      return false;
+    }
+    const normalized = normalizeSessionModelPayload(payload);
+    if (
+      this.currentSessionModel &&
+      sessionModelPayloadsEqual(this.currentSessionModel, normalized)
+    ) {
+      return true;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: normalized,
+      };
+      // Assign before the awaited write so a rewind landing in the
+      // pending-write window re-appends the new binding rather than the
+      // stale one. Roll back on failure: ensureConversationFile can throw
+      // before writeFailure latches, and a later identical call would
+      // otherwise skip the write.
+      const previous = this.currentSessionModel;
+      this.currentSessionModel = normalized;
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        this.currentSessionModel = previous;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session model record:', error);
       }
       return false;
     }

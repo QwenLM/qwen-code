@@ -81,6 +81,8 @@ import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { resolveServeToken } from './serve-token.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -407,6 +409,7 @@ const WORKSPACE_SETTING_SCOPE =
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
   workspace?: string | string[];
+  requireWebShell?: boolean;
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
@@ -2239,17 +2242,7 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
-  // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
-  // token.txt)` keeps the file's trailing `\n` in the env value, so the
-  // hashed-then-compared token never matches what well-behaved clients
-  // send. Every request returns the generic 401 with no breadcrumb
-  // pointing at the whitespace, and operators chase ghosts. Trim once
-  // at boot so the comparison is over what humans intended to set.
-  const rawToken = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
-  const token =
-    typeof rawToken === 'string' && rawToken.trim().length > 0
-      ? rawToken.trim()
-      : undefined;
+  const token = resolveServeToken(optsIn.token);
   const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
     workerEnv: daemonRuntimeBaseEnv,
     ...(token ? { daemonToken: token } : {}),
@@ -3125,6 +3118,9 @@ async function runQwenServeImpl(
   // with a breadcrumb rather than failing the boot.
   const webShellDir =
     opts.serveWebShell === false ? undefined : resolveWebShellDir();
+  if (optsIn.requireWebShell && !webShellDir) {
+    throw new Error('--open-with-auth requires built Web Shell assets.');
+  }
   if (opts.serveWebShell !== false) {
     if (!webShellDir) {
       writeStderrLine(
@@ -3980,8 +3976,8 @@ async function runQwenServeImpl(
             message,
           }),
       },
-      ...(opts.experimentalLsp === true
-        ? { extraArgs: ['--experimental-lsp'] }
+      ...(acpChildExtraArgs(opts)
+        ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
     });
     const statusProvider = runtime.createDaemonStatusProvider({
@@ -4317,6 +4313,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && primaryGenerationGuard.closed) {
@@ -4610,6 +4609,29 @@ async function runQwenServeImpl(
       };
     };
 
+    const readLiveConversationScheduledTasks = async () => {
+      if (!fs.existsSync(liveConversationWorkspace.rootPath)) return [];
+      const { canonicalRoot } = await liveConversationWorkspace.revalidate();
+      let settings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        settings = settingsRuntime.settings.loadSettings(canonicalRoot, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: false,
+          workspaceTrusted: true,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: could not read full settings for Conversations ` +
+            `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
+        );
+      }
+      const env = createRuntimeEnvMetadata(canonicalRoot, settings, true);
+      return core.Storage.runWithResolvedRuntimeBaseDir(
+        env.sessionRuntimeBaseDir,
+        () => core.readCronTasks(canonicalRoot),
+      );
+    };
+
     // Collects stop() callbacks from every per-workspace sub-session launcher
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
@@ -4702,8 +4724,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
@@ -4736,6 +4758,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && secondaryGenerationGuard.closed) {
@@ -5257,8 +5282,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
@@ -5305,6 +5330,9 @@ async function runQwenServeImpl(
             channelDeliveryDiagnosticRedaction,
           ),
           maxSessions: opts.maxSessions,
+          ...(opts.restoreAskUserQuestion === true
+            ? { restoreAskUserQuestion: true }
+            : {}),
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: (event) => {
             if (event.type === 'registered' && generationGuard.closed) return;
@@ -5596,13 +5624,6 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        if (runtimeAdded.provenance === 'live-conversation') return;
-        channelWebhookEnvByWorkspace.set(
-          runtimeAdded.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -5611,6 +5632,13 @@ async function runQwenServeImpl(
           'startScheduledTaskKeepaliveForWorkspace'
         ] as ((runtime: WorkspaceRuntime) => void) | undefined;
         startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
+        if (runtimeAdded.provenance === 'live-conversation') return;
+        channelWebhookEnvByWorkspace.set(
+          runtimeAdded.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
         if (!channelWorkerManager) return;
         try {
           if (runtimeAdded.trusted) {
@@ -5974,6 +6002,7 @@ async function runQwenServeImpl(
         : {}),
       managedScratchRoot,
       liveConversationWorkspace,
+      readLiveConversationScheduledTasks,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       workspaceTrustHotReloadAvailable,
