@@ -326,9 +326,39 @@ describe('the decisions this module exists to make', () => {
     expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: ' required ' }, {})).toBe(
       'required',
     );
+    // Every policy, not just the strict one: normalisation keyed on the value
+    // it was reported against would leave an operator's `"Auto"` resolving to
+    // `off` — the same silent downgrade one rung lower.
+    expect(sandboxPolicy({}, { sandbox: 'Auto' })).toBe('auto');
+    expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'Auto' }, {})).toBe('auto');
+    expect(sandboxPolicy({}, { sandbox: 'OFF' })).toBe('off');
+
     // A value that is not a policy at all still resolves to `off` — the
     // normalisation widens spelling, not the set of accepted values.
     expect(sandboxPolicy({}, { sandbox: 'requiredish' })).toBe('off');
+    // ...and an unreadable ENVIRONMENT value is dropped on its own rather than
+    // taking the operator's setting down with it. This is the cell that
+    // matters: the environment is the half a repository can reach, so garbage
+    // there must never be able to answer for the half it cannot.
+    expect(
+      sandboxPolicy(
+        { QWEN_REVIEW_SANDBOX: 'yes-please' },
+        { sandbox: 'required' },
+      ),
+    ).toBe('required');
+  });
+
+  it('reads the process environment when no env is passed', () => {
+    // The other production default, and the twin of the settings one below:
+    // every assertion in this block hands `sandboxPolicy` an env literal, so
+    // `env = {}` as the default stops the environment half from being read at
+    // all and nothing here notices.
+    vi.stubEnv('QWEN_REVIEW_SANDBOX', 'required');
+    try {
+      expect(sandboxPolicy(undefined, {})).toBe('required');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('reads the operator settings file when no settings are passed', () => {
