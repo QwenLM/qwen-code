@@ -237,6 +237,7 @@ describe('SessionArtifactStore', () => {
           workspacePath: 'report.txt',
           sizeBytes: 5,
           retention: 'restorable',
+          clientRetained: false,
           createdAt: '2026-07-04T00:00:00.000Z',
           updatedAt: '2026-07-04T00:00:00.000Z',
         },
