@@ -32,9 +32,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { abDriveCommand, runAbDrive, type AbDriveArgs } from './ab-drive.js';
 import { DRIVE_SENTINEL, LOG_MAX_BYTES, type ExecResult } from './drive.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { ignoreBrokenPipe, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: vi.fn(),
   writeStdoutLine: vi.fn(),
   writeStdoutLineSafe: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -918,6 +919,20 @@ describe.skipIf(!hasTmux || process.platform === 'win32')(
 describe.skipIf(!hasTmux || process.platform === 'win32')(
   'the command wiring',
   () => {
+    it('installs the broken-pipe guard before writing its result', () => {
+      (abDriveCommand.handler as (a: unknown) => void)({
+        script: 'true',
+        'arm-a': tempDir('ab-wire-p-a-'),
+        'arm-b': tempDir('ab-wire-p-b-'),
+        readyTimeout: 5,
+        timeout: 30,
+        sharedReadyTimeout: 5,
+        sharedOnce: false,
+        server: `abrealp-${process.pid}`,
+      });
+      expect(vi.mocked(ignoreBrokenPipe)).toHaveBeenCalled();
+    });
+
     const handlerArgs = (over: Record<string, unknown>) => ({
       script: 'cat marker.txt',
       readyTimeout: 5,

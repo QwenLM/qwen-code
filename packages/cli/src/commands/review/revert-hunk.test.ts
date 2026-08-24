@@ -42,6 +42,7 @@ import {
 } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: vi.fn(),
   writeStdoutLine: vi.fn(),
   writeStdoutLineSafe: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -281,10 +282,11 @@ describe('runRevertHunk', () => {
     },
   );
 
-  it('reverts a plain edit under a custom prefix WITHOUT moving the file', () => {
-    // stripSide mis-parses a custom/quoted prefix; the old tokens-disagree
-    // rewrite then turned a plain edit into a rename and git apply -R MOVED
-    // the file. Gated on move/copy metadata now, a plain edit never rewrites.
+  it('refuses a plain edit under a non-standard prefix rather than risk mis-targeting it', () => {
+    // The command assumes git's a/ b/ prefixes at every layer; a custom
+    // (--src-prefix) or absent (--no-prefix) prefix is refused wholesale,
+    // which is safe where a -p1 mis-apply or a spurious rename-rewrite is
+    // not. The pipeline's own captures always use default prefixes.
     const dir = tempDir('rh-plainpfx-');
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
@@ -306,13 +308,13 @@ describe('runRevertHunk', () => {
     const diffPath = join(dir, 'plainpfx.diff');
     writeFileSync(diffPath, diffText);
     const id = listHunks(diffText)[0].id;
+    const before = readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8');
     const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
-    expect(r.applied).toBe(true);
-    // The file is where it was, with its content reverted — not moved.
-    expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toContain(
-      'top-old',
-    );
-    expect(existsSync(join(dir, 'caf\u00e9.txt'))).toBe(true);
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('standard a/ b/');
+    // Nothing was touched — no move, no content change.
+    expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toBe(before);
   });
 
   it('refuses an ambiguous hunk id — a path in more than one diff section', () => {

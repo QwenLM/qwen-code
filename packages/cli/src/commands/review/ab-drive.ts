@@ -75,6 +75,7 @@ import {
   type ExecResult,
 } from './drive.js';
 import {
+  ignoreBrokenPipe,
   writeStdoutLine,
   writeStderrLine,
   writeStderrLineSafe,
@@ -655,7 +656,10 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         arm,
         root,
         outcome,
-        exitCode,
+        // Null unless the sentinel was reached (the documented invariant): a
+        // timed-out or overflowed arm read the rc file every poll iteration
+        // and could carry a late — or planted — value otherwise.
+        exitCode: outcome === 'completed' ? exitCode : null,
         readyAfterMs,
         droveForMs,
         output: text,
@@ -674,8 +678,20 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     const b = runArm('b');
     if (b !== 'stop') armReports.b = b;
   } finally {
-    tmux('kill-server');
-    rmSync(runDir, { recursive: true, force: true });
+    // Neither teardown may throw out of the finally and discard the report:
+    // an untrusted arm can leave runDir un-removable (a chmod, a mount), and
+    // tmux can fail transiently — best-effort both, a leak is not worth a
+    // lost verdict.
+    try {
+      tmux('kill-server');
+    } catch {
+      /* best effort */
+    }
+    try {
+      rmSync(runDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
   }
 
   const { a, b } = armReports;
@@ -784,6 +800,9 @@ export const abDriveCommand: CommandModule = {
         describe: 'Write the JSON report here',
       }),
   handler: (argv) => {
+    // stdout is this command's evidence; a reader that left (`| head`) must
+    // not crash the process on the async EPIPE path the safe writer misses.
+    ignoreBrokenPipe();
     try {
       const bundleNotice = bundleStalenessNotices(process.argv[1], true);
       if (bundleNotice) writeStderrLineSafe(bundleNotice);

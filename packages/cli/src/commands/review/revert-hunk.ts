@@ -59,6 +59,7 @@ import { parseDiff } from './lib/diff-plan.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import { assertWritableOutPath } from './lib/paths.js';
 import {
+  ignoreBrokenPipe,
   writeStdoutLineSafe,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
@@ -217,28 +218,23 @@ export function extractHunkPatch(
  * captures always use default prefixes; a non-standard one arrives only
  * through arbitrary `--diff`, and refusing it is safe where mutating is not.
  */
-export function renameSectionHasUnsupportedPrefix(
+export function sectionHasUnsupportedPrefix(
   diffText: string,
   file: DiffFile,
 ): boolean {
   const lines = diffText.split('\n');
   const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
-  // A move OR a copy: parseDiff only records `renameFrom` for `rename from`
-  // lines, so a copy-with-edits section (git emits `copy from`/`copy to`
-  // under copy detection) would slip past a renameFrom-only gate and get its
-  // copy rewound.
-  const isMoveOrCopy =
-    file.renameFrom !== undefined ||
-    header.some(
-      (l) => l.startsWith('copy from ') || l.startsWith('rename from '),
-    );
-  if (!isMoveOrCopy) return false;
   const tok = (pfx: string) =>
     header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '';
-  // A quoted token is standard only when it quotes an a/ or b/ prefix — a
-  // C-quoted path under a CUSTOM prefix (`"x/café"`) starts with `"` too but
-  // the rewrite's `"a/`-assuming slice would mangle it.
+  // Standard git prefixes only, checked for EVERY section rather than just
+  // rename/copy: the command assumes a/ b/ at every layer (parseDiff strips
+  // them, extractHunkPatch rewrites with them, git apply -R uses -p1), and a
+  // custom (--src-prefix) or absent (--no-prefix) prefix mis-targets one of
+  // those. `/dev/null` is a creation/deletion side; a quoted token is
+  // standard only when it quotes an a/ or b/ prefix; an empty token (no such
+  // header line) does not mask the real reason.
   const standard = (t: string) =>
+    t === '' ||
     t === '/dev/null' ||
     t.startsWith('a/') ||
     t.startsWith('b/') ||
@@ -341,12 +337,12 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const entry = listHunks(diffText).find(
     (h) => h.path === sel.path && h.n === sel.n,
   )!;
-  if (renameSectionHasUnsupportedPrefix(diffText, file)) {
+  if (sectionHasUnsupportedPrefix(diffText, file)) {
     return {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `hunk ${args.hunk} sits in a rename section whose diff prefixes are not the standard a/ b/ — a reverse-apply would move the file rather than revert its content. Recapture the diff with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix); nothing was changed.`,
+      note: `hunk ${args.hunk} sits in a section whose diff prefixes are not the standard a/ b/ — this command assumes git's default prefixes at every layer (path parsing, the -p1 apply, the rename rewrite), and a custom or absent prefix mis-targets the reverse-apply. Recapture with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix); nothing was changed.`,
     };
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
@@ -462,6 +458,10 @@ export const revertHunkCommand: CommandModule = {
       })
       .conflicts('list', 'hunk'),
   handler: (argv) => {
+    // stdout is this command's result and the tree may already be mutated by
+    // the time we write it, so a reader that left (`| head`) must not crash
+    // the process on the async EPIPE path the safe writer cannot catch.
+    ignoreBrokenPipe();
     const out = argv['out'] as string | undefined;
     try {
       if (out !== undefined) assertWritableOutPath(out);
