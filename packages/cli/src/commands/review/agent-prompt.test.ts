@@ -3052,6 +3052,52 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');
   });
 
+  it("welds prose-exec its disposable copy with the verifier's command discipline", () => {
+    // prose-exec executes PR-authored recipes — the one role whose INPUT is
+    // the untrusted text — so its copy must stand at the reviewed head or not
+    // at all. The verifier weld above carries the fetched-sha anchor for
+    // exactly that; the prose-exec weld claimed "same command and label
+    // discipline" while omitting it, so a drifted shared worktree handed
+    // prose-exec code the commit does not contain and attributed the run to
+    // the PR (R13-1).
+    const key = 'prose-exec--round-2--deadbeef1234';
+    const p = buildRoleBrief(PR_PLAN, 'prose-exec', { key });
+    expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review scratch-tree');
+    expect(p).toContain(`--worktree '${resolve(PR_PLAN.worktreePath)}'`);
+    expect(p).toContain(`--label ${key}`);
+    // The anchor rides along when the plan carries a usable one. Pin the
+    // JOINED fragment, like the verifier test above: without the continuation
+    // after `--label` the snippet is two statements — the command runs
+    // unpinned and the sha line dies as command-not-found.
+    const sha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha }, 'prose-exec', { key }),
+    ).toContain(`--label ${key} \\
+  --fetched-sha ${sha}`);
+    // A SHA-256 repository's 64-hex record welds in too.
+    const sha256 = 'ab'.repeat(32);
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha256 }, 'prose-exec', {
+        key,
+      }),
+    ).toContain(`--fetched-sha ${sha256}`);
+    // Absent or malformed: nothing is welded, and no dangling continuation
+    // glues the closing fence onto the command.
+    expect(p).not.toMatch(/--label prose-exec--round-2--deadbeef1234 \\/);
+    expect(p).not.toContain('--fetched-sha');
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: 'not-a-sha' }, 'prose-exec', {
+        key,
+      }),
+    ).not.toContain('--fetched-sha');
+    // No worktree, no copy — prose-exec owes its WRITES a tree, and a local
+    // or cross-repo review has none. (The brief BODY names `qwen review
+    // scratch-tree` unconditionally, so the pin targets the welded command.)
+    expect(buildRoleBrief(PLAN, 'prose-exec')).not.toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree',
+    );
+  });
+
   it('tells every code-reading agent the worktree is shared, and names what is dirty', () => {
     // The reader half of #9207: an auditor read a live probe's mutant plus a
     // leftover probe file and came within a step of filing a Critical against
@@ -3599,6 +3645,50 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // would let a malicious recipe license its own exfiltration push.
     expect(pp).toContain('`git push` (to any URL');
     expect(pp).not.toContain('the recipe does not name');
+  });
+
+  it('pins the prose-exec confinement floor — classify what commands REACH, not their text', () => {
+    // The never-execute classes used to read command TEXT only. Two probes at
+    // the reviewed commit broke out of the disposable copy with steps no
+    // class matched (R12-1): a PR-committed symlink (mode 120000) that a
+    // `source config/overrides.env` read exfiltrated through and a `cp`
+    // planted through — both landing outside the copy, both surviving its
+    // removal — and a `git config core.fsmonitor CMD` step that read as an
+    // in-copy write while landing in the host's shared config, where the
+    // value executes at the user's own next git operations. The classes now
+    // classify reach, with the preflights that make reach knowable.
+    const pp = buildRoleBrief(PR_PLAN, 'prose-exec');
+    // The reach rule…
+    expect(pp).toContain('decided by what the command REACHES');
+    // …and the symlink preflight it drives: enumerate, resolve, and treat an
+    // outside-resolving link as a finding rather than a path to run through.
+    expect(pp).toContain("git ls-files -s | grep '^120000'");
+    expect(pp).toContain(
+      'Any symlink whose target resolves outside the disposable copy is itself a finding',
+    );
+    expect(pp).toContain(
+      'a step that reads or writes through such a link is never executed',
+    );
+    // Framed as a floor, not a taxonomy — the text being executed is
+    // PR-authored, so an unresolvable reach stays never-executed.
+    expect(pp).toContain('fail-closed floor, not a complete taxonomy');
+    expect(pp).toContain(
+      'a step whose reach you cannot establish stays never-executed',
+    );
+    // Everything under the common dir is the user's own repository — shared,
+    // not scratch — and a config write reaches it from inside the copy…
+    expect(pp).toContain('git rev-parse --git-common-dir');
+    expect(pp).toContain('shared, not scratch');
+    expect(pp).toContain('A `git config` write from inside the copy');
+    // …with the command-valued keys named as the executing shape.
+    expect(pp).toContain('core.fsmonitor');
+    expect(pp).toContain('credential.helper');
+    // And the install allowance stays bounded by the egress ban: installs go
+    // through the environment's own dependency configuration, never through
+    // a registry redirect the PR commits or a step adds to the copy.
+    expect(pp).toContain('does not open the egress ban');
+    expect(pp).toContain('the registry the environment already uses');
+    expect(pp).toContain('author-controlled destination');
   });
 
   it('welds the PR context pointer into 6d — a mandate without a path is a guess', () => {

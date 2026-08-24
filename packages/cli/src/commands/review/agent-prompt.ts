@@ -1780,6 +1780,7 @@ export function buildRoleBrief(
     const wt = report.worktreePath;
     if (typeof wt === 'string' && wt) {
       const label = scratchLabel(opts.key ?? role);
+      const sha = fetchedShaOf(report);
       parts.push(
         '',
         '**Your disposable copy — where every write-producing recipe step runs.** ' +
@@ -1791,7 +1792,8 @@ export function buildRoleBrief(
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
         '```',
         '',
         'It reports `path` — run the writing steps there and leave what you ' +

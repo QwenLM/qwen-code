@@ -155,6 +155,42 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
+  it('refuses while repo-local config defines ANY command-valued key — git executes their values', () => {
+    // A recipe step running `git config core.fsmonitor CMD` from the copy
+    // lands in the host's COMMON config — textually an in-copy write,
+    // actually a plant that outlives the copy's removal and executes at the
+    // user's own next git operations (R12-1, measured live for fsmonitor and
+    // alias plants). The screen that began with smudge/clean filters covers
+    // the whole command-valued class now: an indistinguishable-from-a-plant
+    // state is a refusal, whatever key carries it.
+    for (const [key, value] of [
+      ['core.fsmonitor', 'node fsmon.js'],
+      ['core.pager', 'evil-pager'],
+      ['alias.st', '!sh -c evil'],
+      ['core.sshCommand', 'evil-ssh'],
+      ['credential.helper', '!evil-helper'],
+    ] as Array<[string, string]>) {
+      git(worktree, 'config', key, value);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('command-valued');
+      expect(
+        existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+      ).toBe(false);
+
+      // The key is the user's to remove — once gone, a tree stands again.
+      git(worktree, 'config', '--unset', key);
+      expect(run().available).toBe(true);
+      rmSync(scratchWorktreePath(worktree, 'verify--round-1--abc123'), {
+        recursive: true,
+        force: true,
+      });
+      git(worktree, 'worktree', 'prune');
+    }
+  });
+
   it('places it BESIDE the review worktree, never inside it', () => {
     // Nested, every probe file would land in the tree this command exists to
     // keep clean — and in the PR's own diff with it.

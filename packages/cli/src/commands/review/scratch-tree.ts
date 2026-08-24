@@ -140,35 +140,41 @@ export interface ScratchTreeArgs {
  * `post-checkout` from there, which means this command would run whatever hooks
  * that repository has (and whatever a probe managed to write into it) as a side
  * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
- * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
- * whichever ones an attributes file selects. `runScratchTree` detects that
- * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
- * business, and the report says plainly that the common dir is shared rather
- * than isolated.
+ * that holds no hooks covers the HOOKS; it does not cover config-driven
+ * COMMANDS — `filter.<name>.smudge|clean` values, which a checkout runs
+ * whenever an attributes file selects them, and pager, alias, fsmonitor,
+ * ssh-command and credential-helper values, which the user's own next git
+ * operations run. `runScratchTree` detects that surface in the repository's
+ * own config and refuses rather than run it (see `localCommandConfig`). What
+ * a probe does with its own shell is the probe's business, and the report
+ * says plainly that the common dir is shared rather than isolated.
  */
 const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
 /**
- * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
+ * The repo-local config keys whose VALUES git executes, when any are defined.
  *
- * The reset's and rebuild's checkouts EXECUTE these — hooks are disabled above,
- * filters are not — and the planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * The reset's and rebuild's checkouts EXECUTE smudge/clean filters — hooks are
+ * disabled above, config commands are not — and a `core.fsmonitor` command
+ * runs at the rebuild's `worktree add` and at the residue probe's status
+ * reads (measured live on both). The planting surface is plain writes into
+ * the COMMON dir this command's report calls shared: `git config
+ * filter.evil.smudge CMD` plus one line appended to `$(git rev-parse
+ * --git-path info/attributes)` — or, one step removed, `git config
+ * core.fsmonitor CMD` from the copy, which lands in the host's common config
+ * (measured live). Pager, alias, ssh-command and credential-helper values are
+ * the same persistence class: they execute at the user's OWN next git
+ * operations in that repository. discard and cleanup never wipe the common
+ * dir, so a key planted while reviewing one PR survives the copy's removal —
+ * persistence planted by reviewing a malicious PR, measured live. The
+ * repo-local config files are checked with `--file` rather than merged config
+ * because command values in the user's global config (git-lfs is the common
+ * one) are the user's own contract, exactly like any git command they run —
+ * while the planting surface is the repo-local files. The state cannot be
+ * told apart from a key the user set deliberately, and cannot be safely
+ * wiped, so a hit is a refusal upstream, not a cleanup here.
  */
-function localFilterCommands(worktree: string): string[] {
+function localCommandConfig(worktree: string): string[] {
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
@@ -207,7 +213,7 @@ function localFilterCommands(worktree: string): string[] {
         '--file',
         file,
         '--get-regexp',
-        '^filter\\..*\\.(smudge|clean)$',
+        '^(filter\\..*\\.(smudge|clean)|core\\.(fsmonitor|pager|sshcommand)|credential\\.helper|alias\\..*)$',
       ],
       { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
     );
@@ -492,18 +498,22 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   }
 
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
+  // `worktree add` both execute configured content filters, and a configured
+  // `core.fsmonitor` runs at that add and at the residue probe's status reads.
+  const commandKeys = localCommandConfig(worktree);
+  if (commandKeys.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
+      `the repository's local config defines command-valued key(s) ${commandKeys
         .map(inertPath)
         .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
+        'git EXECUTES their values (hooks are disabled, config commands are not): ' +
+        'the checkouts this command runs execute smudge/clean filters and a ' +
+        'configured fsmonitor, and pager, alias, ssh-command and credential-helper ' +
+        "values execute at the user's own next git operations in this repository. " +
+        'Two plain writes into the common dir are enough to plant any of them, and ' +
+        'the common dir is never wiped, so what is planted survives this review. ' +
+        'Remove a key that is not yours; until then no scratch tree is safe to ' +
+        'create or reset.',
     );
   }
 
