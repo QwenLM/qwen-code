@@ -26,6 +26,7 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   getToolCallFingerprint,
+  isReplayOfHandledToolCall,
   normalizeModelToolCallIds,
   collectToolCallIdsFromHistory,
 } from './toolCallIdUtils.js';
@@ -5979,7 +5980,12 @@ describe('GeminiChat', async () => {
     it('marks a call handled once a non-error response answers it, even after an earlier error response (R24-1)', () => {
       // The instructed retry after an error answer may itself succeed; that
       // success (non-error) response DOES mark the id handled so a further
-      // identical re-issue is still suppressed as a replay.
+      // identical re-issue is still suppressed as a replay. The retry runs
+      // under its normalized suffixed id (R28-1), so the success marks the
+      // suffixed id; the base raw provider id is additionally keyed via
+      // the R28-1 stamp below so a re-issue under a RESTARTED raw id —
+      // which is how every surface's replay check looks it up — is
+      // suppressed too.
       chat.setHistory([
         {
           role: 'model',
@@ -6032,12 +6038,235 @@ describe('GeminiChat', async () => {
       ]);
 
       const fingerprints = chat.getHistoryToolCallFingerprints();
-      expect([...fingerprints.keys()]).toEqual(['tool_call_0__qwen_dup_2']);
+      expect([...fingerprints.keys()]).toEqual([
+        'tool_call_0__qwen_dup_2',
+        'tool_call_0',
+      ]);
       expect(fingerprints.get('tool_call_0__qwen_dup_2')).toBe(
         getToolCallFingerprint('tool_call', {
           name: 'deferred_target',
           arguments: { x: 1 },
         }),
+      );
+    });
+
+    it('keys a suffixed success under its base raw id so a history-only re-seed suppresses the raw-id re-issue (R28-1)', () => {
+      // R28-1: getHistoryToolCallFingerprints excludes error responses and
+      // keys successes by their (normalized) internal id, so a retry that
+      // succeeded after a gate rejection lands ONLY under the suffixed id
+      // while the raw provider id stays unmarked. Every surface re-seeds
+      // this map from history (TUI per-batch after its per-submit ref
+      // clear, daemon per runToolCalls, headless per run, agent runtime
+      // per batch) and keys the replay check on the RAW provider id —
+      // which restarts per response on `{name}_{index}` providers — so the
+      // unmarked raw id admitted an identical re-issue and re-executed the
+      // side-effecting tool. The stamp keys the suffixed success under its
+      // base raw id (first occurrence wins), restoring suppression.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: {
+                  error:
+                    'Deferred tool "deferred_target" has no presented schema in this session',
+                },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      // Re-seed exactly like the surfaces do: history map only.
+      const reseeded = new Map(chat.getHistoryToolCallFingerprints());
+      const replayFingerprint = getToolCallFingerprint('tool_call', {
+        name: 'deferred_target',
+        arguments: { x: 1 },
+      });
+      // The identical re-issue arrives under the restarted RAW id; it must
+      // be suppressed as a replay of the executed retry.
+      expect(
+        isReplayOfHandledToolCall(reseeded, 'tool_call_0', replayFingerprint),
+      ).toBe(true);
+      // The suffixed id itself stays marked too (in-session dedup paths).
+      expect(
+        isReplayOfHandledToolCall(
+          reseeded,
+          'tool_call_0__qwen_dup_2',
+          replayFingerprint,
+        ),
+      ).toBe(true);
+      // A different call colliding on the same raw id is NOT a replay.
+      expect(
+        isReplayOfHandledToolCall(
+          reseeded,
+          'tool_call_0',
+          getToolCallFingerprint('tool_call', {
+            name: 'deferred_target',
+            arguments: { x: 2 },
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it('does not stamp the base id when the retry itself was answered with an error (R28-1)', () => {
+      // Nothing executed to completion: the instructed second retry must
+      // still be admitted (R24-1 semantics survive the R28-1 stamp).
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: { error: 'no presented schema' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                response: { error: 'tool execution failed' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.getHistoryToolCallFingerprints()).toEqual(new Map());
+    });
+
+    it("keeps the base id's own success fingerprint over a later suffixed stamp (R28-1)", () => {
+      // First-occurrence-wins, mirroring recordHandledToolCall: when the
+      // base id has its own non-error response, the stamp must not
+      // redefine what counts as a replay of the original.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'cid_base',
+                name: 'read_file',
+                args: { file_path: 'a.ts' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_base',
+                name: 'read_file',
+                response: { output: 'a' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'cid_base__qwen_dup_2',
+                name: 'read_file',
+                args: { file_path: 'b.ts' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_base__qwen_dup_2',
+                name: 'read_file',
+                response: { output: 'b' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const fingerprints = chat.getHistoryToolCallFingerprints();
+      expect(fingerprints.get('cid_base')).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
+      );
+      expect(fingerprints.get('cid_base__qwen_dup_2')).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'b.ts' }),
       );
     });
   });

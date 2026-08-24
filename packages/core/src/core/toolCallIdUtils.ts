@@ -42,6 +42,20 @@ function nextAvailableDuplicateId(rawId: string, usedIds: Set<string>): string {
   }
 }
 
+const DUPLICATE_ID_PATTERN = new RegExp(`^(.+)${DUPLICATE_ID_SUFFIX}\\d+$`);
+
+/**
+ * The base (raw provider) id of a duplicate-suffixed id: strips the
+ * outermost trailing `__qwen_dup_<n>` segment (`tool_call_0__qwen_dup_2` →
+ * `tool_call_0`). Nested suffixes strip one segment per call
+ * (`A__qwen_dup_2__qwen_dup_3` → `A__qwen_dup_2`). Returns `undefined`
+ * for ids without a (valid) suffix.
+ */
+export function getDuplicateIdBase(id: string): string | undefined {
+  const match = DUPLICATE_ID_PATTERN.exec(id);
+  return match?.[1];
+}
+
 function nextGeneratedId(usedIds: Set<string>): string {
   for (let suffix = 1; ; suffix += 1) {
     const candidate = `${GENERATED_ID_PREFIX}${suffix}`;

@@ -118,6 +118,7 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
+  getDuplicateIdBase,
   getFunctionCallFingerprint,
   normalizeModelToolCallIds,
   reserveModelToolCallId,
@@ -4300,6 +4301,17 @@ export class GeminiChat {
    * replay record for gate-rejected wrapper calls (R23-30): every surface
    * re-seeds this map from history, and a history entry would win over any
    * surface-local delete.
+   *
+   * R28-1 complement: the instructed retry itself is normalized to a
+   * suffixed id (`…__qwen_dup_N`, the raw provider id already being taken
+   * by the rejected call), so its success response only marks the suffixed
+   * id handled. The surfaces key replay checks on the RAW provider id,
+   * which restarts per response — a history-only re-seed would then admit
+   * an identical re-issue under the raw id and re-execute a side-effecting
+   * tool. Every suffixed success is therefore also keyed under its base
+   * raw id (first occurrence wins, matching `recordHandledToolCall`'s
+   * surface-side semantics: the id keeps naming the first call that
+   * executed under it, and the retry is identical to the call it retries).
    */
   getHistoryToolCallFingerprints(): Map<string, string> {
     const fingerprintsById = new Map<string, string>();
@@ -4328,6 +4340,18 @@ export class GeminiChat {
     for (const id of respondedIds) {
       const fingerprint = fingerprintsById.get(id);
       if (fingerprint !== undefined) handled.set(id, fingerprint);
+    }
+    // R28-1: key every suffixed (`__qwen_dup_N`) success under its base raw
+    // provider id as well, so a history-only re-seed suppresses an identical
+    // re-issue under a restarted raw id. Snapshot before mutating: stamped
+    // bases must not themselves be re-stamped (one level per entry).
+    // First-occurrence-wins — a base that has its own success response is
+    // already in `handled` and keeps that fingerprint.
+    for (const [id, fingerprint] of [...handled]) {
+      const baseId = getDuplicateIdBase(id);
+      if (baseId !== undefined && !handled.has(baseId)) {
+        handled.set(baseId, fingerprint);
+      }
     }
     return handled;
   }
