@@ -296,7 +296,7 @@ export * from './services/tool-write-origin.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
-} from './utils/sync-file-encoding.js';
+} from './services/sync-file-encoding.js';
 export {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
@@ -415,7 +415,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
-export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
+export { isUnusableScriptEntry } from './services/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -432,7 +432,7 @@ export * from './memory/manager.js';
 export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
-export * from './memory/const.js';
+export * from './utils/memory-constants.js';
 export * from './memory/channel-memory-document.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
@@ -565,7 +565,7 @@ export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
-export * from './utils/environmentContext.js';
+export * from './core/environmentContext.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
@@ -596,12 +596,12 @@ export {
 export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
-export * from './utils/tool-result-retention.js';
-export * from './utils/memoryDiscovery.js';
+export * from './tools/tool-result-retention.js';
+export * from './memory/memoryDiscovery.js';
 export * from './utils/modelId.js';
 export * from './utils/runtimeDiagnostics.js';
-export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
-export type { RuleFile } from './utils/rulesDiscovery.js';
+export { ConditionalRulesRegistry } from './config/rulesDiscovery.js';
+export type { RuleFile } from './config/rulesDiscovery.js';
 export {
   OpenAILogger,
   openaiLogger,
@@ -614,11 +614,11 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
-export * from './utils/tool-result-boundary-diagnostics.js';
+export * from './tools/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
-export * from './utils/readManyFiles.js';
+export * from './tools/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
@@ -643,12 +643,12 @@ export * from './utils/terminalSerializer.js';
 export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
-export * from './utils/tool-utils.js';
-export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
+export * from './tools/tool-utils.js';
+export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
-export * from './utils/forkedAgent.js';
+export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
 
 // ============================================================================
