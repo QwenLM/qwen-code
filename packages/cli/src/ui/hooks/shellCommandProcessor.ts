@@ -351,6 +351,7 @@ export const useShellCommandProcessor = (
             });
         } catch (err) {
           // This block handles synchronous errors from `execute`
+          abortSignal.removeEventListener('abort', abortHandler);
           setPendingHistoryItem(null);
           const errorMessage = err instanceof Error ? err.message : String(err);
           addItemToHistory(

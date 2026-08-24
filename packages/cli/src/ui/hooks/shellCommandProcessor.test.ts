@@ -567,12 +567,14 @@ describe('useShellCommandProcessor', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
 
     const { result } = renderProcessorHook();
+    const abortController = new AbortController();
+    const removeEventListenerSpy = vi.spyOn(
+      abortController.signal,
+      'removeEventListener',
+    );
 
     act(() => {
-      result.current.handleShellCommand(
-        'a-command',
-        new AbortController().signal,
-      );
+      result.current.handleShellCommand('a-command', abortController.signal);
     });
     const execPromise = onExecMock.mock.calls[0][0];
 
@@ -587,6 +589,10 @@ describe('useShellCommandProcessor', () => {
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
     // Verify that the temporary file was cleaned up
     expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
+    expect(removeEventListenerSpy).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
