@@ -198,6 +198,12 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // Build and package tools. The payload is a Makefile recipe, a package
   // script, or a downloaded package — never argv — so no argument inspection
   // can see it either.
+  'ant',
+  'bazel',
+  'buck',
+  'buck2',
+  'bundle',
+  'bundler',
   'cargo',
   'cc',
   'c++',
@@ -208,16 +214,40 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'go',
   'g++',
   'gcc',
+  'composer',
+  'dotnet',
+  'gem',
   'gradle',
+  'grunt',
+  'gulp',
+  'hatch',
   'javac',
+  'just',
+  'lein',
   'make',
+  'meson',
   'mvn',
   'ninja',
+  'nix',
+  'nix-build',
+  'nix-shell',
+  'nox',
+  'nx',
+  'pants',
+  'pdm',
   'pip',
   'pip3',
+  'pipenv',
+  'pipx',
   'poetry',
+  'rake',
   'rustc',
+  'rye',
+  'sbt',
   'scons',
+  'task',
+  'tox',
+  'turbo',
   'uv',
   'uvx',
   // Container runtimes: the payload can live entirely inside the image.
@@ -308,7 +338,20 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
  * accepted as a version.
  */
 const VERSIONED_INTERPRETER =
-  /^(?:python|ruby|perl|php|luajit|lua|tclsh|wish|node|javac|java|expect|pip|clang\+\+|clang|gcc|g\+\+|c\+\+|cc|rustc)-?[0-9][0-9a-z.-]*$/;
+  /^(?:python|ruby|perl|php|luajit|lua|tclsh|wish|nodejs|node|javac|java|expect|pip|go|clang\+\+|clang|gcc|g\+\+|c\+\+|cc|rustc)-?[0-9][0-9a-z.-]*$/;
+
+/**
+ * Statement-shaped node types tree-sitter-bash can nest inside a redirect
+ * node. See the `redirected_statement` arm of `evaluateStatementSafety`.
+ */
+const REDIRECT_NESTED_STATEMENT: ReadonlySet<string> = new Set([
+  'command',
+  'compound_statement',
+  'list',
+  'pipeline',
+  'redirected_statement',
+  'subshell',
+]);
 
 /** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
 const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
@@ -372,18 +415,30 @@ const LITERAL_ARGUMENT = /^[\p{L}\p{N}\p{M}_@%+=:,./-]+$/u;
  * - no argument names a command this file knows, so a launcher we have never
  *   heard of cannot use the vouch to smuggle one past the analysis, and
  * - the root itself is not a known command under another spelling
- *   (`git.exe`), which would otherwise skip the dispatch chain above.
+ *   (`git.exe`), which would otherwise skip the dispatch chain above, and
+ * - no argument is one of git's redirecting global options or an option that
+ *   makes a git read verb run a helper program. A vouched wrapper is treated
+ *   as a possible git frontend elsewhere in this file; these options change
+ *   which repository, which config, or which executables git uses, so a
+ *   wrapper carrying one escapes that treatment entirely — `gitw -c
+ *   core.fsmonitor=./evil.sh status` needs no hostile checkout at all.
  *
- * Refusing costs a confirmation prompt; accepting wrongly costs the write.
+ * The cost of the last rule is a prompt for a vouched CLI that spells its own
+ * config flag `-c` or `-C`. Refusing costs a confirmation prompt; accepting
+ * wrongly costs the write.
  */
 function vouchedRootIsSafe(root: string, argNodes: SyntaxNode[]): boolean {
   if (namesAKnownCommand(root)) return false;
-  return argNodes.every(
-    (node) =>
+  return argNodes.every((node) => {
+    const arg = stripOuterQuotes(node.text);
+    return (
       LITERAL_ARGUMENT.test(node.text) &&
       !hasShellExpansion(node) &&
-      !namesAKnownCommand(node.text),
-  );
+      !namesAKnownCommand(node.text) &&
+      !GIT_REDIRECTING_GLOBAL_OPTION.test(arg) &&
+      !GIT_EXTERNAL_HELPER_OPTION.test(arg)
+    );
+  });
 }
 /** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
@@ -414,6 +469,20 @@ const WRITE_GIT_BRANCH_FLAG =
   /^(?:-[cCdDmMu](?:.|$)|--(?:delete|move|copy|set-upstream(?:-to)?|unset-upstream|create-reflog|edit-description)(?:=|$))/;
 const GIT_BRANCH_LIST_FLAG =
   /^(?:-[alr]|--(?:all|list|remotes|show-current|contains|no-contains|merged|no-merged|points-at))(?:=|$)/;
+
+/**
+ * git's global options that redirect which repository it reads, which config
+ * it applies, or where it resolves its sub-command executables.
+ *
+ * `evaluateGitSafety` screens literal git by refusing any leading-dash first
+ * argument. A vouched wrapper cannot be screened that broadly — most CLIs take
+ * flags, and refusing all of them would retract the feature — so the specific
+ * redirecting options are named instead. Unlike the open set of binaries that
+ * `NEVER_READ_ONLY_ROOT_COMMANDS` chases, this one is finite and
+ * authoritative: it is git's own documented global option list.
+ */
+const GIT_REDIRECTING_GLOBAL_OPTION =
+  /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env|exec-path))(?:=|$)/;
 
 const BLOCKED_FIND_PREFIXES = ['-fls', '-fprint', '-fprintf'];
 const FIND_VALUE_PREDICATE =
@@ -1452,6 +1521,19 @@ function evaluateStatementSafety(
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
         .map((child) => evaluateStatementSafety(child, extra)),
+      // A pipeline written after a heredoc opener on the same line is parsed
+      // *inside* the redirect node — `vtool <<EOF | rm -rf build` puts the
+      // `rm` in a `pipeline` sibling of the heredoc body — so filtering the
+      // redirect out above would drop a whole write segment from the
+      // analysis. Only the outermost statement-shaped children are taken;
+      // anything deeper stays owned by the substitution walk.
+      ...node.namedChildren
+        .filter((child) => child.type.endsWith('_redirect'))
+        .flatMap((redirect) =>
+          redirect.namedChildren
+            .filter((child) => REDIRECT_NESTED_STATEMENT.has(child.type))
+            .map((child) => evaluateStatementSafety(child, extra)),
+        ),
       evaluateRedirectionSafety(node, extra),
     );
   if (/^variable_assignments?$/.test(node.type))

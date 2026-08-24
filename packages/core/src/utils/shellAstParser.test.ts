@@ -162,6 +162,24 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(
         await isShellCommandReadOnlyASTInDirectory('git status', hostile),
       ).toBe(false);
+
+      // The changed-directory branch: once the line has cd'd, the ambient
+      // probe describes the wrong repository, so a vouched frontend after a
+      // `cd` fails closed the way literal `git` does — even from a clean cwd.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `cd ${JSON.stringify(hostile)} && gitw status`,
+          clean,
+          vouched,
+        ),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `pushd ${JSON.stringify(hostile)} && gitw status`,
+          clean,
+          vouched,
+        ),
+      ).toBe(false);
     });
 
     it('fails closed instead of simulating a changed directory', async () => {
@@ -548,7 +566,7 @@ describe('substitution hidden in an expansion pattern word', () => {
   // tree-sitter-bash parses the pattern word as a leaf, so the substitution
   // never becomes a command_substitution node — but bash still runs it.
   it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
-    'treats ${var%so$(cmd)} as unknown',
+    'refuses a command substitution hidden by the operator %s',
     async (operator) => {
       expect(
         await classifyShellCommandSafety(
@@ -571,7 +589,7 @@ describe('substitution hidden in an expansion pattern word', () => {
   // bash runs `<(…)` and `>(…)` in a pattern word exactly as it runs `$(…)`,
   // and tree-sitter emits no node for those either.
   it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
-    'treats a process substitution in ${var%so…} as unknown',
+    'refuses a process substitution hidden by the operator %s',
     async (operator) => {
       for (const opener of ['<(', '>(']) {
         expect(
@@ -591,7 +609,7 @@ describe('substitution hidden in an expansion pattern word', () => {
   // `${v@P}` runs any $(…) held in the variable's value, and in a pattern word
   // it is a leaf, so the @/P child-adjacency check never sees it either.
   it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
-    'treats ${var%so${v@P}} as unknown',
+    'refuses a prompt expansion hidden by the operator %s',
     async (operator) => {
       expect(
         await classifyShellCommandSafety(`echo \${x${operator}\${v@P}}`),
@@ -629,6 +647,34 @@ describe('substitution hidden in an expansion pattern word', () => {
     );
   });
 
+  // The default/assign/error/alternate operators take a *word* just as the
+  // trim and case operators do, and bash expands it the same way.
+  it.each([':-', '-', ':=', '=', ':?', '?', ':+', '+'])(
+    'refuses a substitution behind the value operator %s',
+    async (operator) => {
+      // `$(…)` becomes a real node and is classified from the command inside
+      // it; the leaf-parsed spellings reach the regex instead.
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}$(rm -rf b)}`),
+      ).toBe('write');
+      for (const payload of ['`rm -rf b`', '<(rm -rf b)', '${v@P}']) {
+        expect(
+          await classifyShellCommandSafety(`echo \${x${operator}${payload}}`),
+        ).toBe('unknown');
+      }
+    },
+  );
+
+  it('refuses a substitution in a substring or subscript position', async () => {
+    expect(await classifyShellCommandSafety('echo ${x:1:$(rm -rf b)}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${x[$(rm -rf b)]}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${!x@P}')).toBe('unknown');
+  });
+
   it('does not flag expansions without a substitution', async () => {
     expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
       'read-only',
@@ -654,22 +700,26 @@ describe('substitution hidden in a heredoc body', () => {
     // A `<<-` body is always one raw leaf, so the `$(` branch of the body
     // regex is the only thing that catches this — the AST walk sees no
     // command_substitution node to classify.
+    // Only the tab-indented `<<-` spelling is the always-leaf case the body
+    // regex has to catch; the others parse into a real command_substitution
+    // node and are classified from the command inside it. Pinned apart so a
+    // spelling silently changing category is a failure, not a pass.
     expect(
       await classifyShellCommandSafety('cat <<-EOF\n\t$(rm -rf build)\n\tEOF'),
-    ).not.toBe('read-only');
+    ).toBe('unknown');
     expect(
       await classifyShellCommandSafety('cat <<-EOF\n$(rm -rf build)\nEOF'),
-    ).not.toBe('read-only');
+    ).toBe('write');
     expect(
       await classifyShellCommandSafety('cat <<EOF\n$(rm -rf build)\nEOF'),
-    ).not.toBe('read-only');
+    ).toBe('write');
     // Nested one level deep, where the closing paren is not the last
     // character of the line.
     expect(
       await classifyShellCommandSafety(
         'cat <<-EOF\n\tprefix $(rm -rf build) suffix\n\tEOF',
       ),
-    ).not.toBe('read-only');
+    ).toBe('write');
   });
 
   it('treats ${v@P} in a body as unsafe, tab-stripped form included', async () => {
@@ -699,6 +749,40 @@ describe('substitution hidden in a heredoc body', () => {
     // `<<\EOF` quotes the delimiter just as surely.
     expect(
       await classifyShellCommandSafety('cat <<\\EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('read-only');
+  });
+
+  // A pipeline written after the heredoc opener is parsed *inside* the
+  // `heredoc_redirect` node, next to the body — so the arm that filters
+  // redirects out of a `redirected_statement` used to drop the whole segment.
+  it.each([
+    'vtool <<EOF | rm -rf build\nhello\nEOF',
+    'vtool <<EOF | mkdir -p build\nhello\nEOF',
+    'vtool <<EOF | tee out.txt\nhello\nEOF',
+    // The same command with the pipeline after the body, which parses as an
+    // ordinary sibling and was already classified.
+    'vtool <<EOF\nhello\nEOF | rm -rf build',
+    // The shape predates the vouch for built-in roots, so it is pinned there
+    // too — the vouch only turned the prompt into an unattended auto-run.
+    'cat <<EOF | rm -rf build\nhello\nEOF',
+  ])('evaluates the write segment of %s', async (command) => {
+    expect(
+      await classifyShellCommandSafety(command, {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
+    ).toBe('write');
+  });
+
+  it('still reads a heredoc with no pipeline as read-only', async () => {
+    expect(
+      await classifyShellCommandSafety('vtool <<EOF\nhello\nEOF', {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
+    ).toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('vtool <<EOF | wc -l\nhello\nEOF', {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
     ).toBe('read-only');
   });
 
@@ -1359,6 +1443,15 @@ describe('extraReadOnlyRoots', () => {
     'javac11',
     'pip3.11',
     'rustc-1.75',
+    'g++-12',
+    'cc-11',
+    'clang++-17',
+    // `go install golang.org/dl/go1.22.0@latest` installs a binary literally
+    // named `go1.22`, so vouching one is routine setup rather than evasion.
+    'go1.22',
+    'go1.22.0',
+    'go-1.22',
+    'nodejs18',
     // Upstream tarball, Debian hyphen, and the historical ABI suffix.
     'luajit-2.1.0-beta3',
     'gcc-13',
@@ -1380,56 +1473,173 @@ describe('extraReadOnlyRoots', () => {
   });
 
   // The it.each above iterates the very constant it guards, so a deletion
-  // would delete its own test. These names are spelled out for that reason.
-  it('keeps the families the refusal list exists for', () => {
-    for (const root of [
-      'bash',
-      'sh',
-      'busybox',
-      'env',
-      'sudo',
-      'su',
-      'xargs',
-      'time',
-      'watch',
-      'nohup',
-      'python3',
-      'node',
-      'perl',
-      'ruby',
-      'ssh',
-      'make',
-      'npx',
-      'npm',
-      'eval',
-      'exec',
-      'hash',
-      'alias',
-      'source',
-      '.',
-      'read',
-      'getopts',
-      'crontab',
-      'go',
-      'docker',
-      // Payload-executing siblings of the names already above. Each runs code
-      // that never appears in argv: a lockfile, a build manifest, a package
-      // downloaded mid-command, or a plugin the compiler dlopens.
-      'uv',
-      'uvx',
-      'pip',
-      'poetry',
-      'conda',
-      'gradle',
-      'mvn',
-      'ninja',
-      'scons',
-      'clang',
-      'rustc',
-      'javac',
-    ]) {
+  // would delete its own test. Every entry is spelled out here instead, and
+  // the count is asserted both ways: removing a name fails the containment
+  // loop, adding one without a deliberate edit here fails the size check.
+  const REFUSAL_FLOOR = [
+    'bash',
+    'busybox',
+    'cmd',
+    'cmd.exe',
+    'csh',
+    'dash',
+    'fish',
+    'ksh',
+    'powershell',
+    'pwsh',
+    'sh',
+    'tcsh',
+    'toybox',
+    'zsh',
+    'bun',
+    'bunx',
+    'deno',
+    'expect',
+    'lua',
+    'luajit',
+    'java',
+    'node',
+    'nodejs',
+    'osascript',
+    'perl',
+    'pnpx',
+    'php',
+    'python',
+    'python3',
+    'ruby',
+    'tclsh',
+    'wish',
+    'ant',
+    'bazel',
+    'buck',
+    'buck2',
+    'bundle',
+    'bundler',
+    'cargo',
+    'cc',
+    'c++',
+    'clang',
+    'clang++',
+    'cmake',
+    'conda',
+    'go',
+    'g++',
+    'gcc',
+    'composer',
+    'dotnet',
+    'gem',
+    'gradle',
+    'grunt',
+    'gulp',
+    'hatch',
+    'javac',
+    'just',
+    'lein',
+    'make',
+    'meson',
+    'mvn',
+    'ninja',
+    'nix',
+    'nix-build',
+    'nix-shell',
+    'nox',
+    'nx',
+    'pants',
+    'pdm',
+    'pip',
+    'pip3',
+    'pipenv',
+    'pipx',
+    'poetry',
+    'rake',
+    'rustc',
+    'rye',
+    'sbt',
+    'scons',
+    'task',
+    'tox',
+    'turbo',
+    'uv',
+    'uvx',
+    'docker',
+    'podman',
+    'npm',
+    'npx',
+    'pnpm',
+    'yarn',
+    'at',
+    'batch',
+    'bwrap',
+    'crontab',
+    'caffeinate',
+    'chroot',
+    'doas',
+    'env',
+    'fakeroot',
+    'flock',
+    'ionice',
+    'linux32',
+    'linux64',
+    'newgrp',
+    'nice',
+    'nohup',
+    'nsenter',
+    'parallel',
+    'pkexec',
+    'run0',
+    'runuser',
+    'setarch',
+    'script',
+    'rsh',
+    'setsid',
+    'sg',
+    'ssh',
+    'stdbuf',
+    'su',
+    'sudo',
+    'sudoedit',
+    'systemd-nspawn',
+    'systemd-run',
+    'time',
+    'timeout',
+    'unshare',
+    'watch',
+    'wine',
+    'wsl',
+    'wsl.exe',
+    'xargs',
+    'alias',
+    'bind',
+    'builtin',
+    'command',
+    'compgen',
+    'complete',
+    'coproc',
+    'enable',
+    'eval',
+    'exec',
+    'fc',
+    'hash',
+    'history',
+    'getopts',
+    'let',
+    'mapfile',
+    'read',
+    'readarray',
+    'set',
+    'shopt',
+    'source',
+    '.',
+    'trap',
+    'unalias',
+  ];
+
+  it('pins every entry of the refusal floor against deletion', () => {
+    for (const root of REFUSAL_FLOOR) {
       expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
     }
+    expect(new Set(REFUSAL_FLOOR).size).toBe(REFUSAL_FLOOR.length);
+    expect(NEVER_READ_ONLY_ROOT_COMMANDS.size).toBe(REFUSAL_FLOOR.length);
   });
 
   // A refusal list built by family is only as good as its edges: each pair
@@ -1490,6 +1700,50 @@ describe('extraReadOnlyRoots', () => {
         extraReadOnlyRoots: new Set(['mytool']),
       }),
     ).toBe('read-only');
+  });
+
+  // A vouched wrapper is treated as a possible git frontend, so it must not
+  // be able to carry the global options that redirect which repository git
+  // reads, which config it applies, or where it resolves its executables —
+  // options literal git refuses wholesale via its leading-dash screen.
+  it.each([
+    'gitw -C attacker status',
+    'gitw --git-dir=attacker/.git --work-tree=attacker status',
+    'gitw --namespace=x status',
+    // No hostile checkout needed: the config arrives through argv.
+    'gitw -c core.fsmonitor=./evil.sh status',
+    'gitw -c diff.external=./evil.sh diff',
+    'gitw --config-env=core.fsmonitor=EVIL status',
+    // Redirects where git resolves every non-builtin sub-command, and a clone
+    // preserves the executable bit, so the payload ships in the repository.
+    'gitw --exec-path=./evil request-pull',
+    'gitw --exec-path ./evil request-pull',
+    // Flags that make a read verb run a helper program.
+    'gitw diff --textconv',
+    'gitw cat-file --filters',
+    'gitw log --show-signature',
+    'gitw diff --ext-diff',
+  ])('refuses the vouched git frontend invocation %s', async (command) => {
+    expect(
+      await classifyShellCommandSafety(command, {
+        extraReadOnlyRoots: new Set(['gitw']),
+      }),
+    ).toBe('unknown');
+  });
+
+  it('leaves an ordinary flag on a vouched root alone', async () => {
+    // The rule above names git's redirecting options rather than refusing
+    // every leading-dash argument, so a CLI's own flags still pass.
+    for (const command of [
+      'ib --json list',
+      'ib list --format=json',
+      'ib list -l',
+      'ib list --no-color',
+    ]) {
+      expect(await classifyShellCommandSafety(command, withIb)).toBe(
+        'read-only',
+      );
+    }
   });
 
   it('applies inside compound statements and subshells', async () => {

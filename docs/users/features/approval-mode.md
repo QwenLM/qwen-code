@@ -186,6 +186,15 @@ so the vouch is honoured only for an invocation it can read literally:
   not otherwise special. `.` and `..` are the exception: as arguments they name
   a directory, not the POSIX spelling of `source`, so `ib list .` is fine.
 
+- no argument may be one of `git`'s redirecting global options (`-C`, `-c`,
+  `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path`) or
+  a flag that makes a `git` read verb run a helper program (`--textconv`,
+  `--filters`, `--show-signature`, `--ext-diff`). A vouched command is treated
+  as a possible `git` frontend (see below), and these options change which
+  repository, which configuration, or which executables `git` uses. The cost is
+  a prompt for a CLI that spells its own config flag `-c` or `-C`; ordinary
+  flags such as `--json` or `--format=…` are unaffected.
+
 A vouched command is also treated as a possible `git` frontend. `git diff` and
 `git status` are downgraded to a prompt when the repository's own
 `.git/config` sets `diff.external` or `core.fsmonitor`, because git then runs a

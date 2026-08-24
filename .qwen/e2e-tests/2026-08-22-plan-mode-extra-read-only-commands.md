@@ -50,10 +50,17 @@ node /path/to/qwen-code/dist/cli.js
 Dry-run the baseline against the globally installed `qwen` first — the setting
 does not exist there, so expect the unknown-read cases to prompt and the
 state-modifying cases to be blocked, exactly as they are after the change.
-Only cases 1, 5b, 6c, 7, 8, and 9 change behavior with the setting present;
+Only cases 1, 5b, 6b-2, 6c, 6d, 7, 8, and 9 change behavior with the setting
+present;
 every other case behaves identically with and without it. (Case 6c's startup
 warning names a key the baseline build does not have, so it cannot appear
 there at all.)
+
+**Every instructed restart drops Plan mode** — approval mode is session state,
+not a setting — so re-enter it with `/plan` immediately after each restart
+below. A post-restart case run without that step exercises the default mode
+instead, where `permissions.allow` governs and the vouch is deliberately
+inert, and will report the wrong result.
 
 ## Cases
 
@@ -101,7 +108,7 @@ there at all.)
 ### 6. The safety net cannot be switched off from settings
 
 Add `"bash"`, `"time"`, `"hash"`, `"python3"`, `"make"`, `"rm"`, and `"git"`
-to `extraReadOnlyCommands` and restart.
+to `extraReadOnlyCommands`, restart, and re-enter Plan mode with `/plan`.
 
 - Ask for `bash -c 'echo hi'`.
   **Expect**: still prompts — the classifier refuses to let any caller vouch a
@@ -142,7 +149,8 @@ launcher names.
 ### 6b-2. Payload-executing tools fail closed under their own names
 
 Add `"uv"`, `"gradle"`, `"ninja"`, `"c++"`, and `"run0"` to
-`extraReadOnlyCommands` and restart. Each of these takes its payload from a
+`extraReadOnlyCommands`, restart, and re-enter Plan mode with `/plan`. Each
+of these takes its payload from a
 file, a manifest, or a downloaded package rather than from argv, so no
 argument inspection can see what it runs.
 
@@ -165,13 +173,24 @@ printf '#!/bin/sh\nexec git "$@"\n' > /tmp/ib-e2e/bin/gitw
 chmod +x /tmp/ib-e2e/bin/gitw
 ```
 
-With `"gitw"` vouched, launch the CLI from `/tmp/ib-e2e/hostile`:
+Add `"gitw"` to `extraReadOnlyCommands`, then launch the CLI **from
+`/tmp/ib-e2e/hostile`** (the gate reads the session's working directory, which
+cannot be changed from inside the session) and enter Plan mode with `/plan`:
 
 - Ask for `gitw status`. **Expect**: a prompt, the same one literal
   `git status` gets here.
-- Return to `/tmp/ib-e2e` (no planted config) and ask again. **Expect**: no
-  prompt. The gate is keyed to the repository's risk, not to the vouch, so an
-  ordinary checkout is unaffected.
+- Ask for `gitw -c core.fsmonitor=./evil.sh status` and
+  `gitw --exec-path=./evil request-pull`. **Expect**: prompts. These carry
+  git's redirecting global options, which the vouch refuses on shape — the
+  first needs no planted config at all.
+- Ask for `gitw diff --textconv`. **Expect**: a prompt; the flag makes a read
+  verb run a helper program.
+
+Then **quit, relaunch from `/tmp/ib-e2e`** (no planted config) and `/plan`
+again:
+
+- Ask for `gitw status`. **Expect**: no prompt. The gate is keyed to the
+  repository's risk, not to the vouch, so an ordinary checkout is unaffected.
 
 ### 6c. A workspace cannot vouch for itself
 
@@ -181,10 +200,14 @@ Move the vouch into the repository's own settings:
 mv "$QWEN_HOME/settings.json" /tmp/ib-e2e/.qwen/settings.json
 ```
 
-- Restart and ask for `ib domain list` in Plan mode.
+- Restart **from `/tmp/ib-e2e`** (the workspace whose `.qwen` now holds the
+  vouch — started anywhere else the file is not a workspace setting at all and
+  the case proves nothing), enter Plan mode with `/plan`, and ask for
+  `ib domain list`.
 - **Expect**: the prompt is back — the workspace value is stripped during the
   merge — and a startup warning names `permissions.planMode`. Move the file
-  back to `$QWEN_HOME/settings.json` **and restart** before continuing: the
+  back to `$QWEN_HOME/settings.json`, **restart, and `/plan`** before
+  continuing: the
   key is `requiresRestart`, so nothing picks the vouch back up on its own and
   cases 7 and 8 would fail spuriously.
 
@@ -210,7 +233,8 @@ mv "$QWEN_HOME/settings.json" /tmp/ib-e2e/.qwen/settings.json
 ### 9. Invalid entries are ignored, not fatal
 
 Set `extraReadOnlyCommands` to
-`["", "   ", "ib list", "/usr/local/bin/ib", "ib;rm", "IB"]` and restart.
+`["", "   ", "ib list", "/usr/local/bin/ib", "ib;rm", "IB"]`, restart, and
+re-enter Plan mode with `/plan`.
 
 - **Expect**: the CLI starts normally. `ib domain list` runs without a prompt
   (from the `"IB"` entry, which normalizes to `ib`); the malformed entries are
