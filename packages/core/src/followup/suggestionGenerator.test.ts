@@ -85,6 +85,7 @@ describe('generatePromptSuggestion', () => {
       enableCacheSharing: true,
     });
 
+    expect(mockGetCacheSafeParams).toHaveBeenCalledWith('test-session');
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'main-model', abortSignal: signal }),
     );
@@ -175,8 +176,8 @@ describe('generatePromptSuggestion', () => {
       { enableCacheSharing: true },
     );
 
-    // The foreign slot is rejected before cloning the full cached payload.
-    expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+    // The cache API rejects the foreign slot before cloning its payload.
+    expect(mockGetCacheSafeParams).toHaveBeenCalledWith('session-A');
     // The fork must NOT be used for a foreign session's params.
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
     // The session-safe base-LLM path is used instead.

@@ -21332,7 +21332,7 @@ describe('stale sandbox container cleanup', () => {
         '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
       );
       chmodSync(join(bin, 'docker'), 0o755);
-      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // The launcher line exactly as packages/cli/src/serve/sandbox.ts
       // prints it, then the wedge shape: one line, then silence.
       const stub = join(dir, 'qwen');
       writeFileSync(

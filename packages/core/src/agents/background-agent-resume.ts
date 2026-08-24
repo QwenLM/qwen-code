@@ -44,7 +44,10 @@ import {
 } from '../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
-import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import {
+  createApprovalModeOverride,
+  stampBackgroundPromptPolicy,
+} from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
@@ -922,9 +925,7 @@ export class BackgroundAgentResumeService {
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bgConfig = Object.create(activeAgentConfig) as any;
-      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
+      stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -939,7 +940,7 @@ export class BackgroundAgentResumeService {
           ]
         : [
             ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
+              await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
@@ -985,7 +986,7 @@ export class BackgroundAgentResumeService {
       let subagent: AgentHeadless;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
-          bgConfig as Config,
+          activeAgentConfig,
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
@@ -998,7 +999,7 @@ export class BackgroundAgentResumeService {
             : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(resumeSubagentConfig, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
             promptConfigOverrides: {
               initialMessages: resumeHistory,

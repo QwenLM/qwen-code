@@ -106,3 +106,18 @@ export function restorableAskUserQuestionCallIds(
       .filter((id): id is string => typeof id === 'string' && id.length > 0),
   );
 }
+
+/**
+ * Last API-facing content in a transcript replay, skipping system/bookkeeping
+ * records. Used when chat is not initialized yet (cold bulk load replay).
+ */
+export function lastHistoryContentFromRecords(
+  records: ReadonlyArray<{ type?: string; message?: Content }>,
+): Content | undefined {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record?.type === 'system' || !record?.message) continue;
+    return record.message;
+  }
+  return undefined;
+}

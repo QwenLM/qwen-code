@@ -12,11 +12,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
-  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -25,6 +25,21 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
@@ -221,6 +236,7 @@ describe('SettingsSchema', () => {
       expect(imageModel.default).toBe('');
       expect(imageModel.requiresRestart).toBe(false);
       expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
     });
 
     it('should define the advisor model setting', () => {
