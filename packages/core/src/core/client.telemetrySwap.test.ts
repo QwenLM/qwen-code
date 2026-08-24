@@ -152,9 +152,9 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
 
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(2);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_B).models,
-    ).toEqual({});
+    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
+      {},
+    );
 
     // Trap (1): abort must forget initializedSessionId — retrying the same
     // swap replays again instead of early-returning into an under-counted
@@ -255,22 +255,34 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     expect(totalRequests()).toBe(1);
   });
 
-  it('a second begin inside an open swap keeps the earliest snapshot', async () => {
+  it('a second begin while a transaction is open is rejected (serialization latch)', async () => {
     const { config, client } = makeEnv();
 
     config.swap(SESSION_A, { conversation: conversationWith(100) });
     await client.initialize();
 
-    client.beginTelemetrySwap();
-    client.beginTelemetrySwap(); // defensive re-open (concurrent invoke)
+    // The slot doubles as the session-switch latch (#9844): the session
+    // picker fires swaps fire-and-forget and no input gate covers them, so
+    // a concurrent second /resume or /branch must be rejected here. Two
+    // open transactions would entangle — the second replay mutates the
+    // same aggregate while the first swap's stale settlement either no-ops
+    // or restores over the second's committed state.
+    expect(client.beginTelemetrySwap()).toBe(true);
+    expect(client.beginTelemetrySwap()).toBe(false);
+
+    // The rejection leaves the first transaction untouched: it still
+    // settles its own replay.
     config.swap(SESSION_B, {
       conversation: conversationWith(100, SESSION_B),
     });
     await client.initialize();
     expect(totalRequests()).toBe(2);
-
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(1);
+
+    // Once settled, the slot is free again.
+    expect(client.beginTelemetrySwap()).toBe(true);
+    client.commitTelemetrySwap();
   });
 
   it('initialize with a SessionStartSource still honors the transaction', async () => {
@@ -286,8 +298,8 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     await client.initialize(SessionStartSource.Branch);
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(1);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_B).models,
-    ).toEqual({});
+    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
+      {},
+    );
   });
 });

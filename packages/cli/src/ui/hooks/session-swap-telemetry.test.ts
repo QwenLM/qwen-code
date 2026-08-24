@@ -42,12 +42,14 @@ vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
     await importOriginal<typeof import('../utils/resumeHistoryUtils.js')>();
   return {
     ...actual,
-    buildResumedHistoryItems: vi.fn((...args: Parameters<typeof actual.buildResumedHistoryItems>) => {
-      if (historyUtilsMocks.throwOnBuild.value) {
-        throw new Error('history swap failed');
-      }
-      return actual.buildResumedHistoryItems(...args);
-    }),
+    buildResumedHistoryItems: vi.fn(
+      (...args: Parameters<typeof actual.buildResumedHistoryItems>) => {
+        if (historyUtilsMocks.throwOnBuild.value) {
+          throw new Error('history swap failed');
+        }
+        return actual.buildResumedHistoryItems(...args);
+      },
+    ),
   };
 });
 
@@ -185,11 +187,13 @@ function makeFakeEnv() {
       rebuildTurnBoundaries: vi.fn(),
     }),
     getSessionService: () => ({
-      forkSession: vi.fn().mockImplementation(async (from: string, to: string) => {
-        const source = sessionServiceMocks.sessions.get(from);
-        if (source) sessionServiceMocks.sessions.set(to, source);
-        return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
-      }),
+      forkSession: vi
+        .fn()
+        .mockImplementation(async (from: string, to: string) => {
+          const source = sessionServiceMocks.sessions.get(from);
+          if (source) sessionServiceMocks.sessions.set(to, source);
+          return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
+        }),
       loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
       removeSession: vi.fn().mockResolvedValue(true),
       renameSession: vi.fn().mockResolvedValue(true),
@@ -326,9 +330,9 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(promptTokens()).toBe(preSwap.models['test-model']!.tokens.prompt);
     expect(totalRequests()).toBe(2);
     // The fork's replay-created bucket must be gone; A's bucket intact.
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_B).models,
-    ).toEqual({});
+    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
+      {},
+    );
     expect(
       uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
         ?.api.totalRequests,
@@ -385,9 +389,9 @@ describe('session swap telemetry accounting (#9833)', () => {
     // must not remain in the aggregate.
     expect(totalRequests()).toBe(2);
     expect(promptTokens()).toBe(105);
-    expect(
-      uiTelemetryService.getMetricsForSession(SESSION_B).models,
-    ).toEqual({});
+    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
+      {},
+    );
   });
 
   it('a successful /branch keeps the replayed usage', async () => {
@@ -508,6 +512,113 @@ describe('session swap telemetry accounting (#9833)', () => {
     // so the failed rollback must leave the aggregate untouched.
     expect(totalRequests()).toBe(2);
     expect(promptTokens()).toBe(105);
+  });
+
+  it('rejects a concurrent /resume submitted while a swap is in flight', async () => {
+    // The session picker fires handleResume fire-and-forget (the dialog
+    // closes immediately, the promise is never awaited) and no input gate
+    // covers the swap, so a second /resume can be submitted while the first
+    // is still in flight. Before the fix the second begin was a ??= no-op
+    // and the two swaps entangled the single transaction slot: C committed
+    // and cleared the slot, then B's late failure could no longer settle —
+    // B's abandoned replay stayed permanently double-counted in the
+    // aggregate while core rolled back under C's committed UI (SCENARIO A
+    // of the #9844 review). The fix rejects C while B's transaction is
+    // open.
+    const SESSION_C = 'session-C';
+    const { config } = await establishLiveSessionA(100);
+    expect(promptTokens()).toBe(105);
+
+    sessionServiceMocks.sessions.set(SESSION_B, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_B },
+    });
+    sessionServiceMocks.sessions.set(SESSION_C, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_C },
+    });
+
+    // Deterministic interleaving: B's swap hangs on a deferred
+    // loadPausedBackgroundAgents AFTER its forward initialize() replay
+    // committed (transaction open, aggregate includes B's history), so C
+    // can be submitted into exactly that window.
+    let failB!: (err: Error) => void;
+    config.loadPausedBackgroundAgents = vi.fn((id: string) =>
+      id === SESSION_B
+        ? new Promise<never>((_resolve, reject) => {
+            failB = reject;
+          })
+        : Promise.resolve([]),
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const renderResume = (addItemMock: any) =>
+      renderHook(() =>
+        useResumeCommand({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          config: config as any,
+          settings: mockSettings,
+          historyManager: {
+            addItem: addItemMock,
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+          },
+          startNewSession: vi.fn(),
+          clearPendingState: vi.fn(),
+          setSessionName: vi.fn(),
+          remount: vi.fn(),
+        }),
+      ).result;
+
+    const addItemB = vi.fn();
+    const addItemC = vi.fn();
+    const resultB = renderResume(addItemB);
+    const resultC = renderResume(addItemC);
+
+    // Fire-and-forget B, exactly like the resume dialog fires it.
+    let pendingB!: Promise<void>;
+    await act(async () => {
+      pendingB = resultB.current.handleResume(SESSION_B);
+      // Let B reach the deferred loadPausedBackgroundAgents; its replay has
+      // committed by then.
+      for (let i = 0; i < 100 && totalRequests() < 3; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(totalRequests()).toBe(3); // B's replay is in the aggregate
+
+    // Submit C while B's transaction is open: it must be rejected without
+    // replaying anything or touching core's session.
+    await act(async () => {
+      await resultC.current.handleResume(SESSION_C);
+    });
+    expect(addItemC).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(promptTokens()).toBe(205); // C added nothing
+    expect(config.getSessionId()).toBe(SESSION_B); // C swapped nothing
+
+    // Now B fails late: because C never entangled the slot, B's own
+    // transaction settles cleanly — the aggregate is restored exactly
+    // instead of keeping B's abandoned replay forever (which read 305 with
+    // core rolled back under C's committed UI before the fix).
+    await act(async () => {
+      failB(new Error('late failure'));
+      await pendingB;
+    });
+    expect(addItemB).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Failed to resume session'),
+      }),
+      expect.any(Number),
+    );
+    expect(config.getSessionId()).toBe(SESSION_A);
+    expect(promptTokens()).toBe(105);
+    expect(totalRequests()).toBe(2);
+    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
+      {},
+    );
   });
 
   it('an undo committed by an earlier swap is never restored later', async () => {

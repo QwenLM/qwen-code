@@ -177,7 +177,26 @@ export function useResumeCommand(
         // be able to put it back (#9833). The transaction arms its own
         // snapshot inside the client's replay decision, so opening it early
         // costs nothing when no replay happens.
-        config.getGeminiClient()?.beginTelemetrySwap?.();
+        //
+        // Opening also doubles as the session-switch latch (#9844): a false
+        // return means another /resume or /branch already holds the single
+        // swap slot (the session picker fires swaps fire-and-forget and
+        // nothing else serializes them). Reject instead of entangling — a
+        // second concurrent swap would let the first swap's stale settlement
+        // restore over, or drop, this swap's committed replay, reintroducing
+        // the very double-count this transaction exists to prevent.
+        const telemetrySwapOpened =
+          config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
+        if (!telemetrySwapOpened) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'A session switch is already in progress. Try again in a moment.',
+            } as HistoryItemWithoutId,
+            Date.now(),
+          );
+          return;
+        }
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;

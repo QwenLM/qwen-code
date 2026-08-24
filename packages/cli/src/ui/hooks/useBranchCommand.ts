@@ -129,6 +129,10 @@ export function useBranchCommand(
       let coreSwapped = false;
       let uiSwapped = false;
       let forkCreated = false;
+      // Rejected by the telemetry-swap latch: the catch block must neither
+      // roll back (nothing was swapped) nor settle the slot (it belongs to
+      // the in-flight swap that rejected this one) (#9844).
+      let swapRejected = false;
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
@@ -204,7 +208,20 @@ export function useBranchCommand(
         // catch path must be able to put it back (#9833). The transaction
         // arms its own snapshot inside the client's replay decision, so
         // opening it early costs nothing when no replay happens.
-        config.getGeminiClient()?.beginTelemetrySwap?.();
+        //
+        // Opening also doubles as the session-switch latch (#9844): a false
+        // return means another /resume or /branch already holds the single
+        // swap slot. Throw (rather than early-return) so the catch block
+        // still deletes the fork we just created; `swapRejected` keeps the
+        // catch from settling the slot, which belongs to the in-flight swap.
+        const telemetrySwapOpened =
+          config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
+        if (!telemetrySwapOpened) {
+          swapRejected = true;
+          throw new Error(
+            'A session switch is already in progress. Try again in a moment.',
+          );
+        }
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -300,11 +317,13 @@ export function useBranchCommand(
           // committed replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
           config.getGeminiClient()?.abortTelemetrySwap?.();
-        } else {
+        } else if (!swapRejected) {
           // Either the core swap never happened (nothing was replayed —
           // the transaction is unarmed) or the UI already committed (the
           // replay belongs to the session the user is on). Both close the
-          // transaction without restoring.
+          // transaction without restoring. A latch-rejected attempt owns no
+          // transaction — settling here would close the in-flight swap that
+          // rejected it (#9844).
           config.getGeminiClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {

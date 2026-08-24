@@ -611,12 +611,21 @@ export class GeminiClient {
    *   the snapshot is taken here, inside the replay decision, never keyed on
    *   a caller's guess.
    *
-   * Idempotent within a swap: opening while a transaction is already open
-   * keeps the existing one (the earliest snapshot is the correct pre-swap
-   * state).
+   * Serialization: returns false WITHOUT opening when a transaction is
+   * already open. Callers MUST abort the swap attempt on a false return
+   * (the hooks surface "a session switch is already in progress"). Two
+   * concurrent swaps cannot share this single slot: the second open would
+   * no-op while both replays mutate the same aggregate, so the first swap's
+   * stale settlement would either no-op or restore its snapshot over the
+   * second swap's committed state — the double-count / split-brain this
+   * transaction exists to close. Nothing else serializes the swaps: the
+   * session picker fires them fire-and-forget and no input gate covers
+   * them, so this slot is the latch.
    */
-  beginTelemetrySwap(): void {
-    this.telemetrySwap ??= {};
+  beginTelemetrySwap(): boolean {
+    if (this.telemetrySwap) return false;
+    this.telemetrySwap = {};
+    return true;
   }
 
   /**
