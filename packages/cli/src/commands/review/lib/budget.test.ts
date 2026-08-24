@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_CANDIDATE_FLOOR,
   MAX_INLINE_ANGLES,
   MIN_INLINE_ANGLES,
   VERIFY_SHARD,
@@ -15,8 +16,15 @@ import {
   reverseAuditRoundCap,
   reverseAuditRoundTier,
   cappedRoundTier,
-  reviewBudget,
+  reviewBudget as deriveReviewBudget,
+  type BudgetContext,
+  type BudgetInput,
 } from './budget.js';
+
+const reviewBudget = (
+  input: Omit<BudgetInput, 'changedFiles'> & { changedFiles?: number },
+  context?: BudgetContext,
+) => deriveReviewBudget({ changedFiles: 1, ...input }, context);
 
 const budget = (srcDiffLines: number, diffLines = srcDiffLines) =>
   reviewBudget({ srcDiffLines, diffLines });
@@ -58,6 +66,44 @@ describe('reviewBudget — inline angles scale with what there is to see', () =>
     expect(budget(0, 2000).inlineAngles).toBeLessThanOrEqual(
       budget(2000, 2000).inlineAngles,
     );
+  });
+});
+
+describe('reviewBudget — low-effort candidate floor', () => {
+  it.each([
+    [0, 0],
+    [1, 1],
+    [3, 3],
+    [4, 4],
+    [12, 4],
+  ])(
+    'targets min(%i changed files, 4) candidates',
+    (changedFiles, expected) => {
+      expect(
+        reviewBudget({
+          srcDiffLines: 120,
+          diffLines: 120,
+          changedFiles,
+        }).candidateFloor,
+      ).toBe(expected);
+    },
+  );
+
+  it('is independent of diff lines and capped by its one exported maximum', () => {
+    expect(
+      reviewBudget({
+        srcDiffLines: 50_000,
+        diffLines: 50_000,
+        changedFiles: 1,
+      }).candidateFloor,
+    ).toBe(1);
+    expect(
+      reviewBudget({
+        srcDiffLines: 1,
+        diffLines: 1,
+        changedFiles: 50_000,
+      }).candidateFloor,
+    ).toBe(MAX_CANDIDATE_FLOOR);
   });
 });
 
