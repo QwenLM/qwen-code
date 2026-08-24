@@ -190,9 +190,11 @@ export class StreamInactivityTimeoutError extends Error {
   ) {
     super(
       `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
-        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
-        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
-        `(or 0 to disable it).`,
+        `(stream lifetime: ${streamLifetimeMs}ms). Increase ` +
+        `model.generationConfig.streamIdleTimeoutMs or the matching ` +
+        `modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ` +
+        `when neither is set, use ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}. ` +
+        `Set the active value to 0 to disable it.`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
