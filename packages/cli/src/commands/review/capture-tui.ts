@@ -2147,24 +2147,56 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         throw new Error('staged render input is not the .ans this run wrote');
       }
       renderInputStaged = true;
-    } catch {
-      // Swapped (or gone) between this run's write and the render. The
-      // on-disk .ans is no longer the bytes this run produced, so it is
-      // neither rendered NOR credited: `ansLost` drops the ans rung below,
-      // which also stops the manifest from minting the clear-phase
-      // signature over a foreign file (evidence 'none' is not a signature).
-      // The stage is this run's to remove; the foreign .ans is not touched.
-      ansLost = true;
+    } catch (stageErr) {
+      // TWO causes reach here and must NOT be conflated:
+      //  · linkSync SUCCEEDED but the staged inode is not the .ans this run
+      //    wrote — a real swap. The on-disk .ans is foreign, so it is
+      //    neither rendered nor credited: `ansLost` drops the ans rung and
+      //    the run refuses below, which also keeps the clear-phase signature
+      //    off a foreign file.
+      //  · linkSync itself THREW — a host that cannot hard-link the stage
+      //    (exFAT/FAT/WSL DrvFs have no link(); ENOSPC/EDQUOT/EACCES can hit
+      //    the directory-entry create mid-window). This run's own .ans is
+      //    untouched and still identity-checkable, so ONLY the png rung is
+      //    lost. Setting `ansLost` there refused with a factually false
+      //    "replaced during the render window", stranded this run's intact
+      //    .ans with no manifest, and wedged EVERY later capture at that
+      //    --out (the collision gate then refuses the unsignatured file
+      //    forever) — a link-less mount broke the ladder exactly where it
+      //    should degrade png → ans-only.
+      // <out>.ans's identity decides which: still ours ⇒ a stage failure to
+      // degrade past; changed or gone ⇒ a swap to refuse over.
+      let swapped = true;
+      try {
+        const cur = lstatSync(ansPath);
+        swapped =
+          cur.ino !== ansWritten.ino ||
+          cur.size !== ansWritten.size ||
+          cur.mtimeMs !== ansWritten.mtimeMs;
+      } catch {
+        // Gone — this run's .ans is not on disk to credit; treat as lost.
+      }
+      if (swapped) {
+        ansLost = true;
+        degradations.push(
+          `${ansPath} was replaced while the render was being prepared — ` +
+            'this run can no longer show the .ans it wrote, so no evidence ' +
+            'rung is claimed',
+        );
+      } else {
+        // The .ans stands and is still ours; only the render could not be
+        // staged. Name the errno and fall through to an ans-only manifest.
+        degradations.push(
+          `could not stage ${ansPath} for rendering (${
+            (stageErr as NodeJS.ErrnoException).code ?? String(stageErr)
+          }) — .ans text captured, no image rendered`,
+        );
+      }
       try {
         rmSync(ansStage, { force: true });
       } catch {
         // Litter is cosmetic; never let cleanup mask the capture's result.
       }
-      degradations.push(
-        `${ansPath} was replaced while the render was being prepared — ` +
-          'this run can no longer show the .ans it wrote, so no evidence ' +
-          'rung is claimed',
-      );
     }
     if (renderInputStaged && freezeBin === undefined) {
       degradations.push(

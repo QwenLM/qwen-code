@@ -1932,6 +1932,59 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'degrades rather than falsely claiming a swap when staging itself fails',
+    async () => {
+      // R20-2 set `ansLost` unconditionally in the staging catch, conflating
+      // a real swap with `linkSync` ITSELF failing — a host with no link()
+      // (exFAT/FAT/WSL DrvFs), or ENOSPC/EACCES on the stage's directory
+      // entry. There the .ans this run wrote is intact, so refusing with
+      // "replaced during the render window" is factually false and wedges
+      // the --out for every later capture. Identity decides: an intact .ans
+      // is a stage failure to degrade past, not a swap to refuse over.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-stagefail-'));
+      writeFakeTmux(dir, '    :');
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      // Make the --out directory unwritable DURING the render window, after
+      // the .ans is already on disk: the stage linkSync then fails with
+      // EACCES while <out>.ans stays exactly the bytes this run wrote. (A
+      // read-only dir also fails the manifest write, so the run still
+      // refuses — but for the honest reason, never the fabricated swap.)
+      probes.freeze = () => {
+        chmodSync(dir, 0o500);
+        return { status: 'ok', out: '' } as const;
+      };
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        // The staging failed on an intact .ans — never the false swap claim
+        // that stranded it and wedged the --out.
+        expect(stderr).not.toContain('replaced while the render');
+        expect(stderr).not.toContain('replaced during the render window');
+      } finally {
+        chmodSync(dir, 0o700);
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'refuses a render input rewritten IN PLACE — the inode never changed',
     async () => {
       // The sibling below swaps the file; this one rewrites it. The staging
