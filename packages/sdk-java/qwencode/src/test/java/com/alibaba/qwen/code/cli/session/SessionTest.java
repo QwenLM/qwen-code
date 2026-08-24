@@ -258,17 +258,67 @@ class SessionTest {
     }
 
     @Test
-    void sendPromptStopsWhenControlResponseSubtypeIsNestedError() throws SessionControlException, SessionSendPromptException {
+    void sendPromptDrainsTurnWhenControlResponseSubtypeIsNestedError() throws SessionControlException, SessionSendPromptException {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error\","
                         + "\"response\":{\"message\":\"set model failed\"}}}",
-                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"should not be read\"}]}}");
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"still consumed\"}]}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+
+        Session session = new Session(transport);
+        AtomicInteger controlResponses = new AtomicInteger();
+        AtomicInteger results = new AtomicInteger();
+
+        session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+            @Override
+            public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
+                controlResponses.incrementAndGet();
+            }
+
+            @Override
+            public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                results.incrementAndGet();
+            }
+        });
+
+        assertEquals(3, transport.getProcessedPromptLineCount());
+        assertEquals(1, controlResponses.get());
+        assertEquals(1, results.get());
+    }
+
+    @Test
+    void sendPromptUsesTopLevelSubtypeWhenNestedSubtypeIsMissing() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"subtype\":\"error\",\"response\":{\"request_id\":\"set-model\","
+                        + "\"response\":{\"message\":\"set model failed\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
 
         Session session = new Session(transport);
 
         session.sendPrompt("hello", new SessionEventSimpleConsumers());
 
-        assertEquals(1, transport.getProcessedPromptLineCount());
+        assertEquals(2, transport.getProcessedPromptLineCount());
+    }
+
+    @Test
+    void sendPromptContinuesAfterNestedControlResponseSuccess() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"success\","
+                        + "\"response\":{\"message\":\"ok\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+
+        Session session = new Session(transport);
+        AtomicInteger results = new AtomicInteger();
+
+        session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+            @Override
+            public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                results.incrementAndGet();
+            }
+        });
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertEquals(1, results.get());
     }
 
     @Test
