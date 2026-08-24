@@ -14,6 +14,7 @@ import {
   getSessionRegistryDir,
   listLiveSessions,
   patchSessionRecord,
+  readOwnSessionRecord,
   registerSession,
   resetRegisteredRecordPathForTest,
   unregisterSession,
@@ -651,6 +652,28 @@ describe('patchSessionRecord', () => {
 
     expect(await listLiveSessions()).toEqual([]);
     await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
+  });
+
+  it('reads only this process own live registered record', async () => {
+    await registerSession({ sessionId: 'self', cwd: '/w/app' });
+    await expect(readOwnSessionRecord()).resolves.toMatchObject({
+      pid: process.pid,
+      sessionId: 'self',
+      cwd: '/w/app',
+    });
+
+    const foreign = liveBody({ pid: process.pid + 1, sessionId: 'foreign' });
+    await writeRaw(`${process.pid}.json`, foreign);
+    await expect(readOwnSessionRecord()).resolves.toBeNull();
+  });
+
+  it('does not adopt a stale record when this process never registered', async () => {
+    await writeRaw(
+      `${process.pid}.json`,
+      liveBody({ pid: process.pid, sessionId: 'stale' }),
+    );
+
+    await expect(readOwnSessionRecord()).resolves.toBeNull();
   });
 
   it('leaves a foreign record sitting at this pid’s path untouched', async () => {

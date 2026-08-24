@@ -29,6 +29,7 @@ const debugLogger = createDebugLogger('PEER_IPC');
 
 /** Give up on a peer that accepts a connection but never drains it. */
 export const SEND_TIMEOUT_MS = 5_000;
+export const PROBE_TIMEOUT_MS = 250;
 
 /**
  * Most concurrent outbound sends allowed.
@@ -144,6 +145,36 @@ export function sendPeerFrame(
       debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
       resolve();
     });
+  });
+}
+
+/** Dial only long enough to prove that a registered peer is reachable. */
+export function probePeerSocket(
+  socketPath: string,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!isLocalIpcPath(socketPath)) {
+      resolve(false);
+      return;
+    }
+
+    const socket = net.connect({ path: socketPath });
+    socket.unref();
+    let settled = false;
+    const finish = (reachable: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(reachable);
+    };
+    const deadline = setTimeout(() => finish(false), timeoutMs);
+    deadline.unref();
+    socket.on('connect', () => finish(true));
+    socket.on('error', (error: NodeJS.ErrnoException) =>
+      finish(error.code === 'EBUSY' || error.code === 'EAGAIN'),
+    );
   });
 }
 

@@ -407,6 +407,24 @@ export async function patchSessionRecord(
   }
 }
 
+/** Read this process's live record without adopting a stale PID collision. */
+export async function readOwnSessionRecord(): Promise<SessionRegistryRecord | null> {
+  if (registeredRecordPath === null) return null;
+  try {
+    const existing = await readRecord(registeredRecordPath);
+    if (
+      existing.status !== 'ok' ||
+      !matchesLocalIdentity(existing.record) ||
+      !isSameProcess(existing.record.pid, existing.record.procStart)
+    ) {
+      return null;
+    }
+    return existing.record;
+  } catch {
+    return null;
+  }
+}
+
 /** Remove this process's record. Safe to call when none was written. */
 export async function unregisterSession(): Promise<void> {
   try {

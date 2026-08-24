@@ -11,6 +11,13 @@ import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
+const sendToPeerMock = vi.hoisted(() => vi.fn());
+vi.mock('../ipc/peer-send.js', () => ({ sendToPeer: sendToPeerMock }));
+
+beforeEach(() => {
+  sendToPeerMock.mockReset().mockResolvedValue({ kind: 'disabled' });
+});
+
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
@@ -19,11 +26,29 @@ function makeTeamConfig(opts?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
     requestShutdown?: (...args: unknown[]) => Promise<void>;
+    getTeamFile?: () => {
+      leadAgentId: string;
+      members: Array<{ name: string; agentId: string }>;
+    };
   } | null;
   approvalMode?: ApprovalMode;
 }) {
+  const teamManager = opts?.teamManager
+    ? {
+        ...opts.teamManager,
+        getTeamFile:
+          opts.teamManager.getTeamFile ??
+          (() => ({
+            leadAgentId: 'leader@team',
+            members: [
+              { name: 'alice', agentId: 'alice@team' },
+              { name: 'bob', agentId: 'bob@team' },
+            ],
+          })),
+      }
+    : null;
   return {
-    getTeamManager: () => opts?.teamManager ?? null,
+    getTeamManager: () => teamManager,
     getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
   } as unknown as Config;
@@ -35,12 +60,9 @@ describe('SendMessageTool — team mode', () => {
     expect(tool.name).toBe('send_message');
   });
 
-  it('describes text invisibility as peer-only for teammates', () => {
+  it('describes text invisibility for every recipient', () => {
     const tool = new SendMessageTool(makeTeamConfig());
-    expect(tool.description).toContain(
-      'Your text output is NOT visible to peer teammates',
-    );
-    expect(tool.description).not.toContain('NOT visible to other agents');
+    expect(tool.description).toContain('NOT visible to other agents');
   });
 
   it('sends a message via TeamManager', async () => {
@@ -69,7 +91,7 @@ describe('SendMessageTool — team mode', () => {
     );
   });
 
-  it('broadcasts with "*"', async () => {
+  it('rejects broadcast', async () => {
     const broadcast = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
@@ -85,9 +107,9 @@ describe('SendMessageTool — team mode', () => {
       message: 'hey all',
     });
     const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('broadcast');
-    expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('not supported');
+    expect(broadcast).not.toHaveBeenCalled();
   });
 
   it('returns error when no team is active and no task_id given', async () => {
@@ -196,6 +218,80 @@ describe('SendMessageTool — team mode', () => {
     // `message` is required.
     expect(() => tool.build({} as never)).toThrow();
     expect(() => tool.build({ to: 'alice' } as never)).toThrow();
+  });
+});
+
+describe('SendMessageTool — peer-session mode', () => {
+  it('sends to a reachable session when no team is active', async () => {
+    sendToPeerMock.mockResolvedValue({
+      kind: 'sent',
+      address: 'worker-ab',
+      peer: { cwd: '/work/worker' },
+    });
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    const result = await tool.validateBuildAndExecute(
+      { to: 'worker-ab', message: 'inspect the failing test' },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('another Qwen Code session');
+    expect(sendToPeerMock).toHaveBeenCalledWith({
+      target: 'worker-ab',
+      message: 'inspect the failing test',
+      approvalMode: DEFAULT_MODE,
+    });
+  });
+
+  it('keeps an in-process teammate ahead of a same-named peer', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: { sendMessage, broadcast: vi.fn() },
+      }),
+    );
+
+    await tool.validateBuildAndExecute(
+      { to: 'alice', message: 'stay local' },
+      new AbortController().signal,
+    );
+
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeerMock).not.toHaveBeenCalled();
+  });
+
+  it('does not send structured team controls to a peer', async () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    const result = await tool.validateBuildAndExecute(
+      {
+        to: 'worker-ab',
+        message: 'shut down',
+        type: 'shutdown_request',
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(sendToPeerMock).not.toHaveBeenCalled();
+  });
+
+  it('asks for a ref instead of guessing an ambiguous session', async () => {
+    sendToPeerMock.mockResolvedValue({
+      kind: 'ambiguous',
+      matches: ['worker [aaaaaa] in /a', 'worker [bbbbbb] in /b'],
+    });
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    const result = await tool.validateBuildAndExecute(
+      { to: 'worker', message: 'inspect this' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('worker [aaaaaa]');
+    expect(result.llmContent).toContain('full name [ref]');
   });
 });
 
