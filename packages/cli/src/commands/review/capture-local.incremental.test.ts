@@ -20,6 +20,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -137,6 +138,25 @@ function promoteCandidate(plan: Plan, model: string): string {
     JSON.stringify({ ...candidate, lastModelId: model }),
   );
   return cachePath;
+}
+
+/** Append an open Critical to a promoted cache's ledger. */
+function recordOpenCritical(cachePath: string): void {
+  const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  cache['findings'] = [
+    {
+      id: 'R1-1',
+      severity: 'Critical',
+      status: 'open',
+      file: CHANGED,
+      line: 1,
+      title: 'blocker',
+    },
+  ];
+  writeFileSync(cachePath, JSON.stringify(cache));
 }
 
 describe('capture-local — incremental local rounds', () => {
@@ -1225,5 +1245,38 @@ describe('capture-local — round-10 anchor shapes', () => {
     git('checkout', '--', CHANGED, CALLER, BYSTANDER);
     const third = capture({ cache: cachePath, model: 'model-a' });
     expect(third['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+  });
+});
+
+describe('capture-local — round-12 stop shapes', () => {
+  it('a hidden divergence (--assume-unchanged edit) suppresses the clean-tree stop', () => {
+    // R11-5: the refusal proved a path diverges while invisible to the
+    // capture (`git diff HEAD` honours the bit), and `hash-object` reads
+    // through it — so the stop decided clean-tree while the date read the
+    // hidden edit as "the blocker moved", and `--fail-on` exited 0 over a
+    // standing Critical. A `vanishedStillOnDisk` refusal gets the same
+    // standing as `treeHeldStill: false` for the stop decision: no field,
+    // no sidecar, the not-clean warning shape.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
+    git('update-index', '--assume-unchanged', CHANGED);
+    write(CHANGED, 'export const v = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('still on disk');
+    expect(err).not.toContain('the working tree is clean');
+    expect(err).toContain('this is NOT a clean tree');
   });
 });

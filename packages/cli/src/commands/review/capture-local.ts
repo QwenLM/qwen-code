@@ -23,6 +23,7 @@ import {
   mkdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -173,8 +174,24 @@ function vanishedStillOnDisk(
   // as a failed listing.
   const worktree = hashWorktreeFiles(repoRoot, onDisk);
   const head = revisionIdentities(repoRoot, headSha, onDisk);
+  // `core.fileMode=false` makes git itself ignore the EXEC bit — the stored
+  // tree keeps one mode while the worktree lstat reports another and
+  // `git diff HEAD` stays empty. Certifying by the FULL identity then
+  // refused every such path (and the stop suppression beside it withheld
+  // every stop) over a divergence git does not recognise: fold 100755 into
+  // 100644 and compare. The fold is the exec bit ONLY — the mode still
+  // carries the file↔symlink type, which git reports under every fileMode.
+  const identity =
+    gitOpt('-C', repoRoot, 'config', '--get', 'core.fileMode') !== 'false'
+      ? (id: string | undefined) => id
+      : (id: string | undefined) =>
+          id !== undefined && id.startsWith('100755:')
+            ? `100644:${id.slice('100755:'.length)}`
+            : id;
   return onDisk.filter(
-    (path) => worktree[path] !== head[path] || worktree[path] === UNHASHABLE,
+    (path) =>
+      identity(worktree[path]) !== identity(head[path]) ||
+      worktree[path] === UNHASHABLE,
   );
 }
 
@@ -507,6 +524,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   if (treeHeldStill) {
     writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
   } else {
+    // The path is stable per target, so an earlier round's candidate still
+    // sits under the `cacheCandidatePath` this plan publishes, and Step 8
+    // would promote that stale anchor merged with this round's ledger.
+    // Absent IS the withheld state — fail quiet.
+    try {
+      unlinkSync(cacheCandidatePath);
+    } catch {
+      // nothing to remove
+    }
     writeStderrLine(
       'The working tree changed while the capture was being hashed — the ' +
         'cache candidate is withheld, so the next round cannot anchor on ' +
@@ -531,7 +557,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
    * output rendered the blocker as still standing.
    */
   let nothingToReview: { reason: string } | undefined;
-  if (args.cache) {
+  // Cached paths this capture dropped while still on disk and diverging
+  // from HEAD — see `vanishedStillOnDisk`. Empty when no `--cache` scoped
+  // this round. Read by the anchor refusal AND the stop gates below.
+  let vanishedPresent: readonly string[] = [];
+  if (args.cache !== undefined) {
     // A DIRECTORY resolves to this command's own target, because the caller
     // cannot name the file.
     //
@@ -550,6 +580,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // that knows only where caches live. A file path still works unchanged.
     const cachePath = resolveCachePath(args.cache, target, sourcePath);
     const cache = cachePath === null ? null : readLocalCache(cachePath);
+    vanishedPresent =
+      cache === null
+        ? []
+        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes);
     const refusal = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
@@ -559,9 +593,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       capture.skipped.length,
       treeHeldStill,
       args.untracked !== false,
-      cache === null
-        ? []
-        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes),
+      vanishedPresent,
     );
     if (refusal !== null) {
       writeStderrLine(
@@ -715,7 +747,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // reviewed-and-clean. Same discipline as the skipped-content gate beside
     // it: a stop is a DECIDED outcome, and neither unread nor moved content
     // can be decided.
-    treeHeldStill
+    treeHeldStill &&
+    // …and the anchor refusal did not just prove a path diverges while
+    // INVISIBLE to the capture — an `--assume-unchanged` edit is the live
+    // case: `git diff HEAD` honours the bit, so an empty diff proves
+    // nothing about that path, and the blocker date below reads hidden
+    // edits through it. The same uncertainty that refused the anchor
+    // withholds the stop, or the round decides clean over bytes no round
+    // ever read.
+    vanishedPresent.length === 0
   ) {
     nothingToReview = { reason: 'clean-tree' };
   }
@@ -873,19 +913,29 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             'This is NOT a decided stop: the no-diff branch owes it a ' +
             'whole-file review — read the file and review its current ' +
             'state; do not report nothing-to-review.'
-          : treeHeldStill
+          : treeHeldStill && vanishedPresent.length === 0
             ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
               'to review; do not run the review agents.'
-            : // …and NOT when the guard just proved the tree moved. The
-              // machine-readable stop is gated on `treeHeldStill`; this
-              // sentence was not, so the round printed "the working tree
-              // changed while the capture was being hashed" and "the working
-              // tree is clean" back to back and the orchestrator — which reads
-              // prose here — stopped on the second. The same contradiction the
-              // field-level gate closed, one layer up.
-              'WARNING: 0 chunks, but the working tree changed while the ' +
-              'capture was being hashed (above): this is NOT a clean tree. ' +
-              'Re-run the review rather than reporting nothing to review.',
+            : vanishedPresent.length > 0
+              ? // …and NOT when the anchor refusal just proved a path
+                // diverges while invisible to `git diff` — the field gate
+                // above withheld the stop, so the prose must not claim clean
+                // either. Same discipline as the moved-tree branch beside it.
+                'WARNING: 0 chunks, but a cached path dropped out of this ' +
+                'capture while still on disk and diverges from HEAD (above): ' +
+                'this is NOT a clean tree — the divergence is invisible to ' +
+                '`git diff`. Re-run the review rather than reporting ' +
+                'nothing to review.'
+              : // …and NOT when the guard just proved the tree moved. The
+                // machine-readable stop is gated on `treeHeldStill`; this
+                // sentence was not, so the round printed "the working tree
+                // changed while the capture was being hashed" and "the working
+                // tree is clean" back to back and the orchestrator — which reads
+                // prose here — stopped on the second. The same contradiction the
+                // field-level gate closed, one layer up.
+                'WARNING: 0 chunks, but the working tree changed while the ' +
+                'capture was being hashed (above): this is NOT a clean tree. ' +
+                'Re-run the review rather than reporting nothing to review.',
     );
   }
   writeStderrLine(

@@ -142,6 +142,33 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     );
   });
 
+  it('a withhold REMOVES an earlier candidate left at the stable path', () => {
+    // The candidate path is stable per target: round A's candidate still
+    // sits there when round B withholds, and round B's plan still publishes
+    // `cacheCandidatePath` — so Step 8 read the stale file and promoted
+    // round A's anchor merged with round B's ledger. The withhold must
+    // leave the published path actually ABSENT.
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run();
+    expect(
+      existsSync(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
+
+    // Round B: the tree moves under the hash pass — the withhold path.
+    captures.push(
+      { diff: DIFF_A },
+      { diff: Buffer.from('changed mid-hash\n') },
+    );
+    run();
+    expect(
+      existsSync(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(false);
+  });
+
   it('a moved tree refuses THIS round\u2019s scoping too, not just the candidate', () => {
     // Withholding only the candidate protects the NEXT round and leaves this
     // one wrong: the scoping compares the very hashes the guard just proved
