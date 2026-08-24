@@ -3,10 +3,9 @@
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "baseUrl": "http://<your-mem0-endpoint>:8080",
+    "baseUrl": "https://<your-mem0-endpoint>",
     "apiKeyEnv": "MEM0_API_KEY",
     "userId": "<your-user-id>",
-    "appId": "qwen-code",
-    "allowInsecureHttp": true
+    "appId": "qwen-code"
   }
 }
