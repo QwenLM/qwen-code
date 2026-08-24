@@ -886,6 +886,20 @@ export class ToolRegistry {
   }
 
   /**
+   * Whether the named tool is registered and marked `shouldDefer=true`,
+   * regardless of its current visibility (revealed / visibleTools state).
+   * `isDeferredAndHidden` refines this with the hidden-state check; callers
+   * gating on "declared for this context" need the broader predicate, since
+   * a visible/revealed deferred tool is still undeclared for an
+   * explicit-tool-list subagent that does not list it (R28-2).
+   */
+  isDeferredTool(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return tool.shouldDefer === true;
+  }
+
+  /**
    * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
    * with no ToolSearch-discovered reveals — the same state as any fresh

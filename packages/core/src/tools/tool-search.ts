@@ -312,14 +312,23 @@ class ToolSearchInvocation extends BaseToolInvocation<
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
     const subagentLike = isSubagentLikeExecutionContext();
+    // Same criterion as the `select:` gate below (R28-2): in subagent-like
+    // contexts a deferred tool is searchable only when it is declared for
+    // THIS agent. "Not hidden" is not the same as "declared": a deferred
+    // tool made visible via settings.tools.visible or revealed earlier is
+    // still absent from an explicit-tool-list agent's declarations, and
+    // serving its schema there would invite a direct call the provider
+    // rejects as an unknown function. Fail closed when no declaration set
+    // was recorded (frame without prepareTools).
+    const declaredToolNames = subagentLike
+      ? getCurrentAgentDeclaredToolNames()
+      : undefined;
     return registry.getAllTools().filter((tool) => {
       if (!tool.shouldDefer) return false;
-      // Hidden deferred tools are proxy-routed in the main session but are
-      // never declared (and have no proxy) in forks/subagents, so they are
-      // not searchable there.
-      return subagentLike
-        ? !registry.isDeferredAndHidden(tool.name)
-        : registry.isDeferredAndHidden(tool.name);
+      if (subagentLike) {
+        return declaredToolNames?.has(tool.name) ?? false;
+      }
+      return registry.isDeferredAndHidden(tool.name);
     });
   }
 
@@ -370,21 +379,23 @@ class ToolSearchInvocation extends BaseToolInvocation<
         blocked.push(canonical);
         continue;
       }
-      // Hidden deferred tools are proxy-routed in the main session, but
+      // Deferred tools are proxy-routed in the main session, but
       // subagent-like contexts have no `tool_call` proxy (it is excluded
-      // from them). Forks inherit the parent's declarations and never
-      // declare hidden deferred tools; explicit-tool-list subagents only
-      // declare the names they list — for those, returning the bare schema
-      // would invite an unknown-function call, so report them unavailable.
-      // Wildcard/no-tool-config subagents and teammates, in contrast, DO
-      // declare deferred tools directly (agent-core `prepareTools` uses
-      // `includeDeferred: true`), and `prepareTools` records the declared
-      // names on the agent context frame: a registry-hidden-but-declared
-      // tool is directly callable here, so it stays re-inspectable like any
-      // other declared tool.
+      // from them) — a deferred tool is directly callable here ONLY if it
+      // is declared for this agent. `prepareTools` records the declared
+      // names on the agent context frame: wildcard/no-tool-config
+      // subagents and teammates declare deferred tools directly
+      // (`includeDeferred: true`), explicit-tool-list subagents and forks
+      // declare exactly the names they list. Gate EVERY deferred tool on
+      // that recorded set, not merely hidden ones (R28-2): a deferred tool
+      // made visible via settings.tools.visible or revealed earlier is not
+      // hidden, but it is still undeclared for an explicit-list agent that
+      // omits it — returning its bare schema would invite a direct call
+      // the provider rejects as an unknown function. Fail closed when no
+      // declaration set was recorded (frame without prepareTools).
       if (
         isSubagentLikeExecutionContext() &&
-        registry.isDeferredAndHidden(canonical) &&
+        registry.isDeferredTool(canonical) &&
         !getCurrentAgentDeclaredToolNames()?.has(canonical)
       ) {
         blocked.push(canonical);
@@ -457,12 +468,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
         if (isLeaderOnlyToolUnavailableInSubagent(name)) {
           return getLeaderOnlyToolUnavailableMessage(name);
         }
-        if (registry.isDeferredAndHidden(name)) {
+        if (
+          registry.isDeferredTool(name) &&
+          !isPlanLifecycleToolUnavailableInSubagent(name)
+        ) {
           // Genuinely undeclared for this context (forks inheriting the
-          // parent surface, explicit lists that omit the tool). Do NOT
-          // claim a main-session tool_call route: subagent-like contexts
-          // have no tool_call at all, and when the tool IS declared for
-          // the context the gate above already let it through.
+          // parent surface, explicit lists that omit the tool). Applies to
+          // hidden AND visible/revealed deferred tools alike (R28-2): the
+          // gate above blocks every deferred tool not declared for the
+          // current agent. Do NOT claim a main-session tool_call route:
+          // subagent-like contexts have no tool_call at all, and when the
+          // tool IS declared for the context the gate above already let it
+          // through.
           return `${name} is not available in this session: it is a deferred tool that is not declared in this session's tool list, and this context has no tool_call proxy to route it. Use the tools declared for this session instead.`;
         }
         return getSubagentPlanToolUnavailableMessage(name);

@@ -884,6 +884,152 @@ describe('ToolSearchTool', () => {
     expect(result.proxySchemaPresentations).toBeUndefined();
   });
 
+  it('select: blocks a visibleTools deferred tool omitted from an explicit-list agent frame (R28-2)', async () => {
+    // R28-2: a deferred tool made visible via settings.tools.visible (which
+    // propagates through Object.create(base) config inheritance) is NOT
+    // `isDeferredAndHidden`, but an explicit-tool-list subagent still only
+    // declares the names it lists (prepareTools →
+    // getFunctionDeclarationsFiltered). The old gate equated "not hidden"
+    // with "declared for this agent" and served the bare schema, inviting
+    // a direct call the provider rejects as an unknown function — the
+    // exact failure the R24-3 gate's comment says it prevents. The gate
+    // now keys on the recorded declaration set for EVERY deferred tool.
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+      new Set(['probeDeferredTool']),
+    );
+    expect(registry.isDeferredAndHidden('probeDeferredTool')).toBe(false);
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () => {
+      // Explicit tool list that does NOT include probeDeferredTool.
+      recordCurrentAgentDeclaredToolNames(
+        new Set([ToolNames.TOOL_SEARCH, 'read_file']),
+      );
+      return tool
+        .build({ query: 'select:probeDeferredTool' })
+        .execute(new AbortController().signal);
+    });
+
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"probeDeferredTool"',
+    );
+    expect(String(result.llmContent)).toContain(
+      'probeDeferredTool is not available in this session',
+    );
+    expect(String(result.llmContent)).not.toContain('via tool_call');
+    expect(String(result.returnDisplay)).toContain('1 unavailable');
+    expect(registry.isDeferredToolRevealed('probeDeferredTool')).toBe(false);
+  });
+
+  it('select: blocks a revealed deferred tool omitted from an explicit-list agent frame (R28-2)', async () => {
+    // Same gap through the reveal path: a revealed deferred tool is not
+    // hidden, yet still undeclared for an explicit-list agent omitting it.
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+      }),
+    );
+    registry.revealDeferredTool('probeDeferredTool');
+    expect(registry.isDeferredAndHidden('probeDeferredTool')).toBe(false);
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () => {
+      recordCurrentAgentDeclaredToolNames(new Set([ToolNames.TOOL_SEARCH]));
+      return tool
+        .build({ query: 'select:probeDeferredTool' })
+        .execute(new AbortController().signal);
+    });
+
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"probeDeferredTool"',
+    );
+    expect(String(result.llmContent)).toContain(
+      'probeDeferredTool is not available in this session',
+    );
+    expect(String(result.returnDisplay)).toContain('1 unavailable');
+  });
+
+  it('keyword search refuses a visible deferred tool omitted from an explicit-list agent frame (R28-2)', async () => {
+    // collectCandidates' subagent branch used the same "not hidden"
+    // shortcut, so keyword search served the undeclared schema too.
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+        description: 'probeable deferred widget',
+        searchHint: 'probe widget',
+      }),
+    );
+    vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+      new Set(['probeDeferredTool']),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () => {
+      recordCurrentAgentDeclaredToolNames(
+        new Set([ToolNames.TOOL_SEARCH, 'read_file']),
+      );
+      return tool
+        .build({ query: 'probe widget' })
+        .execute(new AbortController().signal);
+    });
+
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"probeDeferredTool"',
+    );
+    expect(String(result.llmContent)).toContain('No tools found matching');
+  });
+
+  it('select: and keyword search still serve a visible deferred tool declared for the agent frame (R28-2)', async () => {
+    // Positive control: wildcard-like frames that DO declare the visible
+    // deferred tool keep full access (schema served, no proxy footer).
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+        description: 'probeable deferred widget',
+        searchHint: 'probe widget',
+      }),
+    );
+    vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+      new Set(['probeDeferredTool']),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const selectResult = await runWithAgentContext('agent-1', () => {
+      recordCurrentAgentDeclaredToolNames(
+        new Set([ToolNames.TOOL_SEARCH, 'probeDeferredTool']),
+      );
+      return tool
+        .build({ query: 'select:probeDeferredTool' })
+        .execute(new AbortController().signal);
+    });
+    expect(String(selectResult.llmContent)).toContain(
+      '"name":"probeDeferredTool"',
+    );
+    expect(String(selectResult.returnDisplay)).toBe('Loaded 1 tool(s)');
+    expect(selectResult.proxySchemaPresentations).toBeUndefined();
+
+    const keywordResult = await runWithAgentContext('agent-1', () => {
+      recordCurrentAgentDeclaredToolNames(
+        new Set([ToolNames.TOOL_SEARCH, 'probeDeferredTool']),
+      );
+      return tool
+        .build({ query: 'probe widget' })
+        .execute(new AbortController().signal);
+    });
+    expect(String(keywordResult.llmContent)).toContain(
+      '"name":"probeDeferredTool"',
+    );
+  });
+
   it('omits hidden deferred tools from the catalog in subagent context', async () => {
     registry.registerTool(
       new MockTool({
@@ -928,11 +1074,24 @@ describe('ToolSearchTool', () => {
         planModeRequired: true,
       },
       () =>
-        tool
-          .build({
-            query: `select:${ToolNames.EXIT_PLAN_MODE},${ToolNames.ENTER_PLAN_MODE}`,
-          })
-          .execute(new AbortController().signal),
+        // Production shape: an in-process teammate runs inside BOTH the
+        // teammate-identity frame and its agent-context frame (the
+        // reasoning loop enters via runInAgentFrames →
+        // runWithAgentContext), and TeamManager injects exit_plan_mode
+        // into a plan-required teammate's tool list (alongside the team
+        // tools), which prepareTools records on that frame (R25-1). The
+        // R28-2 deferred gate then admits it; enter_plan_mode is never
+        // injected and stays policy-blocked regardless.
+        runWithAgentContext('planner@test', () => {
+          recordCurrentAgentDeclaredToolNames(
+            new Set([ToolNames.TOOL_SEARCH, ToolNames.EXIT_PLAN_MODE]),
+          );
+          return tool
+            .build({
+              query: `select:${ToolNames.EXIT_PLAN_MODE},${ToolNames.ENTER_PLAN_MODE}`,
+            })
+            .execute(new AbortController().signal);
+        }),
     );
 
     expect(String(result.llmContent)).toContain(
@@ -1223,13 +1382,25 @@ describe('ToolSearchTool', () => {
     const setTools = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
 
-    const result = await runWithAgentContext('agent-1', () =>
-      new ToolSearchTool(config)
+    const result = await runWithAgentContext('agent-1', () => {
+      // Real agent frames always carry the recorded declaration set
+      // (prepareTools records it; runInAgentFrames re-records it on every
+      // later frame, R25-1). These alwaysLoad tools are declared for this
+      // agent, so they pass the R28-2 deferred gate and reach the budget
+      // guard this test exercises.
+      recordCurrentAgentDeclaredToolNames(
+        new Set([
+          ToolNames.TOOL_SEARCH,
+          'subagent_small',
+          'subagent_oversized',
+        ]),
+      );
+      return new ToolSearchTool(config)
         .build({
           query: `select:subagent_small,subagent_oversized,${ToolNames.ENTER_PLAN_MODE}`,
         })
-        .execute(new AbortController().signal),
-    );
+        .execute(new AbortController().signal);
+    });
 
     expect(setTools).not.toHaveBeenCalled();
     expect(result.error?.message).toContain(
