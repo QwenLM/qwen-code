@@ -199,6 +199,14 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       // ${RUNNER_TEMP}/open-issues.json, which would truncate this fixture.
       const fixture = join(dir, 'fixture-issues.json');
       writeFileSync(fixture, JSON.stringify(issues));
+      // The recurrence path fetches the tracked issue's body through
+      // `gh issue view <number>`; serve it from a per-issue fixture file.
+      for (const issue of issues) {
+        writeFileSync(
+          join(dir, `issue-${issue.number}.body`),
+          issue.body ?? '',
+        );
+      }
       writeFileSync(
         join(dir, 'gh'),
         [
@@ -213,6 +221,7 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
           'done',
           'case "$1 $2" in',
           '  "issue list") cat "' + fixture + '" ;;',
+          '  "issue view") cat "' + dir + '/issue-$3.body" ;;',
           'esac',
           'exit 0',
           '',
@@ -246,6 +255,81 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
     };
 
     it('records the recurrence on the existing issue instead of creating', () => {
+      const previousRun =
+        'https://github.com/QwenLM/qwen-code/actions/runs/32580000000';
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              'The release build job for `1.2.3` failed before the image could be published.\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              `- ${previousRun}\n`,
+          },
+          { number: 43, title: 'unrelated', body: 'no marker here' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.calls).not.toContain('issue create');
+      expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
+      // The new run is appended to the recorded list, newest first, instead
+      // of replacing it — the previous run URL must survive.
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+      expect(result.body).toContain(`- ${previousRun}`);
+      expect(result.body.indexOf('32580293377')).toBeLessThan(
+        result.body.indexOf('32580000000'),
+      );
+    });
+
+    it('keeps hand-written annotations on recurrence instead of wiping them', () => {
+      const annotation =
+        'Do not republish — the npm package is broken, tracked in #9999.';
+      const previousRun =
+        'https://github.com/QwenLM/qwen-code/actions/runs/32580000000';
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              'The release build job for `1.2.3` failed before the image could be published.\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              `- ${previousRun}\n` +
+              '\n' +
+              `${annotation}\n`,
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body).toContain(annotation);
+      expect(result.body).toContain(`- ${previousRun}`);
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('keeps hand-written notes when the existing body predates the run block', () => {
       const result = runScript({
         eventName: 'workflow_dispatch',
         inputVersion: '1.2.3',
@@ -256,16 +340,40 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
               'Sandbox image for 1.2.3 not published: release build job failed',
             body: '<!-- image-build-failure:1.2.3 -->\n\nHand-written note.',
           },
-          { number: 43, title: 'unrelated', body: 'no marker here' },
         ],
       });
       expect(result.status).toBe(0);
       expect(result.calls).toContain('gh issue edit 42');
       expect(result.calls).not.toContain('issue create');
+      expect(result.body).toContain('Hand-written note.');
       expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
       expect(result.body).toContain(
         'https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
       );
+    });
+
+    it('does not record the same run twice on a repeated failure', () => {
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body.match(/actions\/runs\/32580293377/g)).toHaveLength(1);
     });
 
     it('creates a new issue when no open issue carries the version marker', () => {
@@ -288,6 +396,11 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
         'Sandbox image for 4.5.6 not published: release build job failed',
       );
       expect(result.body).toContain('<!-- image-build-failure:4.5.6 -->');
+      expect(result.body).toContain('## Failed runs');
+      expect(result.body).toContain('<!-- image-build-failure-occurrences -->');
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
     });
 
     it('matches a v-prefixed tag push against the versioned marker', () => {

@@ -48,30 +48,117 @@ existing="$(
   | head -n 1
 )"
 
+# The machine-owned recurrence block: every recorded failed run is a bullet
+# under this marker, newest first. On recurrence ONLY this block is rebuilt —
+# hand-written annotations anywhere else in the body survive verbatim, the
+# same contract main-ci-failure-issue.yml's re-plan relies on.
+runs_heading='## Failed runs'
+occurrences_marker='<!-- image-build-failure-occurrences -->'
+max_runs=10
+
 body_file="${RUNNER_TEMP}/image-build-failure.md"
-{
+head_file="${RUNNER_TEMP}/body-head.md"
+runs_file="${RUNNER_TEMP}/body-runs.txt"
+
+write_prose() {
   printf '%s\n' "${marker_html}"
   printf '\n'
   printf 'The release build job for `%s` failed before `ghcr.io/qwenlm/qwen-code:%s` could be published.\n' "${version}" "${version}"
   printf '\n'
   printf 'Until the image exists, every sandbox-based CI lane (`/resolve`, sandboxed review, autofix) crashes with `manifest unknown` when it installs the matching npm version.\n'
   printf '\n'
-  printf 'Failed run: %s\n' "${RUN_URL}"
-  printf '\n'
-  printf 'Fix: open the run above to see which step failed, then rerun the failed jobs (transient failures — for example buildx `ETXTBSY` races during the build steps — usually pass on retry), or dispatch `Build and Publish Docker Image` with `version=%s`, `publish=true`.\n' "${version}"
-} > "${body_file}"
+  printf 'Open the newest run below to see which step failed, then rerun the failed jobs (transient failures — for example buildx `ETXTBSY` races during the build steps — usually pass on retry), or dispatch `Build and Publish Docker Image` with `version=%s`, `publish=true`.\n' "${version}"
+}
 
-if [[ -n "${existing}" ]]; then
-  gh issue edit "${existing}" \
+write_body() {
+  {
+    cat "${head_file}"
+    printf '\n%s\n\n%s\n' "${runs_heading}" "${occurrences_marker}"
+    cat "${runs_file}"
+  } > "${body_file}"
+}
+
+if [[ -z "${existing}" ]]; then
+  write_prose > "${head_file}"
+  printf -- '- %s\n' "${RUN_URL}" > "${runs_file}"
+  write_body
+  gh issue create \
     --repo "${REPO}" \
-    --body-file "${body_file}"
-  echo "Recorded this failure on issue #${existing}."
+    --title "Sandbox image for ${version} not published: release build job failed" \
+    --body-file "${body_file}" \
+    --label 'type/bug' \
+    --label "${DEDUP_LABEL}"
   exit 0
 fi
 
-gh issue create \
+# Recurrence: re-plan against the existing body instead of overwriting it.
+existing_body="${RUNNER_TEMP}/existing-body.md"
+gh issue view "${existing}" \
   --repo "${REPO}" \
-  --title "Sandbox image for ${version} not published: release build job failed" \
-  --body-file "${body_file}" \
-  --label 'type/bug' \
-  --label "${DEDUP_LABEL}"
+  --json body \
+  --jq '.body' > "${existing_body}"
+
+tail_file="${RUNNER_TEMP}/body-tail.md"
+: > "${head_file}"
+: > "${runs_file}"
+: > "${tail_file}"
+# Split head / recorded runs / tail around the occurrences marker. Anything
+# that is not a recorded-run bullet below the marker was written by a human;
+# it lands in the tail and is re-emitted with the head prose.
+awk -v marker="${occurrences_marker}" \
+    -v head_f="${head_file}" -v runs_f="${runs_file}" -v tail_f="${tail_file}" '
+  BEGIN { state = "head" }
+  state == "head" {
+    if ($0 == marker) { state = "runs"; next }
+    print > head_f
+    next
+  }
+  state == "runs" {
+    line = $0
+    sub(/^[ \t]+/, "", line)
+    sub(/[ \t]+$/, "", line)
+    if (line == "") next
+    if (line ~ /^- /) { print > runs_f; next }
+    state = "tail"
+  }
+  state == "tail" { print > tail_f; next }
+' "${existing_body}"
+
+if [[ -s "${head_file}" ]]; then
+  # Drop trailing blank lines, and a stranded heading left behind if the
+  # marker line was edited away — the rebuilt block re-emits both.
+  printf '%s\n' "$(cat "${head_file}")" > "${head_file}"
+  if [[ "$(tail -n 1 "${head_file}")" == "${runs_heading}" ]]; then
+    printf '%s\n' "$(head -n -1 "${head_file}")" > "${head_file}"
+    printf '%s\n' "$(cat "${head_file}")" > "${head_file}"
+  fi
+else
+  # Nothing readable to preserve: fall back to the generated prose so the
+  # narrative (and the dedup marker it carries) is never lost.
+  write_prose > "${head_file}"
+fi
+
+if [[ -s "${tail_file}" ]]; then
+  printf '\n' >> "${head_file}"
+  cat "${tail_file}" >> "${head_file}"
+fi
+
+# The dedup lookup matches this marker client-side; if an edit removed it,
+# restore it so the next failure still finds this issue.
+if ! grep -qF -- "${marker_html}" "${head_file}"; then
+  { printf '%s\n\n' "${marker_html}"; cat "${head_file}"; } > "${head_file}.new"
+  mv "${head_file}.new" "${head_file}"
+fi
+
+# Newest first; a re-run of the same run must not add a second line for it.
+# awk (not head) applies the cap so the pipeline never dies on SIGPIPE.
+{ printf -- '- %s\n' "${RUN_URL}"; cat "${runs_file}"; } \
+  | awk -v max="${max_runs}" '!seen[$0]++ && ++n <= max' \
+  > "${runs_file}.merged"
+mv "${runs_file}.merged" "${runs_file}"
+
+write_body
+gh issue edit "${existing}" \
+  --repo "${REPO}" \
+  --body-file "${body_file}"
+echo "Recorded this failure on issue #${existing}."
