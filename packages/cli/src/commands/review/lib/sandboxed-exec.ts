@@ -148,19 +148,34 @@ let probed: ContainerRuntime | null | undefined;
  */
 export function containerRuntime(): ContainerRuntime | null {
   if (probed !== undefined) return probed;
-  probed = null;
-  for (const runtime of RUNTIMES) {
-    const r = spawnSync(runtime, ['info'], {
-      stdio: 'ignore',
-      timeout: 30_000,
-      env: runtimeClientEnv(),
-    });
-    if (!r.error && r.status === 0) {
-      probed = runtime;
-      break;
-    }
-  }
+  probed = firstAnsweringRuntime(daemonAnswers);
   return probed;
+}
+
+/**
+ * The decision, separated from the memo and the spawn so it can be asked.
+ *
+ * Order is the whole content: `RUNTIMES` is tried in sequence and the first
+ * one whose daemon answers wins, so a client installed but not running never
+ * shadows one that is.
+ */
+export function firstAnsweringRuntime(
+  answers: (runtime: ContainerRuntime) => boolean,
+): ContainerRuntime | null {
+  for (const runtime of RUNTIMES) {
+    if (answers(runtime)) return runtime;
+  }
+  return null;
+}
+
+/** `<rt> info` — a real round trip to the daemon, not presence on `PATH`. */
+function daemonAnswers(runtime: ContainerRuntime): boolean {
+  const r = spawnSync(runtime, ['info'], {
+    stdio: 'ignore',
+    timeout: 30_000,
+    env: runtimeClientEnv(),
+  });
+  return !r.error && r.status === 0;
 }
 
 /**
@@ -584,9 +599,13 @@ export function boxedRunLeftContainer(status: number | null): boolean {
  * must not do is nothing — see `containerCommand`'s `--name` comment for what
  * survives otherwise.
  */
-export function killContainer(runtime: ContainerRuntime, name: string): void {
+export function killContainer(
+  runtime: ContainerRuntime,
+  name: string,
+  spawn: typeof spawnSync = spawnSync,
+): void {
   try {
-    spawnSync(runtime, ['rm', '-f', name], {
+    spawn(runtime, ['rm', '-f', name], {
       stdio: 'ignore',
       timeout: 30_000,
       env: runtimeClientEnv(),

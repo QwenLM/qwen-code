@@ -22,10 +22,13 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
+  firstAnsweringRuntime,
+  killContainer,
   containerPathFor,
   hasRootlessMarker,
   readInfoDocument,
@@ -271,10 +274,23 @@ describe('sandboxVerdict', () => {
 });
 
 describe('the decisions this module exists to make', () => {
-  // Four cells the surrounding suite reached only by accident of the machine
-  // it ran on. Each is a pure function with its ambient dependency already
+  // Cells the surrounding suite reached only by accident of the machine it ran
+  // on. Each is a pure function with its ambient dependency already
   // injectable, so pinning them costs nothing and leaves no mutant alive on
   // the properties this feature is sold on.
+
+  // Swept, like the `mountRootFor` block's: a suite about not leaving residue
+  // behind has no business leaving a temp tree per run.
+  const made: string[] = [];
+  const fixture = (prefix: string): string => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
 
   it('lets the environment tighten the policy and never loosen it', () => {
     // "A repository cannot switch off the containment that exists to contain
@@ -415,11 +431,45 @@ describe('the decisions this module exists to make', () => {
     ).toContain('cannot be mounted');
   });
 
+  it('takes the first runtime whose daemon answers, in order', () => {
+    // Order is the content: a client installed but not running must never
+    // shadow one that is. With the loop reversed or short-circuited on the
+    // first NAME rather than the first ANSWER, `auto` silently picks a runtime
+    // that cannot run anything and the phase degrades to direct.
+    expect(firstAnsweringRuntime(() => true)).toBe('docker');
+    expect(firstAnsweringRuntime((rt) => rt === 'podman')).toBe('podman');
+    expect(firstAnsweringRuntime(() => false)).toBeNull();
+  });
+
+  it('reaps by name, with the flag that makes it a kill', () => {
+    // The reap runs after a deadline already cost the phase its result, so
+    // nothing downstream would notice a garbled argv — and what survives is a
+    // container holding the review tree open past the end of the run. `-f`,
+    // because a container that ignored the client's signal is exactly the one
+    // this is for.
+    const calls: Array<[string, readonly string[]]> = [];
+    const spawn = ((file: string, args: readonly string[]) => {
+      calls.push([file, args]);
+      return { status: 0 } as ReturnType<typeof spawnSync>;
+    }) as unknown as typeof spawnSync;
+    killContainer('podman', 'qwen-review-1-abc-0', spawn);
+    expect(calls).toEqual([['podman', ['rm', '-f', 'qwen-review-1-abc-0']]]);
+
+    // Best-effort by construction: a reap that throws must not become a second
+    // failure on top of the timeout that is already being reported.
+    const throwing = (() => {
+      throw new Error('no daemon');
+    }) as unknown as typeof spawnSync;
+    expect(() =>
+      killContainer('docker', 'qwen-review-1-abc-1', throwing),
+    ).not.toThrow();
+  });
+
   it('spells the workdir canonically, and survives a tree not built yet', () => {
     // This feeds `--workdir` at both spawn sites: a lexical spelling names a
     // directory the container does not have, and every command fails before
     // it starts.
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-workdir-')));
+    const root = fixture('qwen-workdir-');
     const real = join(root, 'review-pr-9');
     mkdirSync(real);
     expect(containerPathFor(real)).toBe(realpathSync(real));
