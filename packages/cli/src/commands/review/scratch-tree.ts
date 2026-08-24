@@ -358,7 +358,7 @@ const REFUSAL_REMEDIES: Array<[prefix: string, remedy: string]> = [
   ],
   [
     "the repository's local config names fetch refspec(s)",
-    'Remove or re-aim the fetch refspec — its destination must not write into refs/heads/ — if it is not yours.',
+    'Remove or re-aim the fetch refspec — its destination must land under refs/remotes/<remote>/ or refs/pull/, and its source must be a wildcard or HEAD — if it is not yours.',
   ],
   [
     "the repository's linked worktrees could not be enumerated",

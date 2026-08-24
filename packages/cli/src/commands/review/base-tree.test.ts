@@ -186,20 +186,22 @@ describe('runBaseTree', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
-  it('the creation checkout empties core.fsmonitor — a planted command never fires', () => {
-    // The screen's regex matches filter keys only, so a fsmonitor-only plant
-    // passes it clean — and `worktree add --detach` runs a repo-local
-    // `core.fsmonitor` (measured live). The override empties the key at the
-    // spawn, the way the probe tree's creation always has.
+  it('refuses a planted core.fsmonitor at the screen — and never executes it', () => {
+    // fsmonitor rides the refusal regex on the include posture: a planted
+    // command is execution the screen cannot certify. The creation refuses
+    // naming the key — and, refused or not, the planted command never
+    // fires. (The creation spawn ALSO carries the empty `-c` override, as
+    // defense against a config swapped in the screen-to-spawn window.)
     const pwned = join(repo, 'PWNED-base-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
+      '[core]\n\tfsmonitor = touch ' + gitConfigPath(pwned) + '\n',
     );
 
     const r = run();
 
-    expect(r.available).toBe(true);
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('core.fsmonitor');
     expect(existsSync(pwned)).toBe(false);
   });
 

@@ -2706,6 +2706,25 @@ describe('the probe tree identity gate, through runOneMutant', () => {
   // runs. runOneMutant carries the creation sha, so the gate answers in the
   // strict shape; a refusal arrives as the restore's inconclusive detail
   // BEFORE any checkout spawn.
+  //
+  // The whole block isolates the host git config, not just the rogue-repo
+  // test: the fixtures' checkouts inherit whatever the host accumulated,
+  // and a host with core.autocrlf=true — Git for Windows' default SYSTEM
+  // config — checks every fixture out as CRLF, leaving every exact-LF
+  // content assertion permanently red on a platform none of these tests
+  // skip. sanitizedGitEnv drops GIT_CONFIG_GLOBAL without setting
+  // GIT_CONFIG_NOSYSTEM, so the production restore checkout inside the
+  // certify test inherits the host config the same way. Measured: under a
+  // poisoned GIT_CONFIG_GLOBAL carrying core.autocrlf=true the fixture
+  // content checks fail without this isolation and pass with it.
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+  });
+  afterEach(() => {
+    gitIsolation.dispose();
+  });
+
   const fixture = (): { host: string; tree: string; headSha: string } => {
     const host = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-idgate-host-')));
     const git = (...args: string[]) =>
@@ -2972,7 +2991,6 @@ describe('the probe tree identity gate, through runOneMutant', () => {
     // `core.autocrlf`). The pipeline records the common dir `worktree
     // add` created the tree under; the gate requires discovery to still
     // resolve into it.
-    const iso = isolateHostGitConfig();
     const { host, tree, headSha } = fixture();
     const rogue = realpathSync(
       mkdtempSync(join(tmpdir(), 'qwen-idgate-rogue-')),
@@ -3039,32 +3057,71 @@ describe('the probe tree identity gate, through runOneMutant', () => {
         'export const a = 1;\n',
       );
     } finally {
-      iso.dispose();
       rmSync(host, { recursive: true, force: true });
       rmSync(rogue, { recursive: true, force: true });
     }
   });
 
+  it('refuses a restore whose config redirects the attribute read — core.attributesFile rides the screen', () => {
+    // A repo-local `core.attributesFile` redirects the checkout's
+    // attribute read away from the info/attributes file the screen covers
+    // — one write bypassed the screen's whole attributes surface
+    // (measured live: the certified checkout executed a global-config
+    // filter the plant selected). The key rides the refusal regex on the
+    // include posture, so the restore refuses BEFORE any checkout spawn,
+    // naming the key.
+    const { host, tree, headSha } = fixture();
+    try {
+      execFileSync(
+        'git',
+        [
+          '-C',
+          host,
+          'config',
+          'core.attributesFile',
+          join(host, 'evil-attributes'),
+        ],
+        { encoding: 'utf8' },
+      );
+
+      const r = runOneMutant(
+        tree,
+        mutant,
+        ['a.test.ts'],
+        undefined,
+        Date.now,
+        tree,
+        headSha,
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('core.attributesfile');
+      expect(r.detail).toContain('EXECUTE');
+    } finally {
+      rmSync(host, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
-    'bounds the restore checkout against a blocking surface the screen does not enumerate',
+    'bounds the restore checkout against a blocking surface the screen cannot read',
     { timeout: 30_000 },
     () => {
-      // The screen's regular-file gate closes info/attributes and
-      // info/exclude; `core.attributesFile` is the next surface of the
-      // same class — a config key pointing at a FIFO, opened by the
-      // checkout, invisible to the screen's candidates (measured live:
-      // the UNBOUNDED checkout blocked until externally killed). The
+      // A planted `core.attributesFile` now dies at the screen, so the
+      // checkout's bound keeps its witness on a surface the screen cannot
+      // read: the per-worktree INDEX the restore checkout opens (measured
+      // live: the checkout blocks in open() on a FIFO planted there). The
       // spawn's bound turns the hang into the named error the restore
       // reports, at the gate's timeout rather than never.
       const { host, tree, headSha } = fixture();
       try {
-        const fifo = join(host, 'attrs.fifo');
-        execFileSync('mkfifo', [fifo]);
-        execFileSync(
+        const admin = execFileSync(
           'git',
-          ['-C', host, 'config', 'core.attributesFile', fifo],
+          ['-C', tree, 'rev-parse', '--path-format=absolute', '--git-dir'],
           { encoding: 'utf8' },
-        );
+        ).trim();
+        const fifo = join(host, 'index.fifo');
+        execFileSync('mkfifo', [fifo]);
+        renameSync(fifo, join(admin, 'index'));
         const started = Date.now();
 
         const r = runOneMutant(

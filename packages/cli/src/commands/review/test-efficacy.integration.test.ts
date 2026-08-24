@@ -499,16 +499,19 @@ process.stdout.write(JSON.stringify({
     );
   });
 
-  it('the creation and revert checkouts empty core.fsmonitor — a planted command never fires', async () => {
-    // The screen's regex matches filter keys only, so a fsmonitor-only plant
-    // passes it clean (measured: the `--get-regexp` exits 1) — the checkout
-    // must not run it either. The restore's `inert` array always emptied the
-    // key; the creation and revert spawns now do what that array does.
+  it('refuses a planted core.fsmonitor at the screen — and never executes it', async () => {
+    // fsmonitor rides the refusal regex on the include posture: a planted
+    // command is execution the screen cannot certify — before this closure
+    // the screen certified the plant (measured: the `--get-regexp` exits 1
+    // on it). The suite refuses the probe creation naming the key, and the
+    // planted command never fires. (The creation and revert spawns still
+    // carry the empty `-c` overrides as defense against a config swapped in
+    // the screen-to-spawn window.)
     const { wt, base } = scaffoldModifiedPr();
     const pwned = join(outside, 'PWNED-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
+      '[core]\n\tfsmonitor = touch ' + gitConfigPath(pwned) + '\n',
     );
 
     await runHandler({
@@ -519,10 +522,10 @@ process.stdout.write(JSON.stringify({
     });
 
     expect(existsSync(pwned)).toBe(false);
+    // Refused, not run: a plant the screen names produces no probed
+    // findings.
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
-      'packages/lib/src/f.test.ts',
-    );
+    expect(out.findings).toEqual([]);
   });
 
   it('a certified restore never recurses into submodules — a planted submodule filter never fires', async () => {

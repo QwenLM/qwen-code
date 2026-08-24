@@ -267,7 +267,9 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(false);
     expect(r.note).toContain('fetch refspec');
     expect(r.note).toContain('remote.origin.fetch');
-    expect(r.note).toContain('its destination must not write into refs/heads/');
+    expect(r.note).toContain(
+      'its destination must land under refs/remotes/<remote>/ or refs/pull/',
+    );
     expect(r.note).not.toContain('Remove the filter config');
   });
 
@@ -302,29 +304,23 @@ describe('runScratchTree', () => {
     },
   );
 
-  it('empties core.fsmonitor on every spawn — a planted command never fires', () => {
-    // The screen matches filter keys only, so a fsmonitor-only plant passes
-    // it clean — the checkouts themselves must not run it. Both the rebuild
-    // path's `worktree add --detach` and the reuse path's
-    // `checkout --force --detach` fire a repo-local `core.fsmonitor`
-    // (measured live), so every spawn carries the empty override.
+  it('refuses a planted core.fsmonitor at the screen — and never executes it', () => {
+    // fsmonitor rides the refusal regex on the include posture: a planted
+    // command is execution the screen cannot certify, and the resume's
+    // `git status` runs ahead of any screen. The reset refuses naming the
+    // key — and, refused or not, the planted command never fires. (The
+    // checkouts ALSO carry the empty `-c` override, as defense against a
+    // config swapped in the screen-to-spawn window.)
     const pwned = join(repo, 'PWNED-scratch-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
+      '[core]\n\tfsmonitor = touch ' + gitConfigPath(pwned) + '\n',
     );
 
-    const first = run();
+    const r = run();
 
-    expect(first.available).toBe(true);
-    expect(existsSync(pwned)).toBe(false);
-
-    // The reuse path's reset rewrites every tracked file — the second spawn
-    // set the override must cover.
-    const second = run();
-
-    expect(second.available).toBe(true);
-    expect(second.note).toContain('reusing');
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('core.fsmonitor');
     expect(existsSync(pwned)).toBe(false);
   });
 

@@ -130,6 +130,44 @@ describe('worktreeResidue', () => {
     expect(got.total).toBe(2);
   });
 
+  it('never executes a planted core.fsmonitor while measuring — the spawn pins hold', () => {
+    // A probe plants `core.fsmonitor` in the shared common dir with the
+    // same one-write facility as the filter plant, and `ls-files`,
+    // `check-ignore` and `status` all RUN it (measured live on every
+    // shape). Own fixture because the leg that exercises the pin is
+    // ignore-attribution: an untracked file hidden by a COMMITTED ignore
+    // rule that is not pipeline footprint (node_modules/dist are dropped
+    // before any attribution runs). The measurement must come back clean
+    // without executing the plant: every spawn carries the empty-value
+    // pin.
+    const host = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-residue-fsm-')));
+    const hgit = (...args: string[]) =>
+      execFileSync('git', args, { cwd: host, encoding: 'utf8' }).trim();
+    try {
+      hgit('init', '-q', '-b', 'main');
+      hgit('config', 'user.email', 't@t.t');
+      hgit('config', 'user.name', 't');
+      writeFileSync(join(host, '.gitignore'), 'coverage\n');
+      writeFileSync(join(host, 'a.ts'), 'export const x = 1;\n');
+      hgit('add', '-A');
+      hgit('commit', '-qm', 'head');
+      const wt = join(host, '.qwen', 'tmp', 'review-wt');
+      mkdirSync(dirname(wt), { recursive: true });
+      hgit('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      const marker = join(host, 'FSMONITOR-PWNED');
+      hgit('config', 'core.fsmonitor', 'touch ' + marker);
+      mkdirSync(join(wt, 'coverage'), { recursive: true });
+      writeFileSync(join(wt, 'coverage', 'x'), 'x');
+
+      const got = worktreeResidue(wt, 12, hgit('rev-parse', 'HEAD'));
+
+      expect(got.paths).toEqual([]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(host, { recursive: true, force: true });
+    }
+  });
+
   it('ignores what every review leaves behind', () => {
     // Agent 7 installs and builds in this tree. If that read as residue, every
     // reader of every review would be told to distrust its own worktree — the
@@ -2199,19 +2237,25 @@ describe('localFilterRefusal', () => {
     expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
   });
 
-  it('certifies a colon-less fetch refspec without a wildcard — FETCH_HEAD alone rewrites no ref', () => {
-    // A colon-less refspec without a wildcard fetches into FETCH_HEAD
-    // alone, rewrites no ref, and is a value git accepts in config
-    // (measured live), so the screen must not touch it. The colon-less
-    // WILDCARD shape this test used to certify is refused by the grammar
-    // suite below: git rejects it with `fatal: invalid refspec` (measured
-    // live), which wedges every later fetch-by-remote-name.
+  it('refuses a colon-less literal source — the ref is remote state the screen cannot read', () => {
+    // Used to certify because FETCH_HEAD alone rewrites no ref. The
+    // judgment now fails CLOSED on literal (non-wildcard) sources: when
+    // the named ref is absent from the remote, every later bare
+    // fetch-by-remote-name dies `fatal: couldn't find remote ref` —
+    // measured live on git 2.39.5, exit 128, a permanent wedge planted by
+    // one config write. That is remote state the screen cannot read, so
+    // it fails the way the GRAMMAR class does; literal `HEAD` stays
+    // excepted because every remote resolves it.
     const g = (...args: string[]) =>
       execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
     g('config', 'remote.origin.url', 'https://example.invalid/x');
     g('config', 'remote.origin.fetch', '+refs/heads/main');
 
-    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('fetch refspec');
+    expect(r).toContain('remote.origin.fetch');
   });
 
   it('certifies an EMPTY fetch refspec value — git ignores it at fetch', () => {
@@ -2264,6 +2308,71 @@ describe('localFilterRefusal', () => {
 
     expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
   });
+
+  it('certifies a HEAD source — every remote resolves it, so it cannot wedge', () => {
+    // The SOURCE class excepts literal `HEAD`: whatever the remote is,
+    // `HEAD` resolves on it, so the value carries no
+    // couldn't-find-remote-ref wedge a literal branch name carries.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '+HEAD:refs/remotes/origin/live-head');
+
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it.each([
+    // The destination rows ride a `HEAD` source — exempted from the
+    // literal-src class because every remote resolves it — so each pins
+    // the DESTINATION policy alone; a wildcard pair isolates it the same
+    // way. The literal-source rows pin the SOURCE class alone, their
+    // destinations allowlisted.
+    ['a bare namespace destination', '+HEAD:refs/tags'],
+    ['a bare refs/heads destination', '+HEAD:refs/heads'],
+    ['a custom-namespace destination', '+HEAD:refs/pr/1'],
+    [
+      'a collision shape inside the allowed prefixes',
+      '+HEAD:refs/remotes/origin',
+    ],
+    [
+      'a literal refs/remotes/<remote>/HEAD destination',
+      '+HEAD:refs/remotes/origin/HEAD',
+    ],
+    [
+      'a wildcard path under refs/remotes/<remote>/HEAD',
+      '+refs/heads/*:refs/remotes/origin/HEAD/*',
+    ],
+    [
+      'a literal source — the single-branch clone shape',
+      '+refs/heads/main:refs/remotes/origin/main',
+    ],
+    [
+      'a literal source naming a ref the remote may not carry',
+      '+refs/heads/z-does-not-exist:refs/remotes/origin/z',
+    ],
+  ])(
+    'refuses a planted fetch refspec with %s — default-deny destinations, wildcard sources',
+    (_shape, refspec) => {
+      // The destination policy is default-DENY now — only
+      // refs/remotes/<name>/<path> and refs/pull/ certify — and a literal
+      // source fails closed beside GRAMMAR and DESTINATION. Each shape
+      // measured live certifying on the old enumeration: a bare namespace
+      // wrote a ref named for the namespace itself; the HEAD destination
+      // wrote THROUGH the origin/HEAD symref and relocated the branch it
+      // pointed at; the literal source wedged every bare fetch when the
+      // ref is absent from the remote.
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('config', 'remote.evil.url', 'https://example.invalid/y');
+      g('config', 'remote.evil.fetch', refspec);
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('fetch refspec');
+      expect(r).toContain('remote.evil.fetch');
+    },
+  );
 
   it('refuses core.alternateRefsCommand — every fetch runs it against the alternates', () => {
     const g = (...args: string[]) =>
@@ -2429,6 +2538,45 @@ describe('localFilterRefusal', () => {
     },
   );
 
+  it.each([
+    ['core.sparsecheckout', 'core.sparseCheckout', 'true'],
+    ['core.attributesfile', 'core.attributesFile', '/tmp/evil-attributes'],
+    ['core.excludesfile', 'core.excludesFile', '/tmp/evil-excludes'],
+    ['core.fsmonitor', 'core.fsmonitor', 'evil-monitor'],
+    ['http.proxy', 'http.proxy', 'http://127.0.0.1:9/'],
+    ['https.proxy', 'https.proxy', 'http://127.0.0.1:9/'],
+    [
+      'a URL-scoped proxy',
+      'http.https://example.invalid/.proxy',
+      'http://127.0.0.1:9/',
+    ],
+    ['a remote-scoped proxy', 'remote.origin.proxy', 'http://127.0.0.1:9/'],
+  ])(
+    'refuses a planted %s — the redirect and proxy families fail closed',
+    (_shown, key, value) => {
+      // One write into the never-wiped common dir arms each of these:
+      // sparseCheckout empties every certified creation checkout;
+      // attributesFile/excludesFile redirect the attribute/exclude reads
+      // away from the info/ files this screen covers; the proxy keys
+      // route every certified fetch through an attacker proxy the SHA
+      // cross-check cannot see. A fresh pipeline clone carries none of
+      // them, so the refusal breaks nothing legitimate — the include
+      // posture.
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('config', key, value);
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('command-execution key(s)');
+      // Git prints the key lowercased in the refusal.
+      expect(r).toContain(key.toLowerCase());
+      expect(r).not.toContain('defines content filter(s)');
+      expect(r).not.toContain('names include directive(s)');
+    },
+  );
+
   it('refuses url-rewrite keys — an insteadOf plant redirects the guarded fetches', () => {
     // `url.<base>.insteadOf` rewrote the URL the pipeline's fetches run
     // against: one plant in the never-wiped common dir sent the guarded
@@ -2517,4 +2665,62 @@ describe('localFilterRefusal', () => {
       expect(r).toContain('the probe checkout');
     },
   );
+
+  it('fails CLOSED when the config swaps between the screen\u2019s two reads', () => {
+    // Pass 1 enumerates `remote.<name>.fetch` and queues the file for the
+    // value read; pass 2 judges the value. A config swapped between the two
+    // reads used to CERTIFY: exit 1 ("no remote.*.fetch in the file right
+    // now") skipped judgment while the classification lists still reflected
+    // the OLD content, and the certified checkout executed whatever the
+    // swap brought in. Exit 1 without a race is impossible — pass 2 matches
+    // the identical key pass 1 just saw in the same file — so failing
+    // closed on it adds no false refusals. The swapper alternates the
+    // common config between a benign clone shape and a filter plant on a
+    // tight copy+rename loop; every screen answer must be null (a benign
+    // read) or a refusal, and the between-reads refusal must land within
+    // the loop budget.
+    const cfg = join(repo, '.git', 'config');
+    const benignSrc = join(repo, 'benign.config');
+    const plantSrc = join(repo, 'plant.config');
+    writeFileSync(
+      benignSrc,
+      '[remote "origin"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+    );
+    writeFileSync(
+      plantSrc,
+      '[filter "evil"]\n\tsmudge = touch ' +
+        gitConfigPath(join(repo, 'PWNED')) +
+        '\n',
+    );
+    copyFileSync(benignSrc, cfg);
+    const swapper = spawn(
+      process.execPath,
+      [
+        '-e',
+        "const fs=require('fs');const [b,p,c,t1,t2]=process.argv.slice(1);const t0=Date.now();while(Date.now()-t0<50000){try{fs.copyFileSync(b,t1);fs.renameSync(t1,c);fs.copyFileSync(p,t2);fs.renameSync(t2,c);}catch{}}",
+        benignSrc,
+        plantSrc,
+        cfg,
+        join(repo, 'swap-t1'),
+        join(repo, 'swap-t2'),
+      ],
+      { stdio: 'ignore', detached: true },
+    );
+    swapper.unref();
+    try {
+      let sawSwapRefusal = false;
+      for (let i = 0; i < 400 && !sawSwapRefusal; i++) {
+        const r = localFilterRefusal(tree, 'the probe checkout');
+        if (r !== null) {
+          expect(r).toContain('the probe checkout');
+          if (r.includes('changed between the screen reads')) {
+            sawSwapRefusal = true;
+          }
+        }
+      }
+      expect(sawSwapRefusal).toBe(true);
+    } finally {
+      if (swapper.pid !== undefined) process.kill(swapper.pid, 'SIGKILL');
+    }
+  });
 });

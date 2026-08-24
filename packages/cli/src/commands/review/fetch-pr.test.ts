@@ -29,7 +29,7 @@ import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
-import { INERT_GIT_ARGS } from './lib/worktree.js';
+import { INERT_GIT_ARGS, SCREEN_SPAWN_TIMEOUT_MS } from './lib/worktree.js';
 import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
@@ -1147,6 +1147,17 @@ describe('fetch-pr report assembly', () => {
       expect(leaseOrder).toBeLessThan(
         producerMocks.execFileSync.mock.invocationCallOrder[0]!,
       );
+      // The stale-clean's `branch -D` opens the repo config: a FIFO planted
+      // there holds an unbounded delete in open(), so the spawn carries the
+      // screen's bound.
+      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
+        'git',
+        ['branch', '-D', 'qwen-review/pr-42'],
+        expect.objectContaining({
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        }),
+      );
     });
   });
 
@@ -1207,8 +1218,15 @@ describe('fetch-pr report assembly', () => {
         'git',
         ['branch', '-D', 'qwen-review/pr-42'],
         // Sanitized env: a delete must land in the repository the caller
-        // named, not the one an exported `GIT_DIR` points at.
-        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+        // named, not the one an exported `GIT_DIR` points at. Bounded:
+        // `git branch` opens the repo config, and a FIFO planted there
+        // holds an unbounded delete in open().
+        expect.objectContaining({
+          stdio: 'pipe',
+          env: expect.any(Object),
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        }),
       );
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
@@ -1242,10 +1260,19 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         /the fetched content is not the PR under review/,
       );
+      // INERT_GIT_ARGS: `branch -D` fires the reference-transaction hook
+      // from the never-wiped common hooks dir, so a correctly REFUSED run
+      // must not execute a planted hook on its way out. Bounded like every
+      // rollback: the spawn opens the repo config.
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
-        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+        [...INERT_GIT_ARGS, 'branch', '-D', 'qwen-review/pr-42'],
+        expect.objectContaining({
+          stdio: 'pipe',
+          env: expect.any(Object),
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        }),
       );
       // No worktree, no report; the outer catch releases the lease.
       expect(
@@ -1284,6 +1311,15 @@ describe('fetch-pr report assembly', () => {
 
       await expect(reportFor({})).rejects.toThrow(
         'Failed to create worktree at',
+      );
+      // The rollback the failure triggers is bounded like its siblings.
+      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
+        'git',
+        ['branch', '-D', 'qwen-review/pr-42'],
+        expect.objectContaining({
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        }),
       );
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
@@ -4284,6 +4320,10 @@ describe('fetch-pr --resume', () => {
       .mocked(gitOpt)
       .mock.calls.find((c) => c.includes('status') && c.includes('-C'));
     expect(statusCall).toContain('--untracked-files=normal');
+    // `status` runs a planted `core.fsmonitor` (measured live), and this
+    // probe runs AHEAD of the first screen — the empty-value pin beside the
+    // explicit-untracked flag.
+    expect(statusCall).toContain('core.fsmonitor=');
   });
 
   it('refuses on an explicit effort different from the recorded run', async () => {

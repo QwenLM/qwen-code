@@ -42,6 +42,7 @@ import {
   INERT_GIT_ARGS,
   localFilterRefusal,
   sanitizedGitEnv,
+  SCREEN_SPAWN_TIMEOUT_MS,
 } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
@@ -625,8 +626,11 @@ function cleanStale(prNumber: string): void {
         stdio: 'pipe',
         // Same reason as every other git spawn in this pipeline: a delete must
         // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at.
+        // `GIT_DIR` points at. Bounded because `git branch` opens the repo
+        // config and a FIFO planted there holds an unbounded delete in open().
         env: sanitizedGitEnv(),
+        timeout: SCREEN_SPAWN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       }),
     );
   }
@@ -696,6 +700,11 @@ function tryResume(
   const status = gitOpt(
     '-C',
     wt,
+    // `status` runs a planted `core.fsmonitor` (measured live) and this
+    // probe runs AHEAD of the first screen — the empty-value pin the
+    // residue's status spawn carries.
+    '-c',
+    'core.fsmonitor=',
     'status',
     '--porcelain',
     '--untracked-files=normal',
@@ -986,8 +995,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           stdio: 'pipe',
           // Same reason as every other git spawn in this pipeline: a delete must
           // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
+          // `GIT_DIR` points at. Bounded because `git branch` opens the repo
+          // config and a FIFO planted there holds an unbounded delete in open().
           env: sanitizedGitEnv(),
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
         }),
       );
       throw new Error(
@@ -1002,16 +1014,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // never named. SHAs are content-addressed, so a mismatch proves the
     // fetch landed something else whatever the redirect's mechanism; the
     // comparison folds case because object IDs are case-insensitive. The
-    // ref is rolled back exactly like a metadata failure, and the outer
-    // catch releases the lease.
+    // ref is rolled back the way a metadata failure rolls it back — plus
+    // the inert overrides the new rollback needs (see its comment) — and
+    // the outer catch releases the lease.
     if (
       meta.headRefOid &&
       meta.headRefOid.toLowerCase() !== fetchedSha.toLowerCase()
     ) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
+        // INERT_GIT_ARGS beside the timeout: `branch -D` fires the
+        // reference-transaction hook from the never-wiped common hooks dir —
+        // the plantable surface every other spawn in this diff neutralizes —
+        // and it opens the repo config, which a FIFO holds in open() past any
+        // bound (the screen-to-spawn window). A timed-out rollback stays
+        // best-effort: tryRemove swallows the kill, the real error throws.
+        execFileSync('git', [...INERT_GIT_ARGS, 'branch', '-D', ref], {
           stdio: 'pipe',
           env: sanitizedGitEnv(),
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
         }),
       );
       throw new Error(
@@ -1051,8 +1072,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           stdio: 'pipe',
           // Same reason as every other git spawn in this pipeline: a delete must
           // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
+          // `GIT_DIR` points at. Bounded because `git branch` opens the repo
+          // config and a FIFO planted there holds an unbounded delete in open().
           env: sanitizedGitEnv(),
+          timeout: SCREEN_SPAWN_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
         }),
       );
       throw new Error(
