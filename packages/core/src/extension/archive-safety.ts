@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import * as tar from 'tar';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
@@ -23,6 +24,46 @@ export interface TarArchiveSafetyOptions {
    * public GitHub archive fallback.
    */
   enforceResourceLimits?: boolean;
+  /**
+   * Accept symbolic-link entries whose targets provably resolve inside the
+   * archive root, instead of rejecting every link entry. Kept off by default
+   * so local, npm, and release archives keep their pre-existing fail-closed
+   * behavior; enable it only for the public GitHub archive fallback, which
+   * has to install repositories that legitimately carry in-repo symlinks.
+   *
+   * Hard links stay unsupported either way: a hard-link entry names another
+   * archive entry rather than a path on disk, so it needs a different
+   * containment argument than the one made here.
+   */
+  allowContainedSymlinks?: boolean;
+}
+
+// A drive-qualified or backslash-rooted target is absolute on Windows even
+// though `path.posix.isAbsolute` reads it as relative. Tar paths are always
+// posix-separated, so this is checked explicitly rather than via `path`.
+const WINDOWS_ABSOLUTE_LINK_TARGET = /^(?:[a-zA-Z]:|\\)/;
+
+/**
+ * Decide containment from the archive's own entry paths rather than from the
+ * extracted tree. The judgement has to hold before anything is written, and
+ * the destination directory may not exist yet, so no filesystem state is
+ * consulted and no link is ever followed to make this call.
+ */
+function isContainedSymlinkTarget(
+  entryPath: string,
+  linkPath: string | undefined,
+): boolean {
+  if (!linkPath) return false;
+  if (path.posix.isAbsolute(linkPath)) return false;
+  if (WINDOWS_ABSOLUTE_LINK_TARGET.test(linkPath)) return false;
+  // Resolve the target against the directory holding the link, so that
+  // `docs/link.md -> ../real.md` stays inside while a root-level
+  // `link.md -> ../real.md` does not.
+  const containingDirectory = path.posix.dirname(entryPath);
+  const resolved = path.posix.normalize(
+    path.posix.join(containingDirectory, linkPath),
+  );
+  return resolved !== '..' && !resolved.startsWith('../');
 }
 
 function formatEntryPath(entryPath: string): string {
@@ -31,12 +72,13 @@ function formatEntryPath(entryPath: string): string {
   return `${sanitized.slice(0, MAX_REPORTED_ENTRY_PATH_LENGTH - 3)}...`;
 }
 
-export async function assertTarArchiveHasNoLinks(
+export async function assertTarArchiveLinksAreSafe(
   file: string,
   signal?: AbortSignal,
   options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   const enforceResourceLimits = options.enforceResourceLimits === true;
+  const allowContainedSymlinks = options.allowContainedSymlinks === true;
   const unsupportedLinkPaths: string[] = [];
   let unsupportedLinkCount = 0;
   let entryCount = 0;
@@ -72,6 +114,16 @@ export async function assertTarArchiveHasNoLinks(
       }
     }
     if (entry.type === 'SymbolicLink' || entry.type === 'Link') {
+      // Hard links stay unsupported even here: the entry names another
+      // archive entry rather than a path on disk, which needs a different
+      // containment argument than the one made for symlinks.
+      if (
+        allowContainedSymlinks &&
+        entry.type === 'SymbolicLink' &&
+        isContainedSymlinkTarget(entry.path, entry.linkpath)
+      ) {
+        return;
+      }
       unsupportedLinkCount += 1;
       const unsupportedLinkPath =
         formatEntryPath(entry.path) || '<sanitized empty path>';

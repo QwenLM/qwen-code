@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_ARCHIVE_ENTRIES,
   MAX_ARCHIVE_EXPANDED_BYTES,
-  assertTarArchiveHasNoLinks,
+  assertTarArchiveLinksAreSafe,
 } from './archive-safety.js';
 
 // Passthrough wrapper around `fs.createReadStream` that tests can hook to
@@ -84,7 +84,7 @@ async function writeCraftedTar(
   await fs.writeFile(archive, Buffer.concat([...headers, TAR_TRAILER]));
 }
 
-describe('assertTarArchiveHasNoLinks', () => {
+describe('assertTarArchiveLinksAreSafe', () => {
   let root: string;
 
   beforeEach(async () => {
@@ -107,7 +107,7 @@ describe('assertTarArchiveHasNoLinks', () => {
       const archive = path.join(root, 'links.tar');
       await tar.c({ cwd: root, file: archive }, links);
 
-      await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
+      await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
         'more than 100 unsupported link entries',
       );
     },
@@ -139,7 +139,7 @@ describe('assertTarArchiveHasNoLinks', () => {
       };
 
       try {
-        await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
+        await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
           'more than 100 unsupported link entries',
         );
       } finally {
@@ -168,7 +168,7 @@ describe('assertTarArchiveHasNoLinks', () => {
 
     try {
       await expect(
-        assertTarArchiveHasNoLinks(
+        assertTarArchiveLinksAreSafe(
           path.join(root, 'missing.tar'),
           controller.signal,
         ),
@@ -191,7 +191,7 @@ describe('assertTarArchiveHasNoLinks', () => {
     );
 
     await expect(
-      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
     ).resolves.toBeUndefined();
   });
 
@@ -204,7 +204,7 @@ describe('assertTarArchiveHasNoLinks', () => {
     );
 
     await expect(
-      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
     ).rejects.toThrow(
       `Tar archive contains more than ${MAX_ARCHIVE_ENTRIES} entries.`,
     );
@@ -220,7 +220,9 @@ describe('assertTarArchiveHasNoLinks', () => {
       ]),
     );
 
-    await expect(assertTarArchiveHasNoLinks(archive)).resolves.toBeUndefined();
+    await expect(
+      assertTarArchiveLinksAreSafe(archive),
+    ).resolves.toBeUndefined();
   });
 
   // The parser skips `size` content bytes after each header, so every entry
@@ -249,7 +251,7 @@ describe('assertTarArchiveHasNoLinks', () => {
     await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512);
 
     await expect(
-      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
     ).resolves.toBeUndefined();
   });
 
@@ -258,9 +260,117 @@ describe('assertTarArchiveHasNoLinks', () => {
     await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512 + 1);
 
     await expect(
-      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
     ).rejects.toThrow(
       `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
+    );
+  });
+
+  // Issue #9724: the older-Git public archive fallback has to install public
+  // repositories that carry in-repo symlinks (the reported repro,
+  // `obra/superpowers`, ships a root `AGENTS.md -> CLAUDE.md`). Containment is
+  // decided from the archive's own paths, never from the extracted tree, so a
+  // hostile entry is refused before anything is written to disk.
+  describe('contained symlinks', () => {
+    const allowLinks = { allowContainedSymlinks: true } as const;
+
+    it.runIf(process.platform !== 'win32')(
+      'accepts a root-level symlink to a sibling file',
+      async () => {
+        await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
+        await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
+        const archive = path.join(root, 'superpowers.tar');
+        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).resolves.toBeUndefined();
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'accepts a nested symlink that stays inside the archive root',
+      async () => {
+        await fs.mkdir(path.join(root, 'docs'));
+        await fs.writeFile(path.join(root, 'real.md'), 'x\n');
+        await fs.symlink('../real.md', path.join(root, 'docs', 'link.md'));
+        const archive = path.join(root, 'nested.tar');
+        await tar.c({ cwd: root, file: archive }, ['real.md', 'docs']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).resolves.toBeUndefined();
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects a symlink whose target escapes the archive root',
+      async () => {
+        await fs.symlink('../../etc/hosts', path.join(root, 'escape'));
+        const archive = path.join(root, 'escape.tar');
+        await tar.c({ cwd: root, file: archive }, ['escape']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).rejects.toThrow('unsupported link entry');
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects a symlink with an absolute target',
+      async () => {
+        await fs.symlink('/etc/passwd', path.join(root, 'absolute'));
+        const archive = path.join(root, 'absolute.tar');
+        await tar.c({ cwd: root, file: archive }, ['absolute']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).rejects.toThrow('unsupported link entry');
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects a symlink with a Windows-absolute target',
+      async () => {
+        await fs.symlink('C:\\Windows\\system32', path.join(root, 'drive'));
+        const archive = path.join(root, 'drive.tar');
+        await tar.c({ cwd: root, file: archive }, ['drive']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).rejects.toThrow('unsupported link entry');
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects a hard link even when it points inside the archive root',
+      async () => {
+        await fs.writeFile(path.join(root, 'original.txt'), 'y\n');
+        await fs.link(
+          path.join(root, 'original.txt'),
+          path.join(root, 'hard.txt'),
+        );
+        const archive = path.join(root, 'hard.tar');
+        await tar.c({ cwd: root, file: archive }, ['original.txt', 'hard.txt']);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).rejects.toThrow('unsupported link entry');
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'still rejects a contained symlink when the option is off',
+      async () => {
+        await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
+        await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
+        const archive = path.join(root, 'default.tar');
+        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+
+        await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
+          'unsupported link entry',
+        );
+      },
     );
   });
 });

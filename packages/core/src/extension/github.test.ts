@@ -43,7 +43,7 @@ import type { ExtensionInstallMetadata } from '../config/config.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
-import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { assertTarArchiveLinksAreSafe } from './archive-safety.js';
 import { AGENT_PLUGIN_SCHEMA } from './agent-plugins-v1/index.js';
 import { prepareStoredGitCredential } from './extension-git-credentials.js';
 
@@ -1062,13 +1062,12 @@ describe('git extension helpers', () => {
 
     // Issue #8993's repro repository (obra/superpowers) carries a root
     // symlink `AGENTS.md -> CLAUDE.md`, and GitHub codeload archives
-    // preserve repository symlinks. The fallback's extraction chain rejects
-    // any archive containing a link entry, so on older Git such repositories
-    // still fail closed — the honest outcome is a clear rejection naming the
-    // link entry. Safe in-archive symlink support is tracked in #9724; this
-    // test must fail if the rejection is ever silently removed.
+    // preserve repository symlinks. Issue #9724 lifted the blanket link ban
+    // for this fallback: a target that resolves inside the archive root now
+    // installs, while anything escaping it still fails closed. The escape
+    // case below must fail if that containment is ever silently removed.
     it.runIf(process.platform !== 'win32')(
-      'rejects archives containing a root symlink like the issue #8993 repro repo',
+      'installs an archive with a root symlink like the issue #8993 repro repo',
       async () => {
         vi.spyOn(dns, 'lookup').mockResolvedValue([
           { address: '8.8.8.8', family: 4 },
@@ -1109,8 +1108,62 @@ describe('git extension helpers', () => {
               },
               destination,
             ),
+          ).resolves.toBe(fallbackSha);
+          // The symlink survives extraction as a symlink rather than being
+          // flattened into a copy, so the installed extension keeps the
+          // repository's own file semantics.
+          const installedLink = path.join(destination, 'AGENTS.md');
+          expect((await fs.lstat(installedLink)).isSymbolicLink()).toBe(true);
+          expect(await fs.readlink(installedLink)).toBe('CLAUDE.md');
+        } finally {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects an archive whose symlink escapes the archive root',
+      async () => {
+        vi.spyOn(dns, 'lookup').mockResolvedValue([
+          { address: '8.8.8.8', family: 4 },
+        ] as never);
+        const tempDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'old-git-fallback-escape-test-'),
+        );
+        const sourceDir = path.join(tempDir, 'source');
+        const destination = path.join(tempDir, 'destination');
+        const archiveRoot = path.join(sourceDir, 'repo-archive');
+        await fs.mkdir(archiveRoot, { recursive: true });
+        await fs.mkdir(destination);
+        await fs.writeFile(
+          path.join(archiveRoot, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
+        );
+        // Resolves above the archive root, so it is refused before extraction.
+        await fs.symlink('../../etc/hosts', path.join(archiveRoot, 'escape'));
+        const archivePath = path.join(tempDir, 'source.tar.gz');
+        await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
+          'repo-archive',
+        ]);
+        const archive = await fs.readFile(archivePath);
+        mockHttpsResponses(
+          JSON.stringify({ sha: fallbackSha }),
+          JSON.stringify({ tree: [], truncated: false }),
+          archive,
+        );
+
+        try {
+          await expect(
+            downloadPublicGitHubArchiveFallback(
+              {
+                type: 'git',
+                source: 'https://github.com/owner/repo',
+                networkPolicy: 'public',
+              },
+              destination,
+            ),
           ).rejects.toThrow(
-            /Tar archive contains unsupported link entry: .*AGENTS\.md/,
+            /Tar archive contains unsupported link entry: .*escape/,
           );
         } finally {
           await fs.rm(tempDir, { recursive: true, force: true });
@@ -3646,7 +3699,7 @@ describe('git extension helpers', () => {
 
       const controller = new AbortController();
       const abortReason = new Error('cancel tar scan');
-      const scan = assertTarArchiveHasNoLinks(archivePath, controller.signal);
+      const scan = assertTarArchiveLinksAreSafe(archivePath, controller.signal);
       setImmediate(() => controller.abort(abortReason));
       await expect(scan).rejects.toBe(abortReason);
     });
@@ -3837,6 +3890,64 @@ describe('git extension helpers', () => {
         await expect(
           fs.lstat(path.join(outsideDir, 'file.txt')),
         ).rejects.toThrow();
+      },
+    );
+
+    // Issue #9724: the older-Git fallback installs public repositories that
+    // carry in-repo symlinks. Containment is asserted here through the real
+    // extraction path, not inferred from the tar library's own behaviour.
+    it.skipIf(process.platform === 'win32')(
+      'extracts a tar.gz carrying a contained symlink when allowed',
+      async () => {
+        const stage = path.join(tempDir, 'superpowers-stage');
+        const extractionDest = path.join(tempDir, 'extracted-contained');
+        await fs.mkdir(stage);
+        await fs.mkdir(extractionDest);
+        await fs.writeFile(path.join(stage, 'CLAUDE.md'), '# guide\n');
+        await fs.symlink('CLAUDE.md', path.join(stage, 'AGENTS.md'));
+        const archivePath = path.join(tempDir, 'contained.tar.gz');
+        await tar.c({ gzip: true, cwd: stage, file: archivePath }, [
+          'CLAUDE.md',
+          'AGENTS.md',
+        ]);
+
+        await extractFile(archivePath, extractionDest, undefined, {
+          allowContainedSymlinks: true,
+        });
+
+        const link = await fs.lstat(path.join(extractionDest, 'AGENTS.md'));
+        expect(link.isSymbolicLink()).toBe(true);
+        expect(await fs.readlink(path.join(extractionDest, 'AGENTS.md'))).toBe(
+          'CLAUDE.md',
+        );
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'refuses a tar.gz whose symlink escapes the destination, writing nothing',
+      async () => {
+        const stage = path.join(tempDir, 'escape-stage');
+        const extractionDest = path.join(tempDir, 'extracted-escape');
+        const outsideDir = path.join(tempDir, 'outside-escape');
+        await fs.mkdir(stage);
+        await fs.mkdir(extractionDest);
+        await fs.mkdir(outsideDir);
+        await fs.writeFile(path.join(outsideDir, 'canary.txt'), 'ORIGINAL\n');
+        await fs.symlink('../outside-escape', path.join(stage, 'escape'));
+        const archivePath = path.join(tempDir, 'escape.tar.gz');
+        await tar.c({ gzip: true, cwd: stage, file: archivePath }, ['escape']);
+
+        await expect(
+          extractFile(archivePath, extractionDest, undefined, {
+            allowContainedSymlinks: true,
+          }),
+        ).rejects.toThrow('unsupported link entry');
+        // The escaping link is refused before extraction begins, so the
+        // destination stays empty and the file outside it is untouched.
+        expect(await fs.readdir(extractionDest)).toEqual([]);
+        expect(
+          await fs.readFile(path.join(outsideDir, 'canary.txt'), 'utf8'),
+        ).toBe('ORIGINAL\n');
       },
     );
 

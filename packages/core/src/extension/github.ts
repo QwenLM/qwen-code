@@ -32,7 +32,7 @@ import {
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
 import {
-  assertTarArchiveHasNoLinks,
+  assertTarArchiveLinksAreSafe,
   type TarArchiveSafetyOptions,
 } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
@@ -561,6 +561,11 @@ export async function downloadPublicGitHubArchiveFallback(
   );
   await extractArchiveFile(archivePath, destination, signal, {
     enforceResourceLimits: true,
+    // Public repositories legitimately carry in-repo symlinks (the reported
+    // case is a root `AGENTS.md -> CLAUDE.md`), and this fallback is the only
+    // way to install them without Git 2.37+. Targets that escape the archive
+    // root are still refused before extraction.
+    allowContainedSymlinks: true,
   });
   await fs.promises.unlink(archivePath);
   await assertArchivePreservesGitSemantics(destination);
@@ -1367,7 +1372,7 @@ export async function extractFile(
 ): Promise<void> {
   signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await assertTarArchiveHasNoLinks(file, signal, options);
+    await assertTarArchiveLinksAreSafe(file, signal, options);
     signal?.throwIfAborted();
     try {
       await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {
