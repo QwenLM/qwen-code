@@ -13,7 +13,7 @@ import type {
   Part,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -43,7 +43,7 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
-import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
+import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -163,10 +163,8 @@ describe('GeminiChat', async () => {
     mockContentGenerator = {
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn(),
       embedContent: vi.fn(),
       batchEmbedContents: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     } as unknown as ContentGenerator;
 
     // Default mock implementation for tests that don't care about retry logic
@@ -7202,10 +7200,8 @@ describe('GeminiChat', async () => {
         ({
           generateContent: vi.fn(),
           generateContentStream,
-          countTokens: vi.fn(),
           embedContent: vi.fn(),
           batchEmbedContents: vi.fn(),
-          useSummarizedThinking: vi.fn().mockReturnValue(false),
         }) as unknown as ContentGenerator;
       const resolveForModel = vi
         .fn()
@@ -7449,10 +7445,8 @@ describe('GeminiChat', async () => {
         ({
           generateContent: vi.fn(),
           generateContentStream,
-          countTokens: vi.fn(),
           embedContent: vi.fn(),
           batchEmbedContents: vi.fn(),
-          useSummarizedThinking: vi.fn().mockReturnValue(false),
         }) as unknown as ContentGenerator;
       const resolveForModel = vi
         .fn()
@@ -7541,10 +7535,8 @@ describe('GeminiChat', async () => {
       const fallbackBGenerator = {
         generateContent: vi.fn(),
         generateContentStream: fallbackBGenerateContentStream,
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
         batchEmbedContents: vi.fn(),
-        useSummarizedThinking: vi.fn().mockReturnValue(false),
       } as unknown as ContentGenerator;
       const resolveError = new Error('unknown fallback alias');
       const resolveForModel = vi
@@ -7630,10 +7622,8 @@ describe('GeminiChat', async () => {
         ({
           generateContent: vi.fn(),
           generateContentStream,
-          countTokens: vi.fn(),
           embedContent: vi.fn(),
           batchEmbedContents: vi.fn(),
-          useSummarizedThinking: vi.fn().mockReturnValue(false),
         }) as unknown as ContentGenerator;
       const resolveForModel = vi
         .fn()
@@ -7794,10 +7784,8 @@ describe('GeminiChat', async () => {
         ({
           generateContent: vi.fn(),
           generateContentStream,
-          countTokens: vi.fn(),
           embedContent: vi.fn(),
           batchEmbedContents: vi.fn(),
-          useSummarizedThinking: vi.fn().mockReturnValue(false),
         }) as unknown as ContentGenerator;
       const resolveForModel = vi
         .fn()
@@ -9582,10 +9570,8 @@ describe('GeminiChat', async () => {
         contentGenerator: {
           generateContent: vi.fn(),
           generateContentStream: fallbackGenerateContentStream,
-          countTokens: vi.fn(),
           embedContent: vi.fn(),
           batchEmbedContents: vi.fn(),
-          useSummarizedThinking: vi.fn().mockReturnValue(false),
         } as unknown as ContentGenerator,
         retryAuthType: AuthType.USE_GEMINI,
         retryErrorCodes: undefined,

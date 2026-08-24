@@ -112,7 +112,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Utilities
 import {
@@ -124,7 +124,7 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   type AgentAvailabilityEntry,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,

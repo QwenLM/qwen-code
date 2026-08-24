@@ -80,7 +80,7 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
-import { setGeminiMdFilename } from '../memory/const.js';
+import { setGeminiMdFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -186,7 +186,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../tools/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import {
@@ -196,11 +196,11 @@ import {
 } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
-import type { FileFilteringOptions } from './constants.js';
+import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-} from './constants.js';
+} from '../utils/file-filtering-options.js';
 import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
@@ -242,8 +242,8 @@ import {
   SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
-import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
+import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from './rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -325,7 +325,11 @@ export {
 
 export type ModelInvocableCommandExecutorResult = string | { error: string };
 
-export { ApprovalMode, APPROVAL_MODES } from './approval-mode.js';
+export {
+  ApprovalMode,
+  APPROVAL_MODES,
+  type ApprovalModeValue,
+} from './approval-mode.js';
 
 /**
  * Thrown by `Config.setApprovalMode` when the requested mode would grant
@@ -1770,6 +1774,75 @@ function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
   );
 }
 
+const DERIVED_CONFIG = Symbol('derivedConfig');
+
+function isDerivedConfig(config: Config): boolean {
+  return (
+    (config as Config & { [DERIVED_CONFIG]?: boolean })[DERIVED_CONFIG] === true
+  );
+}
+
+export type DerivedConfigOverrides = Partial<
+  Pick<
+    Config,
+    | 'getTargetDir'
+    | 'getCwd'
+    | 'getWorkingDir'
+    | 'getProjectRoot'
+    | 'getPlanFilePath'
+    | 'getWorkspaceContext'
+    | 'getFileService'
+    | 'getToolRegistry'
+    | 'getPermissionManager'
+    | 'getApprovalMode'
+    | 'getShouldAvoidPermissionPrompts'
+    | 'getMcpServers'
+    | 'getBareMode'
+    | 'isSafeMode'
+    | 'getSandbox'
+    | 'getScreenReader'
+    | 'getModel'
+    | 'getMaxSessionTurns'
+    | 'getMaxToolCalls'
+    | 'getMaxSubagentDepth'
+    | 'getChatRecordingService'
+    | 'getTranscriptPath'
+    | 'getDisableAllHooks'
+    | 'getHookSystem'
+    | 'getMessageBus'
+    | 'getAutoMemoryPrompt'
+    | 'getUserMemory'
+  >
+>;
+
+/**
+ * Creates a Config overlay while keeping prototype delegation inside one
+ * reviewable boundary. Callers supply only public getter overrides; Config's
+ * child-local and prohibited runtime state remains enforced by its accessors.
+ * Approval-mode override wrappers that call Config prototype mutators must keep
+ * owning their strip/restore lifecycle before migrating to this factory.
+ */
+export function deriveConfig(
+  base: Config,
+  overrides: DerivedConfigOverrides = {},
+): Config {
+  const derived = Object.create(base) as Config;
+  for (const key in overrides) {
+    if (!Object.hasOwn(overrides, key)) continue;
+    const override = overrides[key as keyof DerivedConfigOverrides];
+    if (override !== undefined) {
+      Object.defineProperty(derived, key, {
+        value: override,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+    }
+  }
+  Object.defineProperty(derived, DERIVED_CONFIG, { value: true });
+  return derived;
+}
+
 export class Config {
   private sessionId: string;
   private sessionSourceType?: string;
@@ -1955,6 +2028,7 @@ export class Config {
    * single-block layout when it doesn't match the request's system text.
    */
   private staticSystemPrefix: string | undefined;
+
   /**
    * Volatile system-prompt layer: the managed auto-memory section
    * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
@@ -2669,6 +2743,9 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot be initialized');
+    }
     if (this.initialized) {
       throw Error('Config was already initialized');
     }
@@ -4000,6 +4077,9 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot start new sessions');
+    }
     if (this.chatRecordingService?.hasWriteOwnership()) {
       throw new SessionWriterUnavailableError();
     }
@@ -5214,6 +5294,9 @@ export class Config {
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
   }> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot relocate working directories');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -5348,6 +5431,9 @@ export class Config {
     skipSessionWriter?: boolean;
     strictResourceCleanup?: boolean;
   }): Promise<void> {
+    // Derived Configs share parent resources; any replacement resource a profile
+    // installs is owned and cleaned up by that profile.
+    if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>
@@ -6377,6 +6463,9 @@ export class Config {
    * Clean up Team runtime — stops all teammates and clears state.
    */
   async cleanupTeamRuntime(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot clean up Team runtime');
+    }
     const manager = this.teamManager;
     if (!manager) {
       return;
@@ -6403,6 +6492,9 @@ export class Config {
    * always removes worktrees regardless of preserveArtifacts.
    */
   async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot clean up Arena runtime');
+    }
     const manager = this.arenaManager;
     if (!manager) {
       return;
@@ -6499,6 +6591,9 @@ export class Config {
       fromApprovedPlanExit?: boolean;
     },
   ): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change approval mode');
+    }
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -8128,12 +8223,14 @@ export class Config {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    if (isDerivedConfig(this)) return;
     if (this.chatRecordingService?.hasWriteOwnership()) {
       await this.chatRecordingService.assertCanStartTurn();
     }
   }
 
   hasSessionWriteOwnership(): boolean {
+    if (isDerivedConfig(this)) return false;
     return (
       this.pendingSessionWriterLease !== undefined ||
       this.chatRecordingService?.hasWriteOwnership() === true
@@ -8141,6 +8238,9 @@ export class Config {
   }
 
   setSessionWriterReclaimPolicy(policy: 'local' | 'never'): void {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (this.initialized) {
       throw new SessionWriterUnavailableError();
     }
@@ -8148,6 +8248,9 @@ export class Config {
   }
 
   setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (this.initialized) {
       throw new SessionWriterUnavailableError();
     }
@@ -8155,6 +8258,9 @@ export class Config {
   }
 
   closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
       this.sessionWriterHandoffRequested = true;
     }
@@ -8884,6 +8990,20 @@ export class Config {
         );
         return new TeamPlanApprovalTool(this);
       });
+      // Leader-only, enforced by absence. `requestShutdown` writes the target's
+      // mailbox entry as `from: LEADER_NAME`, so a teammate calling it would be
+      // impersonating the leader. Skipping registration in subagent-context
+      // registries means a teammate has no declaration for it and cannot emit
+      // the call — rather than emitting one and being rejected, which is how
+      // #9276 lost teammate reports when this was a `send_message` field.
+      if (!options?.forSubAgent) {
+        await registerLazy(ToolNames.REQUEST_SHUTDOWN, async () => {
+          const { RequestShutdownTool } = await import(
+            '../tools/request-shutdown.js'
+          );
+          return new RequestShutdownTool(this);
+        });
+      }
       await registerLazy(ToolNames.TASK_CREATE, async () => {
         const { TaskCreateTool } = await import('../tools/task-create.js');
         return new TaskCreateTool(this);
