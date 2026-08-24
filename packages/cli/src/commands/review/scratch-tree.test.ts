@@ -155,6 +155,66 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails CLOSED when the worktrees admin dir cannot be listed — the class is unknowable',
+    () => {
+      // A mode-0111 `<common>/worktrees`: `readdirSync` throws EACCES while
+      // git still reads the entries' `config.worktree` by name, so the
+      // authorised checkout would execute a filter planted there (measured
+      // live). The old catch read ANY readdir failure as "no linked
+      // worktrees" — the same empty answer the genuine absence produces —
+      // and silently dropped the entire admin-dir candidate class.
+      const first = run();
+      expect(first.available).toBe(true);
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      writeFileSync(
+        join(common, 'worktrees', basename(first.path!), 'config.worktree'),
+        '[filter "planted"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+      );
+      const admin = join(common, 'worktrees');
+      chmodSync(admin, 0o111);
+      try {
+        const r = run();
+        expect(r.available).toBe(false);
+        expect(r.note).toContain(
+          'worktrees admin directory could not be listed',
+        );
+      } finally {
+        chmodSync(admin, 0o755);
+      }
+    },
+  );
+
+  it('admits a repository with no worktrees admin dir at all — ENOENT is empty, not unknowable', () => {
+    // The fixture always carries a linked worktree, so build one without:
+    // its `<common>/worktrees` does not exist, and the catch reading it must
+    // read that as "no linked worktrees", not as a refusal — only readdir
+    // failures other than ENOENT are the unknowable state.
+    const plain = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-no-worktrees-')),
+    );
+    try {
+      git(plain, 'init', '-q', '-b', 'main');
+      git(plain, 'config', 'user.email', 't@t.t');
+      git(plain, 'config', 'user.name', 't');
+      writeFileSync(join(plain, 'a.ts'), 'x\n');
+      git(plain, 'add', '-A');
+      git(plain, 'commit', '-qm', 'head');
+      expect(existsSync(join(plain, '.git', 'worktrees'))).toBe(false);
+
+      const r = runScratchTree({ worktree: plain, label: 'verify--enoent' });
+
+      expect(r.available).toBe(true);
+      rmSync(r.path!, { recursive: true, force: true });
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
+
   it('refuses the command-valued keys the value check cannot certify — git executes their values', () => {
     // A recipe step running `git config core.fsmonitor CMD` from the copy
     // lands in the host's COMMON config — textually an in-copy write,
@@ -290,15 +350,48 @@ describe('runScratchTree', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails CLOSED when the hooks dir cannot be listed — git still runs hooks by name',
+    () => {
+      // A mode-0111 hooks dir: `readdirSync` throws EACCES, while git's hook
+      // lookup is a by-name stat that needs only traverse — an executable
+      // hook inside fires at the user's own next commit while the screen
+      // reports clean (measured live). The listing failure used to read as
+      // an empty dir; every sibling error path in this command fails closed.
+      const hookDir = join(repo, '.git', 'hooks');
+      const hook = join(hookDir, 'pre-commit');
+      writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(hook, 0o755);
+      chmodSync(hookDir, 0o111);
+      try {
+        const r = run();
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('hooks directory could not be listed');
+        expect(
+          existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+        ).toBe(false);
+      } finally {
+        chmodSync(hookDir, 0o755);
+      }
+    },
+  );
+
   it('certifies the inert VALUES of value-checked keys — fail-closed is not value-blind', () => {
     // The old blocklist was value-blind: a boolean `core.fsmonitor` selects
-    // git's builtin daemon, a plain alias never reaches a shell, and an
-    // `https://` fetch address names no program — yet all of them refused.
-    // The fail-closed screen reads the value where inertness is decidable
-    // from it, so benign user config does not block the tree (R12-1's fix).
+    // git's builtin daemon and an `https://` fetch address names no program
+    // — yet all of them refused. The fail-closed screen reads the value where
+    // inertness is decidable from it, so benign user config does not block
+    // the tree (R12-1's fix).
     git(worktree, 'config', 'core.fsmonitor', 'true');
-    git(worktree, 'config', 'alias.st', 'status -s');
     git(worktree, 'config', 'remote.origin.url', 'https://example.com/r.git');
+    // The `::` refusal cuts at the first `/` precisely so this stays
+    // admitted: the address's IPv6 literal carries one of its own.
+    git(
+      worktree,
+      'config',
+      'remote.origin.pushurl',
+      'ssh://[2001:db8::1]/repo',
+    );
     git(
       worktree,
       'config',
@@ -318,6 +411,12 @@ describe('runScratchTree', () => {
       ['alias.evil', '!sh -c evil'],
       ['remote.origin.url', 'ext::sh -c evil'],
       ['remote.origin.url', 'evilhelper::addr'],
+      // Git dispatches `git-remote-<helper>` for ANY `<helper>::` prefix —
+      // digit-lead and empty helpers included — and for unknown `<scheme>://`
+      // (all measured dispatching on git 2.43).
+      ['remote.origin.url', '9p::addr'],
+      ['remote.origin.url', '::addr'],
+      ['remote.origin.url', 'evilproto://host/x'],
       ['submodule.vendor.update', '!sh -c evil'],
       ['submodule.vendor.url', 'ext::evil'],
     ] as Array<[string, string]>) {
@@ -336,6 +435,34 @@ describe('runScratchTree', () => {
       });
       git(worktree, 'worktree', 'prune');
     }
+  });
+
+  it('refuses every repo-local alias — no value check certifies the shape', () => {
+    // Alias values reach execution through an open set of routes: options
+    // that carry programs (`clone --upload-pack=...`), a first word git
+    // dispatches from PATH (`eviltool` -> `git-eviltool`), positional
+    // commands (`submodule foreach ...`), and invocation-time plants
+    // (`config core.pager ...`). The value check refused only leading `!`
+    // and `-`, and each audit round since found another route around it —
+    // all four shapes below were measured executing under that check — so
+    // the shape is uncertifiable and refused outright, plain aliases
+    // included.
+    for (const value of [
+      'status -s',
+      "clone --upload-pack='touch PWNED' /src /dst",
+      'eviltool some-arg',
+      'submodule foreach touch PWNED',
+    ]) {
+      git(worktree, 'config', 'alias.st', value);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('alias.st');
+
+      git(worktree, 'config', '--unset', 'alias.st');
+    }
+    expect(run().available).toBe(true);
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {

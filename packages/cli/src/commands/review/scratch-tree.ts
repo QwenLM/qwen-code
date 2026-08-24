@@ -175,10 +175,14 @@ const INERT_KEY_SHAPES: RegExp[] = [
   /^submodule\..+\.(active|branch)$/,
 ];
 
-// Key shapes whose inertness the VALUE decides, and the decision. Composed
-// routes stay closed: an alias expanding to a builtin that honors another
-// config command still needs that command's key planted repo-locally, and
-// the key fails this same screen.
+// Key shapes whose inertness the VALUE decides, and the decision.
+// `alias.*` is deliberately absent: an alias value reaches execution through
+// an open set of routes — program-carrying options (`clone
+// --upload-pack=...`), a first word git dispatches from PATH (`eviltool` ->
+// `git-eviltool`), positional commands (`submodule foreach ...`, `bisect
+// run ...`) and invocation-time plants (`config core.pager ...`) — and every
+// audit round found another, so no value check certifies the shape; it is
+// refused like any other uncertified key.
 const VALUE_CHECKED_SHAPES: Array<{
   shape: RegExp;
   valueIsInert: (value: string) => boolean;
@@ -191,22 +195,23 @@ const VALUE_CHECKED_SHAPES: Array<{
       /^(true|false|yes|no|on|off|1|0)$/i.test(value.trim()),
   },
   {
-    // Only a leading `!` hands an alias to a shell; a leading `-` expands to
-    // command-line OPTIONS on git versions without the hardening against
-    // option-bearing aliases, so neither shape is certifiable — every other
-    // value expands to a builtin's arguments.
-    shape: /^alias\./,
-    valueIsInert: (value) => {
-      const lead = value.trimStart();
-      return !lead.startsWith('!') && !lead.startsWith('-');
-    },
-  },
-  {
-    // A fetch address executes a program only when it names one: the `ext::`
-    // transport and any custom `<helper>::` scheme spawn `git-remote-<helper>`.
-    // The standard schemes and plain paths name nothing the config itself runs.
+    // A fetch address executes a program when it names one: git dispatches
+    // `git-remote-<helper>` for ANY `<helper>::` prefix — empty and
+    // digit-leading helpers included — and for every `<scheme>://` it does
+    // not implement itself. Only the builtin schemes and plain paths name
+    // nothing the config itself runs.
     shape: /^(remote\..+\.(url|pushurl)|submodule\..+\.url)$/,
-    valueIsInert: (value) => !/^[a-z][a-z0-9+.-]*::/i.test(value.trim()),
+    valueIsInert: (value) => {
+      const v = value.trim();
+      const firstSlash = v.indexOf('/');
+      const head = firstSlash === -1 ? v : v.slice(0, firstSlash);
+      // A `::` before the first `/` is a helper dispatch; the cut at the
+      // slash spares IPv6 literals like `ssh://[2001:db8::1]/repo`, whose
+      // `::` sits after it.
+      if (head.includes('::')) return false;
+      const scheme = /^([a-z0-9+.-]+):\/\//i.exec(v)?.[1];
+      return !scheme || /^(https?|ftps?|ssh|git|file)$/i.test(scheme);
+    },
   },
   {
     // Update strategies are checkout, rebase, merge, none — or `!command`.
@@ -278,8 +283,14 @@ function localCommandConfig(worktree: string): string[] {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
     }
-  } catch {
-    // No linked worktrees registered: the candidates above are all of it.
+  } catch (err) {
+    // ENOENT means no linked worktrees registered — the candidates above
+    // are all of it. Any other failure leaves the class unknowable, which
+    // is a refusal here like the git-dir check above: a mode-0111 dir
+    // throws EACCES while git still reads what it holds by name.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return ['(the worktrees admin directory could not be listed)'];
+    }
   }
   const found: string[] = [];
   for (const file of candidates) {
@@ -375,7 +386,10 @@ function localExecutableHooks(worktree: string): string[] {
   try {
     entries = readdirSync(ownHooksDir);
   } catch {
-    return [];
+    // Fail closed, like the config screen: a dir that cannot be listed can
+    // still carry hooks — git executes them by name lookup, which needs
+    // traverse only, and a mode-0111 dir throws here while staying runnable.
+    return ['(the hooks directory could not be listed)'];
   }
   const found: string[] = [];
   for (const name of entries) {
