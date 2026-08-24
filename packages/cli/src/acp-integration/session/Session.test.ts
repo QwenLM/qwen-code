@@ -11989,6 +11989,117 @@ describe('Session', () => {
         );
       });
 
+      it('does not drop a route-B send using a stale route-A token count after a model switch (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // ACP model switches keep the same GeminiChat instance, so only the
+        // route identity changes — the chat-instance reset in the session's
+        // token cache never fires (#9529, follow-up to #9454/#9506).
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported count lands in the session's
+        // private token cache.
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance.
+        routeIdentity = 'route-b';
+
+        // Prompt 2 on route B reaches the session-token-limit gate without
+        // compression info (compression throws), so the gate falls back to the
+        // cached count. The stale route-A count (101 > 100) must not drop a
+        // route-B send.
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('still intercepts a same-route send whose recorded count exceeds the session token limit (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // The route never changes, so the route-scoped cache must keep the
+        // recorded count and let the gate trip exactly as it did before #9529.
+        mockConfig.getModelRouteIdentity = vi.fn(() => 'route-a');
+
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Same route, compression throws → the gate reads the recorded
+        // same-route count (101 > 100) and must still drop the send.
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
       it('returns cancelled when automatic compression is aborted', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat.mockImplementation(

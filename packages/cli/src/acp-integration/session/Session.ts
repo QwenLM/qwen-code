@@ -1849,6 +1849,11 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  // The model route that produced `lastPromptTokenCount` (Config
+  // .getModelRouteIdentity). ACP model switches keep the same GeminiChat, so
+  // the chat-instance check alone never invalidates the count on a route
+  // change (#9529, follow-up to #9454/#9506).
+  private lastPromptTokenCountRouteKey: string | undefined = undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -7100,15 +7105,31 @@ export class Session implements SessionContext {
     return tokenCount;
   }
 
+  #currentRouteKey(): string {
+    // Optional chaining keeps partial Config test mocks from throwing; a
+    // missing identity degrades to one stable key, i.e. no route-change
+    // invalidation (mirrors GeminiChat.currentRouteKey, #9454).
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
   #syncPromptTokenCountWithCurrentChat(): void {
     const chat = this.#getCurrentChat();
-    if (
-      this.lastPromptTokenCountChat &&
-      this.lastPromptTokenCountChat !== chat
-    ) {
+    const routeKey = this.#currentRouteKey();
+    const chatChanged =
+      this.lastPromptTokenCountChat && this.lastPromptTokenCountChat !== chat;
+    // A model switch rebuilds the content generator but keeps the same
+    // GeminiChat, so the chat-instance check above never fires on a route
+    // change. A count recorded for the previous route must not anchor the
+    // session-token-limit gate for the new one — reset it so the gate falls
+    // back to the fresh send's own count (#9529, follow-up to #9454/#9506).
+    const routeChanged =
+      this.lastPromptTokenCountRouteKey !== undefined &&
+      this.lastPromptTokenCountRouteKey !== routeKey;
+    if (chatChanged || routeChanged) {
       this.lastPromptTokenCount = 0;
     }
     this.lastPromptTokenCountChat = chat;
+    this.lastPromptTokenCountRouteKey = routeKey;
   }
 
   #isAbortError(error: unknown): boolean {
