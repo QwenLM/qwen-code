@@ -588,6 +588,7 @@ describe('tool group summary logic', () => {
         args: { file_path: 'README.md' },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     expect(container.textContent).toContain('Shell');
     expect(container.textContent).toContain('查询用户工作空间列表');
@@ -998,6 +999,7 @@ describe('tool row rendering', () => {
         },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1012,6 +1014,7 @@ describe('tool row rendering', () => {
         content: [{ type: 'content', content: { text: 'Permission denied' } }],
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1022,6 +1025,7 @@ describe('tool row rendering', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'glob', status: 'failed' }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1805,19 +1809,19 @@ describe('thinking rows in the compact summary', () => {
       true,
     );
     const outerSummary = container.querySelector('button')!;
-    const parallelSummary = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Parallel agents'))!;
 
     expect(outerSummary.textContent).toContain('Ran 2 agents');
     expect(
       container.querySelector('[data-testid="compact-parallel-agents"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(outerSummary.getAttribute('aria-expanded')).toBe('false');
-    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
 
     act(() => outerSummary.click());
+    const parallelSummary = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Parallel agents'))!;
     expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
     expect(parallelSummary.textContent).toContain('2/2 done');
 
     act(() => parallelSummary.click());
@@ -1841,6 +1845,15 @@ describe('thinking rows in the compact summary', () => {
     expect(container.querySelector('button')?.textContent).toContain(
       'Thinking',
     );
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).toBeNull();
+
+    act(() => container.querySelector('button')?.click());
+
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).not.toBeNull();
   });
 
   it('renders a completed thought line that expands its content on click', () => {
@@ -2032,8 +2045,8 @@ describe('thinking rows in the compact summary', () => {
       ],
     );
 
+    act(() => container.querySelector('button')?.click());
     act(() => {
-      container.querySelector('button')?.click();
       for (const header of container.querySelectorAll(
         '[data-testid="compact-thinking-summary"]',
       )) {

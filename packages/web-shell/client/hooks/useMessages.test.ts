@@ -350,7 +350,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ).toBeUndefined();
   });
 
-  it('falls back when an insight marker spans the appended-text boundary', async () => {
+  it('projects an insight marker that spans the appended-text boundary', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     const t = (key: string) => key;
@@ -361,6 +361,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       text: 'prefix "insi',
       streaming: true,
     });
+    let latest: Message[] = [];
     function Consumer({
       blocks,
       summary,
@@ -368,7 +369,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       blocks: DaemonTranscriptBlock[];
       summary: DaemonTranscriptBlockChangeSummary;
     }) {
-      useMessagesFromBlocks(t, blocks, summary);
+      latest = useMessagesFromBlocks(t, blocks, summary);
       return null;
     }
 
@@ -400,11 +401,15 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     );
 
     expect(adapterSpies.project).toHaveBeenCalledOnce();
+    expect(latest).toMatchObject([
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
     await act(async () => root.unmount());
   });
 
-  it('falls back when a later append completes an insight message', () => {
+  it('projects a later append that completes an insight message', () => {
     const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
     const assistant = baseBlock({
       id: 'assistant',
       kind: 'assistant',
@@ -415,41 +420,97 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       ...assistant,
       text: `${assistant.text}}`,
     };
-    const messages = transcriptBlocksToLocalizedMessages([assistant], t);
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
     const source = {};
 
+    const projected = projectStreamingTailMessages(
+      {
+        blocks: [user, assistant],
+        messages,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 1,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedAssistant],
+      t,
+      {
+        source,
+        revision: 2,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_progress' },
+    ]);
     expect(
       projectStreamingTailMessages(
-        {
-          blocks: [assistant],
-          messages,
-          t,
-          blockChangeSummary: {
-            source,
-            revision: 1,
-            tailAppendBarrierRevision: 1,
-          },
-        },
-        [completedAssistant],
+        { blocks: [user, assistant], messages, t },
+        [user, completedAssistant],
         t,
-        {
+      ),
+    ).toMatchObject([{ role: 'user' }, { role: 'insight_progress' }]);
+
+    const partialReady = {
+      ...completedAssistant,
+      text: `${completedAssistant.text}\n{"insight_ready":{"path":"/tmp/report.md"`,
+    };
+    const partialReadyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, completedAssistant],
+        messages: projected!,
+        t,
+        blockChangeSummary: {
           source,
           revision: 2,
           tailAppendBarrierRevision: 1,
-          tailBlockId: assistant.id,
         },
-      ),
-    ).toBeUndefined();
-    expect(
-      projectStreamingTailMessages(
-        { blocks: [assistant], messages, t },
-        [completedAssistant],
+      },
+      [user, partialReady],
+      t,
+      {
+        source,
+        revision: 3,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+    const completedReady = {
+      ...partialReady,
+      text: `${partialReady.text}}}`,
+    };
+    const readyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, partialReady],
+        messages: partialReadyMessages!,
         t,
-      ),
-    ).toBeUndefined();
-    expect(
-      transcriptBlocksToLocalizedMessages([completedAssistant], t),
-    ).toMatchObject([{ role: 'insight_progress' }]);
+        blockChangeSummary: {
+          source,
+          revision: 3,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedReady],
+      t,
+      {
+        source,
+        revision: 4,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(readyMessages?.[0]).toBe(messages[0]);
+    expect(readyMessages).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+    ]);
   });
 
   it.each([undefined, ''])(

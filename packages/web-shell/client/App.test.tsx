@@ -586,6 +586,7 @@ vi.mock('@qwen-code/sdk/daemon', () => {
 });
 
 vi.mock('./hooks/useMessages', () => ({
+  projectStreamingTailMessages: () => undefined,
   useMessages: () => testState.messages,
   useMessagesFromBlocks: () => testState.messages,
 }));
