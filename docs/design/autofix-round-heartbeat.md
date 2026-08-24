@@ -75,7 +75,11 @@ orphan loops unacceptable):
    gate/repair and finalize flips the terminal text.
 2. Kill targets travel through **expression context**: the launch records
    `$!` as a `heartbeat_pid` step output, and the gate / finalize /
-   cleanup kill that value. A pid read from a WORKDIR file would be an
+   cleanup kill that value — the pid, its process group, AND its session:
+   each tick's `timeout 60 gh` subtree runs in its own process group
+   (coreutils `timeout` default) under the loop's setsid session, so a
+   group/pid kill alone leaves it alive holding the PAT for up to 60s.
+   A pid read from a WORKDIR file would be an
    untrusted kill target — the agent's docker sandbox mounts the host
    `/tmp` on the same path and runs as the same user, so branch code the
    agent executes can plant any value there. The on-disk
@@ -88,18 +92,25 @@ orphan loops unacceptable):
 4. `Clean up autofix workdir` (`always()`) kills again as belt-and-braces.
 5. `Reset autofix workspace` does NOT kill: a cross-run pid would have to
    come from the untrusted file class. Wiping `WORKDIR` removes the pid
-   file, and the loop self-exits at its next identity self-check; a
-   crash-leftover orphan therefore dies within one interval (worst case:
-   one stale "working" tick already past its identity check, re-PATCHed
-   by the new round).
+   file, and the loop self-exits at its next identity self-check when
+   the next round reuses the orphan's host; cross-host, nothing rewrites
+   the pid file, so a crash-leftover orphan keeps pulsing its stale body
+   until the age cap — alternating with the live round's bodies and
+   overwriting later rounds' terminal text within one interval of
+   finalize. Worst same-host case: one stale "working" tick already past
+   its identity check, re-PATCHed by the new round. The cross-host
+   window is an accepted residual risk (below), bounded by the age cap.
 6. Self-exit bounds inside the loop: stop if the pid file no longer holds
    the loop's OWN pid — an identity check, not an existence check,
    because `WORKDIR` is PR-scoped and the next round recreates
    `heartbeat.pid` at the same path, which an existence check would let
    the orphan pass (reading the file here is safe: the loop only
    self-identifies, it never kills anything); stop if `heartbeat-stop`
-   exists, or at a hard age cap (12h, far beyond the 330-minute job
-   timeout); each tick's `gh` call is wrapped in `timeout 60` so a
+   exists, or at a hard age cap set just past the 330-minute job
+   envelope (a live round's loop dies at the gate or finalize well inside
+   the job, so only a crash orphan ever reaches the cap — and the cap
+   bounds how long that orphan holds the PAT in `/proc/<pid>/environ`);
+   each tick's `gh` call is wrapped in `timeout 60` so a
    black-holed connection cannot stall the loop past the cap.
 
 The kill logic is inline in the yml (4-6 lines each), **not** a script
@@ -158,10 +169,17 @@ comment is never worse than today.
    runs the branch's own build/tests ON THE HOST as the runner user, and
    a same-UID `/proc/<pid>/environ` read from that code would expose the
    token. The overlap is therefore bounded to the sandboxed agent phase:
-   the gate kills the loop before any host-side branch code runs
-   (lifetime rule 1). Within that phase the token never touches disk and
-   the only concurrent host processes are trusted (run-agent.mjs, the
-   bundled CLI). The alternative that avoids the overlap entirely —
+   the gate kills the loop's whole session before any host-side branch
+   code runs (lifetime rule 1; the kill covers the session because an
+   in-flight tick's `timeout 60 gh` subtree sits in its own process group
+   under the loop's session). Within that phase the token never touches
+   disk, the only concurrent host processes are trusted (run-agent.mjs,
+   the bundled CLI), and the step's gh calls and every tick run under the
+   af-112 hermetic pins (pinned host, planted tokens dropped, fresh
+   `GH_CONFIG_DIR`) — a planted `http_unix_socket` in the shared HOME's
+   gh config would otherwise deliver the tick's Authorization header to a
+   same-UID listener inside the legitimate overlap. The alternative that
+   avoids the overlap entirely —
    heartbeat from the schedule scan or a watcher job — was rejected on
    cadence and complexity (decision 2). The trade-off is recorded in the
    yml comment so future readers see it was chosen, not overlooked.
@@ -216,9 +234,24 @@ comment is never worse than today.
 - **Post-gate silence.** After the gate kills the loop, the comment holds
   its last tick until finalize. A round deep in gate/repair looks quieter
   than it is; the run link stays live, which is the recourse.
+- **Cross-host orphan pulsing.** The identity self-check only reclaims a
+  crash-leftover orphan when the next same-PR round reuses the orphan's
+  host; the pool is multi-host with no per-PR runner affinity, so the
+  general case leaves the orphan passing its own check and re-PATCHing
+  its stale body onto the shared status comment until the age cap —
+  alternating with live rounds' bodies and overwriting terminal text
+  within one interval of finalize. Accepted, with its real profile: the
+  orphan holds the bot PAT in `/proc/<pid>/environ` until the cap, and
+  any same-UID process on that host — including another PR's round
+  running its gate's host-side build/tests — reads it directly (the
+  pool's ptrace scope gates ptrace attach, not this read; witnessed on
+  the pool's host class). The cap therefore sits just past the
+  330-minute job envelope, bounding the orphan's token window to roughly
+  one job duration; the alternative — a cross-run kill keyed on a
+  WORKDIR pid — reopens the untrusted-kill-target hole.
 
 ## Open questions
 
-None blocking. Cadence (10 min) and age cap (12h) are repo-variable-
-friendly constants but ship as literals until a reason to configure
-appears.
+None blocking. Cadence (10 min) and the age cap (just past the
+330-minute job envelope) are repo-variable-friendly constants but ship
+as literals until a reason to configure appears.

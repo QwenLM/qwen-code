@@ -3610,11 +3610,13 @@ jobs:
           (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
-          # so nothing else ever reclaims them. The rm above also removes a
-          # crashed prior round's heartbeat.pid — the heartbeat loop ends
-          # itself at the next self-check when that file disappears; no
-          # cross-run kill here, because a pid read from a WORKDIR file is
-          # an untrusted kill target (WORKDIR is sandbox-writable).
+          # so nothing else ever reclaims them. WHEN a crashed prior round
+          # ran on THIS host, the rm above also removes its heartbeat.pid
+          # and that loop ends itself at the next identity self-check;
+          # cross-host the orphan keeps its own pid file and pulses until
+          # its age cap (accepted residual risk). No cross-run kill here,
+          # because a pid read from a WORKDIR file is an untrusted kill
+          # target (WORKDIR is sandbox-writable).
           # Full rationale → qwen-autofix.md#af-148
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
@@ -3635,7 +3637,22 @@ jobs:
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
-          cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
+          # Absent from the trusted base until this PR merges, and this step
+          # runs under -e: a hard failure here would kill every pre-merge
+          # round — same rule as the upsert capture below. `|| true`, and the
+          # digest records only when the copy exists; an empty output reaches
+          # the consumer's own empty guard, which degrades to the pre-PR
+          # inline body.
+          # Absent from base must imply absent on disk: this cp fails every
+          # pre-merge round, so a planted leftover in RUNNER_TEMP would
+          # otherwise be digested below and executed as trusted (af-148).
+          # -rf, not -f: the planted leftover can be a DIRECTORY, which rm -f
+          # cannot remove — the non-zero exit aborts this step under its
+          # ambient -eo pipefail before the tolerant cp, and nothing else
+          # reclaims RUNNER_TEMP on this persistent pool, so every later
+          # round on the host dies at staging until a human clears it.
+          rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
+          cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
           # on this host, so record each digest in GITHUB_OUTPUT — expression
@@ -3644,7 +3661,9 @@ jobs:
           # Full rationale → qwen-autofix.md#af-111
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then
+            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          fi
           # The upsert script travels as CONTENT, not as a staged copy: it
           # runs in a clean child that reads it from this expression-context
           # output, so there is no agent-writable copy to protect and no
@@ -4723,8 +4742,27 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           SERVER_URL: '${{ github.server_url }}'
           HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           set -uo pipefail
+          # Binary resolution: this step and the heartbeat loop it launches
+          # carry the bot PAT, and the job's own $GITHUB_PATH append keeps
+          # ${RUNNER_TEMP}/qwen-bin ahead of /usr/bin here — pin PATH from
+          # the stage-time capture BEFORE the first command word resolves
+          # (the R6-3 doctrine the sibling PAT steps apply; the loop
+          # re-pins from the same capture). Full rationale → af-148
+          export PATH="${TRUSTED_PATH}"
+          # The gh calls in this step (deep-link lookup, comment upsert) and
+          # the heartbeat loop launched here all carry the bot PAT: take the
+          # af-112 hermetic pins BEFORE the first call — pinned host, planted
+          # tokens dropped, and a fresh empty GH_CONFIG_DIR instead of the
+          # default ~/.config/gh on the shared attacker-writable HOME (its
+          # config.yml http_unix_socket would deliver the Authorization
+          # header — the PAT — to a planted same-UID listener).
+          # Full rationale → qwen-autofix.md#af-112
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
           # ROUND counts rounds already DONE; every other message numbers the
@@ -4750,12 +4788,22 @@ jobs:
           # subcommand, so they cannot drift. The working tree is PR-branch
           # code by this point — run the staged copy, digest-verified from
           # expression context (same doctrine as resanitize-git-config.sh).
+          # An EMPTY digest means the script was absent from the trusted
+          # base at staging (pre-merge rounds of a PR whose workflow
+          # resolves from its own ref): degrade to the pre-PR inline body
+          # and skip the heartbeat — never fail the round.
           # Full rationale → qwen-autofix.md#af-148
-          /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
           START_EPOCH="$(date +%s)"
-          BODY="$(HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
-            HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
-            bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body)"
+          if [[ -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
+            BODY="$(HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
+              HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
+              bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body)"
+          else
+            BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
+              "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
+              "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
+          fi
           STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
             jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
               '[ .[][] | select((.user.login // "") == $ab)
@@ -4783,7 +4831,14 @@ jobs:
           # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
           # as a kill target. Full rationale → qwen-autofix.md#af-148
           HEARTBEAT_PID=''
-          if [[ -n "${STATUS_ID}" ]]; then
+          # Re-verify immediately before THIS launch (R8-1): the check above
+          # is separated from this second, PAT-holding execution by the two
+          # gh round-trips of the comment upsert — a live swap window in the
+          # attacker-writable RUNNER_TEMP. A mismatch fails the round closed;
+          # the explicit `|| exit 1` does not rely on the step's ambient
+          # shell options (af-023).
+          if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1
             HB_REPO="${REPO}" HB_COMMENT_ID="${STATUS_ID}" \
             HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
             HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
@@ -4956,14 +5011,20 @@ jobs:
           # overlap is bounded to the sandboxed agent phase, never the
           # host-side gate. Kill from the pid the launch recorded in
           # expression context; WORKDIR files are sandbox-writable and are
-          # never read as kill targets. Absolute-path/builtin-only command
-          # words, same doctrine as the gate body below.
+          # never read as kill targets. The session kill covers a kill
+          # landing MID-TICK: each tick's `timeout 60 gh` subtree sits in
+          # its OWN process group (coreutils timeout default), which the
+          # group+pid kills miss — but the loop owns its session via
+          # setsid, so -s <pid> targets exactly this round's tree.
+          # Absolute-path/builtin-only command words, same doctrine as the
+          # gate body below.
           # Full rationale → qwen-autofix.md#af-148
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             builtin kill -- -"${HB_PID}" 2> /dev/null || true
             builtin kill "${HB_PID}" 2> /dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
           fi
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -6096,16 +6157,22 @@ jobs:
           # is the belt to its braces (a missed kill there must not outlive
           # the round). Kill target comes from expression context — a pid
           # read from a WORKDIR file would be an untrusted kill target
-          # (WORKDIR is sandbox-writable). The stop marker ends the loop on
-          # its next self-check even if BOTH kills miss, and the sleep lets
-          # an already-dispatched tick PATCH land before the terminal text
-          # goes up. Full rationale → qwen-autofix.md#af-148
-          touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+          # (WORKDIR is sandbox-writable). The session kill covers a kill
+          # landing mid-tick (the tick's timeout/gh subtree sits in its own
+          # process group under the loop's session). The stop marker ends
+          # the loop on its next self-check even if the kills miss, and the
+          # sleep lets an already-dispatched tick PATCH land before the
+          # terminal text goes up. Full rationale → qwen-autofix.md#af-148
+          # Command words take the gate kill block's absolute-path/builtin
+          # form: this step holds the PAT, and bare names are PATH-resolved
+          # (kill additionally shadowable by a $GITHUB_ENV BASH_FUNC plant).
+          /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
-            kill -- -"${HB_PID}" 2>/dev/null || true
-            kill "${HB_PID}" 2>/dev/null || true
-            sleep 2
+            builtin kill -- -"${HB_PID}" 2>/dev/null || true
+            builtin kill "${HB_PID}" 2>/dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
+            /usr/bin/sleep 2
           fi
           MARKER='<!-- autofix-status -->'
           if [[ -z "${STATUS_ID}" ]]; then
@@ -6156,11 +6223,13 @@ jobs:
         run: |-
           # Last heartbeat kill (the gate and finalize already did this on
           # their paths) from the expression-context pid — never from a
-          # WORKDIR file, which is sandbox-writable.
+          # WORKDIR file, which is sandbox-writable. The session kill
+          # covers the mid-tick subtree, same as its twins.
           # Full rationale → qwen-autofix.md#af-148
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             kill -- -"${HB_PID}" 2>/dev/null || true
             kill "${HB_PID}" 2>/dev/null || true
+            pkill -TERM -s "${HB_PID}" 2>/dev/null || true
           fi
           rm -rf "${WORKDIR}"

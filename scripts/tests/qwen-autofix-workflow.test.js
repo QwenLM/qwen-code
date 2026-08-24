@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -10635,8 +10636,15 @@ exit 1
     expect(patBlockOf(publishPrStep)).toBeTruthy();
     expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
     expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
-    // Each PAT step carries the trusted-PATH env wiring.
-    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+    // Each PAT step carries the trusted-PATH env wiring. post_status's
+    // covers the step's own externals AND seeds the heartbeat loop's pin:
+    // the loop re-pins its tick PATH from this capture (af-148).
+    for (const step of [
+      publishPrStep,
+      pushAndReportStep,
+      prepareStep,
+      postStatusCommentStep,
+    ]) {
       expect(step).toContain(
         "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
       );
@@ -10650,6 +10658,9 @@ exit 1
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [prepareStep, 'PR_LIVE="$(gh pr view'],
+      // The heartbeat's step: deep-link lookup, comment upsert, and the
+      // loop launch all carry the PAT; the first gh call is the deep link.
+      [postStatusCommentStep, 'JOB_ID="$(gh api'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -10662,6 +10673,15 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // post_status pins PATH BEFORE its first external resolves (the
+    // mktemp minting the gh config dir): every command word after it —
+    // gh, jq, date, and the setsid/bash of the heartbeat launch —
+    // resolves under the stage-time capture, never the ambient PATH the
+    // job's own $GITHUB_PATH append keeps plantable (af-148).
+    expect(postStatusCommentStep).toContain('export PATH="${TRUSTED_PATH}"');
+    expect(
+      postStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(postStatusCommentStep.indexOf('mktemp'));
     // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
     // cannot reach the privileged work is the `env -i` clean child, pinned
     // separately below; no regex over source text can be that guarantee,
@@ -11487,6 +11507,11 @@ exit 1
       'if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then',
       'builtin kill -- -"${HB_PID}" 2> /dev/null || true',
       'builtin kill "${HB_PID}" 2> /dev/null || true',
+      // The mid-tick cover: each tick's `timeout 60 gh` subtree runs in
+      // its OWN process group (coreutils timeout default) under the
+      // loop's setsid session, so the group+pid kills above miss a kill
+      // landing mid-tick and leave it holding the PAT for up to 60s.
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true',
       'fi',
     ];
     // Bash breaks words only on ASCII space/tab/newline: strip ASCII
@@ -15736,6 +15761,36 @@ exit 1
     expect(heartbeatScript).toContain('heartbeat-stop');
     expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS');
     expect(heartbeatScript).toContain('HB_INTERVAL_SECONDS');
+    // The default age cap sits just past the 330-minute job envelope: a
+    // live round's loop dies at the gate or finalize well inside the job,
+    // so only a crash orphan reaches it — and the cap bounds how long that
+    // orphan holds the PAT in /proc/<pid>/environ. A 12h default would
+    // reopen the window this cap exists to shrink.
+    expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS:-20400');
+    expect(heartbeatScript).toContain('|| max_age=20400');
+    // Every tick's gh call runs under the af-112 hermetic pins, minted
+    // inside the loop itself: a planted http_unix_socket in the shared
+    // HOME's gh config would otherwise deliver the tick's Authorization
+    // header (the PAT) to a planted same-UID listener.
+    expect(heartbeatScript).toContain('export GH_HOST=github.com');
+    expect(heartbeatScript).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
+    expect(heartbeatScript).toContain(
+      'export GH_CONFIG_DIR="${gh_config_dir}"',
+    );
+    // Auth rides on the step-level GITHUB_TOKEN only: the pins drop any
+    // planted GH_TOKEN, so the fail-fast check must not admit it.
+    expect(heartbeatScript).toContain('GITHUB_TOKEN is required');
+    expect(heartbeatScript).not.toContain('${GITHUB_TOKEN:-}${GH_TOKEN:-}');
+    // The tick's externals (gh, timeout, sleep, date, cat) resolve by
+    // name while the loop holds the PAT, and the ambient PATH carries
+    // same-UID-writable dirs ahead of the system ones — so the loop
+    // re-pins PATH from the launcher's step-level TRUSTED_PATH capture
+    // and fails fast on a launch without it (af-148).
+    expect(heartbeatScript).toContain('export PATH="${TRUSTED_PATH}"');
+    // The capture is validated with the other launch inputs, so a launch
+    // without it fails fast before registering anything (pinned
+    // behaviorally by the script's own suite).
+    expect(heartbeatScript).toContain('HB_START_EPOCH TRUSTED_PATH');
     // A failed PATCH skips one tick, never the pulse.
     expect(heartbeatScript).toContain('PATCH failed; continuing');
     // The loop must not hold the launching step's pipes or the step never
@@ -15745,17 +15800,128 @@ exit 1
 
     // Staging: the working tree is PR-branch code by post_status, so the
     // script travels as a trusted-base staged copy with a digest recorded
-    // in expression context (the af-111 doctrine).
+    // in expression context (the af-111 doctrine). The script itself is NEW
+    // in this PR, so the trusted base (pre-merge main) lacks it: the cp and
+    // the digest echo carry the same guard the upsert capture below uses —
+    // `|| true` and record-only-if-present — because a bare cp exits this
+    // -e step (killing every pre-merge round) on any run whose workflow
+    // resolves from the PR's own ref, and an empty digest degrades the
+    // consumer instead (witnessed on the merge-base tree).
     const stageStep =
       reviewAddressJob.match(
         /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
       )?.[0] ?? '';
     expect(stageStep).toContain(
-      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true',
     );
     expect(stageStep).toContain(
-      'echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
+      'if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then\n' +
+        '            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"\n' +
+        '          fi',
     );
+    // Absent-from-base must imply absent-on-disk (R6-1): this tolerant
+    // cp FAILS every pre-merge round, so a leftover planted in the
+    // host's persistent RUNNER_TEMP by an earlier run must not survive
+    // it to be digested below and executed as trusted content.
+    // Witness: run the stage step verbatim against a tree that lacks
+    // the script (the merge-base shape) with a planted leftover — no
+    // file may remain at the staged path and no digest may reach the
+    // consumers' expression context.
+    expect(stageStep).toContain(
+      'rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+    );
+    expect(
+      stageStep.indexOf('rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
+    );
+    const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
+    const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
+    try {
+      const stageGithubOutput = join(stageProbeDir, 'github-output');
+      mkdirSync(join(stageProbeDir, '.github', 'scripts'), {
+        recursive: true,
+      });
+      for (const name of [
+        'check-settings-schema.sh',
+        'check-autofix-contracts.sh',
+        'resolve-owning-packages.sh',
+        'run-autofix-review-verification.sh',
+        'resanitize-git-config.sh',
+        'upsert-deferred-issue.sh',
+        'autofix-push-and-report.sh',
+      ]) {
+        writeFileSync(
+          join(stageProbeDir, '.github', 'scripts', name),
+          readFileSync(join('.github', 'scripts', name)),
+        );
+      }
+      mkdirSync(join(stageProbeDir, '.qwen', 'skills', 'autofix', 'scripts'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(stageProbeDir, '.qwen', 'skills', 'autofix', 'SKILL.md'),
+        readFileSync('.qwen/skills/autofix/SKILL.md'),
+      );
+      writeFileSync(
+        join(
+          stageProbeDir,
+          '.qwen',
+          'skills',
+          'autofix',
+          'scripts',
+          'run-agent.mjs',
+        ),
+        readFileSync('.qwen/skills/autofix/scripts/run-agent.mjs'),
+      );
+      // The planted leftover: attacker content a same-UID run left at
+      // the staged path on this persistent host. Both leftover shapes
+      // are plantable, and the directory one is what forces the -rf:
+      // rm -f exits non-zero on a directory, which under this step's
+      // ambient -eo pipefail aborts staging before the tolerant cp —
+      // and nothing else reclaims RUNNER_TEMP on this persistent pool,
+      // so every later round on the host dies at staging (R7-2).
+      const stageProbeScript = stageStep
+        .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
+        .replace(/^ {10}/gm, '');
+      const plantLeftover = (asDirectory) => {
+        if (asDirectory) {
+          mkdirSync(join(stageRunnerTemp, 'autofix-status-heartbeat.sh'));
+          writeFileSync(
+            join(stageRunnerTemp, 'autofix-status-heartbeat.sh', 'payload'),
+            'ATTACKER_CONTROLLED\n',
+          );
+        } else {
+          writeFileSync(
+            join(stageRunnerTemp, 'autofix-status-heartbeat.sh'),
+            '#!/usr/bin/env bash\necho ATTACKER_CONTROLLED "$@"\n',
+          );
+        }
+      };
+      for (const asDirectory of [false, true]) {
+        plantLeftover(asDirectory);
+        writeFileSync(stageGithubOutput, '');
+        const stageProbe = spawnSync('bash', ['-c', stageProbeScript], {
+          cwd: stageProbeDir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUNNER_TEMP: stageRunnerTemp,
+            GITHUB_OUTPUT: stageGithubOutput,
+          },
+        });
+        expect(stageProbe.status).toBe(0);
+        expect(
+          existsSync(join(stageRunnerTemp, 'autofix-status-heartbeat.sh')),
+        ).toBe(false);
+        expect(readFileSync(stageGithubOutput, 'utf8')).not.toContain(
+          'heartbeat_sha256=',
+        );
+      }
+    } finally {
+      rmSync(stageProbeDir, { recursive: true, force: true });
+      rmSync(stageRunnerTemp, { recursive: true, force: true });
+    }
     expect(postStatusCommentStep).toContain(
       "HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'",
     );
@@ -15767,6 +15933,16 @@ exit 1
     // af-111 doctrine this wiring cites).
     expect(postStatusCommentStep.indexOf('sha256sum -c')).toBeLessThan(
       postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" body'),
+    );
+    // Consumer side of the same guard: an empty digest (script absent from
+    // the trusted base) degrades to the pre-PR inline body and skips the
+    // heartbeat, instead of digest-checking and running a staged copy that
+    // was never staged.
+    expect(postStatusCommentStep).toContain(
+      'if [[ -n "${HEARTBEAT_SHA256}" ]]; then',
+    );
+    expect(postStatusCommentStep).toContain(
+      '🔄 **AutoFix is working on this PR** — round %s/%s.',
     );
 
     // Deep link: attempt-scoped jobs listing, PR number enters jq as DATA
@@ -15832,14 +16008,116 @@ exit 1
 
     // Launch: detached (setsid + self-redirected output), gated on a
     // comment that actually exists (the gate wraps the launch itself, not
-    // just the earlier PATCH-or-create), carrying the round identity and
-    // recording the pid for the killers in EXPRESSION CONTEXT.
+    // just the earlier PATCH-or-create) AND on a staged script (an empty
+    // digest means the trusted base lacks it), carrying the round identity
+    // and recording the pid for the killers in EXPRESSION CONTEXT.
     expect(postStatusCommentStep).toContain(
       'setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &',
     );
+    // ...and the launch re-verifies the staged script immediately
+    // before starting (R8-1 adjacency): the single check above is
+    // separated from this SECOND execution by the two gh round-trips
+    // of the comment upsert — a multi-second swap window in the same
+    // attacker-writable RUNNER_TEMP — and this execution is the
+    // PAT-holding one. A mismatch fails the round closed; the explicit
+    // `|| exit 1` does not rely on the step's ambient shell options
+    // (the af-023 doctrine).
     expect(postStatusCommentStep).toContain(
-      'if [[ -n "${STATUS_ID}" ]]; then\n            HB_REPO=',
+      'if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then\n' +
+        '            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1\n' +
+        '            HB_REPO=',
     );
+    expect(
+      postStatusCommentStep.indexOf('sha256sum -c - > /dev/null || exit 1'),
+    ).toBeLessThan(
+      postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" loop'),
+    );
+    // Witness (R6-2): run the launch block verbatim with the digest
+    // recorded from the ORIGINAL staged copy, then swap the file on
+    // disk before the block runs — the PAT-holding launch must not
+    // execute the swapped content. The harness sleeps past the
+    // detached launch's startup before asserting.
+    // The verbatim block hard-requires /usr/bin/sha256sum and setsid,
+    // which macOS does not ship (shasum instead of GNU coreutils,
+    // SIP-locked /usr/bin; setsid is util-linux-only), while the
+    // merge_group-gated macOS test lane still collects this suite (the
+    // vitest config excludes it only on win32). The production workflow
+    // is Linux-only, so gate the probe on capability, not platform
+    // (precedent: haveSessionKillTools in
+    // autofix-status-heartbeat.test.mjs); the string pins stay
+    // unconditional.
+    const launchWitnessSupported =
+      spawnSync('bash', [
+        '-c',
+        'command -v setsid >/dev/null 2>&1 && test -x /usr/bin/sha256sum',
+      ]).status === 0;
+    if (launchWitnessSupported) {
+      const launchProbeTemp = mkdtempSync(join(tmpdir(), 'hb-launch-temp-'));
+      const launchProbeWorkdir = mkdtempSync(join(tmpdir(), 'hb-launch-wd-'));
+      try {
+        const stagedScript = join(
+          launchProbeTemp,
+          'autofix-status-heartbeat.sh',
+        );
+        writeFileSync(stagedScript, heartbeatScript);
+        const stagedDigest = createHash('sha256')
+          .update(heartbeatScript)
+          .digest('hex');
+        const launchBlock =
+          'set -uo pipefail\n' +
+          postStatusCommentStep
+            .slice(
+              postStatusCommentStep.indexOf("HEARTBEAT_PID=''"),
+              postStatusCommentStep.indexOf(
+                '# Hand the id to the finalize step',
+              ),
+            )
+            .replace(/^ {10}/gm, '') +
+          '\nsleep 0.5';
+        const launchEnv = {
+          ...process.env,
+          RUNNER_TEMP: launchProbeTemp,
+          STATUS_ID: '12345',
+          HEARTBEAT_SHA256: stagedDigest,
+          REPO: 'octo/repo',
+          ROUND_DISPLAY: '7',
+          MAX_ROUNDS: '5',
+          JOB_URL: 'https://example.invalid/job/1',
+          WORKDIR: launchProbeWorkdir,
+          START_EPOCH: '1000',
+        };
+        delete launchEnv.GITHUB_TOKEN;
+        delete launchEnv.GH_TOKEN;
+        delete launchEnv.TRUSTED_PATH;
+        // Swapped: the staged content changes after the digest above was
+        // recorded and before this launch runs.
+        writeFileSync(
+          stagedScript,
+          '#!/usr/bin/env bash\necho ATTACKER_LOOP_RAN > "${HB_WORKDIR}/proof"\n',
+        );
+        const swapped = spawnSync('bash', ['-c', launchBlock], {
+          encoding: 'utf8',
+          env: launchEnv,
+        });
+        expect(swapped.status).toBe(1);
+        expect(existsSync(join(launchProbeWorkdir, 'proof'))).toBe(false);
+        // Unswapped: an intact staged copy still launches (no
+        // over-block). The launched script fails fast on a missing launch
+        // input; that fail-fast message is the evidence it ran.
+        writeFileSync(stagedScript, heartbeatScript);
+        const intact = spawnSync('bash', ['-c', launchBlock], {
+          encoding: 'utf8',
+          env: launchEnv,
+        });
+        expect(intact.status).toBe(0);
+        expect(intact.stderr).toContain(
+          'autofix-status-heartbeat: TRUSTED_PATH is required',
+        );
+      } finally {
+        rmSync(launchProbeTemp, { recursive: true, force: true });
+        rmSync(launchProbeWorkdir, { recursive: true, force: true });
+      }
+    }
     expect(postStatusCommentStep).toContain('HB_COMMENT_ID="${STATUS_ID}"');
     expect(postStatusCommentStep).toContain('HB_START_EPOCH="${START_EPOCH}"');
     expect(postStatusCommentStep).toContain('HEARTBEAT_PID=$!');
@@ -15867,16 +16145,25 @@ exit 1
     expect(gateStep).toContain('heartbeat-stop');
     expect(gateStep).toContain(`HB_PID="${killTarget}"`);
     expect(gateStep).toContain('kill -- -"${HB_PID}"');
-    expect(finalizeStatusCommentStep).toContain('heartbeat-stop');
+    // Finalize holds the PAT like the gate, so its kill block takes the
+    // same absolute-path/builtin form: bare names are PATH-resolved (the
+    // job's own $GITHUB_PATH append keeps ${RUNNER_TEMP}/qwen-bin ahead
+    // of /usr/bin here) and bare kill is shadowable by a $GITHUB_ENV
+    // BASH_FUNC plant (af-148).
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
+    );
     expect(finalizeStatusCommentStep).toContain(`HB_PID="${killTarget}"`);
-    expect(finalizeStatusCommentStep).toContain('kill -- -"${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill -- -"${HB_PID}" 2>/dev/null || true',
+    );
     expect(finalizeStatusCommentStep.indexOf('heartbeat-stop')).toBeLessThan(
       finalizeStatusCommentStep.indexOf('--method PATCH'),
     );
     // A tick already dispatched when the kill lands can still be applied
     // server-side after the terminal text: finalize sleeps past one PATCH
     // round-trip before its own PATCH.
-    expect(finalizeStatusCommentStep).toContain('sleep 2');
+    expect(finalizeStatusCommentStep).toContain('/usr/bin/sleep 2');
     const cleanupStep =
       reviewAddressJob.match(
         /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
@@ -15886,11 +16173,34 @@ exit 1
     expect(cleanupStep.indexOf('kill -- -"${HB_PID}"')).toBeLessThan(
       cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
     );
-    // Same-round killers also carry the bare-pid fallback; the gate uses
-    // the builtin form of the step's shadowing doctrine.
+    // Same-round killers also carry the bare-pid fallback. The gate and
+    // finalize hold the PAT and take the builtin form of the step's
+    // shadowing doctrine; cleanup carries no token and keeps the bare
+    // form.
     expect(gateStep).toContain('builtin kill "${HB_PID}"');
-    expect(finalizeStatusCommentStep).toContain('kill "${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill "${HB_PID}" 2>/dev/null || true',
+    );
     expect(cleanupStep).toContain('kill "${HB_PID}"');
+    // A kill landing MID-TICK must reach the tick too: each tick's
+    // `timeout 60 gh` subtree runs in its OWN process group (coreutils
+    // timeout default) inside the loop's setsid session, so the group+pid
+    // kills alone leave it alive holding the PAT for up to 60s (witnessed
+    // on the pool's host class). Every killer therefore also kills the
+    // session — the gate's copy rides its statement-list pin above in the
+    // absolute-path form of its shadowing doctrine — and it must land
+    // where the others do: before the terminal PATCH (finalize) and before
+    // the workdir wipe (cleanup).
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true',
+    );
+    expect(cleanupStep).toContain('pkill -TERM -s "${HB_PID}"');
+    expect(
+      finalizeStatusCommentStep.indexOf('pkill -TERM -s "${HB_PID}"'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    expect(cleanupStep.indexOf('pkill -TERM -s "${HB_PID}"')).toBeLessThan(
+      cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
+    );
     // Neither reset step carries a kill (a cross-run pid could only come
     // from the untrusted file class; the comments may still explain why),
     // and none of the kill sites EXECUTES the heartbeat script (the

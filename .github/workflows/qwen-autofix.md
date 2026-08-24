@@ -3750,12 +3750,14 @@ for the whole round and review proved that false — the gate
 script says plainly that the branch's code runs there as
 the runner user. A PAT-holding host process concurrent with
 host-side branch code is a /proc/<pid>/environ read away
-from leaking the token (same UID; only the pool's ptrace
-scope stands between, and it is not pinned anywhere), so
-the pulse covers the agent step — the longest, sandboxed
-phase — and dies before the gate. The comment holds its
-last tick through gate/repair; finalize flips the terminal
-text.
+from leaking the token (same UID; the pool's ptrace scope
+does NOT stand between — it gates ptrace attach, not this
+direct same-UID read; witnessed on the pool's host class:
+a non-descendant sibling extracted an environ canary with
+ptrace_scope=1), so the pulse covers the agent step — the
+longest, sandboxed phase — and dies before the gate. The
+comment holds its last tick through gate/repair; finalize
+flips the terminal text.
 
 KILL TARGETS travel through EXPRESSION CONTEXT: post_status
 records $! as heartbeat_pid, and the gate / finalize / the
@@ -3779,13 +3781,45 @@ PAT TRADE, chosen deliberately within that lifetime: the
 loop holds the bot PAT in env — a temporal overlap the
 "THIS step holds no PAT" rule (af-126) otherwise avoids.
 Accepted because within the agent phase the token never
-touches disk, the only host processes concurrent with the
-loop are trusted (run-agent.mjs, the bundled CLI), and the
-overlap ends deterministically at the gate. The alternative
-— heartbeat from the schedule scan or a watcher job — lands
-every ~40-70 min in this repo (af-027) and would re-derive
-comment id, run identity and liveness remotely: too slow
-and too much machinery for a pulse.
+touches disk and the only host processes concurrent with
+the loop are trusted (run-agent.mjs, the bundled CLI) —
+plus two hardenings that keep the overlap honest. KILL:
+the overlap ends at the gate only if the kill covers the
+loop's whole SESSION — each tick's `timeout 60 gh` subtree
+runs in its OWN process group (coreutils timeout default)
+under the loop's setsid session, so a group/pid kill
+landing mid-tick leaves it alive holding the PAT for up to
+60s (witnessed on the pool's host class); all three
+killers therefore kill pid, group, AND session. PINS: the
+step's gh calls and every tick run under the af-112
+hermetic pins (pinned GH_HOST, dropped
+GH_TOKEN/GH_ENTERPRISE_TOKEN, fresh GH_CONFIG_DIR) —
+without them the default ~/.config/gh on the shared
+attacker-writable HOME can carry http_unix_socket, and a
+planted same-UID listener then receives the tick's
+Authorization header WITH the PAT (witnessed with the
+pool's gh): exfil with no orphan, no /proc read and no
+kill miss, inside the legitimate overlap, where none of
+the trade arguments above reaches. RESOLUTION: the af-112
+pins close gh's CONFIG channel; the binary-resolution
+channel is closed separately. The PAT-bearing step and
+the loop both pin PATH from the stage-time TRUSTED_PATH
+capture BEFORE the first command word resolves (the R6-3
+doctrine): the job's own $GITHUB_PATH append keeps
+${RUNNER_TEMP}/qwen-bin ahead of /usr/bin, and a same-UID
+plant of gh/timeout/setsid/touch in any writable dir on
+the ambient PATH would otherwise be resolved with the PAT
+in env — witnessed: a planted setsid at launch and a
+planted gh mid-tick both received the token; the pinned
+forms never reached the plant. The loop validates the
+capture like any other launch input and fails fast
+without it; the killers in PAT-bearing steps take the
+same absolute-path/builtin command words as the gate's
+kill block. The alternative — heartbeat from the schedule
+scan or a watcher job — lands every ~40-70 min in this
+repo (af-027) and would re-derive comment id, run
+identity and liveness remotely: too slow and too much
+machinery for a pulse.
 
 ORPHAN DISCIPLINE on the persistent pool: the loop
 self-exits when the pid file no longer holds ITS OWN pid.
@@ -3793,12 +3827,28 @@ This is an identity check, not an existence check — WORKDIR
 is PR-scoped, so after a crashed round's reset the next
 round recreates heartbeat.pid at the SAME path; existence
 alone would let the orphaned old loop pass and keep PATCHing
-its stale body onto the comment. Reading the file to
-self-identify is safe (the loop never kills anything); the
+its stale body onto the comment. Reclamation by rewrite is
+HOST-LOCAL: it fires only when the next same-PR round reuses
+the orphan's host. Cross-host — the fleet's general case,
+no per-PR runner affinity — nothing rewrites the file, the
+orphan keeps passing its own identity check, and it pulses
+its stale body onto the shared comment until the age cap
+(accepted residual risk, with its REAL profile: the orphan
+holds the bot PAT in /proc/<pid>/environ until the cap,
+and any same-UID process on that host — including another
+PR's round running its gate's host-side build/tests —
+reads it directly; the pool's ptrace scope does not gate
+this read, as witnessed above. The cap therefore sits just
+past the 330-minute job envelope — only a crash orphan
+ever reaches it, so the cap IS the bound on its token
+window. A cross-run kill keyed on a WORKDIR pid would
+reopen the untrusted-kill-target hole, so reclamation
+stays host-local). Reading the file to self-identify is
+safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other
-bounds: a heartbeat-stop marker, or a 12h age cap far past
-the 330-minute job timeout; each tick's gh call is
+bounds: a heartbeat-stop marker, or the age cap just past
+the 330-minute job envelope; each tick's gh call is
 additionally wrapped in a 60s timeout so a black-holed
 connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a
