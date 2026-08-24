@@ -86,19 +86,6 @@ export interface RunReviewResult {
    */
   expectedComposedName: string;
   reportPath: string | null;
-  /**
-   * The stop sidecar's count of the cache ledger's open Criticals — 0 when
-   * the round composed a verdict or the ledger held none. Informational on
-   * its own: an undated count is the stale-ledger shape and never gates.
-   */
-  openBlockers: number;
-  /**
-   * True only when a stop's open blockers were DATED against this tree: the
-   * capture compared the cache's recorded per-file state with the working
-   * tree and found it byte-identical, so the blockers still stand. Under
-   * `--fail-on request-changes` such a stop exits 3.
-   */
-  blockersStand: boolean;
   childExitCode: number | null;
   childSignal: string | null;
   timedOut: boolean;
@@ -225,16 +212,6 @@ function stopNameFor(cls: RunTargetClass): string {
 /** The stop sidecar's verdict-bearing shape. */
 interface StopVerdict {
   reason: string;
-  /** The cache ledger's open-Critical count — undated, never a gate alone. */
-  openBlockers: number;
-  /**
-   * The capture dated the cache's open blockers against THIS tree — each
-   * against its own file's recorded identity (or the cached round's HEAD
-   * tree for a file it never hashed), never against the whole cached state —
-   * and at least one still stands. False — or absent, a sidecar from before
-   * the field — leaves the count informational only.
-   */
-  blockersStand: boolean;
 }
 
 /**
@@ -245,35 +222,16 @@ interface StopVerdict {
  * review whose path flattens alike writes the same file — and its verdict
  * would decide this run's exit code. Absent stamp, foreign stamp,
  * unreadable or not JSON: no claim either way.
- *
- * The blocker state rides the same fence: a foreign run's open-Critical
- * count would otherwise decide this run's gate. An undated count
- * (`blockersStand` false or absent) never blocks — it is the stale-ledger
- * shape, where the blocker was fixed and committed but the ledger, which a
- * stop never rewrites, still says `open`.
  */
 function readStopSidecar(path: string, runId: string): StopVerdict | null {
   try {
     const stop = JSON.parse(readFileSync(path, 'utf8')) as {
       reason?: unknown;
       runId?: unknown;
-      openBlockers?: unknown;
-      blockersStand?: unknown;
     };
     if (stop.runId !== runId) return null;
     if (typeof stop.reason !== 'string' || stop.reason === '') return null;
-    const rawBlockers = stop.openBlockers;
-    const openBlockers =
-      typeof rawBlockers === 'number' &&
-      Number.isFinite(rawBlockers) &&
-      rawBlockers > 0
-        ? Math.floor(rawBlockers)
-        : 0;
-    return {
-      reason: stop.reason,
-      openBlockers,
-      blockersStand: openBlockers > 0 && stop.blockersStand === true,
-    };
+    return { reason: stop.reason };
   } catch {
     return null;
   }
@@ -461,24 +419,21 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND either the event is REQUEST_CHANGES or the
- * round stopped with `standingBlockers` — open Criticals the capture DATED
- * against the tree (a stop carries no composed verdict; an undated ledger
- * count is the stale-ledger false positive and never blocks). 3, not 2 —
- * yargs exits 1 on usage errors and some shells reserve 2, so a CI gate can
- * tell "review is blocking" from "the tool broke" without parsing anything.
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop carries
+ * no composed verdict and no synthesised one: the cache ledger a stop renders
+ * is rewritten only by a round that writes the cache, so a blocker fixed and
+ * committed stays `open` in it — an exit code keyed on that count is a
+ * failure no action clears. 3, not 2 — yargs exits 1 on usage errors and
+ * some shells reserve 2, so a CI gate can tell "review is blocking" from
+ * "the tool broke" without parsing anything.
  */
 export function exitCodeFor(
   completed: boolean,
   event: string | null,
   failOn: 'none' | 'request-changes',
-  standingBlockers = 0,
 ): number {
   if (!completed) return 1;
-  if (failOn === 'request-changes') {
-    if (event === 'REQUEST_CHANGES') return 3;
-    if (event === null && standingBlockers > 0) return 3;
-  }
+  if (failOn === 'request-changes' && event === 'REQUEST_CHANGES') return 3;
   return 0;
 }
 
@@ -787,35 +742,12 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
-  // A stop carries NO synthesised event, deliberately — what it carries is
-  // the ledger's open-blocker count DATED against this tree: the capture
-  // compared the cache's recorded per-file state with the working tree, and
-  // `blockersStand` is true only where they byte-compare equal, so a
-  // blocker it names still stands in THIS tree. Under `--fail-on` such a
-  // stop exits 3, closing the hole where a user who commits without fixing
-  // a Critical leaves a permanently clean tree, and every later stop
-  // rendered the blocker as standing while the gate exited 0 — passed the
-  // moment the author stopped touching the tree.
-  //
-  // The DATING is what keeps this from the stale-ledger false positive an
-  // undated count fell to: the ledger is rewritten only by a round that
-  // writes the cache, a stop never does, and the date is per BLOCKER — each
-  // open Critical is compared against its own file's recorded identity (or
-  // the cached round's HEAD tree, for a file that round reviewed without
-  // hashing), never against the whole cached state. A fix that moves no
-  // cached byte still clears the gate, because — when the cached round
-  // enumerated the whole population — a file ADDED since it withholds every
-  // blocker: the fix may be the new file. (A scoped capture, `--file` or
-  // `--no-untracked`, cannot reconstruct a population it only partially
-  // saw, so there the date keys on the blocker's own file alone.) The
-  // residual is a false PASS — an unrelated new file withholds a standing
-  // blocker, and an undatable blocker leans the same way — never a false
-  // failure no action clears, and the stop's rendered blocker list still
-  // names it. A composed verdict on the stop path — the model re-ruling the
-  // ledger — remains the stronger answer; this is the one the process can
-  // prove.
-  const standingBlockers =
-    stop !== null && stop.blockersStand ? stop.openBlockers : 0;
+  // A stop carries no synthesised event, deliberately: the stop's rendered
+  // blocker list comes from the cache ledger, which only a cache-writing
+  // round rewrites — a stop never does — so a blocker fixed and committed
+  // stays `open` there, and an exit code keyed on it is a failure no action
+  // clears. A composed verdict on the stop path — the model re-ruling the
+  // ledger — is the answer that can gate; until then a stop exits 0.
 
   const result: RunReviewResult = {
     completed,
@@ -829,8 +761,6 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     composedPath: composedPath ? resolve(composedPath) : null,
     expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
-    openBlockers: stop?.openBlockers ?? 0,
-    blockersStand: stop?.blockersStand ?? false,
     childExitCode,
     childSignal,
     timedOut,
@@ -841,12 +771,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // (EPIPE once the pipe reader exits), and the exit code — not the prose — is
   // the contract a CI gate reads. A throw must not downgrade a blocking verdict
   // (exit 3) to yargs' generic failure (exit 1).
-  process.exitCode = exitCodeFor(
-    completed,
-    result.event,
-    args.failOn,
-    standingBlockers,
-  );
+  process.exitCode = exitCodeFor(completed, result.event, args.failOn);
 
   try {
     if (args.json) {

@@ -40,11 +40,7 @@ import {
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
-import {
-  captureLocalDiff,
-  isReviewPlumbing,
-  type SkippedFile,
-} from './lib/local-diff.js';
+import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import {
   buildDiffPlan,
   sliceDiffByLines,
@@ -59,7 +55,7 @@ import {
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { gitOpt, gitRaw } from './lib/git.js';
+import { gitOpt } from './lib/git.js';
 import { inertText } from './lib/inert-text.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
@@ -71,7 +67,6 @@ import {
   stateIdOf,
   UNHASHABLE,
   type LocalCacheCandidate,
-  type LocalReviewCache,
 } from './lib/local-anchor.js';
 import {
   dependentsOfChanged,
@@ -191,8 +186,24 @@ function vanishedStillOnDisk(
   // as a failed listing.
   const worktree = hashWorktreeFiles(repoRoot, onDisk);
   const head = revisionIdentities(repoRoot, headSha, onDisk);
+  // `core.fileMode=false` makes git itself ignore the EXEC bit — the stored
+  // tree keeps one mode while the worktree lstat reports another and
+  // `git diff HEAD` stays empty. Certifying by the FULL identity then
+  // refused every such path (and the stop suppression beside it withheld
+  // every stop) over a divergence git does not recognise: fold 100755 into
+  // 100644 and compare. The fold is the exec bit ONLY — the mode still
+  // carries the file↔symlink type, which git reports under every fileMode.
+  const identity =
+    gitOpt('-C', repoRoot, 'config', '--get', 'core.fileMode') !== 'false'
+      ? (id: string | undefined) => id
+      : (id: string | undefined) =>
+          id !== undefined && id.startsWith('100755:')
+            ? `100644:${id.slice('100755:'.length)}`
+            : id;
   return onDisk.filter(
-    (path) => worktree[path] !== head[path] || worktree[path] === UNHASHABLE,
+    (path) =>
+      identity(worktree[path]) !== identity(head[path]) ||
+      worktree[path] === UNHASHABLE,
   );
 }
 
@@ -327,216 +338,6 @@ function resolveCachePath(
   // the namespace split moved the write and left this probe on the old name.
   const candidate = join(given, basename(cachePathFor(target, source)));
   return existsSync(candidate) ? candidate : null;
-}
-
-/**
- * The cache's still-open Critical entries — `{ file }` where the ledger
- * names one, `{}` where it does not.
- *
- * A raw list — undated, and never a gate on its own: the ledger is
- * rewritten only by a round that writes the cache, and a stop round does
- * not, so a blocker the user has since FIXED and committed stays `open` in
- * it for ever. Mapped straight to an exit code it produced a failure no
- * action could clear. `run` gates on the count only beside the DATED state
- * the sidecar carries (`blockersStand`, from `blockerStateStillMatchesTree`
- * below), which tells the fixed-and-committed shape from the
- * committed-without-fixing one where the count cannot.
- *
- * A decided stop is not necessarily a CLEAN one: SKILL.md's stop branches
- * open by rendering the cache's still-open findings, and the common shape
- * is a user who commits without fixing a Critical — leaving a permanently
- * clean tree that stops every later round. Without this the stop reached
- * `qwen review run` with no verdict at all, so `--fail-on request-changes`
- * returned 0 over a blocker the round itself was reporting as standing: the
- * gate passed the moment the author stopped touching the tree, which is the
- * inverse of its purpose.
- *
- * Read from the same file the skill's stop branches read. Unreadable, absent
- * or malformed answers empty — the round is then no worse off than it was.
- */
-function openCriticalsInCache(
-  cachePath: string | null,
-): Array<{ file?: string }> {
-  if (cachePath === null) return [];
-  try {
-    const raw = JSON.parse(readFileSync(cachePath, 'utf8')) as {
-      findings?: unknown;
-    };
-    if (!Array.isArray(raw.findings)) return [];
-    const open: Array<{ file?: string }> = [];
-    for (const f of raw.findings) {
-      const e = f as { severity?: unknown; status?: unknown; file?: unknown };
-      if (e?.severity !== 'Critical' || e?.status !== 'open') continue;
-      open.push(
-        typeof e.file === 'string' && e.file !== '' ? { file: e.file } : {},
-      );
-    }
-    return open;
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Whether at least one of the cache's still-open blockers still stands in
- * THIS tree — the DATE a stop's open blockers are held against.
- *
- * The ledger count alone cannot gate: a blocker fixed and committed stays
- * `open` in it for ever, because a stop never rewrites the ledger. The date
- * tells the fixed-and-committed shape from the committed-without-fixing one
- * where the count cannot — and it is taken per BLOCKER, not per state. A
- * whole-state comparison keyed the gate on bytes a blocker has no relation
- * to, and failed permanently in BOTH directions: a fix that moved no cached
- * byte (a new test file, a fix in a file the cached round never hashed)
- * left every blocker "standing" for ever — a failure no action clears —
- * while one cached path unhashable on both sides, or an empty files map,
- * withheld every blocker for ever with the blocker's own file byte-equal.
- *
- * A blocker stands when its own file still BYTE-compares equal to the
- * identity the cached round recorded for it — or, for a file that round
- * never hashed (a no-diff whole-file review promotes an empty map), to its
- * identity in the cached round's HEAD tree, where a no-diff capture's bytes
- * stood. Byte equality is the contract this is wired to (`run`:
- * "blockersStand is true only where they byte-compare equal"), so the
- * comparison is mode-plus-blob, never the full rendering-qualified
- * identity: a rendering-only move — a `.gitattributes` normalisation commit
- * touching the file, an `.git/info/attributes` edit, a repo-local
- * `diff.<driver>.binary` flip — changes none of the file's bytes and
- * appears in no `git diff HEAD`, yet dating on the suffix read the blocker
- * as "moved" and passed `--fail-on` while the stop still rendered the
- * Critical as open. Rendering moves keep their consequence where it
- * belongs — the incremental scope re-reviews them already.
- *
- * A blocker whose recorded identity is UNHASHABLE is undatable and does not
- * stand: no user action ever changes an UNHASHABLE↔UNHASHABLE comparison —
- * the committed deletion is still absent, the reverted bump still a
- * gitlink — so letting it stand failed the gate for ever over a fix nothing
- * clears. A blocker with no file, or one no baseline can date, is undatable
- * the same way. The residual is a false PASS beside the rendered blocker
- * list, which still names it; never a false failure no action clears.
- *
- * A file ADDED to the captured population since the cached round withholds
- * every blocker: a fix can land in a brand-new file no cached byte records,
- * and a stop cannot attribute it. The veto runs only when the cached round
- * enumerated the WHOLE population — a scoped capture cannot reconstruct a
- * population it only partially saw (see `filesAddedSince`). The residual is
- * therefore a false PASS — an unrelated new file clears standing blockers —
- * beside the rendered blocker list; never a false failure no action clears.
- */
-function blockerStateStillMatchesTree(
-  repoRoot: string,
-  cachePath: string | null,
-): boolean {
-  if (cachePath === null) return false;
-  const cache = readLocalCache(cachePath);
-  if (cache === null) return false;
-  const blockers = openCriticalsInCache(cachePath)
-    .map((b) => b.file)
-    .filter((f): f is string => f !== undefined);
-  if (blockers.length === 0) return false;
-  // The added-file veto keys on the population the cached round could
-  // ENUMERATE: a `--file` capture pathspec-scopes both halves of the capture
-  // to the single subject, and a `--no-untracked` round never lists the
-  // untracked half, so either cache records only what it saw — and files
-  // already present at cache time would read as "added", permanently
-  // disarming every blocker. Skip the veto there; the date falls back to
-  // the blocker's own file, which still moves the moment a fix touches it.
-  const populationScoped =
-    cache.source !== undefined || cache.untracked === false;
-  if (!populationScoped) {
-    const added = filesAddedSince(repoRoot, cache);
-    if (added === null || added.length > 0) return false;
-  }
-  // A file the cached round never hashed — the no-diff whole-file review
-  // shape — dates against that round's HEAD tree instead.
-  const missing = blockers.filter((p) => !Object.hasOwn(cache.files, p));
-  const atRevision = revisionIdentities(repoRoot, cache.headSha, missing);
-  const current = hashWorktreeFiles(repoRoot, blockers);
-  return blockers.some((p) => {
-    const before = Object.hasOwn(cache.files, p)
-      ? cache.files[p]
-      : Object.hasOwn(atRevision, p)
-        ? atRevision[p]
-        : undefined;
-    // Undatable: does not stand — see the docstring's UNHASHABLE half.
-    if (before === undefined || before === UNHASHABLE) return false;
-    return byteIdentity(before) === byteIdentity(current[p]);
-  });
-}
-
-/**
- * `<mode>:<blob>` — the byte-and-mode half of an identity, the rendering
- * suffix dropped. Both sides of the blocker date are shaped
- * `<mode>:<oid>[:<rendering attrs>]`; the mode is one of three fixed
- * spellings and the oid is hex, so neither holds a colon and the first two
- * components are exactly the byte equality. `UNHASHABLE` holds no colon and
- * returns unchanged — it never equals a real identity.
- */
-function byteIdentity(id: string): string {
-  return id.split(':', 3).slice(0, 2).join(':');
-}
-
-/**
- * Files in the captured population now that were not there when the cache
- * was written: tracked or untracked-but-not-ignored now, minus the cached
- * HEAD's tree and every path the cache hashed. `.gitignore`d names are not
- * subjects and never count, and neither is the review's own plumbing: the
- * capture excludes it from the hashed population, so the reconstruction of
- * "what was there at cache time" must too — in a repo that does not
- * gitignore `.qwen/` the review's artifacts (the cache file Step 8 wrote
- * among them) are untracked-and-not-ignored, and counting them as "added"
- * disarmed every blocker in every round.
- *
- * Null when the population cannot be listed — an undatable stop leans the
- * same way an undatable blocker does (pass), never into a failure no action
- * clears.
- */
-function filesAddedSince(
-  repoRoot: string,
-  cache: LocalReviewCache,
-): string[] | null {
-  let listing: Buffer;
-  try {
-    listing = gitRaw(
-      '-C',
-      repoRoot,
-      'ls-files',
-      '-z',
-      '--cached',
-      '--others',
-      '--exclude-standard',
-    );
-  } catch {
-    return null;
-  }
-  const current = new Set(
-    listing
-      .toString('utf8')
-      .split('\0')
-      .filter((p) => p !== '' && !isReviewPlumbing(p)),
-  );
-  let treePaths: string[] = [];
-  if (cache.headSha !== null) {
-    try {
-      treePaths = gitRaw(
-        '-C',
-        repoRoot,
-        'ls-tree',
-        '-r',
-        '-z',
-        '--name-only',
-        cache.headSha,
-      )
-        .toString('utf8')
-        .split('\0')
-        .filter((p) => p !== '');
-    } catch {
-      // An unlistable revision contributes no baseline: whatever the capture
-      // sees beyond the cached paths then reads as added.
-    }
-  }
-  const baseline = new Set([...Object.keys(cache.files), ...treePaths]);
-  return [...current].filter((p) => !baseline.has(p));
 }
 
 /**
@@ -774,6 +575,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       );
     }
   } else {
+    // The path is stable per target, so an earlier round's candidate still
+    // sits under the `cacheCandidatePath` this plan publishes, and Step 8
+    // would promote that stale anchor merged with this round's ledger.
+    // Absent IS the withheld state — fail quiet.
     try {
       rmSync(candidatePath, { force: true });
     } catch {
@@ -803,7 +608,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
    * output rendered the blocker as still standing.
    */
   let nothingToReview: { reason: string } | undefined;
-  if (args.cache) {
+  // Cached paths this capture dropped while still on disk and diverging
+  // from HEAD — see `vanishedStillOnDisk`. Empty when no `--cache` scoped
+  // this round. Read by the anchor refusal AND the stop gates below.
+  let vanishedPresent: readonly string[] = [];
+  if (args.cache !== undefined) {
     // A DIRECTORY resolves to this command's own target, because the caller
     // cannot name the file.
     //
@@ -822,6 +631,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // that knows only where caches live. A file path still works unchanged.
     const cachePath = resolveCachePath(args.cache, target, sourcePath);
     const cache = cachePath === null ? null : readLocalCache(cachePath);
+    vanishedPresent =
+      cache === null
+        ? []
+        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes);
     const refusal = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
@@ -831,9 +644,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       capture.skipped.length,
       treeHeldStill,
       args.untracked !== false,
-      cache === null
-        ? []
-        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes),
+      vanishedPresent,
     );
     if (refusal !== null) {
       writeStderrLine(
@@ -987,7 +798,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // reviewed-and-clean. Same discipline as the skipped-content gate beside
     // it: a stop is a DECIDED outcome, and neither unread nor moved content
     // can be decided.
-    treeHeldStill
+    treeHeldStill &&
+    // …and the anchor refusal did not just prove a path diverges while
+    // INVISIBLE to the capture — an `--assume-unchanged` edit is the live
+    // case: `git diff HEAD` honours the bit, so an empty diff proves
+    // nothing about that path, and the blocker date below reads hidden
+    // edits through it. The same uncertainty that refused the anchor
+    // withholds the stop, or the round decides clean over bytes no round
+    // ever read.
+    vanishedPresent.length === 0
   ) {
     nothingToReview = { reason: 'clean-tree' };
   }
@@ -1030,29 +849,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
   if (nothingToReview) {
-    const resolvedCache =
-      args.cache !== undefined
-        ? resolveCachePath(args.cache, target, sourcePath)
-        : cachePathFor(target, sourcePath);
-    const openCriticals = openCriticalsInCache(resolvedCache);
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
         {
           ...nothingToReview,
-          openBlockers: openCriticals.length,
-          // Dated, not counted — and dated per BLOCKER, each against its own
-          // file plus files added since — see `blockerStateStillMatchesTree`.
-          // An undated count never gates.
-          blockersStand: blockerStateStillMatchesTree(
-            capture.repoRoot,
-            resolvedCache,
-          ),
-          // The parent's stamp, echoed back. This file decides `completed`
-          // and can carry a REQUEST_CHANGES event, while its NAME is the
-          // flattened target token — not injective, so a concurrent review
-          // whose path flattens alike writes the same path and its blocker
-          // count would decide the other run's exit code. Absent when the
+          // The parent's stamp, echoed back. This file decides `completed`,
+          // while its NAME is the flattened target token — not injective, so
+          // a concurrent review whose path flattens alike writes the same
+          // path and would decide the other run's completion. Absent when the
           // capture was not launched by `qwen review run`, which is exactly
           // when no parent is reading.
           ...(process.env['QWEN_REVIEW_RUN_ID']
@@ -1159,19 +964,29 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             'This is NOT a decided stop: the no-diff branch owes it a ' +
             'whole-file review — read the file and review its current ' +
             'state; do not report nothing-to-review.'
-          : treeHeldStill
+          : treeHeldStill && vanishedPresent.length === 0
             ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
               'to review; do not run the review agents.'
-            : // …and NOT when the guard just proved the tree moved. The
-              // machine-readable stop is gated on `treeHeldStill`; this
-              // sentence was not, so the round printed "the working tree
-              // changed while the capture was being hashed" and "the working
-              // tree is clean" back to back and the orchestrator — which reads
-              // prose here — stopped on the second. The same contradiction the
-              // field-level gate closed, one layer up.
-              'WARNING: 0 chunks, but the working tree changed while the ' +
-              'capture was being hashed (above): this is NOT a clean tree. ' +
-              'Re-run the review rather than reporting nothing to review.',
+            : vanishedPresent.length > 0
+              ? // …and NOT when the anchor refusal just proved a path
+                // diverges while invisible to `git diff` — the field gate
+                // above withheld the stop, so the prose must not claim clean
+                // either. Same discipline as the moved-tree branch beside it.
+                'WARNING: 0 chunks, but a cached path dropped out of this ' +
+                'capture while still on disk and diverges from HEAD (above): ' +
+                'this is NOT a clean tree — the divergence is invisible to ' +
+                '`git diff`. Re-run the review rather than reporting ' +
+                'nothing to review.'
+              : // …and NOT when the guard just proved the tree moved. The
+                // machine-readable stop is gated on `treeHeldStill`; this
+                // sentence was not, so the round printed "the working tree
+                // changed while the capture was being hashed" and "the working
+                // tree is clean" back to back and the orchestrator — which reads
+                // prose here — stopped on the second. The same contradiction the
+                // field-level gate closed, one layer up.
+                'WARNING: 0 chunks, but the working tree changed while the ' +
+                'capture was being hashed (above): this is NOT a clean tree. ' +
+                'Re-run the review rather than reporting nothing to review.',
     );
   }
   writeStderrLine(
