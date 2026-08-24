@@ -3643,6 +3643,10 @@ jobs:
           # digest records only when the copy exists; an empty output reaches
           # the consumer's own empty guard, which degrades to the pre-PR
           # inline body.
+          # Absent from base must imply absent on disk: this cp fails every
+          # pre-merge round, so a planted leftover in RUNNER_TEMP would
+          # otherwise be digested below and executed as trusted (af-148).
+          rm -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
           cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
@@ -4822,7 +4826,14 @@ jobs:
           # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
           # as a kill target. Full rationale → qwen-autofix.md#af-148
           HEARTBEAT_PID=''
+          # Re-verify immediately before THIS launch (R8-1): the check above
+          # is separated from this second, PAT-holding execution by the two
+          # gh round-trips of the comment upsert — a live swap window in the
+          # attacker-writable RUNNER_TEMP. A mismatch fails the round closed;
+          # the explicit `|| exit 1` does not rely on the step's ambient
+          # shell options (af-023).
           if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1
             HB_REPO="${REPO}" HB_COMMENT_ID="${STATUS_ID}" \
             HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
             HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \

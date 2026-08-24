@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -15818,6 +15819,97 @@ exit 1
         '            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"\n' +
         '          fi',
     );
+    // Absent-from-base must imply absent-on-disk (R6-1): this tolerant
+    // cp FAILS every pre-merge round, so a leftover planted in the
+    // host's persistent RUNNER_TEMP by an earlier run must not survive
+    // it to be digested below and executed as trusted content.
+    // Witness: run the stage step verbatim against a tree that lacks
+    // the script (the merge-base shape) with a planted leftover — no
+    // file may remain at the staged path and no digest may reach the
+    // consumers' expression context.
+    expect(stageStep).toContain(
+      'rm -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+    );
+    expect(
+      stageStep.indexOf('rm -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
+    );
+    const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
+    const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
+    try {
+      const stageGithubOutput = join(stageProbeDir, 'github-output');
+      mkdirSync(join(stageProbeDir, '.github', 'scripts'), {
+        recursive: true,
+      });
+      for (const name of [
+        'check-settings-schema.sh',
+        'check-autofix-contracts.sh',
+        'resolve-owning-packages.sh',
+        'run-autofix-review-verification.sh',
+        'resanitize-git-config.sh',
+        'upsert-deferred-issue.sh',
+        'autofix-push-and-report.sh',
+      ]) {
+        writeFileSync(
+          join(stageProbeDir, '.github', 'scripts', name),
+          readFileSync(join('.github', 'scripts', name)),
+        );
+      }
+      mkdirSync(join(stageProbeDir, '.qwen', 'skills', 'autofix', 'scripts'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(stageProbeDir, '.qwen', 'skills', 'autofix', 'SKILL.md'),
+        readFileSync('.qwen/skills/autofix/SKILL.md'),
+      );
+      writeFileSync(
+        join(
+          stageProbeDir,
+          '.qwen',
+          'skills',
+          'autofix',
+          'scripts',
+          'run-agent.mjs',
+        ),
+        readFileSync('.qwen/skills/autofix/scripts/run-agent.mjs'),
+      );
+      // The planted leftover: attacker content a same-UID run left at
+      // the staged path on this persistent host.
+      writeFileSync(
+        join(stageRunnerTemp, 'autofix-status-heartbeat.sh'),
+        '#!/usr/bin/env bash\necho ATTACKER_CONTROLLED "$@"\n',
+      );
+      writeFileSync(stageGithubOutput, '');
+      const stageProbe = spawnSync(
+        'bash',
+        [
+          '-c',
+          stageStep
+            .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
+            .replace(/^ {10}/gm, ''),
+        ],
+        {
+          cwd: stageProbeDir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUNNER_TEMP: stageRunnerTemp,
+            GITHUB_OUTPUT: stageGithubOutput,
+          },
+        },
+      );
+      expect(stageProbe.status).toBe(0);
+      expect(
+        existsSync(join(stageRunnerTemp, 'autofix-status-heartbeat.sh')),
+      ).toBe(false);
+      expect(readFileSync(stageGithubOutput, 'utf8')).not.toContain(
+        'heartbeat_sha256=',
+      );
+    } finally {
+      rmSync(stageProbeDir, { recursive: true, force: true });
+      rmSync(stageRunnerTemp, { recursive: true, force: true });
+    }
     expect(postStatusCommentStep).toContain(
       "HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'",
     );
@@ -15910,9 +16002,89 @@ exit 1
     expect(postStatusCommentStep).toContain(
       'setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &',
     );
+    // ...and the launch re-verifies the staged script immediately
+    // before starting (R8-1 adjacency): the single check above is
+    // separated from this SECOND execution by the two gh round-trips
+    // of the comment upsert — a multi-second swap window in the same
+    // attacker-writable RUNNER_TEMP — and this execution is the
+    // PAT-holding one. A mismatch fails the round closed; the explicit
+    // `|| exit 1` does not rely on the step's ambient shell options
+    // (the af-023 doctrine).
     expect(postStatusCommentStep).toContain(
-      'if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then\n            HB_REPO=',
+      'if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then\n' +
+        '            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1\n' +
+        '            HB_REPO=',
     );
+    expect(
+      postStatusCommentStep.indexOf('sha256sum -c - > /dev/null || exit 1'),
+    ).toBeLessThan(
+      postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" loop'),
+    );
+    // Witness (R6-2): run the launch block verbatim with the digest
+    // recorded from the ORIGINAL staged copy, then swap the file on
+    // disk before the block runs — the PAT-holding launch must not
+    // execute the swapped content. The harness sleeps past the
+    // detached launch's startup before asserting.
+    const launchProbeTemp = mkdtempSync(join(tmpdir(), 'hb-launch-temp-'));
+    const launchProbeWorkdir = mkdtempSync(join(tmpdir(), 'hb-launch-wd-'));
+    try {
+      const stagedScript = join(launchProbeTemp, 'autofix-status-heartbeat.sh');
+      writeFileSync(stagedScript, heartbeatScript);
+      const stagedDigest = createHash('sha256')
+        .update(heartbeatScript)
+        .digest('hex');
+      const launchBlock =
+        'set -uo pipefail\n' +
+        postStatusCommentStep
+          .slice(
+            postStatusCommentStep.indexOf("HEARTBEAT_PID=''"),
+            postStatusCommentStep.indexOf('# Hand the id to the finalize step'),
+          )
+          .replace(/^ {10}/gm, '') +
+        '\nsleep 0.5';
+      const launchEnv = {
+        ...process.env,
+        RUNNER_TEMP: launchProbeTemp,
+        STATUS_ID: '12345',
+        HEARTBEAT_SHA256: stagedDigest,
+        REPO: 'octo/repo',
+        ROUND_DISPLAY: '7',
+        MAX_ROUNDS: '5',
+        JOB_URL: 'https://example.invalid/job/1',
+        WORKDIR: launchProbeWorkdir,
+        START_EPOCH: '1000',
+      };
+      delete launchEnv.GITHUB_TOKEN;
+      delete launchEnv.GH_TOKEN;
+      delete launchEnv.TRUSTED_PATH;
+      // Swapped: the staged content changes after the digest above was
+      // recorded and before this launch runs.
+      writeFileSync(
+        stagedScript,
+        '#!/usr/bin/env bash\necho ATTACKER_LOOP_RAN > "${HB_WORKDIR}/proof"\n',
+      );
+      const swapped = spawnSync('bash', ['-c', launchBlock], {
+        encoding: 'utf8',
+        env: launchEnv,
+      });
+      expect(swapped.status).toBe(1);
+      expect(existsSync(join(launchProbeWorkdir, 'proof'))).toBe(false);
+      // Unswapped: an intact staged copy still launches (no
+      // over-block). The launched script fails fast on a missing launch
+      // input; that fail-fast message is the evidence it ran.
+      writeFileSync(stagedScript, heartbeatScript);
+      const intact = spawnSync('bash', ['-c', launchBlock], {
+        encoding: 'utf8',
+        env: launchEnv,
+      });
+      expect(intact.status).toBe(0);
+      expect(intact.stderr).toContain(
+        'autofix-status-heartbeat: TRUSTED_PATH is required',
+      );
+    } finally {
+      rmSync(launchProbeTemp, { recursive: true, force: true });
+      rmSync(launchProbeWorkdir, { recursive: true, force: true });
+    }
     expect(postStatusCommentStep).toContain('HB_COMMENT_ID="${STATUS_ID}"');
     expect(postStatusCommentStep).toContain('HB_START_EPOCH="${START_EPOCH}"');
     expect(postStatusCommentStep).toContain('HEARTBEAT_PID=$!');
