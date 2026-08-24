@@ -20,10 +20,12 @@ const testStore = vi.hoisted(() => {
     revision: 0,
     tailAppendBarrierRevision: 0,
   };
+  let blockChangeSummaryEnabled = true;
   const listeners = new Set<() => void>();
   return {
     getSnapshot: () => ({ blocks, blockIndexById }),
-    getBlockChangeSummary: () => blockChangeSummary,
+    getBlockChangeSummary: () =>
+      blockChangeSummaryEnabled ? blockChangeSummary : undefined,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -60,6 +62,9 @@ const testStore = vi.hoisted(() => {
       };
       listeners.forEach((listener) => listener());
     },
+    disableBlockChangeSummary() {
+      blockChangeSummaryEnabled = false;
+    },
     reset() {
       blocks = [];
       blockIndexById = {};
@@ -68,6 +73,7 @@ const testStore = vi.hoisted(() => {
         revision: 0,
         tailAppendBarrierRevision: 0,
       };
+      blockChangeSummaryEnabled = true;
       listeners.clear();
     },
   };
@@ -123,6 +129,18 @@ afterEach(() => {
 });
 
 describe('useAnimationFrameTranscriptSnapshot', () => {
+  it('caches structural snapshots when the store has no change summary', () => {
+    testStore.disableBlockChangeSummary();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    act(() => root!.render(<Harness structuralOnly />));
+
+    expect(renderCount).toBe(1);
+    expect(latestBlocks).toEqual([]);
+  });
+
   it('keeps structural consumers asleep for pure tail appends', () => {
     let pendingFrame: FrameRequestCallback | null = null;
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {

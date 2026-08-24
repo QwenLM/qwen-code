@@ -21,10 +21,10 @@ background-agent reconciliation loop. Structural changes still flow through
 the app and replace the baseline immediately. Insight protocol markers use a
 full projection while retaining the unchanged message prefix.
 
-Compact tool summaries mount their detail subtree only while expanded. The
-summary button remains live while collapsed; expanding reconstructs the current
-tool and thought rows from props. Collapse is immediate so the hidden subtree
-stops work without waiting for an exit animation.
+Compact tool summaries mount their detail subtree only while expanded, except
+for MCP Apps whose iframe state must survive a collapse. The summary button
+remains live while collapsed; expanding reconstructs the current tool and
+thought rows from props. Collapse and expansion are immediate and unanimated.
 
 ## Compatibility
 

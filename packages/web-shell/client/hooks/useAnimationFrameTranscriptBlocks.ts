@@ -116,7 +116,11 @@ export function useAnimationFrameTranscriptSnapshot(
     return () => {
       const state = store.getSnapshot();
       const blockChangeSummary = store.getBlockChangeSummary?.();
-      const changed = structuralOnly
+      const canCompareStructure =
+        structuralOnly &&
+        cached?.blockChangeSummary !== undefined &&
+        blockChangeSummary !== undefined;
+      const changed = canCompareStructure
         ? !isSameTranscriptStructure(
             cached?.blockChangeSummary,
             blockChangeSummary,

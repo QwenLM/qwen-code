@@ -207,15 +207,14 @@ export function projectStreamingTailMessages(
   }
 
   if (after.text.includes(INSIGHT_CONTENT_MARKER)) {
-    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
     const tailPrefix = `${before.id}-`;
     const firstTailMessageIndex = previous.messages.findIndex(
       (message) =>
         message.id === before.id || message.id.startsWith(tailPrefix),
     );
-    const stablePrefixLength =
-      firstTailMessageIndex >= 0 ? firstTailMessageIndex : 0;
-    for (let i = 0; i < stablePrefixLength; i += 1) {
+    if (firstTailMessageIndex < 0) return undefined;
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    for (let i = 0; i < firstTailMessageIndex; i += 1) {
       if (
         messages[i]?.id !== previous.messages[i]?.id ||
         messages[i]?.role !== previous.messages[i]?.role

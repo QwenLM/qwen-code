@@ -1811,8 +1811,11 @@ export const ToolGroup = memo(function ToolGroup({
             aria-hidden="true"
           />
         </button>
-        {chatExpanded && (
-          <div className={styles.chatSummaryContentClip}>
+        {(chatExpanded || hasMcpApp) && (
+          <div
+            className={styles.chatSummaryContentClip}
+            style={chatExpanded ? undefined : { display: 'none' }}
+          >
             <div className={styles.chatSummaryContentInner}>
               <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
                 {tools.map((tool) => {

@@ -10,6 +10,7 @@ import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { McpAppHostContext } from '../../mcpAppHostContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -92,18 +93,26 @@ function renderToolGroup(
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
+  mcpAppHostUrl?: string,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    const group = (
+    const toolGroup = (
       <ToolGroup
         tools={tools}
         thoughts={thoughts}
         compactSummary={compactSummary}
         generateContent={generateContent}
       />
+    );
+    const group = mcpAppHostUrl ? (
+      <McpAppHostContext.Provider value={mcpAppHostUrl}>
+        {toolGroup}
+      </McpAppHostContext.Provider>
+    ) : (
+      toolGroup
     );
     root.render(
       <I18nProvider language={language}>
@@ -483,25 +492,49 @@ describe('tool group summary logic', () => {
   });
 
   it('opens a completed MCP App result in the session transcript', () => {
-    const container = renderToolGroup([
-      makeTool({
-        toolName: 'mcp__demo__show_dashboard',
-        rawOutput: {
-          type: 'mcp_app',
-          serverName: 'demo',
-          resourceUri: 'ui://demo/dashboard',
-          html: '<main>Dashboard</main>',
-          toolResult: { content: [] },
-          toolArguments: {},
-          fallbackText: 'Dashboard ready',
-        },
-      }),
-    ]);
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__show_dashboard',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        }),
+      ],
+      {},
+      undefined,
+      false,
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      'http://localhost:5173',
+    );
 
     expect(
       container.querySelector('button')?.getAttribute('aria-expanded'),
     ).toBe('true');
-    expect(container.textContent).toContain('Dashboard ready');
+
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    );
+    const iframe = container.querySelector('iframe');
+    expect(iframe).not.toBeNull();
+    iframe!.dataset['testState'] = 'preserved';
+    act(() => container.querySelector('button')?.click());
+    expect(content).toBe(
+      container.querySelector('[class*="chatSummaryContentClip"]'),
+    );
+    expect((content as HTMLElement | null)?.style.display).toBe('none');
+    act(() => container.querySelector('button')?.click());
+    expect(container.querySelector('iframe')).toBe(iframe);
+    expect(iframe?.dataset['testState']).toBe('preserved');
   });
 
   it('keeps an MCP App open when multiple tools share a summary', () => {
@@ -829,7 +862,6 @@ describe('tool row rendering', () => {
       const content = container.querySelector(
         '[class*="chatSummaryContentClip"]',
       );
-      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
       expect(content?.textContent).toContain('custom 5s');
 
       act(() => {

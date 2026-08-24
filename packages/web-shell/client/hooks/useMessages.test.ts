@@ -513,6 +513,35 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ]);
   });
 
+  it('falls back when an insight tail has no matching projected message', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'merged-thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages: [
+            {
+              id: 'earlier-assistant',
+              role: 'thinking',
+              content: thought.text,
+              isStreaming: true,
+            },
+          ],
+          t,
+        },
+        [{ ...thought, text: 'prefix "insight_progress":{}' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
   it.each([undefined, ''])(
     'falls back safely when a streaming block has empty text (%j)',
     async (text) => {
@@ -704,6 +733,78 @@ describe('background agent task reconciliation', () => {
       { role: 'tool_group', tools: [{ status: 'completed' }] },
       { role: 'thinking', content: 'ab' },
     ]);
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail has no projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(latest[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed' }],
+    });
     await act(async () => root.unmount());
   });
 

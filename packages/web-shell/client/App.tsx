@@ -2717,9 +2717,6 @@ export function App({
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const messagesRef = useRef(messages);
-  useLayoutEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
