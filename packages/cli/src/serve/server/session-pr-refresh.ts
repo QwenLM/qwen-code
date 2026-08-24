@@ -22,6 +22,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { invalidateWorkspaceSessionListCache } from './session-list.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
@@ -144,6 +145,18 @@ export async function refreshWorkspaceSessionPrStates(
     } catch {
       // One unwritable sidecar must not starve the rest of the sweep.
     }
+  }
+  if (updated > 0) {
+    // Same pairing as every other binding write in this feature: the
+    // sidebar refetch is catalog-version-gated and the live-state payload
+    // carries no `prs`, so a silent sidecar rewrite would leave stale
+    // badges until an unrelated catalog change or a reload.
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      workspaceCwd: runtime.workspaceCwd,
+      archiveStates: ['active', 'archived'],
+    });
+    runtime.bridge.markSessionCatalogChanged();
   }
   return { scanned, updated };
 }

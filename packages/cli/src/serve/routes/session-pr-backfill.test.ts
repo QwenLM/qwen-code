@@ -20,6 +20,7 @@ import {
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from '../server/error-response.js';
+import * as sessionListModule from '../server/session-list.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
   createWorkspaceRegistry,
@@ -491,6 +492,50 @@ describe('backfillWorkspaceSessionPrs', () => {
       number: 7,
       url: 'https://github.com/o/r/pull/7',
     });
+  });
+
+  it('strips repo-shifting env when resolving the git remote fallback', async () => {
+    // A daemon launched with e.g. GIT_DIR in its environment must not bind
+    // badge URLs against the foreign repository: the remote lookup
+    // sanitizes repo-shifting variables like every sibling git/gh call in
+    // this path.
+    execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
+    execSync('git remote add origin git@github.com:o/repoA.git', {
+      cwd: workspaceCwd,
+      stdio: 'pipe',
+    });
+    const foreignDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-foreign-'),
+    );
+    const previousGitDir = process.env['GIT_DIR'];
+    try {
+      execSync('git init', { cwd: foreignDir, stdio: 'pipe' });
+      execSync('git remote add origin git@github.com:elsewhere/repoB.git', {
+        cwd: foreignDir,
+        stdio: 'pipe',
+      });
+      await seedSession(SESSION_B);
+      await seedWorktreeSidecar(SESSION_B, 'pr-7', 'worktree-pr-7');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'cli_unavailable',
+      });
+      process.env['GIT_DIR'] = path.join(foreignDir, '.git');
+
+      const result = await backfillWorkspaceSessionPrs(runtime);
+
+      expect(result).toMatchObject({ bound: 1, unresolved: 0 });
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      );
+      expect(prs?.[0]).toMatchObject({
+        number: 7,
+        url: 'https://github.com/o/repoA/pull/7',
+      });
+    } finally {
+      if (previousGitDir === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = previousGitDir;
+      await fsp.rm(foreignDir, { recursive: true, force: true });
+    }
   });
 
   it('maps custom-slug worktree branches through gh headRefName', async () => {
@@ -1257,6 +1302,7 @@ describe('registerSessionPrBackfillRoutes', () => {
       primary: workspaceId === 'primary',
       trusted,
       env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged: vi.fn() },
     } as unknown as WorkspaceRuntime;
   }
 
@@ -1281,6 +1327,7 @@ describe('registerSessionPrBackfillRoutes', () => {
       primary: true,
       trusted: true,
       env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged: vi.fn() },
     } as unknown as WorkspaceRuntime;
     const trustedService = createWorkspaceRuntimeSessionService(trustedRuntime);
     const chatsDir = path.join(
@@ -1353,6 +1400,138 @@ describe('registerSessionPrBackfillRoutes', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
       await fsp.rm(trustedCwd, { recursive: true, force: true });
       await fsp.rm(trustedRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  // Seeds a trusted workspace holding one `pr-123` worktree session that
+  // backfill can bind through the mocked gh page.
+  async function seedTrustedBackfillWorkspace(): Promise<{
+    runtime: WorkspaceRuntime;
+    markSessionCatalogChanged: ReturnType<typeof vi.fn>;
+    cleanup: () => Promise<void>;
+  }> {
+    const cwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-work-'),
+    );
+    const runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-runtime-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    const markSessionCatalogChanged = vi.fn();
+    const rt = {
+      workspaceId: 'primary',
+      workspaceCwd: cwd,
+      sessionRuntimeBaseDir: runtimeDir,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged },
+    } as unknown as WorkspaceRuntime;
+    const service = createWorkspaceRuntimeSessionService(rt);
+    const chatsDir = path.join(new Storage(cwd).getProjectDir(), 'chats');
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-user-1`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd,
+      })}\n`,
+      'utf8',
+    );
+    const worktreePath = service.getWorktreeSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+    await fsp.writeFile(
+      worktreePath,
+      JSON.stringify({
+        slug: 'pr-123',
+        worktreePath: `${cwd}/.qwen/worktrees/pr-123`,
+        worktreeBranch: 'worktree-pr-123',
+        originalCwd: cwd,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      }),
+      'utf8',
+    );
+    return {
+      runtime: rt,
+      markSessionCatalogChanged,
+      cleanup: async () => {
+        delete process.env['QWEN_RUNTIME_DIR'];
+        await fsp.rm(cwd, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('invalidates the session-list cache and marks the catalog when bindings are added', async () => {
+    const seeded = await seedTrustedBackfillWorkspace();
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([seeded.runtime]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    try {
+      const response = await request(app).post('/sessions/backfill-prs');
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ bound: 1 });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        runtimeBaseDir: seeded.runtime.sessionRuntimeBaseDir,
+        workspaceCwd: seeded.runtime.workspaceCwd,
+        archiveStates: ['active', 'archived'],
+      });
+      expect(seeded.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      invalidateSpy.mockRestore();
+      await seeded.cleanup();
+    }
+  });
+
+  it('leaves the session-list cache and catalog untouched when nothing binds', async () => {
+    const seeded = await seedTrustedBackfillWorkspace();
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([seeded.runtime]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    try {
+      const response = await request(app).post('/sessions/backfill-prs');
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ bound: 0 });
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
+    } finally {
+      invalidateSpy.mockRestore();
+      await seeded.cleanup();
     }
   });
 });

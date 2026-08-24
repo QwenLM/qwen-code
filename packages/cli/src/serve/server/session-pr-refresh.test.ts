@@ -20,6 +20,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import * as sessionListModule from './session-list.js';
 import {
   refreshWorkspaceSessionPrStates,
   resolveSessionPrRefreshIntervalMs,
@@ -134,6 +135,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
   let workspaceCwd: string;
   let runtime: WorkspaceRuntime;
   let sessionService: SessionService;
+  let markSessionCatalogChanged: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -144,6 +146,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       path.join(os.tmpdir(), 'qwen-pr-refresh-work-'),
     );
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    markSessionCatalogChanged = vi.fn();
     runtime = {
       workspaceId: 'primary',
       workspaceCwd,
@@ -155,6 +158,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         overlayKeys: [],
         effectiveEnv: { GH_TOKEN: 'x' },
       },
+      bridge: { markSessionCatalogChanged },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
@@ -247,6 +251,75 @@ describe('refreshWorkspaceSessionPrStates', () => {
       [42, 'merged'],
       [43, 'open'],
     ]);
+  });
+
+  it('invalidates the session-list cache and marks the catalog when a binding changed', async () => {
+    // The sidebar refetch is catalog-version-gated and the live-state
+    // payload carries no `prs`; a rewrite without this pairing leaves the
+    // stale badge on an otherwise-idle workspace indefinitely.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+
+    try {
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        runtimeBaseDir: runtimeDir,
+        workspaceCwd,
+        archiveStates: ['active', 'archived'],
+      });
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      invalidateSpy.mockRestore();
+    }
+  });
+
+  it('leaves the cache and catalog untouched when no binding changed', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+
+    try {
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+
+      expect(result).toEqual({ scanned: 1, updated: 0 });
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+    } finally {
+      invalidateSpy.mockRestore();
+    }
   });
 
   it('skips gh entirely when every binding is merged', async () => {
@@ -668,6 +741,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         primary: true,
         trusted: true,
         env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: { markSessionCatalogChanged: vi.fn() },
       } as unknown as WorkspaceRuntime;
       const serviceA = createWorkspaceRuntimeSessionService({
         ...runtimeB,
@@ -735,6 +809,7 @@ describe('startSessionPrRefreshTimer', () => {
       primary: trusted,
       trusted,
       env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged: vi.fn() },
     } as unknown as WorkspaceRuntime;
   }
 

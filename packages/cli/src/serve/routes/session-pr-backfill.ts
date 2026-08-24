@@ -13,6 +13,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   fetchGitHubPullRequests,
   getDefaultBranch,
+  gitEnv,
   readSessionPrs,
   readWorktreeSession,
   replaceSessionPrs,
@@ -20,6 +21,7 @@ import {
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { invalidateWorkspaceSessionListCache } from '../server/session-list.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -94,6 +96,11 @@ function getRemoteWebUrl(cwd: string): string | undefined {
       cwd,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Sanitize like every sibling git/gh call in this path: without an
+      // env option the spawn inherits the daemon's raw process.env, and an
+      // inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_* would resolve origin
+      // against a different repository despite the cwd.
+      env: gitEnv(),
     }).trim();
     return normalizeRemoteToWebUrl(remote);
   } catch {
@@ -238,8 +245,9 @@ export async function backfillWorkspaceSessionPrs(
     // contributor's PR — the highest-numbered one.
     let defaultBranch: string | undefined;
     if (candidates.some((candidate) => candidate.branches.length > 0)) {
-      // Local ref read only — no credentials needed, so the ambient env
-      // applies (gitEnv falls back to process.env), like getRemoteWebUrl.
+      // Local ref read only — no credentials needed; getDefaultBranch
+      // sanitizes the ambient env through gitEnv internally, the same
+      // stripping getRemoteWebUrl applies to its git spawn.
       const defaultRef = await getDefaultBranch(runtime.workspaceCwd);
       if (defaultRef) {
         defaultBranch = defaultRef.slice(defaultRef.indexOf('/') + 1);
@@ -433,7 +441,20 @@ export function registerSessionPrBackfillRoutes(
           continue;
         }
         try {
-          workspaces.push(await backfillWorkspaceSessionPrs(runtime));
+          const result = await backfillWorkspaceSessionPrs(runtime);
+          workspaces.push(result);
+          // Same pairing as every other catalog mutation in this feature:
+          // the sidebar refetch is catalog-version-gated, so new bindings
+          // stay invisible until the cache scope is dropped and the
+          // revision advances.
+          if (result.bound > 0) {
+            invalidateWorkspaceSessionListCache({
+              runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+              workspaceCwd: runtime.workspaceCwd,
+              archiveStates: ['active', 'archived'],
+            });
+            runtime.bridge.markSessionCatalogChanged();
+          }
         } catch (error) {
           workspaces.push({
             workspaceCwd: runtime.workspaceCwd,

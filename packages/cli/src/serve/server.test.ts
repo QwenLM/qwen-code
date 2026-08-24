@@ -15757,6 +15757,48 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('reads the PR sidecar for a live-only session whose bridge entry has no prs', async () => {
+      // Bridge entries are re-created without `prs` on daemon restart,
+      // close/reload, and archive/restore; only metadata updates re-seed
+      // them. The live-only fast path must still read the persisted sidecar
+      // for such rows — like the sibling live-only paths — or the badge
+      // vanishes on an unflushed workspace until a re-bind.
+      const id = '550e8400-e29b-41d4-a716-44665544b008';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      const result = await listLiveWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+      );
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
     it('reads the live-only PR sidecar from an explicit runtime base dir', async () => {
       // The route passes `{ runtimeBaseDir: runtime.sessionRuntimeBaseDir }`;
       // for a managed runtime with a distinct pinned base dir the read must

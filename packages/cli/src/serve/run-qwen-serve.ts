@@ -5170,12 +5170,26 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js').then((mod) => {
-      if (refreshGeneration !== sessionPrRefreshGeneration) return;
-      sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-        workspaceRegistry,
+    void import('./server/session-pr-refresh.js')
+      .then((mod) => {
+        if (refreshGeneration !== sessionPrRefreshGeneration) return;
+        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+          workspaceRegistry,
+        });
+      })
+      .catch((error) => {
+        // Degrade to "no PR-state sweep" instead of leaking an unhandled
+        // rejection: the serve fast path installs no process-level
+        // unhandledRejection handler before this runs, and Node's default
+        // for one is to exit — a failed chunk load (e.g. an in-place
+        // upgrade replacing dist/ under the running daemon) would take
+        // down every runtime, session, and connection the daemon serves.
+        daemonLog.warn(
+          `session-pr-refresh load failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       });
-    });
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {

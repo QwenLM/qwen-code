@@ -1400,14 +1400,13 @@ export async function listLiveWorkspaceSessionsForResponse(
           );
     const page = afterCursor.slice(0, pageSize);
     // The bind route persists the PR sidecar before the session's first
-    // flush, so a live-only row must read it like the persisted paths do —
-    // otherwise it renders the bind-time state, not the sweep's refreshed one.
+    // flush, and a bridge entry re-created after a restart/close/reload
+    // carries no `prs`, so every live-only row must read the sidecar like
+    // the sibling live-only paths do — unconditionally.
     const sessionService = new SessionService(workspaceCwd);
     const enriched = await Promise.all(
       page.map((summary) =>
-        summary.prs?.length
-          ? liveOnlySummary(summary, sessionService, readOptions.signal)
-          : summary,
+        liveOnlySummary(summary, sessionService, readOptions.signal),
       ),
     );
     const nextCursor =
