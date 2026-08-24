@@ -146,10 +146,16 @@ function getTextContent(content: unknown): string | undefined {
 // set is repeated here and checked before uploading.
 const CHANNEL_IMAGE_EXTENSIONS = ['bmp', 'gif', 'jpeg', 'png', 'webp'];
 
-// Mirrors the store's SESSION_ATTACHMENT_MAX_ITEM_BYTES (same file): checked
-// before uploading so one oversized image degrades by omission instead of
-// failing the whole turn.
+// Mirrors the store's SESSION_ATTACHMENT_MAX_ITEM_BYTES and empty-image
+// rejection (same file): checked before delivery so one inadmissible image
+// degrades by omission instead of failing the whole turn.
 const CHANNEL_IMAGE_MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
+// Daemons without `session_attachments` parse the prompt body with
+// express.json({ limit: '10mb' }), so the inline fallback keeps the
+// aggregate base64 payload below that cap with headroom for the text
+// prompt and the JSON envelope.
+const CHANNEL_IMAGE_INLINE_MAX_BASE64_BYTES = 8 * 1024 * 1024;
 
 function channelImageName(mimeType: string, index = 0): string | undefined {
   if (!mimeType.startsWith('image/')) {
@@ -160,6 +166,25 @@ function channelImageName(mimeType: string, index = 0): string | undefined {
     return undefined;
   }
   return index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
+}
+
+function decodeChannelImage(
+  data: string,
+): { bytes: Buffer } | { skip: string } {
+  // Valid base64 decodes to at most this many bytes (padding shrinks it
+  // further), so an oversized image is rejected on length alone instead of
+  // allocating a buffer the size check would discard.
+  let estimatedBytes = Math.floor((data.length * 3) / 4);
+  if (data.endsWith('==')) estimatedBytes -= 2;
+  else if (data.endsWith('=')) estimatedBytes -= 1;
+  if (estimatedBytes > CHANNEL_IMAGE_MAX_UPLOAD_BYTES) {
+    return { skip: 'above the daemon attachment size limit' };
+  }
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.byteLength === 0) {
+    return { skip: 'empty once base64-decoded' };
+  }
+  return { bytes };
 }
 
 /**
@@ -484,19 +509,19 @@ export class DaemonChannelBridge
                 // One unrecognized subtype must not fail the whole turn;
                 // degrade by omission.
                 process.stderr.write(
-                  `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)}\n`,
+                  `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
                 );
                 return undefined;
               }
-              const bytes = Buffer.from(image.data, 'base64');
-              if (bytes.byteLength > CHANNEL_IMAGE_MAX_UPLOAD_BYTES) {
+              const decoded = decodeChannelImage(image.data);
+              if ('skip' in decoded) {
                 process.stderr.write(
-                  `[DaemonChannelBridge] skipped channel image above the daemon attachment size limit ${sanitizeLogText(image.mimeType, 128)}\n`,
+                  `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
                 );
                 return undefined;
               }
               const attachment = await session.uploadAttachment(
-                new Blob([bytes], {
+                new Blob([decoded.bytes], {
                   type: image.mimeType,
                 }),
                 name,
@@ -526,7 +551,25 @@ export class DaemonChannelBridge
         }
       } else {
         // Daemons without `session_attachments` take images inline.
+        let inlineBase64Bytes = 0;
         for (const image of images) {
+          const decoded = decodeChannelImage(image.data);
+          if ('skip' in decoded) {
+            process.stderr.write(
+              `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+            );
+            continue;
+          }
+          if (
+            inlineBase64Bytes + image.data.length >
+            CHANNEL_IMAGE_INLINE_MAX_BASE64_BYTES
+          ) {
+            process.stderr.write(
+              `[DaemonChannelBridge] skipped channel image to keep the inline prompt under the daemon body limit ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+            );
+            continue;
+          }
+          inlineBase64Bytes += image.data.length;
           prompt.push({
             type: 'image',
             data: image.data,

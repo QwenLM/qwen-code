@@ -2242,6 +2242,7 @@ describe('DaemonChannelBridge', () => {
     }
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
     expect(skippedWarning).toContain('image/tiff');
+    expect(skippedWarning).toContain('for session session-1');
     expect(session.prompt).toHaveBeenCalledWith(
       {
         prompt: [
@@ -2300,6 +2301,7 @@ describe('DaemonChannelBridge', () => {
     }
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
     expect(skippedWarning).toContain('image/jpeg');
+    expect(skippedWarning).toContain('for session session-1');
     expect(session.prompt).toHaveBeenCalledWith(
       {
         prompt: [
@@ -2315,6 +2317,134 @@ describe('DaemonChannelBridge', () => {
       },
       expect.any(AbortSignal),
     );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('skips channel images that decode to zero bytes instead of failing the turn', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment.mockResolvedValueOnce({
+      type: 'image',
+      attachmentId: 'image.png',
+      mimeType: 'image/png',
+      size: 12,
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    let skippedWarning = '';
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [
+          { data: 'AQID', mimeType: 'image/png' },
+          // Invalid base64 decodes to zero bytes; the daemon attachment
+          // store rejects empty images with 400, which would fail the
+          // whole turn.
+          { data: 'A', mimeType: 'image/jpeg' },
+        ],
+      });
+      skippedWarning = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(skippedWarning).toContain('image/jpeg');
+    expect(skippedWarning).toContain('for session session-1');
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [
+          {
+            type: 'image',
+            attachmentId: 'image.png',
+            mimeType: 'image/png',
+            size: 12,
+          },
+          { type: 'text', text: 'describe' },
+        ],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('uploads a channel image at exactly the daemon attachment size limit', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment.mockResolvedValueOnce({
+      type: 'image',
+      attachmentId: 'image.png',
+      mimeType: 'image/png',
+      size: 8 * 1024 * 1024,
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await bridge.prompt('session-1', 'describe', {
+      images: [
+        {
+          data: Buffer.alloc(8 * 1024 * 1024, 1).toString('base64'),
+          mimeType: 'image/png',
+        },
+      ],
+    });
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('rejects oversized channel images from the base64 length without decoding them', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bufferFrom = vi.spyOn(Buffer, 'from');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const oversized = Buffer.alloc(8 * 1024 * 1024 + 1, 1).toString('base64');
+    bufferFrom.mockClear();
+    let decodedOversized = false;
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [{ data: oversized, mimeType: 'image/jpeg' }],
+      });
+      decodedOversized = bufferFrom.mock.calls.some(
+        (call) => call[0] === oversized,
+      );
+    } finally {
+      stderr.mockRestore();
+      bufferFrom.mockRestore();
+    }
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(decodedOversized).toBe(false);
 
     events.close();
     bridge.stop();
@@ -2345,6 +2475,90 @@ describe('DaemonChannelBridge', () => {
           { type: 'image', data: 'BAUG', mimeType: 'image/jpeg' },
           { type: 'text', text: 'describe' },
         ],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('bounds the inline image payload for daemons without session attachments', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    // Three of these inflate to ~14 MiB of base64, past the daemon's
+    // 10mb prompt-body limit, so only the first fits the inline budget.
+    const large = Buffer.alloc(3.5 * 1024 * 1024, 1).toString('base64');
+    let skippedWarning = '';
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [
+          { data: large, mimeType: 'image/png' },
+          { data: large, mimeType: 'image/jpeg' },
+          { data: large, mimeType: 'image/webp' },
+        ],
+      });
+      skippedWarning = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(skippedWarning).toContain('image/jpeg');
+    expect(skippedWarning).toContain('for session session-1');
+    const promptCall = session.prompt.mock.calls[0]?.[0] as {
+      prompt: Array<Record<string, unknown>>;
+    };
+    expect(
+      promptCall.prompt.filter((block) => block['type'] === 'image'),
+    ).toEqual([{ type: 'image', data: large, mimeType: 'image/png' }]);
+    expect(promptCall.prompt).toContainEqual({
+      type: 'text',
+      text: 'describe',
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('skips inline channel images that decode to nothing', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    let skippedWarning = '';
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [{ data: 'A', mimeType: 'image/png' }],
+      });
+      skippedWarning = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(skippedWarning).toContain('image/png');
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'describe' }],
         _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       },
       expect.any(AbortSignal),
