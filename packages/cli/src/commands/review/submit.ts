@@ -79,6 +79,7 @@ import {
   planThreadActions,
   postReviewReply,
   resolveReviewThread,
+  stampCarriedId,
 } from './lib/thread-lifecycle.js';
 import {
   recordedSeverityFloor,
@@ -403,6 +404,13 @@ function compose(
    * one list.
    */
   fixedFindings: FixedFinding[];
+  /**
+   * The ledger id the compose's marker records per drafted comment —
+   * index-aligned with the floor-enforcement-reduced posting set the
+   * marker describes; the stamp's input. Undefined when no ledger marker
+   * rides the body (the ids exist to be carried).
+   */
+  draftedIds: Array<string | undefined> | undefined;
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -454,6 +462,7 @@ function compose(
     cappedBy: r.cappedBy,
     floorEnforced: r.floorEnforced,
     fixedFindings: r.fixedFindings,
+    draftedIds: r.draftedIds,
   };
 }
 
@@ -632,13 +641,22 @@ function inconsistencies(
    */
   authoredIndices?: number[],
   /**
-   * Step 6's `fixed` rulings (validated by the compose). A comment that
-   * re-posts an id a ruling retires is the payload contradicting itself:
-   * the finding is either still standing (re-reported) or fixed
-   * (retired), and posting both copies would reply "fixed" into the very
-   * thread the re-report just revived.
+   * Step 6's `fixed` rulings (validated by the compose). Any channel that
+   * re-voices an id a ruling retires is the payload contradicting itself:
+   * the finding is either still standing (re-reported) or fixed (retired),
+   * and posting both copies would reply "fixed" into the very thread the
+   * re-report just revived. The scan covers every id-carrying channel: the
+   * drafted comments AS COMPOSED — `preRerouteComments`, the set before
+   * the floor-enforcement removal, because a rerouted re-post still
+   * re-voices its id from the body's deferral list — the body Criticals,
+   * the cannot-tell Criticals (they cap the verdict by id exactly like
+   * the body ones), the duplicate-drop account (its entries lead with the
+   * confirmed finding's id), and the Critical deferral entries compose
+   * relocates into the body Criticals (#9940 review).
    */
   fixedFindings: FixedFinding[] = [],
+  preRerouteComments?: ReviewComment[],
+  preRerouteAuthoredIndices?: number[],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -649,27 +667,64 @@ function inconsistencies(
       `${at} re-posts ${id}, which \`state.fixedFindings\` rules fixed — ` +
       `a finding is either still standing (re-reported under its id) or ` +
       `fixed (retired); rule it one way`;
-    comments.forEach((c, i) => {
+    const drafted = preRerouteComments ?? comments;
+    const indices = preRerouteComments
+      ? preRerouteAuthoredIndices
+      : authoredIndices;
+    drafted.forEach((c, i) => {
       const carried =
         typeof c.body === 'string' ? carriedFindingOf(c.body) : null;
       if (carried !== null && fixedIds.has(carried.id)) {
         problems.push(
-          contradiction(`comments[${authoredIndices?.[i] ?? i}]`, carried.id),
+          contradiction(`comments[${indices?.[i] ?? i}]`, carried.id),
         );
       }
     });
-    // The still-standing re-report's OTHER channel (Step 6's still-stands
+    // The still-standing re-post's OTHER channels (Step 6's still-stands
     // rule: an unanchorable carried finding goes to the body with its id,
     // and buildLedger reads it back there). Checking only the inline
     // channel would let one payload resolve a finding's thread as fixed
-    // while its body lists the same id as a standing blocker.
-    const bodyCriticals = payload.state?.bodyCriticals;
-    if (Array.isArray(bodyCriticals)) {
-      bodyCriticals.forEach((entry, i) => {
+    // while its body lists the same id as a standing blocker — or caps on
+    // it, confirms it as a duplicate drop, or defers it as a Critical.
+    const entryChannels: Array<[string, unknown]> = [
+      ['state.bodyCriticals', payload.state?.bodyCriticals],
+      ['state.cannotTellCriticals', payload.state?.cannotTellCriticals],
+      [
+        'state.suggestionsDroppedAsDuplicates',
+        payload.state?.suggestionsDroppedAsDuplicates,
+      ],
+    ];
+    for (const [name, channel] of entryChannels) {
+      if (!Array.isArray(channel)) continue;
+      channel.forEach((entry, i) => {
         const carried =
           typeof entry === 'string' ? carriedFindingOf(entry) : null;
         if (carried !== null && fixedIds.has(carried.id)) {
-          problems.push(contradiction(`state.bodyCriticals[${i}]`, carried.id));
+          problems.push(contradiction(`${name}[${i}]`, carried.id));
+        }
+      });
+    }
+    const deferred = payload.state?.deferredSuggestions;
+    if (Array.isArray(deferred)) {
+      deferred.forEach((entry, i) => {
+        if (
+          entry === null ||
+          typeof entry !== 'object' ||
+          Array.isArray(entry)
+        ) {
+          return;
+        }
+        const { severity, title } = entry as {
+          severity?: unknown;
+          title?: unknown;
+        };
+        if (severity !== 'Critical') return;
+        const carried =
+          typeof title === 'string' ? carriedFindingOf(title) : null;
+        if (carried !== null && fixedIds.has(carried.id)) {
+          problems.push(
+            contradiction(`state.deferredSuggestions[${i}]`, carried.id),
+          );
         }
       });
     }
@@ -1290,20 +1345,22 @@ function submit(
   let cappedBy: string[];
   let floorEnforced: number[];
   let fixedFindings: FixedFinding[];
+  let draftedIds: Array<string | undefined> | undefined;
   try {
-    ({ event, body, cappedBy, floorEnforced, fixedFindings } = compose(
-      payload,
-      cliVersion,
-      attribution,
-      // The anchor's certifying identity is the model the runtime published
-      // for this session — Config publishes it per session, the shell tool
-      // injects it into this subprocess. It supersedes the typed id, but the
-      // launching command can still override the env (and a hijacked
-      // orchestrator can forge the marker outright via the API) — the same
-      // forgeable posture DESIGN.md records for the cache path.
-      // The identity this round runs under — see lib/round-model.ts.
-      roundModelIdFrom(process.env),
-    ));
+    ({ event, body, cappedBy, floorEnforced, fixedFindings, draftedIds } =
+      compose(
+        payload,
+        cliVersion,
+        attribution,
+        // The anchor's certifying identity is the model the runtime published
+        // for this session — Config publishes it per session, the shell tool
+        // injects it into this subprocess. It supersedes the typed id, but the
+        // launching command can still override the env (and a hijacked
+        // orchestrator can forge the marker outright via the API) — the same
+        // forgeable posture DESIGN.md records for the cache path.
+        // The identity this round runs under — see lib/round-model.ts.
+        roundModelIdFrom(process.env),
+      ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -1318,6 +1375,13 @@ function submit(
   // gate: a rerouted comment is no longer posting, so it is no longer the
   // gate's business (an unmarked comment is never rerouted and still
   // refuses below).
+  // The consistency gate's fixed-vs-re-post scan must also see the
+  // comments the floor enforcement is ABOUT to move: a rerouted carried
+  // re-post keeps re-voicing its id from the body's deferral list, so its
+  // pairing with a `fixed` ruling stays a contradiction after the removal
+  // (#9940 review).
+  const preRerouteComments = payload.comments ?? [];
+  const preRerouteAuthoredIndices = authoredIndices;
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
     const comments = payload.comments ?? [];
@@ -1340,12 +1404,44 @@ function submit(
     attribution,
     authoredIndices,
     fixedFindings,
+    preRerouteComments,
+    preRerouteAuthoredIndices,
   );
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
         problems.map((p) => `  - ${p}`).join('\n'),
     );
+  }
+
+  // The thread lifecycle matches threads by the id that LEADS their root
+  // comment, and a freshly drafted finding carries none — its id is minted
+  // only into the ledger marker at compose time. Stamp each id-less draft
+  // with the id the marker records for it (the claim-line shape Step 6
+  // writes on carried re-reports), so a thread is reachable from the round
+  // it is born: a later `still stands` replies into it, a `fixed` ruling
+  // resolves it (#9940 review). GitHub only — the Aone write path has no
+  // review-thread graph to reach into. The insertion preserves every
+  // property the gate above validated: the severity marker, visibility and
+  // fence state all sit behind it, untouched.
+  const stampedFresh = new Set<number>();
+  if (!aoneWrite && draftedIds !== undefined) {
+    const comments = payload.comments ?? [];
+    payload = {
+      ...payload,
+      // Index space: `draftedIds` aligns with the posting set AFTER the
+      // floor-enforcement removal — compose built the ledger off that same
+      // reduced set — so the post-removal position IS the lookup, never
+      // the authored index.
+      comments: comments.map((c, i) => {
+        const id = draftedIds[i];
+        if (id === undefined || typeof c.body !== 'string') return c;
+        const body = stampCarriedId(c.body, id);
+        if (body === c.body) return c;
+        stampedFresh.add(i);
+        return { ...c, body };
+      }),
+    };
   }
 
   // What the platform receives: the caller's findings, under the verdict
@@ -1421,6 +1517,11 @@ function submit(
   } else {
     const carried = finalComments
       .map((c, index) => ({ index, finding: carriedFindingOf(c.body) }))
+      // A stamped-fresh id was minted THIS round; no existing thread can
+      // carry it, so it is no carry candidate — left in, it would pay the
+      // thread read on every round with new findings for a match that
+      // cannot exist, and cost a first round its short-circuit.
+      .filter((x) => !stampedFresh.has(x.index))
       .filter(
         (
           x,
@@ -1878,8 +1979,9 @@ function submit(
       writeStderrLine(
         `WARNING: fixed-ruling reply into thread comment ` +
           `${resolve.commentId} failed: ${(err as Error).message} — the ` +
-          `thread is left UNRESOLVED; resolve it by hand or let the next ` +
-          `round's ruling retry.`,
+          `thread is left UNRESOLVED; resolve it by hand — a later round ` +
+          `re-rules it only if the blocker re-check re-promotes the ` +
+          `thread's root.`,
       );
       continue;
     }

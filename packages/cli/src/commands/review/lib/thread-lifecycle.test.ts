@@ -23,6 +23,7 @@ import {
   carriedFindingOf,
   fetchReviewThreads,
   planThreadActions,
+  stampCarriedId,
   type ReviewThread,
 } from './thread-lifecycle.js';
 
@@ -73,6 +74,16 @@ describe('carriedFindingOf — the id a comment body leads with', () => {
     expect(carriedFindingOf('**[Critical]** a brand new hole')).toBeNull();
     expect(carriedFindingOf(undefined)).toBeNull();
     expect(carriedFindingOf(42)).toBeNull();
+  });
+
+  it('reads the id off a marker-less first line leading with render-nothing residue', () => {
+    // A draft `**[Critical]** <!-- context --> R1-2: the claim` posts with
+    // the residue LEADING the first line; presubmit's marker-less leg
+    // strips it, and this end must agree — one comment, one answer
+    // (#9940 review).
+    expect(
+      carriedFindingOf('<!-- context --> R1-2: the claim\n\nrest of body'),
+    ).toEqual({ id: 'R1-2', fixInduced: false });
   });
 });
 
@@ -253,6 +264,108 @@ describe('planThreadActions — matching threads to findings', () => {
     expect(plan.resolves).toEqual([
       { id: 'R1-9', by: 'the fix', threadId: 'T9', commentId: 1009 },
     ]);
+  });
+
+  it('a still-standing reply prefers the (fix-induced) root over an older unmarked original', () => {
+    // The id fronts two defects once a fix-induced re-report lands; the
+    // standing claim is the LATEST re-report's, so the reply belongs on
+    // the marked thread, not the superseded original's (#9940 review).
+    const plan = planThreadActions(
+      [
+        thread({
+          threadId: 'T-original',
+          rootCommentId: 1001,
+          rootCreatedAt: '2026-08-01T00:00:00Z',
+        }),
+        thread({
+          threadId: 'T-induced',
+          rootCommentId: 1002,
+          rootCreatedAt: '2026-08-02T00:00:00Z',
+          rootBody:
+            '**[Critical]** R1-2: (fix-induced) the fix opened a new hole',
+        }),
+      ],
+      'qwen-bot',
+      [{ index: 0, id: 'R1-2' }],
+      [],
+    );
+    expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 1002 }]);
+  });
+
+  it('a fixed ruling resolves the marked and unmarked threads of one id alike', () => {
+    const plan = planThreadActions(
+      [
+        thread({
+          threadId: 'T-original',
+          rootCommentId: 1001,
+          rootCreatedAt: '2026-08-01T00:00:00Z',
+        }),
+        thread({
+          threadId: 'T-induced',
+          rootCommentId: 1002,
+          rootCreatedAt: '2026-08-02T00:00:00Z',
+          rootBody:
+            '**[Critical]** R1-2: (fix-induced) the fix opened a new hole',
+        }),
+      ],
+      'qwen-bot',
+      [],
+      [{ id: 'R1-2', by: 'the rewrite' }],
+    );
+    expect(plan.resolves.map((r) => r.threadId)).toEqual([
+      'T-induced',
+      'T-original',
+    ]);
+    expect(plan.unmatchedFixed).toEqual([]);
+  });
+
+  it('an attribution-off root with leading residue before the id still matches', () => {
+    const plan = planThreadActions(
+      [thread({ rootBody: '<!-- context --> R1-2: the claim\n\nbody' })],
+      'qwen-bot',
+      [{ index: 0, id: 'R1-2' }],
+      [],
+    );
+    expect(plan.replies).toHaveLength(1);
+  });
+});
+
+describe('stampCarriedId — the write side of the readback', () => {
+  it('stamps the minted id right after the severity marker', () => {
+    expect(
+      stampCarriedId('**[Critical]** the guard drops a valid case', 'R1-5'),
+    ).toBe('**[Critical]** R1-5: the guard drops a valid case');
+    expect(stampCarriedId('**[Suggestion]** tidy', 'R2-3')).toBe(
+      '**[Suggestion]** R2-3: tidy',
+    );
+  });
+
+  it('leaves a draft that already leads with a carried id verbatim', () => {
+    expect(stampCarriedId('**[Critical]** R1-2: still stands', 'R3-1')).toBe(
+      '**[Critical]** R1-2: still stands',
+    );
+    expect(
+      stampCarriedId('**[Critical]** R1-2: (fix-induced) the new hole', 'R3-1'),
+    ).toBe('**[Critical]** R1-2: (fix-induced) the new hole');
+  });
+
+  it('returns an unmarked body unchanged — nothing to stamp into', () => {
+    expect(stampCarriedId('no marker here', 'R1-1')).toBe('no marker here');
+  });
+
+  it('stamps through leading residue, and before residue after the marker', () => {
+    expect(stampCarriedId('\n**[Critical]** the claim', 'R1-1')).toBe(
+      '\n**[Critical]** R1-1: the claim',
+    );
+    const stamped = stampCarriedId(
+      '**[Critical]** <!-- x --> the claim',
+      'R1-1',
+    );
+    expect(stamped).toBe('**[Critical]** R1-1: <!-- x --> the claim');
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R1-1',
+      fixInduced: false,
+    });
   });
 });
 

@@ -7020,6 +7020,27 @@ describe('buildLedger', () => {
     ]);
   });
 
+  it('records the minted id per drafted comment, aligned by index (#9940)', () => {
+    // `draftedIds` is the stamp `submit` applies before posting: the id at
+    // a marked slot equals the ledger entry's id, an unmarked slot stays
+    // undefined, and a carried id reads through unchanged.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+        { path: 'src/x.ts', line: 1, body: 'no marker — not a finding' },
+        {
+          path: 'src/b.ts',
+          line: 4,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      [],
+    );
+    expect(l.draftedIds).toEqual(['R3-1', undefined, 'R1-2']);
+    expect(l.findings.map((f) => f.id)).toEqual(['R3-1', 'R1-2']);
+  });
+
   it('flags the real file spelled like a stand-in, not the stand-in', () => {
     // The flag marks the EXCEPTION, so the routine stand-ins cost the marker
     // no bytes — it rides through every rung of the shed cascade, where the

@@ -913,6 +913,16 @@ export interface ComposeReviewResult {
    */
   fixedFindings: FixedFinding[];
   /**
+   * The ledger id this round's marker records for each drafted comment —
+   * index-aligned with the posting set AFTER floor enforcement (the set
+   * the marker itself describes), undefined at unmarked slots. Present
+   * only when a ledger marker rides the body: the ids exist to be
+   * carried, and `submit` stamps each id-less draft with its minted id
+   * before posting, so every posted thread root leads with the id the
+   * thread lifecycle matches (#9940 review).
+   */
+  draftedIds?: Array<string | undefined>;
+  /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
    *
@@ -1635,7 +1645,7 @@ export function composeReview(
   // count, one origin, so the marker and the reported number cannot drift
   // apart under a later edit to either.
   const postedInline = result.postedInline;
-  const marker = ledgerMarkerFor(
+  const { marker, draftedIds } = ledgerMarkerFor(
     effective,
     result.cappedBy,
     result.scopeUnproven ?? true,
@@ -1668,7 +1678,7 @@ export function composeReview(
       : { prevPostedInline: prevFacts.posted }),
   };
   return marker
-    ? { ...withVolume, body: `${withVolume.body}\n\n${marker}` }
+    ? { ...withVolume, draftedIds, body: `${withVolume.body}\n\n${marker}` }
     : withVolume;
 }
 
@@ -2045,10 +2055,10 @@ function ledgerMarkerFor(
   floorKind: CriticalFloorKind | undefined,
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
   churnRounds: number,
-): string | null {
+): { marker: string | null; draftedIds: Array<string | undefined> } {
   try {
-    if (!input.planPath) return null;
-    if (!planNamesPr(input.planPath)) return null;
+    if (!input.planPath) return { marker: null, draftedIds: [] };
+    if (!planNamesPr(input.planPath)) return { marker: null, draftedIds: [] };
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
@@ -2157,96 +2167,102 @@ function ledgerMarkerFor(
       attribution && certifying !== '' && !identityDrifted
         ? certifying
         : undefined;
-    return serializeLedger({
-      ...buildLedger(
-        // Capped, because the round is the id space and the parser refuses an
-        // id from past the cap: an uncapped stamp of prevRound + 1 met the
-        // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
-        // marker whose own parser dropped every finding — invisibly, with the
-        // anchor still riding. The recovery path already refuses rounds above
-        // the cap, so prevRound can reach it only AT the cap, where staying
-        // there loses id uniqueness across those rounds and nothing else —
-        // against a counter no real PR approaches.
-        Math.min(prevRound + 1, LEDGER_MAX_ROUND),
-        (input.draftedComments ?? []) as Array<{
-          path?: unknown;
-          line?: unknown;
-          body?: unknown;
-        }>,
-        [
-          // The same rule the body applied, through the same statement of
-          // it: a re-post of a claim the gate regenerates below is dropped
-          // here too, or the work-list grows a second entry for one blocker
-          // every round.
-          ...withoutGateReposts(
-            ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
-            scriptLintGate(input.planPath).criticals,
-          ),
-          // The same split the body performed: a relocated Critical is a
-          // posted, counted blocker and must enter the work list.
-          ...splitDeferralChannel(input.deferredSuggestions).relocated,
-          // The gate's Criticals, for the same reason: a gate Critical is a
-          // posted, counted blocker too — leaving it out let the next
-          // round's persistence half read "no prior Critical" over a round
-          // that posted one (#9526).
-          //
-          // A SECOND invocation, not the body composer's result — the two
-          // live in different functions and nothing passes the value across.
-          // What makes them agree is that `scriptLintGate` is pure in
-          // `planPath` and its inputs (the plan JSON, the report, the diff)
-          // are immutable for the length of one synchronous compose; it is
-          // NOT the single-origin discipline `postedInline` gets one line
-          // below. So the standing hazard is an edit, not a race: anything
-          // that filters, caps, or carves out what the BODY pushes must
-          // change this list too, or the posted body and the carried work
-          // list stop describing the same round (R4-1).
-          ...scriptLintGate(input.planPath).criticals,
-        ],
-        carriedWorkList,
-      ),
-      // The pair falls together: a sha with no model reads to the next
-      // round as a pre-field marker rather than as "nobody certified this".
-      ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
-      ...(model ? { model } : {}),
-      // Carry the baseline forward unchanged once one exists; only measure a
-      // full-range diff when there is none. Re-measuring every round would let
-      // a diff that shrinks rewrite its own baseline and erase the growth it
-      // already accumulated.
-      ...(src0 > 0 ? { src0 } : {}),
-      // Volume telemetry: unconditional, unlike everything above it. The
-      // anchor pair is withheld whenever the round could not certify its
-      // scope, but "how many comments did this round post" stays true on a
-      // fail-closed round — and a trend that goes blank exactly when a PR
-      // starts capping would be blind on the rounds it exists to describe.
-      posted: postedInline,
-      ...(prevPostedInline === undefined
-        ? {}
-        : { prevPosted: prevPostedInline }),
-      // The posture that volume was produced under. Without it, the next
-      // round measures a FLOOR change as loop divergence: the volume under a
-      // critical floor and the volume under an open one are not two points
-      // on one trend. Decides nothing, sheds with the volume it qualifies.
-      // The RESOLVED posture, folded the way every consumer folds it: an
-      // ABSENT floor reads as `auto` in the REPORTING reading (a present but
-      // unrecognisable one reads as nothing at all — see
-      // `criticalFloorKind`), and `auto` resolves determinately from the
-      // round number and the context state. The ENFORCEMENT reading folds
-      // nothing and fails open on both; the gap between the two is what the
-      // mechanism-health check discloses. Recording it only when the state NAMED a floor
-      // left the guard blind under the DEFAULT configuration — where the
-      // posture genuinely transitions at round 6 and again on a transient
-      // context failure — so a real posture change read as loop divergence,
-      // which is the misreading the field exists to prevent. What must not
-      // be invented is a posture nobody can derive; this one is derived from
-      // the same fold the advice and the enforcement backstop already use.
-      floor: floorKind === undefined ? 'o' : 'c',
-      // The part of that volume the trend is about — see `Ledger.fresh`.
-      fresh: freshInline,
-      ...(churnRounds > 0 ? { churnRounds } : {}),
-    });
+    const ledger = buildLedger(
+      // Capped, because the round is the id space and the parser refuses an
+      // id from past the cap: an uncapped stamp of prevRound + 1 met the
+      // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
+      // marker whose own parser dropped every finding — invisibly, with the
+      // anchor still riding. The recovery path already refuses rounds above
+      // the cap, so prevRound can reach it only AT the cap, where staying
+      // there loses id uniqueness across those rounds and nothing else —
+      // against a counter no real PR approaches.
+      Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+      (input.draftedComments ?? []) as Array<{
+        path?: unknown;
+        line?: unknown;
+        body?: unknown;
+      }>,
+      [
+        // The same rule the body applied, through the same statement of
+        // it: a re-post of a claim the gate regenerates below is dropped
+        // here too, or the work-list grows a second entry for one blocker
+        // every round.
+        ...withoutGateReposts(
+          ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
+          scriptLintGate(input.planPath).criticals,
+        ),
+        // The same split the body performed: a relocated Critical is a
+        // posted, counted blocker and must enter the work list.
+        ...splitDeferralChannel(input.deferredSuggestions).relocated,
+        // The gate's Criticals, for the same reason: a gate Critical is a
+        // posted, counted blocker too — leaving it out let the next
+        // round's persistence half read "no prior Critical" over a round
+        // that posted one (#9526).
+        //
+        // A SECOND invocation, not the body composer's result — the two
+        // live in different functions and nothing passes the value across.
+        // What makes them agree is that `scriptLintGate` is pure in
+        // `planPath` and its inputs (the plan JSON, the report, the diff)
+        // are immutable for the length of one synchronous compose; it is
+        // NOT the single-origin discipline `postedInline` gets one line
+        // below. So the standing hazard is an edit, not a race: anything
+        // that filters, caps, or carves out what the BODY pushes must
+        // change this list too, or the posted body and the carried work
+        // list stop describing the same round (R4-1).
+        ...scriptLintGate(input.planPath).criticals,
+      ],
+      carriedWorkList,
+    );
+    return {
+      // `serializeLedger` picks the fields it writes; the stamp ids ride
+      // the returned ledger object but never the marker.
+      marker: serializeLedger({
+        ...ledger,
+        // The pair falls together: a sha with no model reads to the next
+        // round as a pre-field marker rather than as "nobody certified this".
+        ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
+        ...(model ? { model } : {}),
+        // Carry the baseline forward unchanged once one exists; only measure a
+        // full-range diff when there is none. Re-measuring every round would let
+        // a diff that shrinks rewrite its own baseline and erase the growth it
+        // already accumulated.
+        ...(src0 > 0 ? { src0 } : {}),
+        // Volume telemetry: unconditional, unlike everything above it. The
+        // anchor pair is withheld whenever the round could not certify its
+        // scope, but "how many comments did this round post" stays true on a
+        // fail-closed round — and a trend that goes blank exactly when a PR
+        // starts capping would be blind on the rounds it exists to describe.
+        posted: postedInline,
+        ...(prevPostedInline === undefined
+          ? {}
+          : { prevPosted: prevPostedInline }),
+        // The posture that volume was produced under. Without it, the next
+        // round measures a FLOOR change as loop divergence: the volume under a
+        // critical floor and the volume under an open one are not two points
+        // on one trend. Decides nothing, sheds with the volume it qualifies.
+        // The RESOLVED posture, folded the way every consumer folds it: an
+        // ABSENT floor reads as `auto` in the REPORTING reading (a present but
+        // unrecognisable one reads as nothing at all — see
+        // `criticalFloorKind`), and `auto` resolves determinately from the
+        // round number and the context state. The ENFORCEMENT reading folds
+        // nothing and fails open on both; the gap between the two is what the
+        // mechanism-health check discloses. Recording it only when the state NAMED a floor
+        // left the guard blind under the DEFAULT configuration — where the
+        // posture genuinely transitions at round 6 and again on a transient
+        // context failure — so a real posture change read as loop divergence,
+        // which is the misreading the field exists to prevent. What must not
+        // be invented is a posture nobody can derive; this one is derived from
+        // the same fold the advice and the enforcement backstop already use.
+        floor: floorKind === undefined ? 'o' : 'c',
+        // The part of that volume the trend is about — see `Ledger.fresh`.
+        fresh: freshInline,
+        ...(churnRounds > 0 ? { churnRounds } : {}),
+      }),
+      draftedIds: ledger.draftedIds,
+    };
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
-    return null;
+    return { marker: null, draftedIds: [] };
   }
 }
 
@@ -6052,8 +6068,13 @@ export function buildLedger(
    * this cannot be told apart, so the id is retained and continuity wins.
    */
   carriedWorkList?: { ids: ReadonlySet<string>; complete: boolean },
-): Ledger {
+): Ledger & { draftedIds: Array<string | undefined> } {
   const findings: LedgerFinding[] = [];
+  // The stamp `submit` applies before posting: index-aligned with
+  // `drafted`, undefined at unmarked slots. The ledger marker records the
+  // ids; the stamp makes the posted thread roots lead with them — the
+  // position the thread lifecycle matches (#9940 review).
+  const draftedIds: Array<string | undefined> = [];
   const taken = new Set<string>();
   let next = 0;
   /** Is this claimed id one the previous round actually recorded? */
@@ -6105,7 +6126,7 @@ export function buildLedger(
   const locatable = (title: string, where: string): string =>
     title || `(comment carried no text — see the posted finding at ${where})`;
 
-  for (const c of drafted) {
+  drafted.forEach((c, i) => {
     // ONE severity predicate for the whole package. `severityOf` trims leading
     // whitespace before matching, and it is what `countInlineFindings` — the
     // count the verdict is computed from — and the unmarked-comment gate both
@@ -6113,7 +6134,7 @@ export function buildLedger(
     // Critical whose body opened with a newline was counted, was posted, and
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
-    if (!sev) continue;
+    if (!sev) return;
     // `ledgerClaimLine` is the shared projection — `carriedClaimLine` (the ONE
     // readback statement, also used by presubmit's carried-id extractor) with
     // forged footer spans and leading render-nothing residue stripped off it.
@@ -6122,8 +6143,10 @@ export function buildLedger(
     // id anchor and silently renumber the finding.
     const { id: carried, title } = readClaim(ledgerClaimLine(c.body));
     const file = typeof c.path === 'string' ? c.path : LEDGER_UNKNOWN_FILE;
+    const id = idFor(carried);
+    draftedIds[i] = id;
     findings.push({
-      id: idFor(carried),
+      id,
       sev: sev === 'critical' ? 'C' : 'S',
       file,
       // The flag marks the EXCEPTION — a real path that happens to be spelled
@@ -6146,7 +6169,7 @@ export function buildLedger(
         `${file}${typeof c.line === 'number' ? `:${c.line}` : ''}`,
       ),
     });
-  }
+  });
   for (const b of bodyCriticals) {
     // The title strips through the same fixpoint chain the visible list
     // uses — the ledger marker rides the posted body as an HTML comment,
@@ -6164,7 +6187,7 @@ export function buildLedger(
       title: locatable(title, 'the review body'),
     });
   }
-  return { v: 1, round, findings };
+  return { v: 1, round, findings, draftedIds };
 }
 
 /** The terminal verdict, in the words Step 6 is told to print. */

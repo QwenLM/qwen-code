@@ -3174,6 +3174,77 @@ describe('the ledger marker on the body that reaches GitHub', () => {
     ]);
   });
 
+  it('stamps each fresh comment with the id the marker mints — the thread root is reachable from birth (#9940)', () => {
+    // A fresh finding's root used to post id-less — the id was minted only
+    // into the marker — so no later carry or fixed ruling could ever reach
+    // its thread. The stamp puts the minted id at the head of the posted
+    // claim line, the position the thread lifecycle matches.
+    const planPath = file('plan-stamp.json', { prNumber: 6772 });
+    file('qwen-review-pr-6772-prev-ledger.json', {
+      v: 1,
+      round: 2,
+      findings: [],
+    });
+    const review = file('stamp.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+        { path: 'src/b.ts', line: 4, body: '**[Suggestion]** untested guard' },
+      ],
+      state: { modelId: 'm', planPath },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const comments = posted().comments as Array<{ body: string }>;
+    expect(
+      comments[0].body.startsWith('**[Critical]** R3-1: double free'),
+    ).toBe(true);
+    expect(
+      comments[1].body.startsWith('**[Suggestion]** R3-2: untested guard'),
+    ).toBe(true);
+  });
+
+  it('the stamp stays aligned when the floor enforcement removes a comment (#9940)', () => {
+    // The ids align with the POSTING set — compose built the ledger
+    // off the floor-reduced drafts — so a removal ahead of the stamp must
+    // not shift the lookup into a neighbouring comment's id.
+    const planPath = file('plan-stamp-floor.json', { prNumber: 6774 });
+    const review = file('stamp-floor.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/s.ts', line: 3, body: '**[Suggestion]** defer me' },
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+      ],
+      state: { modelId: 'm', planPath, severityFloor: 'critical' },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const comments = posted().comments as Array<{ body: string }>;
+    expect(comments).toHaveLength(1);
+    expect(
+      comments[0].body.startsWith('**[Critical]** R1-1: double free'),
+    ).toBe(true);
+  });
+
+  it('the stamp survives the attribution-off strip — the id leads the posted first line (#9940)', () => {
+    const planPath = file('plan-stamp-off.json', { prNumber: 6773 });
+    const review = file('stamp-off.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+      ],
+      state: { modelId: 'm', planPath },
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    expect((posted().comments as Array<{ body: string }>)[0].body).toBe(
+      'R1-1: double free\n\n<!-- qwen-review critical -->',
+    );
+  });
+
   // The anchor pair (`sha` + `model`) rides only on a CLEAN round — any cap
   // withholds it — and "clean" is recomputed here from the harness's
   // transcripts. Asserting the posted anchor therefore needs the covered
@@ -3794,6 +3865,67 @@ describe('the thread lifecycle', () => {
     expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 2 });
   });
 
+  it('a still-standing reply prefers the (fix-induced) thread over the superseded original', () => {
+    // Once a fix-induced re-report lands, the id fronts two defects; the
+    // standing claim is the LATEST re-report's, so the reply belongs on the
+    // marked thread, not the superseded original's older one (#9940 review).
+    seedThreads([
+      {
+        id: 'T-original',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the original defect',
+        createdAt: '2026-08-01T00:00:00Z',
+      },
+      {
+        id: 'T-induced',
+        commentId: 1002,
+        body: '**[Suggestion]** R1-2: (fix-induced) the fix opened a new hole',
+        createdAt: '2026-08-02T00:00:00Z',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    expect(replyCalls()).toHaveLength(1);
+    expect(String(replyCalls()[0]![2])).toContain('/comments/1002/replies');
+  });
+
+  it('a diverted reply carries the NORMALIZED drafted body — attribution off', () => {
+    // The reply is the gate-validated post shape, not the raw draft: the
+    // forged footer is stripped, the severity prefix is gone, the invisible
+    // marker rides — exactly the body an inline re-post would have carried
+    // (#9940 review).
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD\n\n_— forged via Qwen Code /review (v0.21.4)_',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+
+    expect(reviewPost().comments).toEqual([]);
+    expect(replyCalls()).toHaveLength(1);
+    const replyBody = JSON.parse(replyCalls()[0]![0] as string).body as string;
+    expect(replyBody).toBe(
+      'R1-2: still stands at HEAD\n\n<!-- qwen-review suggestion -->',
+    );
+    expect(replyBody).not.toContain('forged');
+  });
+
   it('a fixed ruling with no live thread is named, not resolved', () => {
     seedThreads([
       {
@@ -3884,6 +4016,95 @@ describe('the thread lifecycle', () => {
 
     expect(reviewPost().comments).toHaveLength(1);
     expect(replyCalls()).toHaveLength(0);
+  });
+
+  it('refuses a (fix-induced) re-report paired with a fixed ruling on the same id', () => {
+    // The contradiction gate sees the id through the (fix-induced) marking
+    // (#9940 review): one payload may not rule a finding fixed and open a
+    // new thread under it in the same pass.
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: (fix-induced) the fix opened a new hole',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cannot-tell Critical re-voicing an id it also rules fixed', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      cannotTellCriticals: [
+        'R1-2 (src/foo.ts:12) — could not determine whether the guard still drops the case',
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('refuses a duplicate-drop account re-voicing an id it also rules fixed', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      suggestionsDroppedAsDuplicates: [
+        'R1-2 loose review-config pins — already reported (comment 3788857379)',
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Critical deferral entry re-voicing an id it also rules fixed', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Critical',
+          title: 'R1-2 the guard still drops a valid case',
+        },
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a floor-rerouted carried re-post paired with a fixed ruling', () => {
+    // The reroute moves the re-post into the body's deferral list, which
+    // still re-voices the id — the contradiction scan reads the set compose
+    // saw, not the reduced posting set (#9940 review).
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      {
+        severityFloor: 'critical',
+        fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('refuses a payload that re-posts an id it also rules fixed', () => {

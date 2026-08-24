@@ -20,10 +20,9 @@
 //
 // The fix, in code rather than in a rule the model is asked to keep: at
 // submit time the PR's review threads are read ONCE, matched to findings
-// by the carried id that already leads every posted claim line (the same
-// readback the ledger builder performs — nothing new is persisted, and
-// findings posted before this existed match too), and the round's thread
-// bookkeeping lands in the same posting pass:
+// by the carried id that leads the posted claim line (the same readback
+// the ledger builder performs — nothing new is persisted), and the
+// round's thread bookkeeping lands in the same posting pass:
 //
 //  - a carried finding REPLIES into its original thread instead of
 //    opening a new one (only into an UNRESOLVED thread this account
@@ -37,12 +36,27 @@
 //    live thread this account opened under the id and resolves it, so
 //    the unresolved list reads as "still standing" again.
 //
+// Matching keys on the id because the id LEADS every thread this pass
+// posts: `submit` stamps each freshly drafted finding with the id the
+// ledger mints for it (`stampCarriedId` — the write side of the readback
+// carriedFindingOf reads), exactly the claim-line shape Step 6 writes on
+// carried re-reports. A thread's root is reachable from the round it is
+// born. Roots posted before the stamp existed carry no id — the matcher
+// cannot reach them, and they degrade to the pre-fix behaviour: a
+// re-post opens a new thread, a fixed ruling reports nothing to resolve.
+//
 // GitHub only: the Aone write path fans findings out as plain MR comments
 // and has no review-thread graph to reply into or resolve.
 
 import { gh, ghWithInput } from './gh.js';
 import { LEDGER_ID_READBACK, readClaim } from './ledger.js';
-import { carriedClaimLine } from './inline-counts.js';
+import {
+  CRITICAL_PREFIX,
+  LEADING_INVISIBLE_RE,
+  SUGGESTION_PREFIX,
+  carriedClaimLine,
+  severityOf,
+} from './inline-counts.js';
 import type { FixedFinding } from '../compose-review.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
@@ -172,6 +186,14 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
  * attribution-off post carries no severity marker, so the bare first line
  * is tried too. Everything past the marker is model text; only the
  * ^-anchored grammar position is trusted.
+ *
+ * The bare leg MIRRORS presubmit's marker-less readback — leading
+ * render-nothing residue stripped, CRLF-tolerant split — because both
+ * ends read the SAME posted shape: an HTML comment that sat between the
+ * severity marker and the id in the draft survives the prefix strip at
+ * post time and leads the posted first line, and two readback ends that
+ * disagree about one comment are the drift class the shared readback
+ * exists to prevent.
  */
 export function carriedFindingOf(body: unknown): {
   id: string;
@@ -179,10 +201,43 @@ export function carriedFindingOf(body: unknown): {
 } | null {
   if (typeof body !== 'string') return null;
   const marked = carriedClaimLine(body);
-  const line = (marked ?? body.split('\n')[0]).trim();
+  const line = (
+    marked ??
+    body
+      .trimStart()
+      .split(/\r\n?|\n/)[0]
+      .replace(LEADING_INVISIBLE_RE, '')
+  ).trim();
   if (!LEDGER_ID_READBACK.test(line)) return null;
   const { id, fixInduced } = readClaim(line);
   return id === undefined ? null : { id, fixInduced };
+}
+
+/**
+ * The write side of the readback above: stamp a freshly drafted finding
+ * with the id the ledger mints for it, so the posted thread root LEADS
+ * with its id from birth — the same claim-line shape Step 6 writes on
+ * carried re-reports, and the position `carriedFindingOf` reads. Without
+ * the stamp a fresh finding's root is id-less, and no later carry or
+ * `fixed` ruling can ever reach the thread (#9940 review).
+ *
+ * The stamp is an INSERTION right after the severity marker; it rewrites
+ * nothing else. A body that already leads with a carried id keeps it —
+ * the model's carry stays verbatim, and a re-minted stray id keeps
+ * whatever claim line it arrived with (the ledger records the re-mint;
+ * the root and the marker disagree exactly as they did before stamps).
+ * Returns the body unchanged when there is nothing to stamp into (no
+ * marker) or nothing to stamp (an id already leads).
+ */
+export function stampCarriedId(body: string, id: string): string {
+  if (carriedFindingOf(body) !== null) return body;
+  const sev = severityOf({ body });
+  if (sev === null) return body;
+  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+  const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
+  const visible = body.slice(lead.length);
+  if (!visible.startsWith(marker)) return body;
+  return `${lead}${marker} ${id}:${visible.slice(marker.length)}`;
 }
 
 export interface ThreadActionPlan {
@@ -208,7 +263,15 @@ export interface ThreadActionPlan {
  *  - a carried finding replies into the OLDEST matching thread (the
  *    original), one reply per thread per round — extra drafts under the
  *    same id (an aggregate's further locations) get no target and stay
- *    inline, one thread per location as the original round posted them;
+ *    inline, one thread per location as the original round posted them.
+ *    ONE exception: a `(fix-induced)` root is preferred over an unmarked
+ *    one regardless of age. The flow reuses one id across two defects —
+ *    the superseded original and the induced hole — and the standing
+ *    claim under the id is the LATEST re-report's: once a fix-induced
+ *    re-report exists, a still-standing re-assertion belongs on the
+ *    induced defect's own marked thread, not on the superseded
+ *    original's older one (the readClaim contract: the new defect keeps
+ *    its OWN thread);
  *  - a fixed ruling resolves EVERY matching thread — the one cleanup a
  *    multiplied pre-fix lineage (#9659's four R1-15 threads) gets.
  */
@@ -219,18 +282,25 @@ export function planThreadActions(
   fixed: FixedFinding[],
 ): ThreadActionPlan {
   const me = login.trim().toLowerCase();
-  const byId = new Map<string, ReviewThread[]>();
+  const byId = new Map<
+    string,
+    Array<{ thread: ReviewThread; marked: boolean }>
+  >();
   for (const t of threads) {
     if (t.isResolved) continue;
     if (t.rootAuthor === null || t.rootAuthor.toLowerCase() !== me) continue;
     const finding = carriedFindingOf(t.rootBody);
     if (finding === null) continue;
     const list = byId.get(finding.id) ?? [];
-    list.push(t);
+    list.push({ thread: t, marked: finding.fixInduced });
     byId.set(finding.id, list);
   }
   for (const list of byId.values()) {
-    list.sort((a, b) => a.rootCreatedAt.localeCompare(b.rootCreatedAt));
+    list.sort(
+      (a, b) =>
+        Number(b.marked) - Number(a.marked) ||
+        a.thread.rootCreatedAt.localeCompare(b.thread.rootCreatedAt),
+    );
   }
 
   const plan: ThreadActionPlan = {
@@ -241,12 +311,15 @@ export function planThreadActions(
   for (const c of carried) {
     const target = byId
       .get(c.id)
-      ?.find((t) => !plan.replies.some((r) => r.commentId === t.rootCommentId));
+      ?.find(
+        ({ thread }) =>
+          !plan.replies.some((r) => r.commentId === thread.rootCommentId),
+      );
     if (target !== undefined) {
       plan.replies.push({
         index: c.index,
         id: c.id,
-        commentId: target.rootCommentId,
+        commentId: target.thread.rootCommentId,
       });
     }
   }
@@ -256,12 +329,12 @@ export function planThreadActions(
       plan.unmatchedFixed.push(f.id);
       continue;
     }
-    for (const t of targets) {
+    for (const { thread } of targets) {
       plan.resolves.push({
         id: f.id,
         ...(f.by === undefined ? {} : { by: f.by }),
-        threadId: t.threadId,
-        commentId: t.rootCommentId,
+        threadId: thread.threadId,
+        commentId: thread.rootCommentId,
       });
     }
   }
