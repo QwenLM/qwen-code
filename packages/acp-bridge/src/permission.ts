@@ -20,10 +20,10 @@
  *   prompt may answer; other clients see `permission_forbidden`.
  *   Use case: per-tenant SaaS where a UI surface must own its own
  *   approvals.
- * - `consensus` — N-of-M quorum across pair-token-authenticated
- *   clients before resolving; intermediate `permission_partial_vote`
- *   events let UIs render progress. Use case: enterprise change
- *   review where two operators must agree.
+ * - `consensus` — N-of-M quorum across the session client IDs
+ *   captured when the permission request is issued; intermediate
+ *   `permission_partial_vote` events let UIs render progress. Use case:
+ *   enterprise change review where two operators must agree.
  * - `local-only` — refuses any HTTP voter; the prompt blocks until
  *   a loopback client (the local TUI super-client) resolves it.
  *   Use case: workstations where remote control should never grant
@@ -32,10 +32,7 @@
  * See `permissionMediator.ts` for the production implementation.
  */
 export type PermissionPolicy =
-  | 'first-responder'
-  | 'designated'
-  | 'consensus'
-  | 'local-only';
+  'first-responder' | 'designated' | 'consensus' | 'local-only';
 
 /**
  * One pending permission tracked by a `PermissionMediator`. The

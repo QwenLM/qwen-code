@@ -5,13 +5,13 @@ and remote-control adapters. Lives in the monorepo, not published to npm.
 
 Lift history (#4175 Mode B daemon roadmap):
 
-| Slice                | Scope                                                                                                                                               | Status         |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| **PR 22a** (#4295)   | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                | ✅ merged      |
-| **PR 22b/1** (#4298) | Lift `status` + `workspacePaths` + `bridgeErrors` + `bridgeTypes`                                                                                   | ✅ merged      |
-| **PR 22b/2** (#4304) | Lift `BridgeOptions` + new `DaemonStatusProvider` injection seam                                                                                    | ✅ merged      |
-| **F1** (this PR)     | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)     | ✅ in this PR  |
-| **F3 PR 24**         | Implement the four `PermissionMediator` strategies (`first-responder`, `designated`, `consensus`, `local-only`) + pair-token revocation + audit log | ✅ implemented |
+| Slice                | Scope                                                                                                                                                                                      | Status                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| **PR 22a** (#4295)   | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                                                       | ✅ merged                      |
+| **PR 22b/1** (#4298) | Lift `status` + `workspacePaths` + `bridgeErrors` + `bridgeTypes`                                                                                                                          | ✅ merged                      |
+| **PR 22b/2** (#4304) | Lift `BridgeOptions` + new `DaemonStatusProvider` injection seam                                                                                                                           | ✅ merged                      |
+| **F1** (this PR)     | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)                                            | ✅ in this PR                  |
+| **F3 PR 24**         | Implement the four `PermissionMediator` policies (`first-responder`, `designated`, `consensus`, `local-only`) plus audit/emit fan-out; pair-token binding and revocation stay future scope | ✅ policy dispatch implemented |
 
 ## What's here today
 
