@@ -1259,6 +1259,24 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       );
       expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
     });
+
+    it('accepts independent runtime claims only for the same session id', () => {
+      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'claims-'));
+      const chatsDir = path.join(dir, 'chats');
+      actualFs.mkdirSync(chatsDir);
+      actualFs.writeFileSync(path.join(chatsDir, 'sess-1.jsonl'), '');
+      actualFs.writeFileSync(
+        path.join(chatsDir, 'sess-1.claim-token.runtime.json'),
+        JSON.stringify({ session_id: 'sess-1', pid: process.pid }),
+      );
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
+
+      actualFs.writeFileSync(
+        path.join(chatsDir, 'foreign.claim-token.runtime.json'),
+        JSON.stringify({ session_id: 'foreign', pid: process.pid }),
+      );
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+    });
   });
 
   it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {

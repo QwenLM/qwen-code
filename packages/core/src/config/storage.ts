@@ -963,16 +963,23 @@ export class Storage {
     } catch {
       return true;
     }
-    // Exact names, not prefix/suffix matching: session ids are
-    // caller-supplied SDK input, so one id can be a strict prefix or
-    // suffix of a sibling's (`sess-1` vs `sess-1.b`, `worker-1` vs
-    // `team-worker-1`) and artifacts are named exactly
-    // `${sessionId}${suffix}`.
-    return files.every((file) =>
-      ['.jsonl', '.runtime.json', '.worktree.json'].some(
-        (suffix) => file === `${sessionId}${suffix}`,
-      ),
-    );
+    // Transcript/worktree names must match exactly: session ids are
+    // caller-supplied SDK input, so one id can prefix or suffix another.
+    // Runtime claims may use unique filenames during concurrent resume;
+    // their payload remains authoritative for session ownership.
+    return files.every((file) => {
+      if (file === `${sessionId}.jsonl`) return true;
+      if (file === `${sessionId}.worktree.json`) return true;
+      if (!file.endsWith('.runtime.json')) return false;
+      try {
+        const parsed = JSON.parse(
+          fs.readFileSync(path.join(projectDir, 'chats', file), 'utf8'),
+        ) as { session_id?: unknown };
+        return parsed.session_id === sessionId;
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** Every `*.jsonl` transcript under `<projectDir>/chats` (depth ≤ 2). */

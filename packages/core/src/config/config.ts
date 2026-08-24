@@ -216,9 +216,8 @@ import {
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
-import { isPidAlive } from '../utils/process-liveness.js';
 import {
-  readRuntimeStatus,
+  claimRuntimeStatus,
   releaseRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
@@ -2041,6 +2040,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
+  private runtimeStatusClaimPath?: string;
   private sessionRegistryActive = false;
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
@@ -2693,28 +2693,18 @@ export class Config {
       // block session startup.
       if (this.chatRecordingEnabled) {
         try {
-          const sidecarPath = this.storage.getRuntimeStatusPath(this.sessionId);
-          const existing = await readRuntimeStatus(sidecarPath);
-          // Ownership-aware claim: a live foreign claim means another
-          // process already serves this session id (concurrent
-          // --resume, writer lease off); overwriting it would destroy
-          // that process's only liveness evidence. Go without a claim
-          // — the same posture as a failed claim write.
-          const foreignClaimLive =
-            existing !== null &&
-            existing.pid !== process.pid &&
-            isPidAlive(existing.pid);
-          if (!foreignClaimLive) {
-            await writeRuntimeStatus(sidecarPath, {
+          const claimPath = await claimRuntimeStatus(
+            this.storage.getRuntimeStatusPath(this.sessionId),
+            {
               sessionId: this.sessionId,
               workDir: this.getTargetDir(),
               qwenVersion: this.cliVersion ?? null,
-            });
-            // Arm the session-swap refresh for every kind, not just the
-            // interactive UI: /clear, /resume and ACP session switches
-            // must keep the sidecar on the session this pid now serves.
-            this.markRuntimeStatusEnabled();
-          }
+            },
+          );
+          // Arm the session-swap refresh for every kind, not just the
+          // interactive UI: /clear, /resume and ACP session switches
+          // must keep the sidecar on the session this pid now serves.
+          this.markRuntimeStatusEnabled(claimPath);
         } catch {
           // ignored: best-effort, never block session startup.
         }
@@ -4154,7 +4144,6 @@ export class Config {
     // established for this process" rule.
     if (isSessionTransition) {
       if (this.runtimeStatusEnabled) {
-        const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
         const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
         const cliVersion = this.cliVersion ?? null;
         const workDir = this.targetDir;
@@ -4163,8 +4152,10 @@ export class Config {
           // Demote (never unlink) so a /cd-relocated outgoing session
           // keeps its membership evidence; the pid gate inside
           // releaseRuntimeStatus protects a foreign claim.
-          await releaseRuntimeStatus(oldPath);
-          await writeRuntimeStatus(newPath, {
+          const oldClaimPath = this.runtimeStatusClaimPath;
+          this.runtimeStatusClaimPath = undefined;
+          if (oldClaimPath) await releaseRuntimeStatus(oldClaimPath);
+          this.runtimeStatusClaimPath = await claimRuntimeStatus(newPath, {
             sessionId: newSessionId,
             workDir,
             qwenVersion: cliVersion,
@@ -4207,8 +4198,10 @@ export class Config {
    * alone so this process can't trample a sidecar that happens to
    * share the outgoing session id.
    */
-  markRuntimeStatusEnabled(): void {
+  markRuntimeStatusEnabled(claimPath?: string): void {
     this.runtimeStatusEnabled = true;
+    this.runtimeStatusClaimPath =
+      claimPath ?? this.storage.getRuntimeStatusPath(this.sessionId);
   }
 
   /**
@@ -4315,8 +4308,9 @@ export class Config {
     // project filesystem must neither skip the patch nor hang `/cd` on
     // the HOME write. The failure domains are independent.
     if (this.runtimeStatusEnabled) {
-      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
       this.queueRuntimeStatusWrite(async () => {
+        const sidecarPath = this.runtimeStatusClaimPath;
+        if (!sidecarPath) return;
         await writeRuntimeStatus(sidecarPath, {
           sessionId,
           workDir,
@@ -5153,9 +5147,13 @@ export class Config {
   ): Array<{ from: string; to: string }> {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const runtimeFileName = path.basename(
+      this.runtimeStatusClaimPath ??
+        oldStorage.getRuntimeStatusPath(this.sessionId),
+    );
     return [
       `${this.sessionId}.jsonl`,
-      `${this.sessionId}.runtime.json`,
+      runtimeFileName,
       `${this.sessionId}.worktree.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
@@ -5241,6 +5239,13 @@ export class Config {
     await this.flushRuntimeStatusWrites();
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+      if (this.runtimeStatusEnabled && this.runtimeStatusClaimPath) {
+        this.runtimeStatusClaimPath = path.join(
+          newStorage.getProjectDir(),
+          'chats',
+          path.basename(this.runtimeStatusClaimPath),
+        );
+      }
     } catch (error) {
       if (!opts?.skipProcessChdir) {
         try {
@@ -5520,10 +5525,14 @@ export class Config {
       // sibling's claim untouched — a sibling serving the same session
       // id (concurrent --resume, writer lease off) must keep its only
       // liveness evidence.
-      if (this.runtimeStatusEnabled && !this.sessionWriterHandoffRequested) {
-        await releaseRuntimeStatus(
-          this.storage.getRuntimeStatusPath(this.sessionId),
-        );
+      if (this.runtimeStatusEnabled) {
+        this.runtimeStatusEnabled = false;
+        await this.flushRuntimeStatusWrites();
+        if (!this.sessionWriterHandoffRequested) {
+          const claimPath = this.runtimeStatusClaimPath;
+          this.runtimeStatusClaimPath = undefined;
+          if (claimPath) await releaseRuntimeStatus(claimPath);
+        }
       }
 
       if (Object.hasOwn(this, 'goalRuntime')) {

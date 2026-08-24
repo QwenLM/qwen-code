@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
+  claimRuntimeStatus,
   clearRuntimeStatus,
   readRuntimeStatus,
   releaseRuntimeStatus,
@@ -17,18 +18,21 @@ import {
 } from './runtimeStatus.js';
 
 const fsMocks = vi.hoisted(() => ({
+  link: vi.fn<typeof import('node:fs/promises').link>(),
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.link.mockImplementation(actual.link);
   fsMocks.readFile.mockImplementation(actual.readFile);
-  return { ...actual, readFile: fsMocks.readFile };
+  return { ...actual, link: fsMocks.link, readFile: fsMocks.readFile };
 });
 
 let tmpDir: string;
 
 beforeEach(async () => {
+  fsMocks.link.mockClear();
   fsMocks.readFile.mockClear();
   tmpDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-runtime-status-'));
 });
@@ -38,6 +42,52 @@ afterEach(async () => {
 });
 
 const targetPath = () => path.join(tmpDir, 'runtime.json');
+
+describe('claimRuntimeStatus', () => {
+  it('uses an independent claim when a sibling wins the canonical path race', async () => {
+    const actualFs =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    fsMocks.link.mockImplementationOnce(async (source, target) => {
+      await writeRuntimeStatus(target.toString(), {
+        sessionId: 'abc',
+        workDir: '/sibling',
+      });
+      return actualFs.link(source, target);
+    });
+
+    const claimedPath = await claimRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/ours',
+    });
+
+    expect(claimedPath).not.toBe(targetPath());
+    expect(claimedPath).toMatch(/\.claim-[a-f0-9]+\.runtime\.json$/);
+    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/sibling');
+    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
+  });
+
+  it('replaces a non-live canonical claim', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/stale',
+      pid: 0,
+    });
+
+    const claimedPath = await claimRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/ours',
+    });
+
+    expect(claimedPath).toBe(targetPath());
+    expect((await readRuntimeStatus(targetPath()))?.pid).toBe(process.pid);
+    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/ours');
+    expect(
+      (await readdir(tmpDir)).filter((file) => file.includes('displaced')),
+    ).toEqual([]);
+  });
+});
 
 describe('writeRuntimeStatus', () => {
   it('writes the expected fields', async () => {
@@ -345,6 +395,67 @@ describe('releaseRuntimeStatus', () => {
     const after = await readRuntimeStatus(targetPath());
     expect(after?.pid).toBe(4242);
     expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
+  });
+
+  it('does not overwrite a sibling claim that lands at the demotion commit', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/ours',
+      pid: process.pid,
+    });
+    const actualFs =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    fsMocks.link.mockImplementationOnce(async (source, target) => {
+      await writeRuntimeStatus(target.toString(), {
+        sessionId: 'abc',
+        workDir: '/sibling',
+        pid: process.pid,
+      });
+      return actualFs.link(source, target);
+    });
+
+    await releaseRuntimeStatus(targetPath());
+
+    const after = await readRuntimeStatus(targetPath());
+    expect(after?.pid).toBe(process.pid);
+    expect(after?.workDir).toBe('/sibling');
+    expect(
+      (await readdir(tmpDir)).some((file) => file.includes('releasing')),
+    ).toBe(false);
+  });
+
+  it('preserves a displaced foreign claim when a sibling wins put-back', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/foreign',
+      pid: 4242,
+    });
+    const actualFs =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    fsMocks.link.mockImplementationOnce(async (source, target) => {
+      await writeRuntimeStatus(target.toString(), {
+        sessionId: 'abc',
+        workDir: '/sibling',
+        pid: process.pid,
+      });
+      return actualFs.link(source, target);
+    });
+
+    await releaseRuntimeStatus(targetPath());
+
+    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/sibling');
+    const displacedPath = (await readdir(tmpDir))
+      .map((file) => path.join(tmpDir, file))
+      .find((file) => file.includes('claim-'));
+    expect(displacedPath).toBeDefined();
+    expect((await readRuntimeStatus(displacedPath!))?.workDir).toBe('/foreign');
+    expect(
+      (await readdir(tmpDir)).some((file) => file.includes('releasing')),
+    ).toBe(false);
   });
 
   it('restores an unreadable record instead of destroying it', async () => {
