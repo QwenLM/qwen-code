@@ -2484,10 +2484,12 @@ export class CoreToolScheduler {
               // call keeps scoped PermissionManager shims (installed via
               // `as unknown as PermissionManager`, e.g.
               // memory-scoped-agent-config.ts) from throwing until they grow
-              // the delegation; they keep the pre-#9827 message meanwhile.
+              // the delegation; when coverage is unknown the fallback stays
+              // on the pre-#9827 message rather than risk the wrong
+              // attribution (#9827).
               (typeof pm.isCoveredByAllowOrAskRule === 'function'
                 ? !pm.isCoveredByAllowOrAskRule(canonicalName)
-                : true)
+                : false)
             ) {
               // The tool was rejected by the `permissions.allow` registry
               // allowlist, not by any deny rule: it is not covered by an

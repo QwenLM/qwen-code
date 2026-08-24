@@ -3692,15 +3692,20 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('keeps a memory-scoped shim rejection on the allowlist permission path instead of throwing (#9827)', async () => {
+  it('keeps a memory-scoped shim rejection on the pre-#9827 declined message instead of throwing (#9827)', async () => {
     // Production installs the memory-scoped PermissionManager shim via
     // `as unknown as PermissionManager` (memory-scoped-agent-config.ts);
     // the cast used to hide that the shim lacked
     // `isPermissionsAllowListActive`, so a shim-rejected call under an
     // active allowlist threw TypeError in the message branch below and
     // surfaced as an UNHANDLED_EXCEPTION tool error instead of the
-    // designed permission error. Drive the REAL shim through the
-    // scheduler to pin the end-to-end path.
+    // designed permission error. The shim also lacks
+    // `isCoveredByAllowOrAskRule`, so coverage is unknown for it and the
+    // fallback must stay on the pre-#9827 declined message — never the
+    // allowlist attribution, which would be wrong for a COVERED tool
+    // rejected by a different gate (e.g. the legacy coreTools allowlist).
+    // Drive the REAL shim through the scheduler to pin the end-to-end
+    // path.
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'sent',
       returnDisplay: 'sent',
@@ -3764,7 +3769,10 @@ describe('CoreToolScheduler', () => {
         ToolErrorType.EXECUTION_DENIED,
       );
       const message = completedCall.response.error?.message ?? '';
-      expect(message).toContain('permissions.allow');
+      expect(message).toBe(
+        'Qwen Code requires permission to use "send_message", but that permission was declined.',
+      );
+      expect(message).not.toContain('permissions.allow');
       expect(message).not.toContain('UNHANDLED_EXCEPTION');
     }
     expect(execute).not.toHaveBeenCalled();
