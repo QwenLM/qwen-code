@@ -7,16 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
-const configurationGet = vi.hoisted(() => vi.fn(() => false));
-
 vi.mock('vscode', () => ({
   Uri: {
     joinPath: vi.fn((_base: unknown, ...parts: string[]) => ({
       fsPath: `/ext/${parts.join('/')}`,
     })),
-  },
-  workspace: {
-    getConfiguration: vi.fn(() => ({ get: configurationGet })),
   },
 }));
 
@@ -69,7 +64,7 @@ describe('WebViewContent', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
-    expect(html).toContain('<script src=');
+    expect(html).toContain('<script type="module" src=');
     expect(html).toContain('webview.js');
   });
 
@@ -80,23 +75,24 @@ describe('WebViewContent', () => {
     expect(html).toContain('data-extension-uri=');
   });
 
-  it('keeps the Web Shell transcript disabled by default', () => {
-    const html = WebViewContent.generate(
-      createMockWebview() as never,
-      fakeExtensionUri,
-    );
+  it('grants wasm-unsafe-eval to script-src unconditionally', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
-    expect(html).toContain('data-web-shell-transcript="disabled"');
+    expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
   });
 
-  it('enables the Web Shell transcript only when configured', () => {
-    configurationGet.mockReturnValueOnce(true);
+  it('allows the WebShell transcript to use its inlined fonts', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
-    const html = WebViewContent.generate(
-      createMockWebview() as never,
-      fakeExtensionUri,
-    );
+    expect(html).toContain('font-src data:;');
+  });
 
-    expect(html).toContain('data-web-shell-transcript="enabled"');
+  it('does not set data-web-shell-transcript on the body', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).not.toContain('data-web-shell-transcript');
   });
 });

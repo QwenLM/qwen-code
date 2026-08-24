@@ -281,11 +281,12 @@ export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
 export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
   return Math.max(1, Math.floor(outerWaitMs * 0.8));
 }
-/** Bounds on a single snapshot. Generous next to any real deployment — they
- *  exist so a version-skewed or buggy child cannot make the daemon walk an
- *  unbounded structure per report, not to constrain legitimate use. A packet
- *  over either bound is discarded whole, like any other malformed one. */
+/** Bounds on a single snapshot. Generous next to any real deployment — it
+ *  exists so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded Session list per report. An oversized packet is discarded whole. */
 export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+/** Shared per-Session hold bound. Oversized snapshots are discarded whole;
+ *  oversized close refusals retain the Session without replacing its cache. */
 export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
@@ -847,7 +848,7 @@ export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
  * / `session_closed`). The ACP wire frame itself only carries
  * `{outcome:'cancelled'}`; the child uses this to avoid persisting a
  * fabricated "canceled by the user" tool result when an unattended restore
- * prompt's permission wait simply timed out.
+ * prompt's permission wait timed out or the session closed.
  */
 export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
   'qwen.daemon.permissionCancelReason';

@@ -18,6 +18,10 @@ import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
+import {
+  collectHistoryReplayUpdates,
+  createReplayCumulativeUsage,
+} from './history-replay-page.js';
 import type { SessionContext } from './types.js';
 import { ChatRecordingService } from '@qwen-code/qwen-code-core';
 import type {
@@ -1543,5 +1547,80 @@ describe('HistoryReplayer', () => {
         assistantRecord.timestamp,
       );
     });
+  });
+});
+
+describe('collectHistoryReplayUpdates restore skip', () => {
+  const AUQ_ARGS = {
+    questions: [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        options: [
+          { label: 'Polling', description: 'Poll the API' },
+          { label: 'Webhook', description: 'Use a webhook' },
+        ],
+      },
+    ],
+  };
+
+  const danglingRecord = (): ChatRecord => ({
+    uuid: 'assistant-auq',
+    parentUuid: 'user-uuid',
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    cwd: '/test',
+    version: '1.0.0',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: AUQ_ARGS,
+          },
+        },
+      ],
+    },
+  });
+
+  it('skips finalize from the transcript tail when chat is not initialized', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+    ]);
+  });
+
+  it('finalizes when restore skip is suppressed', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      suppressRestoreAskUserQuestion: true,
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+      'tool_call_update',
+    ]);
   });
 });

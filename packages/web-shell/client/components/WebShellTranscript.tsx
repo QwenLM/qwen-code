@@ -1,3 +1,4 @@
+import 'katex/dist/katex.min.css';
 import '../styles/globals.css';
 import {
   useLayoutEffect,
@@ -43,6 +44,7 @@ import {
 } from '../themeContext';
 import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 import styles from '../App.module.css';
+import { McpAppHostContext } from '../mcpAppHostContext';
 
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
@@ -68,6 +70,7 @@ export interface WebShellTranscriptProps {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  mcpAppBaseUrl?: string;
 }
 
 function resolveLanguage(
@@ -119,6 +122,7 @@ function WebShellTranscriptContent({
   renderComposerTag,
   renderComposerTagTooltip,
   renderAssistantTurnFooter,
+  mcpAppBaseUrl,
 }: WebShellTranscriptProps): ReactElement {
   const documentMode = renderMode === 'document';
   const effectiveCollapseCompletedTurns =
@@ -239,44 +243,46 @@ function WebShellTranscriptContent({
   return (
     <ThemeProvider value={theme}>
       <I18nProvider language={resolvedLanguage}>
-        <WebShellPortalRootContext.Provider value={portalRoot}>
-          <TranscriptRenderModeProvider value={renderMode}>
-            <WebShellCustomizationProvider value={customization}>
-              <TodoTimelineContext.Provider value={todoTimeline}>
-                <TodoDetailContext.Provider value={todoDetails}>
-                  <CompactModeContext.Provider value={false}>
-                    <div
-                      ref={rootRef}
-                      className={rootClassName}
-                      style={rootStyle}
-                      data-web-shell-root
-                      data-web-shell-shadcn
-                      data-transcript-render-mode={renderMode}
-                      lang={resolvedLanguage}
-                    >
+        <McpAppHostContext.Provider value={mcpAppBaseUrl}>
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <TranscriptRenderModeProvider value={renderMode}>
+              <WebShellCustomizationProvider value={customization}>
+                <TodoTimelineContext.Provider value={todoTimeline}>
+                  <TodoDetailContext.Provider value={todoDetails}>
+                    <CompactModeContext.Provider value={false}>
                       <div
-                        className={`${styles.content} ${styles.contentHasMessages}`}
+                        ref={rootRef}
+                        className={rootClassName}
+                        style={rootStyle}
+                        data-web-shell-root
+                        data-web-shell-shadcn
+                        data-transcript-render-mode={renderMode}
+                        lang={resolvedLanguage}
                       >
-                        <MessageList
-                          messages={messages}
-                          pendingApproval={null}
-                          isResponding={false}
-                          workspaceCwd={workspaceCwd}
-                          virtualScrollThreshold={
-                            documentMode
-                              ? Number.MAX_SAFE_INTEGER
-                              : virtualScrollThreshold
-                          }
-                          hideSessionTimeline={documentMode}
-                        />
+                        <div
+                          className={`${styles.content} ${styles.contentHasMessages}`}
+                        >
+                          <MessageList
+                            messages={messages}
+                            pendingApproval={null}
+                            isResponding={false}
+                            workspaceCwd={workspaceCwd}
+                            virtualScrollThreshold={
+                              documentMode
+                                ? Number.MAX_SAFE_INTEGER
+                                : virtualScrollThreshold
+                            }
+                            hideSessionTimeline={documentMode}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  </CompactModeContext.Provider>
-                </TodoDetailContext.Provider>
-              </TodoTimelineContext.Provider>
-            </WebShellCustomizationProvider>
-          </TranscriptRenderModeProvider>
-        </WebShellPortalRootContext.Provider>
+                    </CompactModeContext.Provider>
+                  </TodoDetailContext.Provider>
+                </TodoTimelineContext.Provider>
+              </WebShellCustomizationProvider>
+            </TranscriptRenderModeProvider>
+          </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );

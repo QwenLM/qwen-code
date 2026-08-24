@@ -85,10 +85,9 @@ function makeQualifiedApp() {
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
-    workspaceRegistry:
-      registry as unknown as Parameters<
-        typeof registerWorkspaceQualifiedSettingsRoutes
-      >[1]['workspaceRegistry'],
+    workspaceRegistry: registry as unknown as Parameters<
+      typeof registerWorkspaceQualifiedSettingsRoutes
+    >[1]['workspaceRegistry'],
     invalidateServeFeaturesCache: () => {},
   });
 

@@ -29,12 +29,11 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
-  toolCallCallbackRef,
   transcriptUpdateCallbackRef,
+  toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
   mockShowInformationMessage,
-  mockShowErrorMessage,
   mockWindowState,
   mockQwenAgentManagerInstances,
   mockClipboardWriteText,
@@ -106,14 +105,14 @@ const {
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
   },
+  transcriptUpdateCallbackRef: {
+    current: undefined as
+      | ((notification: Record<string, unknown>) => void)
+      | undefined,
+  },
   toolCallCallbackRef: {
     current: undefined as
       | ((update: Record<string, unknown>) => void)
-      | undefined,
-  },
-  transcriptUpdateCallbackRef: {
-    current: undefined as
-      | ((notification: { sessionId: string; update: unknown }) => void)
       | undefined,
   },
   permissionRequestCallbackRef: {
@@ -127,7 +126,6 @@ const {
   mockShowInformationMessage: vi.fn<
     (message: string, ...items: string[]) => Thenable<string | undefined>
   >(() => Promise.resolve(undefined)),
-  mockShowErrorMessage: vi.fn(),
   mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
@@ -175,7 +173,6 @@ vi.mock('vscode', () => ({
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
     showInformationMessage: mockShowInformationMessage,
-    showErrorMessage: mockShowErrorMessage,
     state: mockWindowState,
   },
   workspace: {
@@ -205,21 +202,10 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
   QwenAgentManager: class {
     isConnected = false;
     currentSessionId = null;
-    rehydratingTranscriptSessionId = null;
     connect = vi.fn();
     createNewSession = vi.fn();
     setModelFromUi = vi.fn();
     onMessage = vi.fn();
-    onTranscriptUpdate = vi.fn(
-      (
-        callback: (notification: {
-          sessionId: string;
-          update: unknown;
-        }) => void,
-      ) => {
-        transcriptUpdateCallbackRef.current = callback;
-      },
-    );
     onStreamChunk = vi.fn((cb: (chunk: string) => void) => {
       streamChunkCallbackRef.current = cb;
     });
@@ -270,6 +256,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onAskUserQuestion = vi.fn(
       (callback: (request: unknown) => Promise<{ optionId: string }>) => {
         askUserQuestionCallbackRef.current = callback;
+      },
+    );
+    onTranscriptUpdate = vi.fn(
+      (callback: (notification: Record<string, unknown>) => void) => {
+        transcriptUpdateCallbackRef.current = callback;
       },
     );
     onDisconnected = vi.fn();
@@ -481,14 +472,13 @@ beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
-  toolCallCallbackRef.current = undefined;
   transcriptUpdateCallbackRef.current = undefined;
+  toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
   mockShowInformationMessage.mockReset();
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
-  mockShowErrorMessage.mockReset();
   mockClipboardWriteText.mockReset();
   mockClipboardWriteText.mockResolvedValue(undefined);
 });
@@ -592,65 +582,6 @@ describe('WebViewProvider.attachToView', () => {
         ],
         requestId: 7,
       },
-    });
-  });
-
-  it('forwards transcript updates only while enabled and for the active session', async () => {
-    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) =>
-      key === 'experimental.webShellTranscript' ? true : defaultValue,
-    );
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1)! as unknown as {
-      currentSessionId: string | null;
-      rehydratingTranscriptSessionId: string | null;
-    };
-    agentManager.currentSessionId = 'session-1';
-
-    transcriptUpdateCallbackRef.current?.({
-      sessionId: 'stale-session',
-      update: { sessionUpdate: 'agent_message_chunk' },
-    });
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'transcriptUpdate' }),
-    );
-
-    transcriptUpdateCallbackRef.current?.({
-      sessionId: 'session-1',
-      update: { sessionUpdate: 'agent_message_chunk' },
-    });
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'transcriptUpdate' }),
-    );
-
-    postMessage.mockClear();
-    agentManager.currentSessionId = null;
-    agentManager.rehydratingTranscriptSessionId = 'session-loading';
-    transcriptUpdateCallbackRef.current?.({
-      sessionId: 'session-loading',
-      update: { sessionUpdate: 'agent_message_chunk' },
-    });
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'transcriptUpdate' }),
-    );
-
-    postMessage.mockClear();
-    mockConfigGet.mockImplementation(
-      (_key: string, defaultValue: unknown) => defaultValue,
-    );
-    transcriptUpdateCallbackRef.current?.({
-      sessionId: 'session-1',
-      update: { sessionUpdate: 'agent_message_chunk' },
-    });
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'transcriptUpdate' }),
-    );
-
-    await mockConfigChangeHandlers.at(-1)?.(
-      createConfigChangeEvent('qwen-code.experimental.webShellTranscript'),
-    );
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'webShellTranscriptSettingChanged',
-      data: { enabled: false, sessionId: 'session-loading' },
     });
   });
 
@@ -1202,6 +1133,39 @@ describe('WebViewProvider.attachToView', () => {
   });
 });
 
+describe('WebViewProvider transcript forwarding', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+  });
+
+  it('forwards agent transcriptUpdate notifications to the webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    // The subscription is registered in the provider constructor; without it
+    // the webview never receives timeline frames and renders an empty
+    // transcript while every other message flow keeps working.
+    expect(transcriptUpdateCallbackRef.current).toBeDefined();
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      },
+    };
+
+    transcriptUpdateCallbackRef.current?.(notification);
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: notification,
+    });
+  });
+});
+
 describe('WebViewProvider settings sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1447,13 +1411,6 @@ describe('WebViewProvider.createNewSession', () => {
         };
       }
     ).messageHandler;
-    const sendMessageToWebView = vi.spyOn(
-      provider as unknown as {
-        sendMessageToWebView: (message: unknown) => void;
-      },
-      'sendMessageToWebView',
-    );
-    agentManager.createNewSession.mockResolvedValue('session-2');
 
     await provider.createNewSession();
 
@@ -1462,46 +1419,6 @@ describe('WebViewProvider.createNewSession', () => {
       { forceNew: true },
     );
     expect(messageHandler.setCurrentConversationId).toHaveBeenCalledWith(null);
-    expect(sendMessageToWebView).toHaveBeenCalledWith({
-      type: 'conversationCleared',
-      data: { sessionId: 'session-2' },
-    });
-  });
-
-  it('keeps the current view when session creation returns no id', async () => {
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-    const agentManager = (
-      provider as unknown as {
-        agentManager: { createNewSession: ReturnType<typeof vi.fn> };
-      }
-    ).agentManager;
-    const messageHandler = (
-      provider as unknown as {
-        messageHandler: {
-          setCurrentConversationId: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).messageHandler;
-    const sendMessageToWebView = vi.spyOn(
-      provider as unknown as {
-        sendMessageToWebView: (message: unknown) => void;
-      },
-      'sendMessageToWebView',
-    );
-    agentManager.createNewSession.mockResolvedValue(null);
-
-    await provider.createNewSession();
-
-    expect(messageHandler.setCurrentConversationId).not.toHaveBeenCalled();
-    expect(sendMessageToWebView).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'conversationCleared' }),
-    );
-    expect(mockShowErrorMessage).toHaveBeenCalledWith(
-      expect.stringContaining('did not return a session id'),
-    );
   });
 });
 

@@ -189,23 +189,6 @@ export class WebViewProvider {
     // The isSyncingToVSCode guard prevents a loop when we programmatically populate VSCode settings.
     const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
       async (e) => {
-        if (
-          e.affectsConfiguration('qwen-code.experimental.webShellTranscript')
-        ) {
-          const enabled = vscode.workspace
-            .getConfiguration('qwen-code')
-            .get<boolean>('experimental.webShellTranscript', false);
-          this.sendMessageToWebView({
-            type: 'webShellTranscriptSettingChanged',
-            data: {
-              enabled,
-              sessionId:
-                this.agentManager.currentSessionId ??
-                this.agentManager.rehydratingTranscriptSessionId ??
-                undefined,
-            },
-          });
-        }
         const authSettingsChanged = AUTH_RELATED_QWEN_SETTINGS.some((setting) =>
           e.affectsConfiguration(setting),
         );
@@ -266,29 +249,6 @@ export class WebViewProvider {
     this.disposables.push(fileWatcherDisposable);
 
     // Setup agent callbacks
-    this.agentManager.onTranscriptUpdate((notification) => {
-      const enabled = vscode.workspace
-        .getConfiguration('qwen-code')
-        .get<boolean>('experimental.webShellTranscript', false);
-      const currentSessionId = this.agentManager.currentSessionId;
-      const rehydratingSessionId =
-        this.agentManager.rehydratingTranscriptSessionId;
-      if (
-        !enabled ||
-        (notification.sessionId !== currentSessionId &&
-          notification.sessionId !== rehydratingSessionId)
-      ) {
-        return;
-      }
-      this.sendMessageToWebView({
-        type: 'transcriptUpdate',
-        data: {
-          sessionId: notification.sessionId,
-          update: notification.update,
-        },
-      });
-    });
-
     this.agentManager.onMessage((message) => {
       // Do not suppress messages during checkpoint saves.
       // Checkpoint persistence now writes directly to disk and should not
@@ -391,15 +351,18 @@ export class WebViewProvider {
       });
     });
 
+    // Forward raw ACP session/update notifications for the WebShell transcript UI.
+    this.agentManager.onTranscriptUpdate((notification) => {
+      this.sendMessageToWebView({
+        type: 'transcriptUpdate',
+        data: notification,
+      });
+    });
+
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {
-        const current = (info?.currentModeId || null) as
-          | 'plan'
-          | 'default'
-          | 'auto-edit'
-          | 'yolo'
-          | null;
+        const current = info?.currentModeId ?? null;
         this.currentModeId = current;
       } catch (_error) {
         // Ignore error when parsing mode info
@@ -1381,7 +1344,7 @@ export class WebViewProvider {
           // Notify webview that agent is connected
           this.sendMessageToWebView({
             type: 'agentConnected',
-            data: { sessionId: this.agentManager.currentSessionId },
+            data: {},
           });
         } else {
           logger.log(
@@ -1612,7 +1575,7 @@ export class WebViewProvider {
       // Notify webview that agent is connected after refresh
       this.sendMessageToWebView({
         type: 'agentConnected',
-        data: { sessionId: this.agentManager.currentSessionId },
+        data: {},
       });
     } catch (_error) {
       const errorMsg = getErrorMessage(_error);
@@ -2559,18 +2522,20 @@ export class WebViewProvider {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       // Create new Qwen session via agent manager
-      const sessionId = await this.agentManager.createNewSession(workingDir, {
-        forceNew: true,
-      });
-      if (!sessionId) {
-        throw new Error('The agent did not return a session id.');
-      }
+      await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.messageHandler.setCurrentConversationId(null);
 
-      // Clear current conversation UI
+      // Clear current conversation UI. Publish the fresh ACP session id so
+      // the transcript guard drops trailing frames from the abandoned
+      // session (which may still be streaming) instead of adopting them
+      // into the new conversation.
       this.sendMessageToWebView({
         type: 'conversationCleared',
-        data: { sessionId },
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
     } catch (_error) {
       logger.error('[WebViewProvider] Failed to create new session:', _error);

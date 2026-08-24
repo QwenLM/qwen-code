@@ -28,10 +28,6 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
-  groupParallelAgents,
-  type ParallelAgentDisplayItem,
-} from '../adapters/parallelAgentGrouping';
-import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
@@ -57,11 +53,10 @@ import {
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
-  isAskUserQuestionToolName,
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
-import { isTodoWriteToolName } from '../utils/todos';
+import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -225,15 +220,28 @@ function getLastTurnStartMessageId(messages: Message[]): string | null {
 }
 
 export type DisplayItem =
-  | (Extract<ParallelAgentDisplayItem, { type: 'message' }> & {
+  | {
+      type: 'message';
+      key: string;
+      message: Message;
       /** Metrics info for the final answer assistant message. */
       turnCollapse?: TurnCollapseHead;
-    })
-  | Extract<ParallelAgentDisplayItem, { type: 'parallel_agents' }>
+    }
   | {
       type: 'turn_collapse';
       key: string;
       turnCollapse: TurnCollapseHead;
+    }
+  | {
+      type: 'parallel_agents';
+      key: string;
+      turnId: string;
+      agents: ACPToolCall[];
+      /**
+       * Wall-clock time of the first grouped launch, carried so the grouped
+       * box reveals its time on hover exactly like a standalone message row.
+       */
+      timestamp?: number;
     }
   | {
       type: 'turn_outputs';
@@ -279,6 +287,36 @@ export interface SessionTimelineRange {
   currentIndex: number;
 }
 
+// Synthetic compact summaries carry a folded thought next to their single
+// tool; the parallel-agent path must never swallow that row, so agent-only
+// detection excludes them.
+function isAgentOnlyToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    !msg.id.startsWith('summary-') &&
+    msg.tools.length === 1 &&
+    isSubAgentToolCall(msg.tools[0])
+  );
+}
+
+function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    !msg.id.startsWith('summary-') &&
+    msg.tools.length === 1 &&
+    isBackgroundSubAgentToolCall(msg.tools[0])
+  );
+}
+
+function isBackgroundLaunchNarration(msg: Message): boolean {
+  // The daemon often streams short main-agent thought text between background
+  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
+  // those as internal launch narration and shows a single Parallel agents box.
+  // Only skip thought-only messages here; any user-facing assistant content
+  // still breaks the group and remains visible.
+  return msg.role === 'thinking';
+}
+
 function isForceExpandGroup(
   msg: Message,
   pendingApproval: PermissionRequest | null,
@@ -292,18 +330,6 @@ function isForceExpandGroup(
   return false;
 }
 
-function isStandaloneToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    msg.tools.some(
-      (tool) =>
-        isSubAgentToolCall(tool) ||
-        isTodoWriteToolName(tool.toolName) ||
-        isAskUserQuestionToolName(tool.toolName),
-    )
-  );
-}
-
 function mergeCompactToolGroups(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
@@ -312,9 +338,7 @@ function mergeCompactToolGroups(
   let i = 0;
 
   const isMergedToolGroup = (m: Message): boolean =>
-    m.role === 'tool_group' &&
-    !isForceExpandGroup(m, pendingApproval) &&
-    !isStandaloneToolGroup(m);
+    m.role === 'tool_group' && !isForceExpandGroup(m, pendingApproval);
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -345,18 +369,22 @@ function mergeCompactToolGroups(
     const tools = run
       .filter((m): m is DaemonToolGroupMessage => m.role === 'tool_group')
       .flatMap((group) => group.tools);
-    const hasStreamingThought = run.some(
-      (m) => m.role === 'thinking' && m.isStreaming === true,
-    );
-    if (tools.length === 0 && !hasStreamingThought) {
-      // Completed thinking with no adjacent tools stays a standalone row.
+    if (
+      tools.length === 0 ||
+      run.length <= 1 ||
+      (run.length >= 2 && run.every(isAgentOnlyToolGroup))
+    ) {
+      // A lone thought or tool stays a standalone row: only multi-item runs
+      // aggregate into a summary. A parallel-agent-only run keeps its direct
+      // x/x row; it nests only when thinking or other tools join the run.
       for (const item of run) result.push(item);
       i = lastRunIdx + 1;
       continue;
     }
 
-    // Each thought remembers the tool that follows it, so the group renders
-    // in the original order without the view reordering anything.
+    // Each thought remembers the tool that follows it. Consecutive agents may
+    // later render as one row anchored at the first agent; launch narration
+    // bound to later agents follows that aggregate row.
     const thoughts: Array<{
       content: string;
       isStreaming?: boolean;
@@ -425,7 +453,82 @@ function updateCompactStreamingThinkingTail(
   return result;
 }
 
-export { groupParallelAgents };
+export function groupParallelAgents(messages: Message[]): DisplayItem[] {
+  const items: DisplayItem[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
+      const grouped: Message[] = [];
+      let j = i;
+      while (j < messages.length) {
+        const current = messages[j];
+        if (isBackgroundAgentOnlyToolGroup(current)) {
+          grouped.push(current);
+          j++;
+          continue;
+        }
+        if (isBackgroundLaunchNarration(current)) {
+          let nextAgentIdx = j + 1;
+          while (
+            nextAgentIdx < messages.length &&
+            isBackgroundLaunchNarration(messages[nextAgentIdx])
+          ) {
+            nextAgentIdx++;
+          }
+          if (
+            nextAgentIdx < messages.length &&
+            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
+          ) {
+            j = nextAgentIdx;
+            continue;
+          }
+        }
+        break;
+      }
+
+      if (grouped.length >= 2) {
+        items.push({
+          type: 'parallel_agents',
+          key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
+          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+          timestamp: grouped[0].timestamp,
+        });
+        i = j;
+        continue;
+      }
+    }
+
+    if (isAgentOnlyToolGroup(messages[i])) {
+      const start = i;
+      while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
+      if (i - start >= 2) {
+        const grouped = messages.slice(start, i);
+        items.push({
+          type: 'parallel_agents',
+          key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
+          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+          timestamp: grouped[0].timestamp,
+        });
+      } else {
+        items.push({
+          type: 'message',
+          key: messages[start].id,
+          message: messages[start],
+        });
+      }
+    } else {
+      items.push({
+        type: 'message',
+        key: messages[i].id,
+        message: messages[i],
+      });
+      i++;
+    }
+  }
+  return items;
+}
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
@@ -1415,6 +1518,19 @@ function turnHasActiveAgent(
   );
 }
 
+function turnHasMcpApp(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+): boolean {
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) => getMcpAppDisplay(tool.rawOutput) !== undefined,
+  );
+}
+
 function completedBackgroundShellTaskIds(
   items: readonly DisplayItem[],
   terminalTaskIds?: ReadonlySet<string>,
@@ -1715,6 +1831,7 @@ export function applyTurnCollapse(
     const isLastTurn = k === userIdxs.length - 1;
     const isActiveTurn = isLastTurn && isResponding;
     const hasActiveAgent = turnHasActiveAgent(items, start, end);
+    const hasMcpApp = turnHasMcpApp(items, start, end);
     const hasPendingBackgroundShell = turnHasPendingBackgroundShell(
       items,
       start,
@@ -1840,6 +1957,7 @@ export function applyTurnCollapse(
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
+      hasMcpApp ||
       hasPendingBackgroundShell ||
       hasAutomaticallyExpandedAgent ||
       awaitsBackgroundSummary ||
@@ -1977,14 +2095,6 @@ function displayItemMatchesLocateTarget(
   }
   if (item.type === 'turn_outputs') return false;
   return false;
-}
-
-function displayItemSourceBlockIds(
-  item: DisplayItem | undefined,
-): string | undefined {
-  return item?.type === 'message'
-    ? item.message.sourceBlockIds?.join(',')
-    : undefined;
 }
 
 export interface MessageListHandle {
@@ -5206,9 +5316,6 @@ export const MessageList = memo(
                   ),
                 )}
                 data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  visibleItems[virtualRow.index - headerOffset],
-                )}
                 data-web-shell-message-row
                 style={{
                   position: 'absolute',
@@ -5231,7 +5338,6 @@ export const MessageList = memo(
                 data-index={index}
                 className={getRowClassName(item)}
                 data-message-row-key={String(key)}
-                data-source-block-ids={displayItemSourceBlockIds(item)}
                 data-web-shell-message-row
               >
                 {renderVirtualItem(index)}
