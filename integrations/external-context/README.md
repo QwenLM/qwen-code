@@ -12,9 +12,11 @@ three managed deployment variants:
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. Only Mem0 has an
-optional write path. There is no generic ingestion protocol, personal memory,
+The built-in adapters support Mem0 Platform V3 search, the open-source Mem0
+REST protocol (self-hosted servers and managed services such as Aliyun
+PolarDB Mem0), and a small Generic HTTP Search V1 contract for existing
+knowledge or RAG services. Only the Mem0 providers have an optional write
+path. There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
 Provider teams that need a separately owned and released integration should
@@ -395,7 +397,11 @@ relay (for example `ssh -L` or a VPC-side proxy) when one is available.
 
 `userId` selects the tenant whose memories are read and written. It is fixed
 in the configuration and is never supplied by the model. See
-`examples/mem0-oss.json` for a complete configuration.
+`examples/mem0-oss.json` for a complete configuration. That example is
+read-only as shipped: `context_remember` is registered only when the v1
+configuration carries `"write": { "enabled": true }`, and enabling it should
+reuse the managed write-confirmation Hook and permissions from the Mem0 write
+variant above.
 
 ## Rollout and rollback
 
@@ -403,8 +409,12 @@ Start with the pinned read-only on-demand MCP for one workspace and validate
 search quality and provenance. For writes, first run the repository's
 interactive fake-Mem0 test harness, then progress through an isolated temporary
 Mem0 Project, one trusted repository, and a small team. The shipped Mem0
-configuration always targets Mem0 Platform; only the test harness injects a
-local endpoint. Enable auto-recall only after the administrator accepts
+Platform configuration always targets Mem0 Platform, and only the test harness
+injects a local endpoint; a `mem0` (open-source) configuration instead points
+at whatever endpoint the operator sets — plain HTTP included when
+`allowInsecureHttp` is on — so treat that endpoint and its network whitelist
+as the access boundary and validate search against it read-only before
+enabling writes. Enable auto-recall only after the administrator accepts
 automatic query forwarding. Do not run auto-recall and an on-demand MCP in one
 process.
 

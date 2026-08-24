@@ -7,7 +7,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
-import { validateProviderBaseUrl } from './http-client.js';
 import type {
   ExternalContextConfig,
   GenericHttpProviderConfig,
@@ -167,15 +166,6 @@ function resolveProvider(
     }
     case 'mem0': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
-      try {
-        validateProviderBaseUrl(provider.baseUrl, {
-          allowInsecureHttp: provider.allowInsecureHttp ?? false,
-        });
-      } catch (error) {
-        throw new ConfigurationError(
-          error instanceof Error ? error.message : String(error),
-        );
-      }
       return { ...provider, apiKey };
     }
     case 'generic-http-search-v1': {

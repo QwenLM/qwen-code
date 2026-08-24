@@ -233,6 +233,18 @@ describe('validateProviderBaseUrl', () => {
     expect(validateProviderBaseUrl('http://127.0.0.1:8080').hostname).toBe(
       '127.0.0.1',
     );
+    expect(validateProviderBaseUrl('http://localhost:8080').hostname).toBe(
+      'localhost',
+    );
+    expect(validateProviderBaseUrl('http://[::1]:8080').hostname).toBe('[::1]');
+  });
+
+  it('points at the allowInsecureHttp opt-in when the provider offers one', () => {
+    expect(() =>
+      validateProviderBaseUrl('http://192.0.2.1:8080', {
+        allowInsecureHttpHint: true,
+      }),
+    ).toThrow('set "allowInsecureHttp": true');
   });
 
   it('rejects non-loopback HTTP unless explicitly allowed', () => {

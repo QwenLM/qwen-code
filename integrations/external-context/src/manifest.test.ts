@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -260,21 +260,25 @@ describe('extension manifest', () => {
     const directory = await mkdtemp(
       join(tmpdir(), 'external-context-example-'),
     );
-    const configPath = join(directory, 'config.json');
-    await writeFile(configPath, JSON.stringify(substituted));
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
 
-    await expect(
-      loadConfig({
-        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
-        MEM0_API_KEY: 'example-key',
-      }),
-    ).resolves.toMatchObject({
-      provider: {
-        type: 'mem0',
-        userId: 'example-user',
-        appId: 'qwen-code',
-      },
-    });
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+          MEM0_API_KEY: 'example-key',
+        }),
+      ).resolves.toMatchObject({
+        provider: {
+          type: 'mem0',
+          userId: 'example-user',
+          appId: 'qwen-code',
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('pins write confirmation and disables local persistence', async () => {

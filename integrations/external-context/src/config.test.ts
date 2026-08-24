@@ -127,7 +127,7 @@ describe('loadConfig', () => {
       });
     });
 
-    it('accepts a plain-HTTP baseUrl only with allowInsecureHttp', async () => {
+    it('loads a plain-HTTP baseUrl with allowInsecureHttp', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
@@ -146,40 +146,6 @@ describe('loadConfig', () => {
       ).resolves.toMatchObject({
         provider: { type: 'mem0', allowInsecureHttp: true },
       });
-
-      const rejected = await createFixture();
-      await writeConfig(rejected, {
-        version: 1,
-        provider: { ...provider, baseUrl: 'http://192.0.2.1:8080' },
-      });
-
-      await expect(
-        loadConfig({
-          QWEN_EXTERNAL_CONTEXT_CONFIG: rejected.config,
-          MEM0_API_KEY: 'secret-value',
-        }),
-      ).rejects.toThrow('Provider URL must use HTTPS or loopback HTTP.');
-    });
-
-    it('rejects a credentialed baseUrl even with allowInsecureHttp', async () => {
-      const fixture = await createFixture();
-      await writeConfig(fixture, {
-        version: 1,
-        provider: {
-          ...provider,
-          baseUrl: 'http://key@192.0.2.1:8080',
-          allowInsecureHttp: true,
-        },
-      });
-
-      await expect(
-        loadConfig({
-          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
-          MEM0_API_KEY: 'secret-value',
-        }),
-      ).rejects.toThrow(
-        'Provider URL must not contain credentials, path, query, or fragment.',
-      );
     });
 
     it('rejects a mem0 provider without userId', async () => {

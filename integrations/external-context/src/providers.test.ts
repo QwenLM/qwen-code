@@ -618,7 +618,7 @@ describe('Mem0OssAdapter', () => {
       userId: 'fixed-user',
     };
     expect(() => new Mem0OssAdapter(config)).toThrow(
-      'Provider URL must use HTTPS or loopback HTTP.',
+      'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true',
     );
     expect(
       () => new Mem0OssAdapter({ ...config, allowInsecureHttp: true }),
@@ -787,6 +787,15 @@ describe('Mem0OssAdapter', () => {
       expect(requestCount).toBe(1);
     },
   );
+
+  it('returns unknown when the write fails before any HTTP response', async () => {
+    await expect(
+      ossAdapter('http://127.0.0.1:1').remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
 });
 
 function ossAdapter(baseUrl: string, appId?: string) {

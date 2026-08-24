@@ -22,7 +22,7 @@ export class ProviderHttpStatusError extends Error {
 
 export function validateProviderBaseUrl(
   value: string,
-  options?: { allowInsecureHttp?: boolean },
+  options?: { allowInsecureHttp?: boolean; allowInsecureHttpHint?: boolean },
 ): URL {
   let url: URL;
   try {
@@ -51,7 +51,11 @@ export function validateProviderBaseUrl(
   ) {
     return url;
   }
-  throw new Error('Provider URL must use HTTPS or loopback HTTP.');
+  throw new Error(
+    options?.allowInsecureHttpHint === true
+      ? 'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true to permit plain HTTP for this provider.'
+      : 'Provider URL must use HTTPS or loopback HTTP.',
+  );
 }
 export async function postJson(input: {
   url: URL;

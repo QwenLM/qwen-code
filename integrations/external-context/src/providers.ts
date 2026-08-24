@@ -127,16 +127,20 @@ export class Mem0PlatformV3Adapter
         signal: input.signal,
       });
     } catch (error) {
-      if (
-        error instanceof ProviderHttpStatusError &&
-        DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
-      ) {
-        return { status: 'failed' };
-      }
-      return { status: 'unknown' };
+      return classifyWriteRejection(error);
     }
     return parseMem0RememberResult(response);
   }
+}
+
+function classifyWriteRejection(error: unknown): RememberResult {
+  if (
+    error instanceof ProviderHttpStatusError &&
+    DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
+  ) {
+    return { status: 'failed' };
+  }
+  return { status: 'unknown' };
 }
 
 function parseMem0RememberResult(response: unknown): RememberResult {
@@ -179,6 +183,7 @@ export class Mem0OssAdapter
   constructor(private readonly config: Mem0OssProviderConfig) {
     this.baseUrl = validateConfiguredBaseUrl(config.baseUrl, {
       allowInsecureHttp: config.allowInsecureHttp,
+      allowInsecureHttpHint: true,
     });
   }
 
@@ -221,13 +226,7 @@ export class Mem0OssAdapter
         signal: input.signal,
       });
     } catch (error) {
-      if (
-        error instanceof ProviderHttpStatusError &&
-        DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
-      ) {
-        return { status: 'failed' };
-      }
-      return { status: 'unknown' };
+      return classifyWriteRejection(error);
     }
     return parseOssRememberResult(response);
   }
@@ -342,7 +341,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validateConfiguredBaseUrl(
   value: string,
-  options?: { allowInsecureHttp?: boolean },
+  options?: { allowInsecureHttp?: boolean; allowInsecureHttpHint?: boolean },
 ): URL {
   try {
     return validateProviderBaseUrl(value, options);
