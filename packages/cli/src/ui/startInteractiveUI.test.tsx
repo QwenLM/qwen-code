@@ -65,7 +65,7 @@ type TestConfig = Config & {
   updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
 };
 
-function makeConfig(): TestConfig {
+function makeConfig(crossSessionMessagingEnabled = false): TestConfig {
   const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
     void registration.catch(() => undefined);
   });
@@ -76,6 +76,7 @@ function makeConfig(): TestConfig {
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
     getApprovalMode: () => 'default',
+    isCrossSessionMessagingEnabled: () => crossSessionMessagingEnabled,
     trackSessionRegistration,
     whenSessionRegistered: vi.fn().mockResolvedValue(true),
     updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
@@ -194,7 +195,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // record, and a patch against a record that does not exist yet is
     // dropped silently. Binding before registration is queued would
     // therefore leave the session unreachable with no error anywhere.
-    const config = makeConfig();
+    const config = makeConfig(true);
     let trackedFirst = false;
     config.whenSessionRegistered.mockImplementation(async () => {
       trackedFirst = config.trackSessionRegistration.mock.calls.length > 0;
@@ -208,7 +209,7 @@ describe('startInteractiveUI cross-session messaging', () => {
   });
 
   it('skips the inbox when the session never registered', async () => {
-    const config = makeConfig();
+    const config = makeConfig(true);
     config.whenSessionRegistered.mockResolvedValue(false);
 
     await start(config, enabledSettings);
@@ -222,7 +223,7 @@ describe('startInteractiveUI cross-session messaging', () => {
   it('closes the inbox from exit cleanup', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     peerMessagingStart.mockResolvedValue({ close });
-    const config = makeConfig();
+    const config = makeConfig(true);
 
     await start(config, enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
@@ -236,7 +237,7 @@ describe('startInteractiveUI cross-session messaging', () => {
 
   it('does not start an inbox after exit cleanup begins', async () => {
     let finishRegistration!: (registered: boolean) => void;
-    const config = makeConfig();
+    const config = makeConfig(true);
     config.whenSessionRegistered.mockImplementation(
       () =>
         new Promise<boolean>((resolve) => {
@@ -255,6 +256,15 @@ describe('startInteractiveUI cross-session messaging', () => {
     finishRegistration(true);
     await cleanup;
 
+    expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  it('does not bind when effective runtime policy disables the setting', async () => {
+    const config = makeConfig(false);
+
+    await start(config, enabledSettings);
+
+    expect(config.whenSessionRegistered).not.toHaveBeenCalled();
     expect(peerMessagingStart).not.toHaveBeenCalled();
   });
 });
