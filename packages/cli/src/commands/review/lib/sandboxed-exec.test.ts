@@ -555,7 +555,15 @@ describe('mountRootFor', () => {
       rmSync(dir, { recursive: true, force: true });
   });
 
-  it('refuses a root the -v grammar cannot spell', () => {
+  // Every absolute Windows path carries a colon — the drive letter — so the
+  // check below refuses all of them there. That is the shipped behaviour (see
+  // `mountRootFor`, and the win32 test at the end of this block), but it makes
+  // "which root is mountable" a question Windows cannot be asked, and these
+  // three cases exist only to ask it. `test_windows` is merge_group-only, so
+  // an ungated assertion here would first go red inside the merge queue.
+  const itWhereRootsCanMount = it.skipIf(process.platform === 'win32');
+
+  itWhereRootsCanMount('refuses a root the -v grammar cannot spell', () => {
     // `-v src:dst` has exactly one separator. A checkout at `/…/my:repo` makes
     // the spec `…/my:repo/.qwen/tmp:…/my:repo/.qwen/tmp`, which docker rejects
     // as "too many colons" — measured, not assumed. Saying "mountable" about
@@ -573,7 +581,7 @@ describe('mountRootFor', () => {
     expect(mountRootFor(comma)).not.toBeNull();
   });
 
-  it('takes the DEEPEST temp dir, not the first', () => {
+  itWhereRootsCanMount('takes the DEEPEST temp dir, not the first', () => {
     // A review run from inside another review's worktree — this pipeline's own
     // dogfood geometry — nests one `.qwen/tmp` inside another. First-occurrence
     // search widens the mount to the OUTER temp dir, which pulls `<repo>/.git`
@@ -596,27 +604,47 @@ describe('mountRootFor', () => {
     );
   });
 
-  it('refuses a root reached through a symlink instead of mounting it', () => {
-    // `resolve` never touches the filesystem, so a link at or above
-    // `.qwen/tmp` — committable as mode 120000, materialised by a fresh clone
-    // — would silently widen a read-write bind mount to wherever it points.
-    // Every other creating or destroying path in this pipeline refuses that.
-    const root = tmp();
-    const elsewhere = tmp();
-    mkdirSync(join(elsewhere, 'tmp', 'review-pr-1'), { recursive: true });
-    mkdirSync(join(root, '.qwen'), { recursive: true });
-    symlinkSync(join(elsewhere, 'tmp'), join(root, '.qwen', 'tmp'));
+  itWhereRootsCanMount(
+    'refuses a root reached through a symlink instead of mounting it',
+    () => {
+      // `resolve` never touches the filesystem, so a link at or above
+      // `.qwen/tmp` — committable as mode 120000, materialised by a fresh clone
+      // — would silently widen a read-write bind mount to wherever it points.
+      // Every other creating or destroying path in this pipeline refuses that.
+      const root = tmp();
+      const elsewhere = tmp();
+      mkdirSync(join(elsewhere, 'tmp', 'review-pr-1'), { recursive: true });
+      mkdirSync(join(root, '.qwen'), { recursive: true });
+      symlinkSync(join(elsewhere, 'tmp'), join(root, '.qwen', 'tmp'));
 
-    expect(mountRootFor(join(root, '.qwen', 'tmp', 'review-pr-1'))).toBe(null);
+      expect(mountRootFor(join(root, '.qwen', 'tmp', 'review-pr-1'))).toBe(
+        null,
+      );
 
-    // ...and the same layout without the link is mounted normally, so the
-    // refusal is about the redirect and not about the shape.
-    const honest = tmp();
-    mkdirSync(join(honest, '.qwen', 'tmp', 'review-pr-1'), { recursive: true });
-    expect(mountRootFor(join(honest, '.qwen', 'tmp', 'review-pr-1'))).toBe(
-      realpathSync(join(honest, '.qwen', 'tmp')),
-    );
-  });
+      // ...and the same layout without the link is mounted normally, so the
+      // refusal is about the redirect and not about the shape.
+      const honest = tmp();
+      mkdirSync(join(honest, '.qwen', 'tmp', 'review-pr-1'), {
+        recursive: true,
+      });
+      expect(mountRootFor(join(honest, '.qwen', 'tmp', 'review-pr-1'))).toBe(
+        realpathSync(join(honest, '.qwen', 'tmp')),
+      );
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'refuses every absolute path on Windows, where the drive letter is a colon',
+    () => {
+      // The other side of the same coin, and the reason the three above are
+      // skipped rather than deleted: containment is unavailable on Windows —
+      // this mount uses one path as both source and target, and the container
+      // side has no `C:` — so refusing is the honest answer, not a casualty.
+      expect(mountRootFor(join(tmpdir(), '.qwen', 'tmp', 'review-pr-1'))).toBe(
+        null,
+      );
+    },
+  );
 
   it('is null outside a temp dir, so a local checkout is never mounted', () => {
     // `/review` of a local checkout has no sibling layout: the tree under test
