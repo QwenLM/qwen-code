@@ -276,7 +276,10 @@ vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+}));
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -449,6 +452,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     vi.mocked(Session).mockImplementation(() => {
       const mock = {
         getId: vi.fn().mockReturnValue(SESSION_ID),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),

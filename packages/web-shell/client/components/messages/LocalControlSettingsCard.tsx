@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CopyIcon, WifiIcon } from 'lucide-react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import {
   warnClipboardWriteFailure,

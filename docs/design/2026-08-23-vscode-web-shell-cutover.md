@@ -56,14 +56,14 @@ webview boundary.
 
 The host contract covers these existing capabilities:
 
-| State supplied by the host | Actions sent to the host |
-| --- | --- |
-| Active session and session summaries | Submit and cancel a prompt |
-| Transcript blocks and streaming state | Create or switch session |
-| Pending permission and question requests | Respond to permission or question |
-| Models, approval mode, commands, and skills | Change model or approval mode |
-| Context usage, authentication, and account state | Request completion and authentication |
-| Workspace files and pasted images | Open a file, diff, report, or external link |
+| State supplied by the host                       | Actions sent to the host                    |
+| ------------------------------------------------ | ------------------------------------------- |
+| Active session and session summaries             | Submit and cancel a prompt                  |
+| Transcript blocks and streaming state            | Create or switch session                    |
+| Pending permission and question requests         | Respond to permission or question           |
+| Models, approval mode, commands, and skills      | Change model or approval mode               |
+| Context usage, authentication, and account state | Request completion and authentication       |
+| Workspace files and pasted images                | Open a file, diff, report, or external link |
 
 The contract is owned by `@qwen-code/web-shell`; it is not a new workspace
 package and it does not introduce another shared `Message[]` model. Transcript
@@ -110,9 +110,14 @@ The PR completes and verifies these user flows:
 - copy actions, file links, report links, and VS Code diff actions;
 - error, cancellation, authentication, and reconnect states.
 
-User-message edit/rewind is an explicit parity decision. It must either be
-restored in Web Shell and tested or be documented as a deliberate breaking
-change; it cannot disappear implicitly during the cutover.
+User-message edit/rewind is deliberately not restored in this cutover. The
+legacy interaction was removed in #9719, and Web Shell's current rewind picker
+depends on daemon snapshot APIs while VS Code continues to own an ACP runtime.
+Restoring the feature safely requires a separate controlled-host contract for
+enumerating rewind targets, mapping transcript turns to canonical ACP turn
+indexes, and reconciling persisted history after success or rollback. #9911
+tracks that follow-up. This is an explicit temporary parity break rather than
+an implicit consequence of deleting the legacy UI.
 
 ## Out of scope
 

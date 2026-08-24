@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -7,6 +7,15 @@ import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider'
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
+export { EmbeddedWebShell } from './components/EmbeddedWebShell';
+export type {
+  EmbeddedWebShellNotice,
+  EmbeddedWebShellPermissionRequest,
+  EmbeddedWebShellProps,
+  EmbeddedWebShellSession,
+  EmbeddedWebShellSubmit,
+} from './components/EmbeddedWebShell';
+export * from './daemon-react-sdk';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -70,7 +79,7 @@ function RootBoundary({
 
 /**
  * Low-level UI component. Requires ancestor `DaemonWorkspaceProvider` and
- * `DaemonSessionProvider` from `@qwen-code/webui/daemon-react-sdk`. The consumer
+ * `DaemonSessionProvider` from `@qwen-code/web-shell`. The consumer
  * owns those providers, so this boundary covers only what we render (`App`).
  */
 export function WebShell(props: WebShellProps) {
@@ -223,6 +232,8 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellPreparedSubmit,
+  WebShellSubmitSnapshot,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';

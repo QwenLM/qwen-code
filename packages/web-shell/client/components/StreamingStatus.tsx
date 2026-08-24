@@ -3,7 +3,7 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
-import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import { useStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics';

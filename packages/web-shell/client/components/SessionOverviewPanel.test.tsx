@@ -40,7 +40,7 @@ let workspaceClient: { listWorkspaceSessionsPage: ReturnType<typeof vi.fn> };
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
 const statusReload = vi.fn(async () => statusState.report);
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connectionState,
   useSessions: () => ({ ...sessionsState, reload: sessionsReload }),
   useStatusReport: () => ({ ...statusState, reload: statusReload }),
@@ -320,7 +320,29 @@ describe('SessionOverviewPanel', () => {
     render();
     const label = container!.querySelector('ul li button') as HTMLButtonElement;
     act(() => label.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run');
+    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+  });
+
+  it("passes the owning workspace cwd when clicking another workspace's session", async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = Array.from(container!.querySelectorAll('ul li button')).find(
+      (b) => b.textContent?.trim() === 'Beta',
+    ) as HTMLButtonElement;
+    act(() => beta.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
   });
 
   it('always shows selection + the "Open in new tab" batch action', () => {

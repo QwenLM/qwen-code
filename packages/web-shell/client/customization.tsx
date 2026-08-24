@@ -15,7 +15,7 @@ import type {
   DaemonInputAnnotation,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -179,6 +179,17 @@ export interface UserMessageContentRenderInfo {
     attachmentId?: string;
   }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (

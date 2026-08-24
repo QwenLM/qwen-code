@@ -7,6 +7,7 @@ export default defineConfig({
       'packages/core',
       'packages/vscode-ide-companion',
       'packages/sdk-typescript',
+      'packages/node-repl',
       'packages/channels/base',
       'packages/channels/dingtalk',
       'packages/channels/telegram',

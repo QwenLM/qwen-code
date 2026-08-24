@@ -29,6 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -62,17 +63,6 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
 export interface SettingEnumOption {
   value: string | number;
   label: string;
-}
-
-export enum MergeStrategy {
-  // Replace the old value with the new value. This is the default.
-  REPLACE = 'replace',
-  // Concatenate arrays.
-  CONCAT = 'concat',
-  // Merge arrays, ensuring unique values.
-  UNION = 'union',
-  // Shallow merge objects.
-  SHALLOW_MERGE = 'shallow_merge',
 }
 
 export interface SettingDefinition {
@@ -202,7 +192,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http'],
+            enum: ['command', 'http', 'prompt'],
             required: true,
           },
           command: {
@@ -214,6 +204,15 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The prompt to send to the model. Required for "prompt" type.',
+          },
+          model: {
+            type: 'string',
+            description: 'The optional model to use for a "prompt" hook.',
           },
           headers: {
             type: 'object',
@@ -1463,7 +1462,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.',
+      'Model used by the built-in image_gen tool. Set with /model --image. The selected route must set supportsImageGeneration: true (or legacy imageOnly: true) in modelProviders.',
     showInDialog: false,
   },
 
@@ -1704,6 +1703,19 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as number | undefined,
             description: 'Request timeout in milliseconds.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          streamIdleTimeoutMs: {
+            type: 'integer',
+            label: 'Stream Idle Timeout',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
+            minimum: 0,
+            maximum: 2_147_483_647,
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -2806,6 +2818,21 @@ const SETTINGS_SCHEMA = {
         description:
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
+      },
+      workflowsEnabled: {
+        type: 'boolean',
+        label: 'Dynamic Workflows',
+        category: 'Tools',
+        // The Workflow tool is registered once while building the tool
+        // registry and /workflows is gated when commands load. Keyword
+        // steering reads the same startup-built Config on each submission,
+        // so changing the settings file mid-session cannot update any of the
+        // three surfaces until the next launch.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
+        showInDialog: true,
       },
       truncateToolOutputThreshold: {
         type: 'number',

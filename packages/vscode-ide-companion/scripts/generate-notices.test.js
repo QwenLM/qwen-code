@@ -232,6 +232,18 @@ describe('getFallbackLicenseText', () => {
     expect(text).toContain('Permission is hereby granted, free of charge');
   });
 
+  // MIT requires the permission notice to be included verbatim; the
+  // fallback body must carry the canonical disclaimer wording so every
+  // regenerated NOTICES.txt entry matches the other MIT entries.
+  it('emits the canonical MIT disclaimer wording verbatim', () => {
+    const text = getFallbackLicenseText('MIT', undefined);
+
+    expect(text).toContain(
+      'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE',
+    );
+    expect(text).not.toContain('THE USE OF OTHER DEALINGS');
+  });
+
   it('reads the author name from object-form authors', () => {
     const text = getFallbackLicenseText('MIT', { name: 'Junyoung Choi' });
 

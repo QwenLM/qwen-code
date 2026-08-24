@@ -6,7 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -105,6 +105,10 @@ function truncate(text: string, maxChars: number): string {
 }
 
 async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
+  // Deliberately capped, unlike recall (recall.ts) and forget (forget.ts):
+  // every doc is rendered into the extraction agent's task prompt below, so
+  // an uncapped scan would grow that prompt without bound. Anything past the
+  // cap stays reachable — the agent holds read_file/grep/glob/ls.
   // User-level scan is best-effort: a read failure on `~/.qwen/memories/`
   // must not deny the extraction agent its view of existing project-level
   // memories (which it uses to avoid creating duplicates).
@@ -247,7 +251,7 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
       'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +

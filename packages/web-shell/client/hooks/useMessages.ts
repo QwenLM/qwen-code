@@ -10,7 +10,7 @@ import {
   useConnection,
   useTranscriptBlocks,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import type { Message } from '../adapters/types';
 import {

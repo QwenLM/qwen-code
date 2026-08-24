@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonMetricsSeriesBucket } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -196,7 +196,7 @@ let fullState: HookState = {
 };
 const seenDetails: Array<string | undefined> = [];
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStatusReport: (options: { detail?: string } = {}) => {
     seenDetails.push(options.detail);
     if (options.detail === 'full') {

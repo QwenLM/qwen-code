@@ -12,11 +12,13 @@ const {
   mockShowErrorMessage,
   mockExportSessionToFile,
   mockReadFile,
+  mockStat,
 } = vi.hoisted(() => ({
   mockProcessImageAttachments: vi.fn(),
   mockShowErrorMessage: vi.fn(),
   mockExportSessionToFile: vi.fn(),
   mockReadFile: vi.fn(),
+  mockStat: vi.fn(),
 }));
 const { mockExecuteCommand } = vi.hoisted(() => ({
   mockExecuteCommand: vi.fn(),
@@ -24,7 +26,8 @@ const { mockExecuteCommand } = vi.hoisted(() => ({
 
 vi.mock('fs/promises', () => ({
   readFile: mockReadFile,
-  default: { readFile: mockReadFile },
+  stat: mockStat,
+  default: { readFile: mockReadFile, stat: mockStat },
 }));
 
 vi.mock('vscode', () => ({
@@ -47,6 +50,19 @@ vi.mock('vscode', () => ({
     }),
   },
 }));
+
+vi.mock('node:url', async () => {
+  const actual = await vi.importActual<typeof import('node:url')>('node:url');
+  return {
+    ...actual,
+    pathToFileURL: (filePath: string) => {
+      if (process.platform !== 'win32' && /^[a-zA-Z]:\\/.test(filePath)) {
+        return actual.pathToFileURL(filePath, { windows: true });
+      }
+      return actual.pathToFileURL(filePath);
+    },
+  };
+});
 
 vi.mock('../utils/imageHandler.js', async (importOriginal) => {
   const actual =
@@ -74,11 +90,8 @@ vi.mock('../../services/sessionExportService.js', () => ({
   exportSessionToFile: mockExportSessionToFile,
 }));
 
-vi.mock('@qwen-code/webui', () => ({
-  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
-}));
-
 import { SessionMessageHandler } from './SessionMessageHandler.js';
+import { MAX_IMAGE_SIZE } from '../../utils/imageSupport.js';
 
 describe('SessionMessageHandler', () => {
   beforeEach(() => {
@@ -93,6 +106,7 @@ describe('SessionMessageHandler', () => {
       filename: 'export.html',
       uri: { fsPath: '/workspace/export.html' },
     });
+    mockStat.mockResolvedValue({ size: 3 });
   });
 
   it('forwards the active model when opening a new chat tab', async () => {
@@ -114,6 +128,115 @@ describe('SessionMessageHandler', () => {
     expect(mockExecuteCommand).toHaveBeenCalledWith('qwenCode.openNewChatTab', {
       initialModelId: 'glm-5',
     });
+  });
+
+  it('sends inline file contents to ACP without exposing them in the user display', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'Please inspect this file',
+        inlineFiles: [
+          {
+            name: 'notes&<.md',
+            mediaType: 'text/markdown',
+            text: '# private contents',
+          },
+        ],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: 'Please inspect this file\n\n<attached_file name="notes&amp;&lt;.md" media_type="text/markdown">\n# private contents\n</attached_file>',
+      },
+    ]);
+    expect(conversationStore.addMessage).toHaveBeenCalledWith(
+      'conversation-1',
+      expect.objectContaining({
+        role: 'user',
+        content: 'Please inspect this file',
+      }),
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: { sessionId: 'conversation-1', title: 'Please inspect this file' },
+    });
+  });
+
+  it('sends inline files when the user text is empty', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '',
+        inlineFiles: [{ name: 'empty.txt', mediaType: 'text/plain', text: '' }],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: '<attached_file name="empty.txt" media_type="text/plain">\n\n</attached_file>',
+      },
+    ]);
+    expect(conversationStore.addMessage).toHaveBeenCalledWith(
+      'conversation-1',
+      expect.objectContaining({ role: 'user', content: '' }),
+    );
   });
 
   it('does not create conversation state or send an empty prompt when all pasted images fail to materialize', async () => {
@@ -180,6 +303,7 @@ describe('SessionMessageHandler', () => {
         },
       ],
     });
+    mockReadFile.mockResolvedValue(Buffer.from('abc'));
 
     const agentManager = {
       isConnected: true,
@@ -351,6 +475,16 @@ describe('SessionMessageHandler', () => {
         sessionId: 'session-1',
         update: {
           sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'look at this' },
+        },
+      },
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
           content: {
             type: 'image',
             data: Buffer.from([1, 2, 3]).toString('base64'),
@@ -434,12 +568,66 @@ describe('SessionMessageHandler', () => {
           sessionUpdate: 'user_message_chunk',
           content: {
             type: 'text',
-            text: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+            text: 'look at this',
           },
         },
       },
     });
     expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips oversized context images without reading them into memory', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'inspect image',
+      displayText: 'inspect image',
+      savedImageCount: 0,
+      promptImages: [
+        {
+          path: '/workspace/huge.tiff',
+          name: 'huge.tiff',
+          mimeType: 'image/tiff',
+        },
+      ],
+    });
+    mockStat.mockResolvedValue({ size: MAX_IMAGE_SIZE + 1 });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'inspect image' },
+    });
+
+    expect(mockStat).toHaveBeenCalledWith('/workspace/huge.tiff');
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendToWebView).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'transcriptUpdate',
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({ type: 'image' }),
+          }),
+        }),
+      }),
+    );
   });
 
   it('sends image file context as prompt image blocks', async () => {
@@ -734,10 +922,16 @@ describe('SessionMessageHandler', () => {
   });
 
   it('forces a fresh ACP session when the webview requests a new session', async () => {
+    let liveSessionId: string | null = 'session-1';
     const agentManager = {
       isConnected: true,
-      currentSessionId: 'session-1',
-      createNewSession: vi.fn().mockResolvedValue('session-2'),
+      get currentSessionId() {
+        return liveSessionId;
+      },
+      createNewSession: vi.fn().mockImplementation(async () => {
+        liveSessionId = 'session-2';
+        return 'session-2';
+      }),
     };
     const conversationStore = {
       createConversation: vi.fn(),
@@ -761,9 +955,59 @@ describe('SessionMessageHandler', () => {
     expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
       forceNew: true,
     });
+    // The boundary publishes the fresh session id so the transcript guard
+    // drops trailing frames from the abandoned session instead of
+    // adopting them into the new conversation.
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'conversationCleared',
-      data: {},
+      data: { sessionId: 'session-2' },
+    });
+  });
+
+  it('publishes the live session id on the first-send conversationLoaded boundary', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi
+        .fn()
+        .mockResolvedValue({ id: 'conversation-1', messages: [] }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    // The boundary re-pins the transcript guard; without the session id
+    // the adopt-on-null window reopens for stale frames on every first
+    // send of a fresh conversation.
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationLoaded',
+      data: expect.objectContaining({
+        id: 'conversation-1',
+        sessionId: 'session-1',
+      }),
     });
   });
 
@@ -810,6 +1054,9 @@ describe('SessionMessageHandler', () => {
         role: 'assistant',
         content:
           'Session exported to HTML: [export.html](file:///workspace/export.html)',
+        // The confirmation never flows through ACP transcriptUpdate; without
+        // localOnly the WebShell transcript renders it nowhere.
+        localOnly: true,
       }),
     });
   });
@@ -927,6 +1174,142 @@ describe('SessionMessageHandler', () => {
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
   });
 
+  it('tags the timeout message localOnly so the notice slot renders it', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockRejectedValue(new Error('Request timeout')),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Request timed out. This may be due to a network issue. Please try again.',
+        localOnly: true,
+      }),
+    });
+  });
+
+  it('re-surfaces the user message as a local notice when the agent is not connected', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: false,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    // The eager echo stays untagged (the transcript renders it on
+    // successful sends); the aborted send re-posts a tagged copy so the
+    // user's own message is visible in the notice slot.
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'user',
+        content: 'hello',
+        localOnly: true,
+      }),
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('re-surfaces the user message as a local notice when session creation fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: null,
+      createNewSession: vi.fn().mockRejectedValue(new Error('spawn failed')),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'user',
+        content: 'hello',
+        localOnly: true,
+      }),
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('encodes exported file links before rendering markdown', async () => {
     mockExportSessionToFile.mockResolvedValue({
       filename: 'export (#1).html',
@@ -967,7 +1350,7 @@ describe('SessionMessageHandler', () => {
       data: expect.objectContaining({
         role: 'assistant',
         content:
-          'Session exported to HTML: [export (#1).html](file:///workspace/export%20(%231).html)',
+          'Session exported to HTML: [export (#1).html](file:///workspace/export%20%28%231%29.html)',
       }),
     });
   });
@@ -1057,6 +1440,50 @@ describe('SessionMessageHandler', () => {
 
       expect(setModelFromUi).toHaveBeenCalledWith('gpt-4(openai)');
       expect(mockShowErrorMessage).not.toHaveBeenCalled();
+    });
+  });
+  it('preserves the drive-letter colon in Windows exported file links', async () => {
+    mockExportSessionToFile.mockResolvedValue({
+      filename: 'file.md',
+      uri: { fsPath: 'D:\\aplikacja\\file.md' },
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export md',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to MD: [file.md](file:///D:/aplikacja/file.md)',
+      }),
     });
   });
 });
