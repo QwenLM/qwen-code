@@ -5159,6 +5159,38 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('drops a sticky disable when rebuilding onto a preset thinking-mandatory model', async () => {
+      // Preset `thinkingMandatory` models (e.g. Token Plan kimi-k2.7-code)
+      // strip every disable shape on the wire even though they are not
+      // registered canDisable:false; the discard must match the wire's gate
+      // instead of force-re-applying the inapplicable override.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k2.7-code',
+          authType,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          thinkingMandatory: true,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+      config.setReasoningEffort('high');
+      expect(config.getReasoningEffort()).toBe('high');
+    });
+
     it('restores the user effort on a standalone auth refresh under a preset disable', async () => {
       // The user cleared a preset disable and chose a tier, so the session
       // carries the tier while the model's preset still resolves

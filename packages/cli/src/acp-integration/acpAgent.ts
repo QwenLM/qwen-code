@@ -6136,18 +6136,25 @@ class QwenAgent implements Agent {
           );
         }
         // This surface offers no "Thinking off" option, so any selection is
-        // an explicit opt into the model default or a tier: clear a sticky
-        // disable first, or the clear below would no-op on it and report
-        // success while thinking stays off with no re-enable path.
+        // an explicit opt into the model default or a tier.
         const fallbackConfig = session.getConfig();
-        if (fallbackConfig.getContentGeneratorConfig().reasoning === false) {
+        if (effort === undefined) {
+          // Record the sticky default override like the registry branch;
+          // setReasoningEffort(undefined) would clear it again, letting the
+          // next rebuild re-pin a preset `reasoning: false`.
           fallbackConfig.setReasoningDisabled(false);
-        }
-        if (!applyReasoningEffort(fallbackConfig, effort)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Reasoning effort cannot be applied while thinking is disabled',
-          );
+        } else {
+          // Clear a sticky disable first, or the tier would no-op on it and
+          // report success while thinking stays off with no re-enable path.
+          if (fallbackConfig.getContentGeneratorConfig().reasoning === false) {
+            fallbackConfig.setReasoningDisabled(false);
+          }
+          if (!applyReasoningEffort(fallbackConfig, effort)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Reasoning effort cannot be applied while thinking is disabled',
+            );
+          }
         }
         break;
       }

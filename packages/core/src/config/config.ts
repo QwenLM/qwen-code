@@ -4763,7 +4763,7 @@ export class Config {
         authType: cfg.authType,
         baseUrl: cfg.baseUrl,
       });
-      if (reasoning?.canDisable === false) {
+      if (cfg.thinkingMandatory === true || reasoning?.canDisable === false) {
         // Thinking-mandatory models ignore a disable on the wire, so the
         // override cannot apply; drop it (and the `reasoning: false` it
         // re-pinned) instead of concealing it behind a projected effort.
