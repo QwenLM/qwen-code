@@ -5121,19 +5121,6 @@ export class Session implements SessionContext {
               const strippedRetryEntries =
                 this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                 [];
-              // The resend re-pushes the prompt below; if it throws before
-              // the push (hard-rescue compaction stop, UserPromptSubmit Stop,
-              // a compression abort rethrow, resolve failures), the stripped
-              // orphans would be permanently lost while their records stay in
-              // the transcript — the same window the continuation branch
-              // above guards. Hand them to the shared pair so the
-              // push-count-gated catch restore covers retries exactly like
-              // continuations (on success the resend advances the push
-              // counter past the snapshot, so no double-restore).
-              strippedOrphanEntries =
-                strippedRetryEntries.length > 0 ? strippedRetryEntries : null;
-              orphanPushCountSnapshot =
-                this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
               const promptIdentities = strippedRetryEntries
                 .map(getApiHistoryPromptId)
                 .filter((value): value is string => value !== undefined);
@@ -5145,6 +5132,37 @@ export class Session implements SessionContext {
                 promptIdentities.length === 1
                   ? promptIdentities[0]
                   : undefined;
+              if (resubmittedPromptIdentity !== undefined) {
+                // The resend re-pushes the prompt under the adopted identity
+                // below; if it throws before the push (hard-rescue
+                // compaction stop, UserPromptSubmit Stop, a compression
+                // abort rethrow, resolve failures), the stripped orphan
+                // would be permanently lost while its record stays in the
+                // transcript — the same window the continuation branch
+                // above guards. Hand it to the shared pair so the
+                // push-count-gated catch restore covers retries exactly like
+                // continuations (on success the resend advances the push
+                // counter past the snapshot, so no double-restore).
+                strippedOrphanEntries = strippedRetryEntries;
+                orphanPushCountSnapshot =
+                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+              } else if (strippedRetryEntries.length > 0) {
+                // No adoptable identity (orphan-less strips are handled by
+                // the fresh record below): the resend re-pushes ONLY the
+                // retried prompt, and nothing re-pushes these stripped
+                // entries on the send-success, null-stream, pre-send-cancel,
+                // or locally-handled-slash return paths — the
+                // push-count-gated catch covers throws alone. Re-add them
+                // now (strip returns them in original order) so their
+                // transcript records and turn-start snapshots keep matching
+                // live positional turns; the resend appends after them
+                // below. The continuation twin re-pushes its stripped
+                // content too (merged into the resent parts), so this keeps
+                // retries divergence-free on every exit path.
+                for (const entry of strippedRetryEntries) {
+                  this.#getCurrentChat().addHistory(entry);
+                }
+              }
               if (
                 resubmittedPromptIdentity === undefined &&
                 // Mirror the normal branch: only `/advisor` defers its
@@ -5295,7 +5313,11 @@ export class Session implements SessionContext {
               // command was already recorded above, before its action ran.
               // Retries included: the retry fresh-record branch skips
               // advisor-named input, so this is the shadow's only record
-              // site on both paths.
+              // site when the strip yielded no adoptable identity. A retry
+              // that ADOPTED an identity re-pushes under the original
+              // attempt's record, and that attempt already recorded here
+              // (its push landed after this site) — recording again would
+              // land a second boundary for one positional turn.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
@@ -5304,7 +5326,8 @@ export class Session implements SessionContext {
               if (
                 slashCommandName === 'advisor' &&
                 shouldRecordSlashCommand &&
-                goalTurn?.origin !== 'runtime'
+                goalTurn?.origin !== 'runtime' &&
+                !(isRetry && resubmittedPromptIdentity !== undefined)
               ) {
                 const recorder = this.config.getChatRecordingService();
                 if (promptDisplayText !== undefined) {
@@ -5745,12 +5768,17 @@ export class Session implements SessionContext {
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
                     // Preserve the full message (not just functionResponse
-                    // parts) for a continuation: its content was stripped from
-                    // history before the send, so dropping it here on a
-                    // non-cancelled failure would lose the orphaned turn the
-                    // user never got an answer to.
+                    // parts) for a continuation or retry: its content was
+                    // stripped from history before the send, so dropping it
+                    // here on a non-cancelled failure would lose the turn
+                    // the user never got an answer to. The push-count-gated
+                    // catch below never runs on this RETURN path, so this is
+                    // the only restore site for a graceful null stream
+                    // (e.g. the session-token-limit stop).
                     const preserveFullMessage =
-                      isContinue || sendResult.stopReason === 'cancelled';
+                      isContinue ||
+                      isRetry ||
+                      sendResult.stopReason === 'cancelled';
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,

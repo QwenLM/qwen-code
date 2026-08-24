@@ -2367,6 +2367,86 @@ describe('Session', () => {
     expect(restored).toBeUndefined();
   });
 
+  it('preserves the retried prompt on the session-token-limit null-stream return', async () => {
+    // A retry resend that hits the session token limit before any push
+    // returns a graceful null stream. The push-count-gated catch never
+    // runs on that RETURN path, so the preserve call is the resend's only
+    // restore site: the full prompt (not just functionResponse parts)
+    // must land back in history, or the prompt entry vanishes from live
+    // API history while its transcript record stays.
+    mockChat.stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
+    mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+    mockGeminiClient.tryCompressChat.mockResolvedValue({
+      originalTokenCount: 999,
+      newTokenCount: 999,
+      compressionStatus: core.CompressionStatus.NOOP,
+    });
+
+    const result = await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'token-limit retry' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(result).toEqual({ stopReason: 'max_tokens' });
+    expect(mockChat.addHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'user',
+        parts: expect.arrayContaining([
+          expect.objectContaining({ text: 'token-limit retry' }),
+        ]),
+      }),
+    );
+    const restored = vi.mocked(mockChat.addHistory).mock.calls[0]![0];
+    expect(core.getApiHistoryPromptId(restored)).toBe(
+      'test-session-id########1',
+    );
+  });
+
+  it('re-adds every stripped entry a no-adoption retry does not re-push', async () => {
+    // Two stacked failed attempts leave two marked orphans; the retry
+    // strips BOTH and fails closed on adoption (length !== 1). The resend
+    // re-pushes only the retried prompt — on send success nothing else
+    // re-adds the stripped entries (the push-count-gated catch covers
+    // throws alone), so they must be restored at strip time or they vanish
+    // from live history while their records and snapshots stay.
+    const orphanA: Content = {
+      role: 'user',
+      parts: [{ text: 'first failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanA, 'original-a');
+    const orphanB: Content = {
+      role: 'user',
+      parts: [{ text: 'second failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanB, 'original-b');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphanA, orphanB]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'second failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    // Both stripped entries come back, in their original order, and the
+    // resend's fresh record stays a single boundary.
+    const readdedIds = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
+    expect(readdedIds).toEqual(['original-a', 'original-b']);
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'test-session-id########1' },
+    );
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()
@@ -19292,6 +19372,53 @@ describe('Session', () => {
           undefined,
           undefined,
           'test-session-id########1',
+        );
+      });
+
+      it('does not double-record the shadowing advisor command when its retry adopts the stripped identity', async () => {
+        // Attempt 1 recorded in the deferred block, then pushed its user
+        // content and failed. The retry strips the marked orphan and adopts
+        // its identity: the resend re-pushes under attempt-1's record,
+        // which attempt-1 already recorded — the deferred block must not
+        // land a second boundary for the same positional turn (one turn
+        // owning two boundaries fails every strict pairing gate in legacy
+        // sessions).
+        const orphan: Content = {
+          role: 'user',
+          parts: [{ text: '/advisor check my work' }],
+        };
+        core.markApiHistoryPrompt(orphan, 'original-prompt');
+        mockChat.stripOrphanedUserEntriesFromHistory = vi
+          .fn()
+          .mockReturnValue([orphan]);
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor check my work' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest);
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        // The resend still carries the adopted identity.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'qwen3-code-plus',
+          expect.any(Object),
+          'test-session-id########1',
+          undefined,
+          { promptId: 'original-prompt' },
         );
       });
 
