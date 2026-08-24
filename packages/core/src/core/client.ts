@@ -56,7 +56,8 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, type RepairOrphanedToolUseOptions } from './geminiChat.js';
+import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -745,11 +746,14 @@ export class GeminiClient {
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
    */
-  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+  repairOrphanedToolUseTurnsInHistory(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    const result = this.getChat().repairOrphanedToolUseTurns(reason, options);
     if (result.injected.length > 0) {
       debugLogger.warn(
         `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
@@ -1811,7 +1815,15 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        this.repairOrphanedToolUseTurnsInHistory();
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
+        this.repairOrphanedToolUseTurnsInHistory(
+          undefined,
+          preserveCallIds ? { preserveCallIds } : undefined,
+        );
       });
 
       const sessionStartAdditionalContext = await profiler.time(
@@ -3130,10 +3142,25 @@ export class GeminiClient {
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
+      const model = options?.modelOverride ?? this.config.getModel();
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
+        // An exact `\0` full-turn route selector resolves to its route before
+        // GeminiChat.sendMessageStream stamps counts under it, so the gate
+        // must key the resolved route too — the raw selector key can never
+        // match a stamped count. Mirrors the resolution at the top of
+        // GeminiChat.sendMessageStream (#9454).
+        const exactRoute = model.endsWith('\0')
+          ? await this.config
+              .getBaseLlmClient()
+              .resolveForModel(model.slice(0, -1), { failClosed: true })
+          : undefined;
+        const requestRouteKey = this.config.getModelRouteIdentity(
+          exactRoute ? exactRoute.model : model,
+          exactRoute?.contentGeneratorConfig,
+        );
         const lastPromptTokenCount =
-          uiTelemetryService.getLastPromptTokenCount();
+          this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
@@ -3224,9 +3251,6 @@ export class GeminiClient {
       }
 
       const turn = new Turn(this.getChat(), prompt_id, goalPermit);
-
-      // Determine the model to use for this turn
-      const model = options?.modelOverride ?? this.config.getModel();
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -4047,8 +4071,8 @@ export class GeminiClient {
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
         // Save cache-safe params here — before any early return — so that
-        // background extract/dream agents calling getCacheSafeParams() always
-        // see the current turn's history regardless of which path exits below.
+        // background readers calling getCacheSafeParams(sessionId) can see the
+        // current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;

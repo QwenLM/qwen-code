@@ -117,6 +117,7 @@ import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
@@ -876,6 +877,7 @@ export class MCPServerConfig {
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
     readonly agentPluginV1?: boolean,
+    readonly versionNegotiation?: 'auto' | 'legacy',
   ) {}
 }
 
@@ -1138,6 +1140,12 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  /**
+   * When true, daemon `session/load` and `session/resume` re-hang a trailing
+   * unanswered `ask_user_question` instead of synthesizing a failed tool
+   * result. Default false. CLI: `--restore-ask-user-question`.
+   */
+  restoreAskUserQuestion?: boolean;
   sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
@@ -2041,6 +2049,13 @@ export class Config {
   private sessionRegistryActive = false;
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly restoreAskUserQuestion: boolean = false;
+  /**
+   * startChat orphan-repair preserve. Defaults to `restoreAskUserQuestion`.
+   * A load/resume that will not re-hang (no client, fork) turns this off so
+   * Gemini history is repaired in lockstep with replay finalization.
+   */
+  private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
@@ -2325,6 +2340,8 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.restoreAskUserQuestion = params.restoreAskUserQuestion === true;
+    this.preserveRestorableAskUserQuestion = this.restoreAskUserQuestion;
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
@@ -3241,7 +3258,7 @@ export class Config {
       if (this.sessionWriterShutdownRequested) {
         throw new SessionWriterShutdownError();
       }
-      if (location === 'conflict' || location === 'archived') {
+      if (location === 'archived') {
         throw new SessionTranscriptChangedError();
       }
       let authoritative: ResumedSessionData | undefined;
@@ -4375,12 +4392,16 @@ export class Config {
    * configurations without publishing where they point. The bare id stays the
    * readable half, so a mismatch still names the model a human recognises.
    */
-  private resolvedModelIdentity(): string {
-    const model = this.getModel();
-    const authType = this.getContentGeneratorConfig()?.authType ?? '';
+  private resolvedModelIdentity(
+    model = this.getModel(),
+    generatorConfig = this.getContentGeneratorConfig(),
+  ): string {
+    const authType = generatorConfig?.authType ?? '';
     const baseUrl =
-      this.getContentGeneratorConfig()?.baseUrl ??
-      this.getCurrentModelRegistryBaseUrl() ??
+      generatorConfig?.baseUrl ??
+      (model === this.getModel()
+        ? this.getCurrentModelRegistryBaseUrl()
+        : undefined) ??
       '';
     if (authType === '' && baseUrl === '') return model;
     const digest = createHash('sha256')
@@ -4388,6 +4409,19 @@ export class Config {
       .digest('hex')
       .slice(0, 8);
     return `${model}@${digest}`;
+  }
+
+  /**
+   * Identity of the currently active model route for consumers that cache
+   * route-specific state and must invalidate it when a model/auth/endpoint
+   * switch swaps the content generator — e.g. GeminiChat's API-reported
+   * token counts (#9454). Same identity ⇒ same serialization target.
+   */
+  getModelRouteIdentity(
+    model?: string,
+    generatorConfig?: ContentGeneratorConfig,
+  ): string {
+    return this.resolvedModelIdentity(model, generatorConfig);
   }
 
   /**
@@ -5068,6 +5102,7 @@ export class Config {
       `${this.sessionId}.jsonl`,
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
+      `${this.sessionId}.pr.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -7032,7 +7067,7 @@ export class Config {
 
     const routeMatches = this.getAllConfiguredModels().filter(
       (model) =>
-        model.imageOnly === true &&
+        isImageGenerationCapable(model) &&
         !model.fastOnly &&
         !model.voiceOnly &&
         model.id === selector.modelId &&
@@ -7240,6 +7275,19 @@ export class Config {
 
   getExperimentalZedIntegration(): boolean {
     return this.experimentalZedIntegration;
+  }
+
+  getRestoreAskUserQuestion(): boolean {
+    return this.restoreAskUserQuestion;
+  }
+
+  getPreserveRestorableAskUserQuestion(): boolean {
+    return this.preserveRestorableAskUserQuestion;
+  }
+
+  /** Load/resume declined the re-hang: repair Gemini history like flag-off. */
+  suppressRestorableAskUserQuestionPreservation(): void {
+    this.preserveRestorableAskUserQuestion = false;
   }
 
   isSessionWriterLeaseEnabled(): boolean {
@@ -7914,6 +7962,10 @@ export class Config {
     const runtime = createGoalRuntime({
       journal: recorder,
       evidenceSource: recorder,
+      // The recorder already sees every assistant turn's usage stamped with
+      // the Goal permit that produced it, so the spend is Goal-scoped at the
+      // point it is recorded rather than reconstructed from session totals.
+      tokenLedger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
     });
@@ -8777,17 +8829,25 @@ export class Config {
       });
     }
 
-    // create_sub_session: spawn a fresh top-level sub-session and run a prompt
-    // in it. Only functional under `qwen serve` (needs the bridge, wired as a
-    // spawner by the ACP session); the tool's execute() reports a clear
-    // daemon-only error otherwise. Registered unconditionally so the message is
-    // available rather than the tool silently missing.
-    await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
-      const { CreateSubSessionTool } = await import(
-        '../tools/create-sub-session.js'
-      );
-      return new CreateSubSessionTool(this);
-    });
+    // create_sub_session is daemon-only: it needs the bridge, wired onto the
+    // Config as a sub-session spawner by the ACP session. Registering it
+    // unconditionally advertised a tool that can never work in interactive TUI
+    // / headless runs, so gate on the spawner actually being present.
+    //
+    // The ACP session's own registry is built before its constructor wires the
+    // spawner, so that one is registered by the Session itself. Every registry
+    // built afterwards reaches the spawner from here: sub-agent and override
+    // configs are `Object.create(base)`, and `copyDiscoveredToolsFrom` carries
+    // discovered tools only, so without this a daemon sub-agent would silently
+    // lose the tool.
+    if (this.getSubSessionSpawner()) {
+      await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+        const { CreateSubSessionTool } = await import(
+          '../tools/create-sub-session.js'
+        );
+        return new CreateSubSessionTool(this);
+      });
+    }
 
     // Register team collaboration tools (experimental). The team-specific
     // tools (team_create/team_delete/task_create/task_update/task_list)
@@ -8933,8 +8993,8 @@ export class Config {
   /**
    * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
    * the daemon/ACP session layer (which routes it to the bridge over
-   * `extMethod`); left unset in interactive TUI / headless — the tool then
-   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   * `extMethod`); left unset in interactive TUI / headless, where the tool is
+   * therefore never registered. `undefined` clears it on session teardown.
    */
   setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
     this.subSessionSpawner = spawner;

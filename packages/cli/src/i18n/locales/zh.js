@@ -766,6 +766,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未设置',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (follow user input)': '自动（跟随用户输入）',
@@ -2323,6 +2324,7 @@ export default {
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
+  'from nested agent': '来自嵌套 agent',
   Running: '运行中',
   Pausing: '暂停中',
   Paused: '已暂停',
