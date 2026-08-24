@@ -1697,6 +1697,44 @@ describe('Server Config (config.ts)', () => {
       expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
+    it('rebinds agent workspace getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const agentPlanPath = path.join('/tmp/plans', 'session-agent-1.md');
+      const {
+        config: child,
+        fileService,
+        workspaceContext,
+      } = deriveAgentConfig(parent, '/tmp/agent-workspace', {
+        customIgnoreFiles: ['.cursorignore'],
+        getPlanFilePath: () => agentPlanPath,
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/agent-workspace');
+      expect(child.getCwd()).toBe('/tmp/agent-workspace');
+      expect(child.getWorkingDir()).toBe('/tmp/agent-workspace');
+      expect(child.getProjectRoot()).toBe('/tmp/agent-workspace');
+      expect(child.getPlanFilePath()).toBe(agentPlanPath);
+      expect(child.getWorkspaceContext()).toBe(workspaceContext);
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/agent-workspace',
+      ]);
+      expect(child.getFileService()).toBe(fileService);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/agent-workspace');
+      expect(workspaceState['cwd']).toBe('/tmp/agent-workspace');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
+    });
+
     it('prohibits inherited session-writer lifecycle access', async () => {
       const parent = new Config(baseParams);
       const beginClose = vi.fn();
