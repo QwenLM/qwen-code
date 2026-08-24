@@ -207,6 +207,7 @@ export default {
   'toolDisplayName.TeamDelete': '删除团队',
   'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
+  'toolDisplayName.RequestShutdown': '请求下线',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',

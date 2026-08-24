@@ -16,7 +16,7 @@ import {
   getCacheSafeParamsSessionId,
   runForkedAgent,
   type CacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
