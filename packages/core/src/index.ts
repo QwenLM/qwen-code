@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
   type ModelGenerationConfig,
@@ -46,6 +47,7 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  VERTEX_ADC_HINT,
 } from './models/index.js';
 
 // Output formatting
@@ -91,6 +93,7 @@ export * from './core/model-stream-attempt-state.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/session-recovery.js';
+export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
@@ -147,6 +150,7 @@ export {
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
+export { isWsl } from './utils/terminal-env.js';
 export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -230,6 +234,7 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
@@ -376,6 +381,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/session-pr-service.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,

@@ -765,6 +765,7 @@ export default {
   'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
   'Folder Trust': 'Folder Trust',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  Unset: 'Unset',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   'Auto (follow user input)': 'Auto (follow user input)',
@@ -2048,6 +2049,7 @@ export default {
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
+  'from nested agent': 'from nested agent',
   Running: 'Running',
   Pausing: 'Pausing',
   Paused: 'Paused',
