@@ -487,19 +487,31 @@ export function fetchRemoteWebUrl(
 }
 
 /**
+ * The branch's current PR as seen by gh, for `gh pr create` attribution.
+ * `none` is a PROVED absence (gh answered for this branch); `error` means
+ * gh could not answer (timeout, rate limit, unavailable, unparseable). A
+ * caller gating on the pre-run state must decline attribution on `error`
+ * rather than read it as "no prior PR", or a branch whose fetch flaked
+ * would bind its existing PR as this session's creation.
+ */
+export type BranchPullRequestSnapshot =
+  | { status: 'none' }
+  | { status: 'error' }
+  | { status: 'pr'; number: number; url: string; state: SessionPrState };
+
+/**
  * Resolves the PR gh associates with the current branch of the repo
- * containing `cwd` (`gh pr view` with no argument names one), best-effort:
- * undefined when the branch has no PR, gh is unavailable, the repo cannot
- * be resolved, or gh reports no recognizable state. Used to attribute a
- * `gh pr create` run to the PR it created — command/output text alone
- * cannot prove which printed URL gh itself produced. The state lets the
- * caller decline an already-merged/closed PR a retry merely resolved.
+ * containing `cwd` (`gh pr view` with no argument names one). Used to
+ * attribute a `gh pr create` run to the PR it created — command/output
+ * text alone cannot prove which printed URL gh itself produced. The state
+ * lets the caller decline an already-merged/closed PR a retry merely
+ * resolved.
  */
 export function fetchCurrentBranchPullRequest(
   cwd: string,
-): Promise<{ number: number; url: string; state: SessionPrState } | undefined> {
+): Promise<BranchPullRequestSnapshot> {
   const gitRoot = findGitRoot(cwd);
-  if (!gitRoot) return Promise.resolve(undefined);
+  if (!gitRoot) return Promise.resolve({ status: 'none' });
   return new Promise((resolve) => {
     execFile(
       'gh',
@@ -512,9 +524,16 @@ export function fetchCurrentBranchPullRequest(
         encoding: 'utf8',
         env: gitEnv(),
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error) {
-          resolve(undefined);
+          // gh exits non-zero both when the branch has no PR and on real
+          // failures (timeout, rate limit, auth); only the no-PR message
+          // is a proved absence — anything else fails closed as `error`.
+          resolve(
+            /no pull requests found/i.test(stderr)
+              ? { status: 'none' }
+              : { status: 'error' },
+          );
           return;
         }
         try {
@@ -529,11 +548,16 @@ export function fetchCurrentBranchPullRequest(
             typeof parsed.number === 'number' &&
               typeof parsed.url === 'string' &&
               (state === 'open' || state === 'merged' || state === 'closed')
-              ? { number: parsed.number, url: parsed.url, state }
-              : undefined,
+              ? {
+                  status: 'pr',
+                  number: parsed.number,
+                  url: parsed.url,
+                  state,
+                }
+              : { status: 'error' },
           );
         } catch {
-          resolve(undefined);
+          resolve({ status: 'error' });
         }
       },
     );

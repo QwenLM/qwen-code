@@ -154,9 +154,13 @@ const GH_PR_CREATE_SEGMENT_PATTERN =
   /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*gh(?:\.exe)?\s+pr\s+create\b/;
 
 export function commandRunsGhPrCreate(command: string): boolean {
-  return command
-    .split(/&&|\|\||[;|]/)
-    .some((segment) => GH_PR_CREATE_SEGMENT_PATTERN.test(segment));
+  return (
+    command
+      // \n is a standard shell separator: model-authored commands routinely
+      // span lines, and the gate must see a `gh pr create` on a later line.
+      .split(/&&|\|\||[;|\n]/)
+      .some((segment) => GH_PR_CREATE_SEGMENT_PATTERN.test(segment))
+  );
 }
 
 /**
@@ -297,10 +301,14 @@ function enqueuePrMutation<T>(
 
 /**
  * Insert or refresh a binding (matched by PR number) and persist the list,
- * keeping at most {@link SESSION_PR_LIST_LIMIT} entries. A re-bound number
- * moves to the end (latest) with a fresh createdAt. An omitted `state`
- * preserves the existing entry's state on re-bind; the persisted `source`
- * likewise survives a re-bind that does not name one.
+ * keeping at most {@link SESSION_PR_LIST_LIMIT} entries. A number re-bound
+ * to a DIFFERENT url moves to the end (latest) with a fresh createdAt; a
+ * same-url refresh rewrites the entry in place, preserving its position and
+ * createdAt. An explicitly supplied `state`/`source` wins; the persisted
+ * value survives only a re-bind that does not name one, and state never
+ * crosses a URL change — the same number in another repository is another
+ * PR, and inheriting a terminal 'merged' would poison the new binding
+ * permanently (the sweep never re-queries merged entries).
  *
  * Entries the read-side shape check would reject are declined here: the
  * reader fails the WHOLE list closed, so persisting one poisoned entry would
@@ -318,19 +326,27 @@ export function upsertSessionPr(
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
     const known = existing.find((entry) => entry.number === pr.number);
-    const source = known?.source ?? pr.source;
+    const source = pr.source ?? known?.source;
+    const state =
+      pr.state ?? (known && known.url === pr.url ? known.state : undefined);
     const entry: SessionPr = {
       number: pr.number,
       url: pr.url,
-      createdAt: new Date().toISOString(),
-      ...((pr.state ?? known?.state)
-        ? { state: (pr.state ?? known?.state) as SessionPrState }
-        : {}),
+      createdAt:
+        known && known.url === pr.url
+          ? known.createdAt
+          : new Date().toISOString(),
+      ...(state ? { state } : {}),
       ...(source ? { source } : {}),
     };
     if (!isValidSessionPr(entry)) return existing;
-    const rest = existing.filter((e) => e.number !== pr.number);
-    const next = capSessionPrListByAuthority([...rest, entry]);
+    const next =
+      known && known.url === pr.url
+        ? existing.map((e) => (e.number === pr.number ? entry : e))
+        : capSessionPrListByAuthority([
+            ...existing.filter((e) => e.number !== pr.number),
+            entry,
+          ]);
     await writeSessionPrs(filePath, next);
     return next;
   });

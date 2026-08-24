@@ -196,6 +196,40 @@ describe('upsertSessionPr', () => {
     expect(poisoned.map((p) => p.number)).toEqual([51]);
     expect(await readSessionPrs(filePath)).not.toBeNull();
   });
+
+  it('lets an explicitly supplied source win over the persisted one', async () => {
+    // Backfill binds transcript-mentioned PRs as reviews (authority 0); a
+    // later explicit bind of the same number must upgrade the provenance —
+    // the persisted source survives only a re-bind that does not name one.
+    await writeSessionPrs(filePath, [{ ...entry(10), source: 'review' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 10,
+      url: entry(10).url,
+      state: 'open',
+      source: 'create',
+    });
+    expect(prs[0]?.source).toBe('create');
+    expect((await readSessionPrs(filePath))?.[0]?.source).toBe('create');
+  });
+
+  it('rewrites a same-URL refresh in place, keeping position and createdAt', async () => {
+    // A state-only refresh of an existing binding is not a re-bind: moving
+    // it to the tail with a fresh createdAt falsifies the binding-time
+    // order the badge and archive merges render by.
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open' },
+      entry(101),
+    ]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+      state: 'merged',
+    });
+    expect(prs.map((p) => p.number)).toEqual([100, 101]);
+    expect(prs[0]?.state).toBe('merged');
+    expect(prs[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
 });
 
 describe('upsertSessionPr failure handling', () => {
@@ -261,6 +295,21 @@ describe('upsertSessionPr state', () => {
     });
     expect(prs).toHaveLength(1);
     expect(prs[0]?.state).toBe('merged');
+  });
+
+  it('does not inherit state across a URL change', async () => {
+    // The same number in another repository is another PR: inheriting the
+    // previous entry's terminal 'merged' would poison the new binding
+    // permanently — the sweep never re-queries merged entries.
+    await writeSessionPrs(filePath, [{ ...entry(5), state: 'merged' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 5,
+      url: 'https://github.com/other/repo/pull/5',
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(prs[0]?.state).toBeUndefined();
+    expect((await readSessionPrs(filePath))?.[0]?.state).toBeUndefined();
   });
 });
 
@@ -596,6 +645,15 @@ describe('commandRunsGhPrCreate', () => {
     );
     expect(
       commandRunsGhPrCreate('GH_TOKEN=x gh pr create --fill | tee log'),
+    ).toBe(true);
+  });
+
+  it('matches a gh pr create on a later line of a multi-line command', () => {
+    expect(
+      commandRunsGhPrCreate('git push -u origin HEAD\ngh pr create --fill'),
+    ).toBe(true);
+    expect(
+      commandRunsGhPrCreate('git push -u origin HEAD\r\ngh pr create --fill'),
     ).toBe(true);
   });
 

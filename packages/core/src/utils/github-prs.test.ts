@@ -571,6 +571,7 @@ describe('fetchCurrentBranchPullRequest', () => {
     );
 
     expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'pr',
       number: 77,
       url: 'https://github.com/o/r/pull/77',
       state: 'open',
@@ -579,26 +580,52 @@ describe('fetchCurrentBranchPullRequest', () => {
 
   it('fails closed when gh reports no recognizable state', async () => {
     // A retry that resolves the branch's existing PR must never bind on a
-    // shape the caller cannot gate on — missing or unknown state declines.
+    // shape the caller cannot gate on — an unparseable pre-state is an
+    // error, not a proved absence.
     fs.mkdirSync(path.join(dir, '.git'));
     mockGhSuccess({ number: 77, url: 'https://github.com/o/r/pull/77' });
-    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'error',
+    });
     mockGhSuccess({
       number: 77,
       url: 'https://github.com/o/r/pull/77',
       state: 'SOMETHING_NEW',
     });
-    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'error',
+    });
   });
 
-  it('returns undefined when gh fails (no PR for the branch)', async () => {
+  it('reports none when gh proves the branch has no PR', async () => {
+    // gh exits non-zero with a characteristic message when the branch
+    // simply has no PR — a proved absence, distinct from a fetch failure.
     fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(new Error('no open pull request found for branch'));
-    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+    mockGhError(
+      Object.assign(new Error('exit code 1'), {
+        stderr: 'no pull requests found for branch "feat/x"',
+      }),
+    );
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'none',
+    });
   });
 
-  it('returns undefined outside a git repository without spawning gh', async () => {
-    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+  it('reports error when the gh fetch fails', async () => {
+    // Timeouts, rate limits, and auth failures prove nothing about the
+    // branch's PRs; the attribution gate must decline on them instead of
+    // reading them as "no prior PR".
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhError(Object.assign(new Error('network timeout'), { killed: true }));
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'error',
+    });
+  });
+
+  it('reports none outside a git repository without spawning gh', async () => {
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      status: 'none',
+    });
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 });

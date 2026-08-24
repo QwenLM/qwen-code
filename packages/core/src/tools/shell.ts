@@ -40,7 +40,10 @@ import {
   commandRunsGhPrCreate,
   upsertSessionPrs,
 } from '../services/session-pr-service.js';
-import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
+import {
+  fetchCurrentBranchPullRequest,
+  type BranchPullRequestSnapshot,
+} from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -2339,8 +2342,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // view` exits 0 through the view segment and prints the existing URL,
     // and post-run gh resolution alone cannot distinguish the two. Awaited
     // before spawn so the snapshot strictly precedes the command.
-    const preExistingPrNumber = commandRunsGhPrCreate(commandToExecute)
-      ? (await fetchCurrentBranchPullRequest(cwd))?.number
+    const preRunPrSnapshot = commandRunsGhPrCreate(commandToExecute)
+      ? await fetchCurrentBranchPullRequest(cwd)
       : undefined;
 
     let cumulativeOutput: string | AnsiOutput = '';
@@ -2743,7 +2746,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         commandToExecute,
         result.output,
         cwd,
-        preExistingPrNumber,
+        preRunPrSnapshot,
       );
     }
 
@@ -3087,33 +3090,42 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * pattern; a failure must never shadow the tool result. gh itself is the
    * attribution authority: the binding is the PR gh resolves for the working
    * branch, accepted only when it is OPEN, this command's output carries
-   * gh's URL, and the number did not already exist before the run —
-   * command/output text alone cannot attribute a printed URL to gh's own
-   * execution, and a retry that passes the execution gate
-   * (`gh pr create || gh pr view`) resolves the branch's EXISTING PR, which
-   * the pre-run snapshot (`preExistingPrNumber`) declines.
+   * gh's URL, the pre-run fetch proved the branch's prior state, and the
+   * number did not already exist before the run — command/output text alone
+   * cannot attribute a printed URL to gh's own execution, and a retry that
+   * passes the execution gate (`gh pr create || gh pr view`) resolves the
+   * branch's EXISTING PR, which the pre-run snapshot declines.
    */
   private bindGhPrCreate(
     command: string,
     output: string,
     cwd: string,
-    preExistingPrNumber: number | undefined,
+    preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
   ): void {
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
+        // An ERRORED pre-run fetch proved nothing about the branch's prior
+        // PRs — decline instead of failing open, or a branch whose snapshot
+        // flaked would bind its existing PR as this session's creation.
+        if (preRunPrSnapshot?.status === 'error') return;
         // The launch directory (`directory` param, else target dir), not a
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd);
-        if (!created || created.state !== 'open') return;
+        if (created.status !== 'pr' || created.state !== 'open') return;
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).
         // Binding would stamp this session as creator of a PR it did not
         // create, at a fresh createdAt that falsifies the badge's
         // binding-time order.
-        if (created.number === preExistingPrNumber) return;
+        if (
+          preRunPrSnapshot?.status === 'pr' &&
+          created.number === preRunPrSnapshot.number
+        ) {
+          return;
+        }
         if (!output.includes(created.url)) return;
         const prPath = this.config
           .getSessionService()
@@ -3124,8 +3136,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An already-bound number stays untouched (position and createdAt):
         // only a genuinely new binding persists and notifies — a re-bind
         // would move the entry to the tail with a fresh createdAt.
+        const createdPr = {
+          number: created.number,
+          url: created.url,
+          state: created.state,
+        };
         const applied = await upsertSessionPrs(prPath, [
-          { ...created, source: 'create' },
+          { ...createdPr, source: 'create' },
         ]);
         if (!applied.added.includes(created.number)) return;
         // The daemon never sees this write; the notification carries the
@@ -3133,7 +3150,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // waiting for unrelated catalog churn.
         this.config
           .getSessionService()
-          .emitSessionPrBound(this.config.getSessionId(), created);
+          .emitSessionPrBound(this.config.getSessionId(), createdPr);
       } catch {
         /* best-effort binding */
       }

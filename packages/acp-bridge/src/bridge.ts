@@ -9893,26 +9893,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Already validated above, before any mutation.
         const bound = metadata.pr;
         const existing = entry.prs ?? [];
+        const known = existing.find((p) => p.number === bound.number);
+        // An omitted state preserves the known one only when the URL is
+        // unchanged — the same number in another repository is another PR,
+        // and inheriting a terminal 'merged' would poison the new binding
+        // (mirrors the sidecar upsert).
+        const state =
+          bound.state ??
+          (known && known.url === bound.url ? known.state : undefined);
         const latest = existing[existing.length - 1];
-        if (latest?.number === bound.number && latest.url === bound.url) {
-          // Same binding repeated — no change, no event.
+        if (
+          latest?.number === bound.number &&
+          latest.url === bound.url &&
+          (state === undefined || state === latest.state)
+        ) {
+          // Same binding repeated with no state change — no change, no event.
         } else {
-          // Re-binding a number refreshes it and moves it to latest; an
-          // omitted state preserves the known one (mirrors the sidecar).
-          const known = existing.find((p) => p.number === bound.number);
-          entry.prs = [
-            ...existing.filter((p) => p.number !== bound.number),
-            {
-              number: bound.number,
-              url: bound.url,
-              ...((bound.state ?? known?.state)
-                ? {
-                    state: (bound.state ??
-                      known?.state) as SessionPrInfo['state'],
-                  }
-                : {}),
-            },
-          ].slice(-SESSION_PR_LIST_LIMIT);
+          // Re-binding a number to another URL moves it to latest; a
+          // same-URL refresh keeps its position — list order is the
+          // binding recency the badge renders by.
+          const merged: SessionPrInfo = {
+            number: bound.number,
+            url: bound.url,
+            ...(state ? { state } : {}),
+          };
+          entry.prs = (
+            known && known.url === bound.url
+              ? existing.map((p) => (p.number === bound.number ? merged : p))
+              : [...existing.filter((p) => p.number !== bound.number), merged]
+          ).slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
           writeStderrLine(
             `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +

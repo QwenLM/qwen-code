@@ -281,9 +281,12 @@ describe('ShellTool', () => {
 
     it('writes the PR sidecar when gh attributes the create to the branch PR', async () => {
       // A real create: the branch had no PR before the run (pre-run
-      // snapshot undefined), gh resolves the new one after.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
+      // snapshot `none`), gh resolves the new one after.
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',
@@ -323,8 +326,11 @@ describe('ShellTool', () => {
     it('binds the PR gh resolved even when a later echo prints another URL', async () => {
       // A supersede/changelog echo printing a second same-repo URL must not
       // steer the binding: gh's own resolution for the branch wins.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 100,
         url: 'https://github.com/o/r/pull/100',
         state: 'open',
@@ -343,7 +349,7 @@ describe('ShellTool', () => {
     });
 
     it('does not bind when the create fails without a URL', async () => {
-      fetchCurrentBranchPullRequestMock.mockResolvedValue(undefined);
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
       await runShell('gh pr create --title x', {
         output: 'error: not logged in',
         exitCode: 1,
@@ -357,6 +363,7 @@ describe('ShellTool', () => {
       // A compound command can exit non-zero after another segment printed a
       // PR URL; only a fully successful run may bind.
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
         number: 1234,
         url: 'https://github.com/o/r/pull/1234',
         state: 'open',
@@ -374,7 +381,7 @@ describe('ShellTool', () => {
       // The execution gate passes for these shapes, but gh resolves no PR
       // for the working branch — nothing was created, so nothing binds,
       // whatever same-repo URL the output carries.
-      fetchCurrentBranchPullRequestMock.mockResolvedValue(undefined);
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
       await runShell('gh pr create --fill; cat notes.txt', {
         output: 'create failed\nhttps://github.com/o/r/pull/1234\n',
         exitCode: 0,
@@ -401,8 +408,11 @@ describe('ShellTool', () => {
       // `gh pr create --help` passes the execution gate; no PR existed
       // before the run, gh resolves one after, but this run printed no
       // created URL for it — the output check declines.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 5,
         url: 'https://github.com/o/r/pull/5',
         state: 'open',
@@ -421,8 +431,11 @@ describe('ShellTool', () => {
       // workspace; gh must attribute the repo the command actually ran in,
       // or a `directory`-parameter create binds nothing (or a wrong-repo
       // PR whose URL happens to appear in the output).
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',
@@ -459,6 +472,7 @@ describe('ShellTool', () => {
       // the state gate must decline it — binding would stamp 'open' over a
       // merged state and move the entry to the tail with a fresh createdAt.
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
         number: 42,
         url: 'https://github.com/o/r/pull/42',
         state: 'merged',
@@ -481,6 +495,31 @@ describe('ShellTool', () => {
       // single candidate would evict a genuine binding).
       fetchCurrentBranchPullRequestMock.mockReset();
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run snapshot errored', async () => {
+      // An errored pre-run fetch proves nothing about the branch's prior
+      // PRs; failing open would bind the branch's existing PR as this
+      // session's creation when the post-run fetch recovers. The post-run
+      // value is a persistent fallback: the errored snapshot declines before
+      // any second fetch, so a second Once would leak into later tests.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'error',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
         number: 42,
         url: 'https://github.com/o/r/pull/42',
         state: 'open',
@@ -499,8 +538,11 @@ describe('ShellTool', () => {
       // run), so the resolution reaches persistence; the write reports the
       // number alreadyBound, so nothing is re-stamped and no catalog
       // notification fires.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 42,
         url: 'https://github.com/o/r/pull/42',
         state: 'open',
@@ -538,8 +580,11 @@ describe('ShellTool', () => {
       // The promote abort fires with kind 'background', but the child had
       // already completed with exit 0 and full output — the run still goes
       // through the binding gate.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce(undefined);
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',

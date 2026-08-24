@@ -782,6 +782,28 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.map((p) => p.number)).toEqual([42]);
   });
 
+  it('does not bind digit-leading file paths passed to /review', async () => {
+    // `/review <file-path>` is another documented invocation form of the
+    // review skill; a digit-leading path must not forge a binding on its
+    // digit run (`001_init.sql` is not PR 1).
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 001_init.sql');
+    await appendUserText(SESSION_A, '/review 2026-08-25-notes.md');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'fix/1'), pr(2026, 'fix/2026')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('rejects foreign-repo and zero /review numbers', async () => {
     // The URL form names another repo: resolution must not bind the
     // workspace's own same-numbered PR instead. `/review 0` must not count

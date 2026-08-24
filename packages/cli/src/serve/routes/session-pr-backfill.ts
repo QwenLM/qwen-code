@@ -84,13 +84,16 @@ interface BackfillCandidate {
 // examples, so nothing after the first part may seed a binding. `[ \t]+`
 // (not `\s+`) keeps the number on the command's own line and isolates the
 // command token — `/review-skill …` is another command and must not forge
-// a binding. `(?!\d)` rejects 10+-digit numbers instead of truncating them
-// to a 9-digit prefix. The bare-number alternative comes first:
-// `/review 42 and fix #7` names 42. Bare session git branches are NOT a
-// source: they bind the workspace's current branch PR onto every session —
-// measured pure noise, removed with cleanup.
+// a binding. The bare-number alternative closes its token against filename
+// characters (`(?!\w)`-class): `/review <file-path>` is another documented
+// invocation form, so `/review 001_init.sql` must not forge PR 1. The URL
+// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
+// truncating them to a 9-digit prefix. The bare-number alternative comes
+// first: `/review 42 and fix #7` names 42. Bare session git branches are
+// NOT a source: they bind the workspace's current branch PR onto every
+// session — measured pure noise, removed with cleanup.
 const REVIEW_COMMAND_PATTERN =
-  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?!\d)|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
 const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 

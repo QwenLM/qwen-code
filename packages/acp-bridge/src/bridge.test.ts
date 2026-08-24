@@ -26991,6 +26991,127 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('republishes and bumps the catalog when only the latest state changes', async () => {
+      // Live-state clients refetch only on catalog revision change; a
+      // state-only re-bind short-circuited as "no change" strands the
+      // stale badge state until unrelated catalog churn or a restart.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const before = bridge.getSessionCatalogVersion().revision;
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'open',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 2);
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(prEvents).toHaveLength(2);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('does not inherit the prior state when re-binding a number to another URL', async () => {
+      // The same number in another repository is another PR: inheriting
+      // the old repo's terminal 'merged' would render the new repo's open
+      // PR as merged permanently.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 5,
+          url: 'https://github.com/repo-a/r/pull/5',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('keeps a same-URL state refresh at its position', async () => {
+      // List order is the binding recency the badge renders by; updating
+      // only the state of an earlier binding must not move it to latest.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+        },
+      });
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('echoes the current displayName on the pr metadata event', async () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
