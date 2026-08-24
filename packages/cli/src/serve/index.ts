@@ -118,6 +118,12 @@ export {
   createHttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridge';
 export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+// Every typed error class `sendBridgeError` (server/error-response.ts)
+// matches via `instanceof` must stay on this public barrel so external
+// embeds can recognize daemon errors without deep-importing the bridge
+// package. In-repo callers import these classes from
+// `@qwen-code/acp-bridge/bridgeErrors` directly, so this block looks
+// unused from inside the repo but is load-bearing public surface.
 export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
