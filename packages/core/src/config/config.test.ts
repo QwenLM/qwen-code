@@ -8334,6 +8334,87 @@ describe('Server Config (config.ts)', () => {
       ).not.toContain(ToolNames.LS);
     });
 
+    it('registers list_directory when covered only by a merged (non-settings) allow rule under an active allowlist (#9827)', async () => {
+      // CLI-shaped wiring: settings `permissions.allow: ['Edit']` activates
+      // the allowlist, while `--allowed-tools ListFiles` (or the SDK
+      // `allowedTools` param) lands only in the merged allow set
+      // (`getPermissionsAllow()`), never in `getRegistryAllowList()`.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // because it counts the merged set, so the opt-in gate must offer the
+      // tool to registerLazy too — otherwise it silently vanishes from
+      // `/tools` and the model request while arriving calls fail
+      // TOOL_NOT_REGISTERED.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [ToolNames.EDIT, 'ListFiles'],
+          registryAllowList: [ToolNames.EDIT],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when only the merged allow set covers it but no settings allow rule activates the allowlist (#9827)', async () => {
+      // `--allowed-tools ListFiles` alone reaches `getPermissionsAllow()`
+      // but not `getRegistryAllowList()`; only settings
+      // `permissions.allow` rules can ACTIVATE the allowlist, so without
+      // one the opt-in gate must stay closed and the default-disabled
+      // behaviour holds.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: ['ListFiles'], registryAllowList: [] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when the settings allow list holds only empty entries (#9827)', async () => {
+      // `permissions.allow: ['']` is schema-valid but degenerate.
+      // `PermissionManager.initialize` computes activation through
+      // `parseRules`, which filters empty entries before parsing, so the
+      // allowlist stays inactive; the opt-in gate must agree — otherwise
+      // the ask branch would register list_directory while the permission
+      // system reports the allowlist inactive.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [''],
+          registryAllowList: [''],
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
