@@ -34,6 +34,11 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import { resolveRequestTimeout } from '../openaiContentGenerator/constants.js';
+import {
+  resolveStreamIdleTimeoutMs,
+  resolveStreamMaxLifetimeMs,
+  withStreamGuards,
+} from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -300,6 +305,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private effortClampWarned = false;
   private budgetDropWarned = false;
   private temperatureDropWarned = false;
+  // Stream watchdog tuning, resolved once (config field > env > default) so
+  // the env read + any invalid-value warning happen per generator, not per
+  // streaming request. Same guards the OpenAI pipeline applies — the two
+  // wires must not differ on whether a stalled stream is recoverable
+  // (issue #9005 finding 4).
+  private readonly streamIdleTimeoutMs: number;
+  private readonly streamMaxLifetimeMs: number;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -354,6 +366,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
+    );
+
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      contentGeneratorConfig,
+    );
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
+      contentGeneratorConfig,
     );
   }
 
@@ -425,8 +444,29 @@ export class AnthropicContentGenerator implements ContentGenerator {
       throw redactProxyError(error);
     }
 
+    // Two guards wrap the stream, identical to the OpenAI pipeline (the SDK
+    // `timeout` only bounds connect + first response). The inactivity
+    // watchdog aborts + surfaces a retryable ETIMEDOUT after `idleMs` of no
+    // events; the lifetime cap covers what the watchdog cannot — a drip-fed
+    // stream (e.g. long runs of low-content `thinking_delta` frames) resets
+    // the idle timer forever while never completing (issue #8597), so it
+    // aborts once `maxLifetimeMs` of accumulated upstream-wait has passed.
+    // `<= 0` disables each guard. Issue #9005 finding 4.
+    const idleMs = this.streamIdleTimeoutMs;
+    const maxLifetimeMs = this.streamMaxLifetimeMs;
+    const guardedStream =
+      idleMs > 0 || maxLifetimeMs > 0
+        ? withStreamGuards(
+            stream,
+            idleMs,
+            maxLifetimeMs,
+            () => perRequestAc.abort(),
+            request.config?.abortSignal,
+          )
+        : stream;
+
     const inner = this.processStreamWithEmptyFallback(
-      this.redactStreamErrors(stream),
+      this.redactStreamErrors(guardedStream),
       anthropicRequest,
       perRequestAc.signal,
       headers,
