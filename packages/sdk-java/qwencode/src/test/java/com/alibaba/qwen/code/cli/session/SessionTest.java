@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import com.alibaba.fastjson2.JSON;
@@ -45,11 +46,16 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 class SessionTest {
 
     private static final Logger log = LoggerFactory.getLogger(SessionTest.class);
     private static final String INIT_RESPONSE = "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
             + "\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}";
+    private static final String INITIALIZE_RESPONSE
+            = "{\"type\":\"control_response\",\"response\":{\"request_id\":\"init\",\"subtype\":\"success\","
+            + "\"response\":{\"subtype\":\"initialize\",\"session_id\":\"session-test\"}}}";
 
     @TempDir
     Path tempDir;
@@ -252,6 +258,20 @@ class SessionTest {
     }
 
     @Test
+    void sendPromptStopsWhenControlResponseSubtypeIsNestedError() throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error\","
+                        + "\"response\":{\"message\":\"set model failed\"}}}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"should not be read\"}]}}");
+
+        Session session = new Session(transport);
+
+        session.sendPrompt("hello", new SessionEventSimpleConsumers());
+
+        assertEquals(1, transport.getProcessedPromptLineCount());
+    }
+
+    @Test
     void testJSON() {
         String json
                 = "{\"type\":\"assistant\",\"uuid\":\"ed8374fe-a4eb-4fc0-9780-9bd2fd831cda\","
@@ -316,6 +336,61 @@ class SessionTest {
 
         @Override
         public void inputNoWaitResponse(String message) throws IOException {
+        }
+    }
+
+    private static class FakeTransport implements Transport {
+        private final String[] promptLines;
+        private final AtomicInteger processedPromptLineCount = new AtomicInteger();
+
+        FakeTransport(String... promptLines) {
+            this.promptLines = promptLines;
+        }
+
+        @Override
+        public TransportOptions getTransportOptions() {
+            return new TransportOptions();
+        }
+
+        @Override
+        public boolean isReading() {
+            return false;
+        }
+
+        @Override
+        public void start() throws IOException {
+        }
+
+        @Override
+        public void close() throws IOException {
+        }
+
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public String inputWaitForOneLine(String message) {
+            return INITIALIZE_RESPONSE;
+        }
+
+        @Override
+        public void inputWaitForMultiLine(String message, Function<String, Boolean> callBackFunction) {
+            for (String line : promptLines) {
+                processedPromptLineCount.incrementAndGet();
+                if (callBackFunction.apply(line)) {
+                    return;
+                }
+            }
+        }
+
+        @Override
+        public void inputNoWaitResponse(String message) throws IOException {
+        }
+
+        int getProcessedPromptLineCount() {
+            return processedPromptLineCount.get();
         }
     }
 }
