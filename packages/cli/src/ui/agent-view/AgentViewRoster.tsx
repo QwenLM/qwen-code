@@ -513,7 +513,7 @@ function isReturnInput(input: string, key: RosterInputKey): boolean {
 }
 
 const STRIPPED_TERMINAL_CONTROL_PATTERN =
-  /^(?:\[[?>][\d;]*[uc]|\[\d+(?:;\d+)+R|\[[IO])$/;
+  /^(?:\[[?>][\d;]*[uc]|\[\d+(?:;\d+)+R|\[27;\d+;\d+~|\[[IO])$/;
 
 function isTerminalControlInput(input: string): boolean {
   return (

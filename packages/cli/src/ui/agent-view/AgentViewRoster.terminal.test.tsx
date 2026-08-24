@@ -24,6 +24,7 @@ describe('AgentViewRoster terminal input', () => {
   it('drops terminal responses after Ink strips their ESC prefix', async () => {
     const onPromptChange = vi.fn();
     const onCancel = vi.fn();
+    const onDispatch = vi.fn(() => true);
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <AgentViewRoster
@@ -33,7 +34,7 @@ describe('AgentViewRoster terminal input', () => {
           groupMode="state"
           onPromptChange={onPromptChange}
           onPeekPromptChange={vi.fn()}
-          onDispatch={vi.fn(() => true)}
+          onDispatch={onDispatch}
           onSubmitPeekPrompt={vi.fn(() => true)}
           onAttachSession={vi.fn()}
           onPeekSession={vi.fn()}
@@ -50,11 +51,13 @@ describe('AgentViewRoster terminal input', () => {
     );
 
     stdin.write('\x1b[?1;2c');
+    stdin.write('\x1b[27;2;13~');
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     expect(onPromptChange).not.toHaveBeenCalled();
+    expect(onDispatch).not.toHaveBeenCalled();
     expect(onCancel).not.toHaveBeenCalled();
   });
 });

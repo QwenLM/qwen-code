@@ -261,6 +261,7 @@ describe('AgentViewRoster', () => {
     press('[I', {});
     press('[10;20R', {});
     press('\x1b[27;2;13~', {});
+    press('[27;2;13~', {});
     press('', { escape: true });
     press('[?u', {});
     await act(async () => {
@@ -272,8 +273,11 @@ describe('AgentViewRoster', () => {
     press('[3]', {});
     expect(onPromptChange).toHaveBeenLastCalledWith('[3]');
 
+    press('[1;2~]', {});
+    expect(onPromptChange).toHaveBeenLastCalledWith('[3][1;2~]');
+
     press('[Info] check', {});
-    expect(onPromptChange).toHaveBeenLastCalledWith('[3][Info] check');
+    expect(onPromptChange).toHaveBeenLastCalledWith('[3][1;2~][Info] check');
   });
 
   it('does not append terminal responses to peek replies', () => {
