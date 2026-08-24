@@ -677,6 +677,7 @@ const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 interface HeredocDelimiter {
   delimiter: string;
   stripTabs: boolean;
+  quoted: boolean;
 }
 
 interface SimpleHeredocLine {
@@ -747,15 +748,18 @@ function parseSimpleHeredocLine(
       }
       if (line[i] !== delimiterQuote) return null;
     } else {
-      while (i < line.length && /[A-Za-z0-9_./,:+-]/.test(line[i]!)) i++;
+      while (i < line.length && /[A-Za-z0-9_]/.test(line[i]!)) i++;
     }
 
     const delimiter = line.slice(delimiterStart, i);
-    if (delimiter.length === 0) return null;
+    // Only identifier-shaped delimiters are provably a plain heredoc; a
+    // digit-leading, spaced, or punctuated word can be arithmetic or worse,
+    // so anything else falls back to keeping every line visible.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(delimiter)) return null;
     if (delimiterQuote) i++;
     if (i < line.length && !/[ \t<]/.test(line[i]!)) return null;
 
-    delimiters.push({ delimiter, stripTabs });
+    delimiters.push({ delimiter, stripTabs, quoted: delimiterQuote !== '' });
     for (let j = operatorStart; j < i; j++) masked[j] = ' ';
     i--;
   }
@@ -787,6 +791,53 @@ function receiverConsumesData(receiver: string): boolean {
   );
 }
 
+function quoteStateAtLineEnd(
+  line: string,
+  open: "'" | '"' | undefined,
+): { end: "'" | '"' | undefined; closedAt: number | undefined } {
+  // Tracks quotes across physical lines so a multi-line quoted string is never
+  // mistaken for shell structure. `\` escapes only inside double quotes.
+  // closedAt records where the incoming quote closed, if it did.
+  let closedAt: number | undefined;
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (open === '"') {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') {
+        open = undefined;
+        closedAt ??= i;
+      }
+      continue;
+    }
+    if (open === "'") {
+      if (ch === "'") {
+        open = undefined;
+        closedAt ??= i;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') open = ch;
+  }
+  return { end: open, closedAt };
+}
+
+function receiverRedefinedInCommand(
+  command: string,
+  receiver: string,
+): boolean {
+  const escaped = receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`\\balias\\s+${escaped}=`).test(command) ||
+    new RegExp(`\\b${escaped}\\s*\\(\\s*\\)`).test(command) ||
+    new RegExp(`\\bfunction\\s+${escaped}\\b`).test(command)
+  );
+}
+
 function projectHeredocBodies(
   command: string,
   stripAllSimpleBodies: boolean,
@@ -798,6 +849,7 @@ function projectHeredocBodies(
   while (command.includes(placeholderPrefix)) placeholderPrefix += '_';
   let pending: HeredocDelimiter[] = [];
   let keepPendingBody = false;
+  let quoteOpen: "'" | '"' | undefined;
 
   for (const line of lines) {
     const comparableLine = line.endsWith('\r') ? line.slice(0, -1) : line;
@@ -808,6 +860,14 @@ function projectHeredocBodies(
         : comparableLine;
       if (terminator === current.delimiter) {
         pending = pending.slice(1);
+      } else if (
+        !current.quoted &&
+        (comparableLine.includes('$(') || comparableLine.includes('`'))
+      ) {
+        // An unquoted heredoc body undergoes command substitution, so a line
+        // carrying one is executed code, not data; never strip it from what
+        // the rules evaluate.
+        return { command, ambiguous: true, bodyPlaceholders: [] };
       } else if (keepPendingBody) {
         const placeholder = `${placeholderPrefix}${bodyPlaceholders.length}__`;
         kept.push(placeholder);
@@ -817,7 +877,24 @@ function projectHeredocBodies(
     }
 
     kept.push(line);
-    if (!line.includes('<<')) continue;
+    if (quoteOpen !== undefined) {
+      // Inside a multi-line quoted string. A line the quote never closes on
+      // is string content whole, heredoc-looking text included; only when the
+      // quote closes and a << follows can we not prove the structure.
+      const scan = quoteStateAtLineEnd(comparableLine, quoteOpen);
+      if (
+        scan.closedAt !== undefined &&
+        comparableLine.indexOf('<<', scan.closedAt) !== -1
+      ) {
+        return { command, ambiguous: true, bodyPlaceholders: [] };
+      }
+      quoteOpen = scan.end;
+      continue;
+    }
+    if (!line.includes('<<')) {
+      quoteOpen = quoteStateAtLineEnd(comparableLine, undefined).end;
+      continue;
+    }
 
     const parsed = parseSimpleHeredocLine(comparableLine);
     if (parsed === null) {
@@ -826,7 +903,8 @@ function projectHeredocBodies(
     if (parsed === 'none') continue;
     pending = parsed.delimiters;
     keepPendingBody =
-      !stripAllSimpleBodies && !receiverConsumesData(parsed.receiver);
+      (!stripAllSimpleBodies && !receiverConsumesData(parsed.receiver)) ||
+      receiverRedefinedInCommand(command, parsed.receiver);
   }
 
   if (pending.length > 0) {
@@ -881,7 +959,12 @@ function findStateTrackingHeredocDelimiters(
       inDouble = true;
       continue;
     }
-    if (ch === '#') break;
+    if (ch === '#' && (i === 0 || /[\s;&|()]/.test(line[i - 1]!))) break;
+    if (ch === '$' || ch === '`') {
+      // Expansions and substitutions hide structure this scanner cannot
+      // model ($[1 << 5] arms a phantom delimiter), so leave the line visible.
+      return { delimiters, unsafe: true, inSingle, inDouble };
+    }
     if (ch === '(' && line[i + 1] === '(') {
       arithmeticDepth++;
       i++;
@@ -908,10 +991,16 @@ function findStateTrackingHeredocDelimiters(
     const quote = line[wordStart];
     const quoted = quote === "'" || quote === '"';
     if (quoted) wordStart++;
+    if (!quoted && !/[A-Za-z_]/.test(line[wordStart] ?? '')) {
+      // Only identifier-shaped delimiters are provably a plain heredoc; a
+      // digit-leading or punctuated word could be arithmetic or worse, so the
+      // body stays visible.
+      return { delimiters, unsafe: true, inSingle, inDouble };
+    }
     let wordEnd = wordStart;
     while (wordEnd < line.length) {
       const wordCh = line[wordEnd]!;
-      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./,:+-]/.test(wordCh)) {
+      if (quoted ? wordCh === quote : !/[A-Za-z0-9_]/.test(wordCh)) {
         break;
       }
       wordEnd++;
@@ -924,17 +1013,30 @@ function findStateTrackingHeredocDelimiters(
         inDouble,
       };
     }
+    const delimiter = line.slice(wordStart, wordEnd);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(delimiter)) {
+      // Same bar as the permission arm: only identifier-shaped delimiters are
+      // provably plain heredocs, anything else keeps its lines visible.
+      return { delimiters, unsafe: true, inSingle, inDouble };
+    }
     if (wordEnd > wordStart) {
       delimiters.push({
-        delimiter: line.slice(wordStart, wordEnd),
+        delimiter,
         stripTabs,
+        quoted,
       });
     }
     i = wordEnd;
   }
 
+  let trailingBackslashes = 0;
+  for (let i = line.length - 1; i >= 0 && line[i] === '\\'; i--) {
+    trailingBackslashes++;
+  }
+  // A line continuation is an odd run of trailing backslashes; an even run is
+  // escaped backslashes and continues nothing.
   const trailingContinuation =
-    !inSingle && !inDouble && /\\$/.test(line.replace(/\\\\$/, ''));
+    !inSingle && !inDouble && trailingBackslashes % 2 === 1;
   return {
     delimiters,
     unsafe: trailingContinuation || inSingle || inDouble,

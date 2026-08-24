@@ -21,6 +21,7 @@ import {
   toolMatchesRuleToolName,
   splitCompoundCommand,
   splitCompoundCommandSegments,
+  projectHeredocBodiesForStateTracking,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -517,10 +518,13 @@ describe('splitCompoundCommand', () => {
     ).toEqual(['echo hi # <<EOF', 'touch /tmp/pwned', 'EOF']);
   });
 
-  it('keeps every physical line visible for an unclosed quote', async () => {
+  it('treats a multi-line quoted string as one argument, not visible lines', async () => {
+    // bash reads this as a single echo with a quoted multi-line argument:
+    // nothing after the opening quote executes. Splitting it per line would
+    // expose string content as phantom commands to deny rules.
     expect(
       splitCompoundCommand('echo "start\n<<EOF\nrm -rf /\nEOF\nend"'),
-    ).toEqual(['echo "start', '<<EOF', 'rm -rf /', 'EOF', 'end"']);
+    ).toEqual(['echo "start\n<<EOF\nrm -rf /\nEOF\nend"']);
   });
 
   it('leaves a backslash-continued opener visible rather than guessing the body', async () => {
@@ -529,8 +533,14 @@ describe('splitCompoundCommand', () => {
     ).toEqual(['cat <<EOF \\', 'rm -rf /', 'body', 'EOF']);
   });
 
-  it('reads a delimiter with word characters beyond the old charset', async () => {
-    expect(splitCompoundCommand('cat <<A,B\nbody\nA,B')).toEqual(['cat <<A,B']);
+  it('keeps punctuated delimiters visible rather than guessing', async () => {
+    // Only identifier-shaped delimiters are provably plain heredocs; <<A,B is
+    // beyond what this parser can prove, so every line stays visible.
+    expect(splitCompoundCommand('cat <<A,B\nbody\nA,B')).toEqual([
+      'cat <<A,B',
+      'body',
+      'A,B',
+    ]);
   });
 
   it('keeps a shell-fed heredoc body visible to deny rules', async () => {
@@ -760,6 +770,139 @@ describe('splitCompoundCommandSegments', () => {
     expect(
       splitCompoundCommandSegments("python - <<'PY'\nprint('ok')\nPY"),
     ).toEqual([{ command: "python - <<'PY'", terminator: '' }]);
+  });
+});
+
+// Witnesses from the round-5 bot review of #9417: every one of these shipped
+// with a bash ground-truth execution, so pin both the structure and the verdict.
+describe('heredoc fail-closed projections', () => {
+  it('treats heredoc-looking text inside a multi-line quote as string content', () => {
+    // The << sits inside a double-quoted argument spanning physical lines;
+    // bash executes the rm line after the closing quote, so it must surface
+    // as its own segment instead of being stripped as a heredoc body.
+    const segments = splitCompoundCommand(
+      'echo "start\ncat <<EOF\n"\nrm -rf /\nEOF',
+    );
+    expect(segments).toContain('rm -rf /');
+  });
+
+  it('keeps a multi-line quoted command with a << token as one segment', () => {
+    // python -c with a quoted multi-line script: the << is arithmetic inside
+    // a string, not an opener, and per-line splitting would prompt per line.
+    const command = 'python -c "\nx = 1 << 2\nprint(x)\n"';
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it('keeps the body visible when the receiver is redefined in-command', () => {
+    // bash runs the body through the redefined receiver, so the deny rule
+    // must see it.
+    expect(
+      splitCompoundCommand(
+        'cat() { bash; }\ncat <<EOF\nrm -rf /tmp/pwned\nEOF',
+      ),
+    ).toContain('rm -rf /tmp/pwned');
+    expect(
+      splitCompoundCommand('alias cat=bash\ncat <<EOF\nrm -rf /important\nEOF'),
+    ).toContain('rm -rf /important');
+  });
+
+  it('refuses to strip an unquoted-delimiter body with command substitution', () => {
+    // $(rm -rf /) inside an unquoted heredoc executes; the line must stay
+    // visible rather than being treated as inert data.
+    const segments = splitCompoundCommand('cat <<EOF\n$(rm -rf /)\nEOF');
+    expect(segments).toContain('$(rm -rf /)');
+  });
+
+  it('still strips provably-inert bodies', () => {
+    expect(splitCompoundCommand("cat <<'EOF'\nplain data\nEOF")).toEqual([
+      "cat <<'EOF'",
+    ]);
+    expect(splitCompoundCommand('python - <<EOF\nprint(1)\nEOF')).toEqual([
+      'python - <<EOF',
+    ]);
+  });
+
+  it('denies the executed line after a quoted multi-line string', async () => {
+    const pm2 = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+    );
+    pm2.initialize();
+    expect(
+      await pm2.evaluate({
+        toolName: 'run_shell_command',
+        command: 'echo "start\ncat <<EOF\n"\nrm -rf /\nEOF',
+      }),
+    ).toBe('deny');
+  });
+
+  it('auto-allows a multi-line quoted python -c under a prefix allow rule', async () => {
+    const pm2 = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python *)'] }),
+    );
+    pm2.initialize();
+    expect(
+      await pm2.evaluate({
+        toolName: 'run_shell_command',
+        command: 'python -c "\nx = 1 << 2\nprint(x)\n"',
+      }),
+    ).toBe('allow');
+  });
+
+  it('denies a heredoc body executed through a redefined receiver', async () => {
+    const pm2 = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+    );
+    pm2.initialize();
+    expect(
+      await pm2.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cat() { bash; }\ncat <<EOF\nrm -rf /tmp/pwned\nEOF',
+      }),
+    ).toBe('deny');
+  });
+});
+
+// Round-5 witnesses on the state-tracking projection (the daemon git-worktree
+// guard consumes this string; a misread opener either hides executed lines or
+// lets child-shell stdin mutate the tracked cwd).
+describe('state-tracking heredoc projection', () => {
+  it('does not start a comment at a mid-word #', () => {
+    // foo#bar is one word in bash, so the heredoc is live and its body is
+    // stdin data that must be stripped, not executed cd commands.
+    expect(
+      projectHeredocBodiesForStateTracking(
+        'cd /outside; cat foo#bar <<EOF\ncd /inside\nEOF\ngit reset --hard',
+      ),
+    ).toBe('cd /outside; cat foo#bar <<EOF\ngit reset --hard');
+  });
+
+  it('leaves arithmetic expansions fully visible', () => {
+    // $[1 << 5] is arithmetic, not a heredoc with delimiter 5.
+    const command = 'echo $[1 << 5]\ncd /outside\ngit reset --hard';
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
+  });
+
+  it('reads only an odd run of trailing backslashes as a continuation', () => {
+    // Built by repeat() so the count is unambiguous: an even run of trailing
+    // backslashes is escaped backslashes, not a continuation, so the heredoc
+    // is live and its body is stripped; an odd run continues the line and the
+    // structure stays visible.
+    const opener = 'cat <<EOF ';
+    for (const n of [2, 4]) {
+      const command = opener + '\\'.repeat(n) + '\nbody\nEOF';
+      expect(projectHeredocBodiesForStateTracking(command)).toBe(
+        opener + '\\'.repeat(n),
+      );
+    }
+    const odd = opener + '\\'.repeat(3) + '\nbody\nEOF';
+    expect(projectHeredocBodiesForStateTracking(odd)).toBe(odd);
+  });
+
+  it('keeps non-identifier delimiters visible', () => {
+    // <<123 is legal shell but beyond what this scanner can prove, so the
+    // body stays visible rather than being stripped.
+    const command = 'cat <<123\nbody\n123';
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
   });
 });
 
