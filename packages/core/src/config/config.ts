@@ -7010,12 +7010,14 @@ export class Config {
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
    * is disabled by default and turns on through the
    * `tools.listDirectory.enabled` setting, by being explicitly listed in the
-   * `coreTools` allowlist, or by being covered by a `permissions.allow`
-   * registry-allowlist rule (#9827). Entries are normalised with `parseRule`
-   * — the same parser `PermissionManager` uses — so alias forms (`ListFiles`)
-   * and specifier forms (`list_directory(/src)`) match; the allowlist check
-   * honours meta-categories (`Read`) via `toolMatchesRuleToolName`, matching
-   * the coverage semantics of the registry gate itself.
+   * `coreTools` allowlist, or by being covered by an allow OR ask rule while
+   * the `permissions.allow` registry allowlist is active (#9827). Entries are
+   * normalised with `parseRule` — the same parser `PermissionManager` uses —
+   * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
+   * match; the check honours meta-categories (`Read`) via
+   * `toolMatchesRuleToolName`, matching the coverage semantics of the
+   * registry gate itself (`isCoveredByAllowOrAskRule`, which counts ask
+   * rules too).
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
@@ -7031,12 +7033,28 @@ export class Config {
     // allowlisted tool passes `PermissionManager.isToolEnabled()` but the
     // registry never registers it, so it silently vanishes from `/tools` and
     // the model request while calls to it fail with TOOL_NOT_REGISTERED.
-    return this.getRegistryAllowList().some((raw) => {
+    const coveredByPermissionRule = (raw: string): boolean => {
       const rule = parseRule(raw);
       return (
         !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
       );
-    });
+    };
+    if (this.getRegistryAllowList().some(coveredByPermissionRule)) {
+      return true;
+    }
+    // Ask-only coverage counts for exactly the same reason it counts in
+    // `PermissionManager.isCoveredByAllowOrAskRule`: under an active
+    // allowlist `isToolEnabled('list_directory')` returns true for it, so
+    // the gate must offer the tool to `registerLazy` too — otherwise the
+    // ask rule can never fire and arriving calls fail TOOL_NOT_REGISTERED
+    // (#9827). Gated on the allowlist actually being active so an ask rule
+    // alone never changes the default opt-in behaviour.
+    const allowListActive = this.getRegistryAllowList().some(
+      (raw) => !parseRule(raw).invalid,
+    );
+    return (
+      allowListActive && this.getPermissionsAsk().some(coveredByPermissionRule)
+    );
   }
 
   isAgentTeamEnabled(): boolean {

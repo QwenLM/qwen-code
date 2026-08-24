@@ -8003,6 +8003,57 @@ describe('Server Config (config.ts)', () => {
       ).not.toContain(ToolNames.LS);
     });
 
+    it('registers list_directory when covered only by an ask rule under an active allowlist (#9827)', async () => {
+      // Probe scenario: allow:['edit'] activates the allowlist, and
+      // ask:['ListFiles'] is the ONLY coverage for list_directory.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // (membership counts ask rules — see isCoveredByAllowOrAskRule), so
+      // the opt-in gate must offer the tool to registerLazy too; otherwise
+      // the schema is never sent, the ask rule can never fire, and arriving
+      // calls fail TOOL_NOT_REGISTERED.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory for an ask rule when the allowlist is inactive (#9827)', async () => {
+      // Ask coverage only gates registration while the registry allowlist
+      // is active; without it list_directory stays opt-in, so an ask rule
+      // alone must not change the default-disabled behaviour.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { ask: ['ListFiles'] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
