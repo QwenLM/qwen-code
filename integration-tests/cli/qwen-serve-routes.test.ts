@@ -296,11 +296,15 @@ describe('qwen serve — capabilities envelope', () => {
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
-    // `workspace_trust`, `workspace_github_setup`, `workspace_reload`, and
-    // `scheduled_task_session_reuse`. The CLI serve path always wires
-    // `persistSetting`, the workspace service, route-local workspace helpers,
-    // and the managed scheduled-task bridge callback.
-    expect(caps.features).toEqual([
+    // `workspace_trust`, `workspace_github_setup`, and `workspace_reload`.
+    // `scheduled_task_session_reuse` appears only after the managed runtime
+    // mounts, so the fast-path bootstrap and runtime envelopes legitimately
+    // differ by that tag. Its transition is covered by the serve startup tests.
+    expect(
+      caps.features.filter(
+        (feature) => feature !== 'scheduled_task_session_reuse',
+      ),
+    ).toEqual([
       'health',
       'daemon_status',
       'capabilities',
@@ -348,7 +352,6 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
-      'scheduled_task_session_reuse',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
