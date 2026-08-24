@@ -765,9 +765,13 @@ EOF
   )
 fi
 if [ -z "$MAINTAINER" ]; then
-  # Last resort: the most recent human reviewer, if any.
+  # Last resort: the most recent human reviewer, if any. latestReviews is
+  # not recency-sorted and bot accounts submit formal reviews here, so
+  # filter the bot-suffix logins and order by submittedAt before taking
+  # the last — otherwise a defer escalation @mentions a bot and notifies
+  # nobody.
   MAINTAINER=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json latestReviews \
-    --jq '[.latestReviews[].author.login] | last // empty')
+    --jq '[.latestReviews[] | select((.author.login | (endswith("[bot]") or endswith("-bot"))) | not)] | sort_by(.submittedAt) | last | .author.login // empty')
 fi
 if [ -n "$MAINTAINER" ]; then
   # Put the PR in their Assigned filter — a stronger signal than the mention
