@@ -37,6 +37,24 @@ describe('normalizeExplicitFileLink', () => {
   it('converts a line-number fragment into a path:line suffix', () => {
     expect(normalizeExplicitFileLink('/src/app.ts#L42')).toBe('/src/app.ts:42');
   });
+
+  it('treats an encoded %23 as a literal # in the filename, not a fragment', () => {
+    expect(normalizeExplicitFileLink('/tmp/my%23file.md')).toBe(
+      '/tmp/my#file.md',
+    );
+  });
+
+  it('splits line fragments on the raw # before percent-decoding', () => {
+    expect(normalizeExplicitFileLink('/src/app%20main.ts#L42')).toBe(
+      '/src/app main.ts:42',
+    );
+  });
+
+  it('decodes %23 inside file:// paths without applying fragment logic', () => {
+    expect(
+      normalizeExplicitFileLink('file:///workspace/export%20(%231).html'),
+    ).toBe('/workspace/export (#1).html');
+  });
 });
 
 describe('resolveFileLinkFromAnchor', () => {
@@ -62,6 +80,29 @@ describe('resolveFileLinkFromAnchor', () => {
     expect(
       resolveFileLinkFromAnchor(anchorWith(null, '/var/log/app.log')),
     ).toBe('/var/log/app.log');
+  });
+
+  it('resolves hrefs whose filename contains an encoded #', () => {
+    expect(
+      resolveFileLinkFromAnchor(anchorWith('/tmp/my%23file.md', 'r')),
+    ).toBe('/tmp/my#file.md');
+  });
+
+  it('keeps a literal # in sanitized-away anchor text intact', () => {
+    expect(
+      resolveFileLinkFromAnchor(anchorWith(null, 'export (#1).html')),
+    ).toBe('export (#1).html');
+  });
+
+  it('resolves file:// export links with an encoded # in the filename', () => {
+    expect(
+      resolveFileLinkFromAnchor(
+        anchorWith(
+          'file:///workspace/export%20(%231).html',
+          'export (#1).html',
+        ),
+      ),
+    ).toBe('/workspace/export (#1).html');
   });
 
   it('ignores external links', () => {
