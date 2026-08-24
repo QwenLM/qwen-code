@@ -30,6 +30,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeJsonTagCharacters } from '../utils/formatters.js';
 import {
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
@@ -401,15 +402,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    // Escape `<` in the JSON-stringified schema so any `</function>`
+    // Escape tag boundary characters in the JSON-stringified schema so any
+    // `</function>`
     // (or `</functions>`) substring inside a tool's description / enum
     // / examples can't prematurely close the pseudo-XML wrapper. The
-    // `<` JSON unicode escape decodes back to `<` when the model
-    // interprets the JSON, but as raw text inside the wrapper it's no
-    // longer the start of a closing tag.
+    // JSON unicode escapes decode back to their original characters when the
+    // model interprets the JSON, but as raw text inside the wrapper they are
+    // no longer tag delimiters.
     const schemaBlocks = loaded.map(
       (tool) =>
-        `<function>${JSON.stringify(tool.schema).replace(/</g, '\\u003c')}</function>`,
+        `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,
     );
     let llmContent = '';
     if (schemaBlocks.length > 0) {

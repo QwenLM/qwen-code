@@ -5,6 +5,7 @@
  */
 
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
+import { escapeJsonTagCharacters } from '@qwen-code/qwen-code-core';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {
@@ -17,8 +18,7 @@ export class TemplateRenderer {
     // engines (embedded WebViews, older Electron) and would throw SyntaxError.
     // All three are valid JSON escapes and parse back to the original
     // characters, so the data reaching the page is unchanged.
-    const insightJson = JSON.stringify(insights)
-      .replace(/</g, '\\u003c')
+    const insightJson = escapeJsonTagCharacters(JSON.stringify(insights))
       .replace(/\u2028/g, '\\u2028')
       .replace(/\u2029/g, '\\u2029');
     const html = `<!doctype html>
