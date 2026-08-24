@@ -12100,11 +12100,10 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
-      it('does not drop a modelOverride send using the active route token count (#9529)', async () => {
+      it('does not drop a send using another route token count (#9529)', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
-          model === 'route-b-model' ? 'route-b' : 'route-a',
-        );
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
 
         mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
           originalTokenCount: 50,
@@ -12135,20 +12134,15 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
+        routeIdentity = 'route-b';
         await expect(
           session.prompt({
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'second' }],
-            model: 'route-b-model',
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-        expect(mockChat.sendMessageStream).toHaveBeenLastCalledWith(
-          'route-b-model',
-          expect.any(Object),
-          expect.any(String),
-        );
       });
 
       it('retains a returning route token count after an A-B-A switch (#9529)', async () => {

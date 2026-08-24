@@ -5136,6 +5136,9 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
+                let requestRouteKey = this.config.getModelRouteIdentity(
+                  this.config.getModel(),
+                );
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -5181,6 +5184,7 @@ export class Session implements SessionContext {
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
+                  requestRouteKey = sendResult.requestRouteKey;
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
@@ -5356,7 +5360,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(pendingSend.signal);
@@ -5899,6 +5903,9 @@ export class Session implements SessionContext {
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      let requestRouteKey = this.config.getModelRouteIdentity(
+        this.config.getModel(),
+      );
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -6192,6 +6199,7 @@ export class Session implements SessionContext {
           };
         }
 
+        requestRouteKey = sendResult.requestRouteKey;
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
@@ -6362,7 +6370,7 @@ export class Session implements SessionContext {
       );
 
       if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata, sendResult.requestRouteKey);
+        this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,
