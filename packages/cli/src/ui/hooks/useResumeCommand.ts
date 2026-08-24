@@ -119,6 +119,35 @@ export function useResumeCommand(
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
 
+      // Open the telemetry swap transaction BEFORE touching the outgoing
+      // session. Opening takes the session-switch latch and captures the
+      // outgoing session for the undo snapshot; see the lifetime contract
+      // in beginTelemetrySwap's JSDoc in core client.ts (#9833, #9844).
+      // A false return means another /resume or /branch already holds the
+      // single swap slot — reject instead of entangling; the in-flight swap
+      // settles the slot itself. Opening before the outgoing-session
+      // capture and the incoming loadSession await also means a failure of
+      // that pre-swap work can never settle a transaction this attempt did
+      // not open.
+      let swapOpened = false;
+      const telemetrySwapOpened =
+        config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
+      if (!telemetrySwapOpened) {
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'A session switch is already in progress. Try again in a moment.',
+          } as HistoryItemWithoutId,
+          Date.now(),
+        );
+        return;
+      }
+      swapOpened = true;
+
+      // Capture the outgoing session under the latch: before this point a
+      // concurrent picker swap could still roll back and change the session
+      // the user is on, and rolling back against that stale id would land
+      // on a session the UI never shows (#9844).
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
@@ -130,6 +159,10 @@ export function useResumeCommand(
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {
+          // Close the transaction this attempt opened; nothing was replayed.
+          // Forgetting this would leave the single slot occupied and every
+          // later swap rejected (#9844).
+          config.getGeminiClient()?.commitTelemetrySwap?.();
           return;
         }
 
@@ -169,34 +202,9 @@ export function useResumeCommand(
         // 1. Swap core first. Matches useBranchCommand's core-before-UI
         //    pattern: if anything fails between core swap and UI swap,
         //    the catch block rolls core back to the old session so the
-        //    user is not stranded with a half-live client.
-        //
-        // Open the telemetry swap transaction BEFORE the core swap: the
-        // initialize() below replays the resumed session's stored usage
-        // straight into the process-wide aggregate, and the catch path must
-        // be able to put it back (#9833). The transaction arms its own
-        // snapshot inside the client's replay decision, so opening it early
-        // costs nothing when no replay happens.
-        //
-        // Opening also doubles as the session-switch latch (#9844): a false
-        // return means another /resume or /branch already holds the single
-        // swap slot (the session picker fires swaps fire-and-forget and
-        // nothing else serializes them). Reject instead of entangling — a
-        // second concurrent swap would let the first swap's stale settlement
-        // restore over, or drop, this swap's committed replay, reintroducing
-        // the very double-count this transaction exists to prevent.
-        const telemetrySwapOpened =
-          config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
-        if (!telemetrySwapOpened) {
-          addItem(
-            {
-              type: MessageType.ERROR,
-              text: 'A session switch is already in progress. Try again in a moment.',
-            } as HistoryItemWithoutId,
-            Date.now(),
-          );
-          return;
-        }
+        //    user is not stranded with a half-live client. The transaction
+        //    opened above covers the initialize() replay (#9833; see
+        //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
@@ -279,11 +287,14 @@ export function useResumeCommand(
           // AFTER the rollback above — restore overwrites, so anything the
           // rollback itself replayed is correctly superseded (#9833).
           config.getGeminiClient()?.abortTelemetrySwap?.();
-        } else {
-          // Either the core swap never happened (nothing was replayed —
-          // the transaction is unarmed) or the UI already committed (the
-          // replay belongs to the session the user is on). Both close the
-          // transaction without restoring.
+        } else if (swapOpened) {
+          // Either the core swap never happened (nothing was replayed — the
+          // transaction is unarmed) or the UI already committed (the replay
+          // belongs to the session the user is on): close THIS attempt's
+          // transaction without restoring. Never settle a transaction this
+          // attempt did not open — the shared slot may hold a different
+          // in-flight swap (#9844). See beginTelemetrySwap's JSDoc in core
+          // client.ts.
           config.getGeminiClient()?.commitTelemetrySwap?.();
         }
         addItem(
