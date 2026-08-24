@@ -36,7 +36,7 @@ import {
   type ChunkCoverageItem,
 } from './lib/coverage.js';
 import { buildSelectionIdentity } from './lib/selection.js';
-import type { DiffChunk } from './lib/diff-plan.js';
+import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 import {
   promptRecordDir,
   briefPath,
@@ -75,7 +75,12 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
  */
 function plan(
   n = 2,
-  opts: { record?: boolean; roster?: boolean } = {},
+  opts: {
+    record?: boolean;
+    roster?: boolean;
+    /** Id of a chunk carrying one line longer than the read cap. */
+    longLineChunk?: number;
+  } = {},
 ): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
@@ -94,6 +99,10 @@ function plan(
         id: i + 1,
         startLine: i * 100 + 1,
         endLine: (i + 1) * 100,
+        // The planner's own pre-detection of a chunk no read can span.
+        ...(opts.longLineChunk === i + 1
+          ? { maxLineChars: READ_FILE_CHAR_CAP + 1 }
+          : {}),
       })),
     }),
   );
@@ -2938,6 +2947,121 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
       'recovered',
       'recovered',
     ]);
+  });
+});
+
+describe('coverage — an honest Uncoverable declaration is not refuted by the read that produced it', () => {
+  it("a declarer performing the launch prompt's spelled-out read still lands declared-uncoverable", () => {
+    // Production shape: `buildChunkLaunchPrompt` spells out a ranged read of
+    // the chunk's own window for EVERY chunk agent, unreachable ones
+    // included, and a compliant declarer performs exactly that read before
+    // returning the declaration. The read lands in `diffReads` spanning the
+    // chunk, so a refutation scan that quantifies over the declarer too
+    // refutes every honest declaration through the very read that motivated
+    // it — the chunk drops to `missingChunks` with no cause, and
+    // check-coverage prescribes relaunching a chunk no read can span,
+    // forever.
+    const p = plan();
+    transcript('a1', good(1), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+    const entry = r.chunkItems.find((i) => i.id === 1);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+  });
+
+  it('a spanning read of a long-line chunk is a truncated view and refutes nothing', () => {
+    // The whole-diff agents' prompts carry one ranged read per chunk, so one
+    // of them RETURNs a read spanning the declarer's chunk too. For a chunk
+    // whose longest line exceeds the read cap — the planner's own
+    // `maxLineChars` pre-detection — that read necessarily truncated before
+    // returning the window: counting it as a demonstration that the chunk
+    // CAN be spanned refutes the honest declaration and certifies the chunk
+    // COVERED on a tail no read ever returned.
+    const p = plan(2, { longLineChunk: 1 });
+    transcript('a1', good(1), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('w1', wholeDiff(), { calls: 2, range: [0, 100] });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('a superseded rewritten record leaves no cause behind', () => {
+    // The supersession gate suppresses the blind/idle/rewritten PROSE for a
+    // record a verbatim relaunch superseded — but the rewritten arm's
+    // chunk-cause note carried no gate, so `classify()` diagnosed a prompt
+    // defect the relaunch already repaired while the suppressed prose array
+    // said nothing. First record: chunk 2 launched with a paraphrase,
+    // worked, read without spanning. The operator rebuilt and relaunched;
+    // the rebuild on disk is stale — it points at the wrong window, the
+    // state family the supersession machinery exists to serve — and the
+    // relaunch delivered it verbatim. The chunk's residue is exactly what
+    // 'unknown' documents.
+    const p = plan();
+    const stale =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=50)`;
+    writeFileSync(join(promptRecordDir(p), 'chunk-2.txt'), stale);
+    const paraphrased =
+      `Please review chunk 2 of 2 carefully.\n` +
+      `read_file(file_path="${DIFF}", offset=100, limit=50)`;
+    transcript('a2first', paraphrased, { calls: 1, range: [100, 50] });
+    transcript('a2relaunch', stale, { calls: 1, range: [0, 50] });
+    transcript('a1', good(1), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.rewrittenPrompts).toEqual([]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('unknown');
+  });
+
+  it('a superseded unopened record leaves no cause behind either', () => {
+    // Same gate, sibling arm: the unopened prose push is suppressed for a
+    // superseded record, so its cause note must be too, or the ledger
+    // contradicts the suppressed prose exactly the way the rewritten arm
+    // did. The record was told chunk 2's lines, worked, and never opened
+    // the diff; the stale verbatim relaunch opened it.
+    const p = plan();
+    const stale =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=50)`;
+    writeFileSync(join(promptRecordDir(p), 'chunk-2.txt'), stale);
+    transcript('a2first', stale, {
+      calls: 0,
+      opens: [],
+      mentions: [chunkBrief(2)],
+    });
+    transcript('a2relaunch', stale, { calls: 1, range: [0, 50] });
+    transcript('a1', good(1), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.unopenedAgents).toEqual([]);
+    expect(r.rewrittenPrompts).toEqual([]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('unknown');
   });
 });
 

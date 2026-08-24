@@ -79,7 +79,11 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
-import { chunkIdsProblem, type DiffChunk } from './diff-plan.js';
+import {
+  chunkIdsProblem,
+  READ_FILE_CHAR_CAP,
+  type DiffChunk,
+} from './diff-plan.js';
 import { selectionDrift, type SelectionDrift } from './selection.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
@@ -483,6 +487,8 @@ interface Plan {
     startLine: number;
     endLine: number;
     files?: Array<{ path: string }>;
+    /** Longest single line in the range; absent on older plans. */
+    maxLineChars?: number;
   }>;
 }
 
@@ -898,9 +904,22 @@ export function coverageFromTranscripts(
   const refutedByReturnedSpanningRead = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
     if (c === undefined) return false;
+    // A line longer than the read cap is unrecoverable — every page starts at
+    // a line boundary, so no read returns the tail of that line — and a
+    // spanning read recorded for such a chunk is a truncated view by
+    // construction. It demonstrably spanned nothing, so it refutes nothing;
+    // `maxLineChars` is the planner's own pre-detection of this shape.
+    if ((c.maxLineChars ?? 0) > READ_FILE_CHAR_CAP) return false;
     return records.some(
       (r) =>
         r.returned &&
+        // Not the declarers of this chunk: the declarer's own spanning read
+        // is the read the launch prompt spelled out and the declaration
+        // answered — every production declaration would otherwise refute
+        // itself — and two honest declarers refute each other the same way.
+        // Same-shape records exclude each other here exactly as they do at
+        // the `chunkSatisfied` call site below.
+        !declaresOwnUncoverable(r, chunkId) &&
         merge(r.diffReads).some(([s, e]) => s <= c.startLine && e >= c.endLine),
     );
   };
@@ -1072,12 +1091,15 @@ export function coverageFromTranscripts(
       }
     }
 
-    // Recorded whether or not this record goes on to cover its chunk: a
-    // rewritten launch that still read the diff earns the coverage, and the
+    // Recorded whether or not this record goes on to cover its chunk — the
     // classification is only ever consulted for a chunk that ended up
-    // uncovered. A candidate cause that never gets read costs nothing; one
-    // that was never collected cannot be read at all.
-    if (rewrittenThisRecord) noteChunkCause(chunk, 'rewritten-prompt');
+    // uncovered, and a cause that was never collected cannot be read at all —
+    // but gated with the same supersession check as its prose push and the
+    // blind/idle arms: a relaunch that satisfied the chunk already rebuilt
+    // the prompt, and a cause that outlives its suppression makes
+    // `classify()` diagnose the chunk with a repaired problem.
+    if (rewrittenThisRecord && !superseded(rec, chunk))
+      noteChunkCause(chunk, 'rewritten-prompt');
 
     const told = pointedAt(rec.launchPrompt, plan);
 
@@ -1093,11 +1115,14 @@ export function coverageFromTranscripts(
       // The cause the operator is handed is the one whose repair subsumes the
       // other, matching the push above: a rewritten prompt is rebuilt, and a
       // rebuild already relaunches. Reporting both would hand two conflicting
-      // repairs for one chunk.
-      noteChunkCause(
-        chunk,
-        rewrittenThisRecord ? 'rewritten-prompt' : 'unopened',
-      );
+      // repairs for one chunk. Gated like the push and the note above: a
+      // superseding relaunch already reopened the diff or rebuilt the prompt.
+      if (!superseded(rec, chunk)) {
+        noteChunkCause(
+          chunk,
+          rewrittenThisRecord ? 'rewritten-prompt' : 'unopened',
+        );
+      }
       continue;
     }
 
