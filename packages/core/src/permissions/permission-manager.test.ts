@@ -2711,6 +2711,47 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('monitor')).toBe(true);
     });
 
+    it('ask rules keep their tool registered under an active allowlist (#9827)', async () => {
+      // `allow: ["ReadFile"]` + `ask: ["Shell"]` is a natural "auto-approve
+      // reads, always confirm shell" posture. The ask rule expresses "this
+      // tool must stay usable, with confirmation", so the shell family must
+      // NOT be silently deregistered just because no ALLOW rule covers it —
+      // otherwise "always require user confirmation" becomes "tool
+      // unavailable" and the ask rule can never fire.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFile'],
+          permissionsAsk: ['Shell'],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      // "Shell" ask rule covers monitor too (same meta-category semantic).
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+      // The ask rule still governs the runtime decision.
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('ask');
+      // A tool covered by neither an allow nor an ask rule stays gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('removing a startup ask rule mid-session keeps its tools registered (#9827)', async () => {
+      // Same monotonic-membership contract as allow rules: removing an ask
+      // rule live must not deregister a running tool.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFile'],
+          permissionsAsk: ['Shell'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(pm.removePersistentRule('Shell', 'ask')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
     it('deny rules still win over allowlist membership', async () => {
       pm = new PermissionManager(
         makeConfig({

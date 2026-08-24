@@ -194,6 +194,18 @@ export class PermissionManager {
   private startupAllowRules: PermissionRule[] = [];
 
   /**
+   * Frozen snapshot of the ask rules in force at startup.
+   *
+   * Ask rules count toward registry-allowlist membership: a tool the user
+   * configured to always be prompted for must stay usable, so "always ask"
+   * must not silently become "unregistered" whenever an allowlist is
+   * active (#9827). Membership is monotonic within the session for the
+   * same reason as `startupAllowRules`: removing an ask rule mid-session
+   * must not deregister a tool that was legitimately registered.
+   */
+  private startupAskRules: PermissionRule[] = [];
+
+  /**
    * Set once the restart caveat for session allow-rule grants under an
    * active registry allowlist has been logged, so repeated skill
    * `allowedTools` grants do not pile identical warnings into the log.
@@ -250,6 +262,12 @@ export class PermissionManager {
     // monotonic within the session, removals take effect at restart (see
     // `startupAllowRules`, #9827).
     this.startupAllowRules = this.getEffectiveAllowRules();
+
+    // Ask rules count toward membership too (see
+    // `isCoveredByAllowOrAskRule`); freeze them for the same
+    // restart-scoped monotonicity. AUTO mode only strips allow rules, so
+    // the live ask set is never stashed.
+    this.startupAskRules = this.getEffectiveAskRules();
   }
 
   // ---------------------------------------------------------------------------
@@ -692,7 +710,10 @@ export class PermissionManager {
    *
    * A tool is disabled (returns false) when:
    * - the `permissions.allow` registry allowlist is active and the tool is
-   *   not covered by any allow rule (see `isPermissionsAllowListActive`), or
+   *   not covered by any allow or ask rule (see
+   *   `isPermissionsAllowListActive`; ask rules keep their tool registered
+   *   so "always require confirmation" never silently becomes "tool
+   *   unavailable"), or
    * - a `deny` rule without a specifier (i.e. a whole-tool deny) matches.
    *
    * Specifier-based deny rules such as `"Bash(rm -rf *)"` do NOT remove the
@@ -716,8 +737,8 @@ export class PermissionManager {
 
     // `permissions.allow` registry allowlist: when the session starts with
     // at least one allow rule, any built-in tool not covered by an allow
-    // rule is never registered, so its schema is not sent to the model.
-    // Exempt:
+    // or ask rule is never registered, so its schema is not sent to the
+    // model. Exempt:
     // - MCP tools (`mcp__*`): dynamically discovered and filtered via the
     //   per-server `includeTools` / `excludeTools` and `tools.disabled`
     //   knobs instead — same bypass the legacy coreTools allowlist had.
@@ -744,7 +765,7 @@ export class PermissionManager {
       !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
       !canonicalName.startsWith('mcp__') &&
       !canonicalName.startsWith('computer_use__') &&
-      !this.isCoveredByAllowRule(canonicalName)
+      !this.isCoveredByAllowOrAskRule(canonicalName)
     ) {
       return false;
     }
@@ -794,20 +815,34 @@ export class PermissionManager {
   }
 
   /**
+   * All ask rules currently in force: persistent + session. AUTO mode
+   * strips only allow rules (the stash in `strippedAllowRules`), so ask
+   * rules are never suspended and no stash applies here.
+   */
+  private getEffectiveAskRules(): PermissionRule[] {
+    return [...this.sessionRules.ask, ...this.persistentRules.ask];
+  }
+
+  /**
    * Registry-membership check for the `permissions.allow` allowlist: true
-   * when any in-force allow rule mentions the tool. Tool-name matching is
-   * specifier-agnostic (`Bash(npm test)` keeps `run_shell_command`
-   * registered) and honours meta-categories (`Read` covers grep/glob/...,
-   * `Bash` covers monitor) via `toolMatchesRuleToolName`.
+   * when any in-force allow OR ask rule mentions the tool. Ask rules count
+   * because they express "this tool must stay usable, with confirmation" —
+   * a tool covered only by an ask rule must not be silently deregistered
+   * whenever an allowlist is active, or the documented "always require
+   * user confirmation" would become "tool unavailable" and the ask rule
+   * could never fire (#9827). Tool-name matching is specifier-agnostic
+   * (`Bash(npm test)` keeps `run_shell_command` registered) and honours
+   * meta-categories (`Read` covers grep/glob/..., `Bash` covers monitor)
+   * via `toolMatchesRuleToolName`.
    *
    * Membership is monotonic within the session: the union of the frozen
-   * startup rule set (`startupAllowRules`) and the live rule set. Removing
-   * a STARTUP rule mid-session therefore never deregisters an
-   * already-registered tool (removals take effect at restart, matching the
-   * documented "Requires restart" contract), while rules granted
-   * mid-session — skill `allowedTools`, "Always allow", `/permissions`
-   * writes — extend membership live even though they can never ACTIVATE
-   * the allowlist (#9827).
+   * startup rule sets (`startupAllowRules` / `startupAskRules`) and the
+   * live rule sets. Removing a STARTUP rule mid-session therefore never
+   * deregisters an already-registered tool (removals take effect at
+   * restart, matching the documented "Requires restart" contract), while
+   * rules granted mid-session — skill `allowedTools`, "Always allow",
+   * `/permissions` writes — extend membership live even though they can
+   * never ACTIVATE the allowlist (#9827).
    *
    * Caveat: extending membership flips this runtime predicate only. A
    * mid-session grant can never RESTORE a tool that the startup allowlist
@@ -817,12 +852,14 @@ export class PermissionManager {
    * until the rule is added to settings `permissions.allow` and the
    * session restarts (#9827).
    */
-  private isCoveredByAllowRule(canonicalName: string): boolean {
+  private isCoveredByAllowOrAskRule(canonicalName: string): boolean {
     const covered = (rule: PermissionRule): boolean =>
       !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName);
     return (
       this.startupAllowRules.some(covered) ||
-      this.getEffectiveAllowRules().some(covered)
+      this.getEffectiveAllowRules().some(covered) ||
+      this.startupAskRules.some(covered) ||
+      this.getEffectiveAskRules().some(covered)
     );
   }
 
