@@ -133,6 +133,7 @@ import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_STALE_INTERVALS,
   clampActiveWorkIntervalMs,
   type ActiveWorkHeartbeatCapabilityV1,
@@ -3133,10 +3134,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The child is done with it; only local teardown remains.
         return true;
       }
-      // Refused: adopt the hold set it handed back so the cache reflects the
-      // reason we are backing off rather than the stale set that sent us here.
+      // Refused: adopt a bounded hold set so the cache reflects the reason we
+      // are backing off rather than the stale set that sent us here.
       const holds = response['holds'];
-      if (Array.isArray(holds)) {
+      if (
+        Array.isArray(holds) &&
+        holds.length <= ACTIVE_WORK_MAX_SESSION_HOLDS
+      ) {
         const adopted = new Map<string, ActiveWorkHoldCategory>();
         for (const hold of holds) {
           if (typeof hold !== 'object' || hold === null) continue;
