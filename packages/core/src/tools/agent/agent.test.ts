@@ -6644,11 +6644,25 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
       });
 
+      const updates: AgentResultDisplay[] = [];
       const result = await runWithAgentContext('sub-1', () =>
-        invocation.execute(),
+        invocation.execute(undefined, (output) => {
+          updates.push(output as AgentResultDisplay);
+        }),
       );
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
+      // Pin the downgrade: backgroundRequested is true here (the loaded
+      // config has background: true), but a nested session runs foreground.
+      // Web Shell treats executionMode as authoritative, so a 'background'
+      // value on this path would hide the inline result from the user.
+      expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
+        'foreground',
+      );
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'foreground',
+      });
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );

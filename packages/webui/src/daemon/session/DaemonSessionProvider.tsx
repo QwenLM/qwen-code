@@ -519,6 +519,7 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const projectedInput = rawInput
     ? {
@@ -542,6 +543,9 @@ function projectSubagentToolUpdate(
         ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
+        ...(executionMode === 'foreground' || executionMode === 'background'
+          ? { executionMode }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }

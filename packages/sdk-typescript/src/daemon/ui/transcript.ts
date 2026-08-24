@@ -1136,6 +1136,7 @@ function compactTaskExecutionOutput(
     'subagentColor',
     'taskDescription',
     'status',
+    'executionMode',
     'terminateReason',
     'tokenCount',
     'executionSummary',

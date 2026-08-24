@@ -3614,6 +3614,28 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('rejects an unknown executionMode literal from task_execution rawOutput', () => {
+    // Only the two known literals may flow through as authoritative; any
+    // other value (corrupted recording, future runtime mode) must fall back
+    // to the compatibility heuristic instead of forcing a classification.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution', executionMode: 'detached' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBeUndefined();
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      executionMode: 'detached',
+    });
+  });
+
   it('does not merge assistant across error block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'analyzing...', 1),

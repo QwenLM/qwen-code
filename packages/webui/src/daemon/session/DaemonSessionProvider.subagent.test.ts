@@ -127,4 +127,33 @@ describe('on-demand subagent transcript projection', () => {
       },
     });
   });
+
+  it('retains executionMode in the projected task_execution output', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ]);
+
+    // Summary-mode clients classify from executionMode starting with the
+    // first running update; the projection must not strip the field.
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+      },
+    });
+  });
 });
