@@ -773,6 +773,19 @@ describe('renderMechanismHealth — is the machinery working', () => {
     })!;
     expect(r.en).toContain('re-reads the whole diff');
     expect(r.zh).toContain('重读整个 diff');
+    // The clause splits the two shapes that fire it: a recovered round with
+    // no anchor at all, and one whose side file holds a GRAFTED anchor the
+    // running identity cannot use. The split is load-bearing: before it, the
+    // wording said the recovered round "had none either" — false beside a
+    // side file that visibly holds the sha, and pointing away from the
+    // actual cause (identity mismatch).
+    expect(r.en).toContain(
+      'none at all, one with no certifier, or one certified by an identity other than',
+    );
+    expect(r.en).not.toContain('had none either');
+    expect(r.zh).toContain(
+      '要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证',
+    );
     // The termination condition is "an anchor again", not "a clean close":
     // the marker also withholds on a missing fetched sha and on a model
     // identity drift, both of which a cleanly-closed round can carry.

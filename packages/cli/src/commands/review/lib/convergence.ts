@@ -145,11 +145,13 @@ export interface PrevRound {
   /** Its own round number; 0 when nothing was recovered. */
   round?: number;
   /**
-   * Whether it carried an incremental anchor. Read only by the
-   * mechanism-health check: two consecutive withholds mean every later round
-   * re-reads the whole diff until a round's marker carries an anchor again —
-   * which a clean close does not guarantee, because the marker also
-   * withholds on a missing fetched sha and on a model-identity drift.
+   * Whether it carried an incremental anchor THIS round can use — a grafted
+   * one whose certifier mismatches does not count (Step 1's gate refuses it,
+   * so the chain is still broken). Read only by the mechanism-health check:
+   * two consecutive withholds mean every later round re-reads the whole diff
+   * until a round's marker carries an anchor again — which a clean close
+   * does not guarantee, because the marker also withholds on a missing
+   * fetched sha and on a model-identity drift.
    */
   anchored?: boolean;
 }
@@ -673,10 +675,10 @@ export function renderMechanismHealth(
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round's marker carries an anchor again`,
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, or one certified by an identity other than the one this round runs under — so the next review re-reads the whole diff and will keep doing so until a round's marker carries an anchor again`,
     );
     zh.push(
-      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮的标记重新带上锚点`,
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证——因此下一次评审将重读整个 diff，并会一直如此，直到某一轮的标记重新带上锚点`,
     );
   }
   if (en.length === 0) return null;

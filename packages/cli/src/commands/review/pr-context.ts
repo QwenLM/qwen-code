@@ -1829,7 +1829,7 @@ function anchorRuling(
   }
   if (certifierMatchesRound(ledger.model, running)) {
     return (
-      `The reviewed-at sha is the incremental anchor Step 1's ` +
+      `The anchor above is the incremental anchor Step 1's ` +
       `recovered-anchor check reads from the side file, and the \`model\` ` +
       `beside it IS the identity running this review ` +
       `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
@@ -1846,11 +1846,11 @@ function anchorRuling(
   }
   const certifier = ledger.model?.trim()
     ? `\`${code(ledger.model.trim())}\``
-    : 'nothing — the marker predates the field, which counts as a mismatch';
+    : 'nothing — the marker carries no model (attribution off, or it predates the field), which counts as a mismatch';
   const runner =
     running !== '' ? `\`${code(running)}\`` : 'an unpublished identity';
   return (
-    `**Do NOT pass the reviewed-at sha as \`--since\`, and do not run git ` +
+    `**Do NOT pass the anchor above as \`--since\`, and do not run git ` +
     `against it yourself.** It was certified by ${certifier}, and this ` +
     `review runs as ${runner}: "clean up to that sha" is the recorded ` +
     `identity's verdict, so scoping to it would carry this round past code ` +
@@ -1929,18 +1929,22 @@ export function renderLedgerSection(
   // A grafted anchor is an EARLIER round's verdict this round carries, not a
   // range this round certified — "reviewed at" would attribute round M's
   // reading to round N. Why round N carries none differs: an OWN winner
-  // closed fail-closed, a FOREIGN one had its anchor stripped at the seam —
-  // and the clause says which, because "closed without an anchor" claimed of
-  // another account's cleanly-closed round would be its own lie. The foreign
-  // provenance clauses make the same distinction at their tail: with a graft
-  // in hand the round is NOT full-range-by-default, so the "unless a local
-  // cache supplies one" fallback wording would undersell what the section
-  // already holds.
+  // closed fail-closed, a FOREIGN one had its anchor stripped at the seam (or
+  // never carried one) — and the foreign clause must hold in BOTH sub-cases,
+  // because the renderer cannot tell a stripped anchor from an absent one,
+  // and each one-sided claim would be a lie in the other sub-case. The
+  // "certified it" clause is likewise conditional on a certifier riding the
+  // graft: an attribution-off source round posts a model-less sha, and
+  // asserting its certification beside the ruling's "certified by nothing"
+  // would contradict it within one section. The foreign provenance clauses
+  // make the same distinction at their tail: with a graft in hand the round
+  // is NOT full-range-by-default, so the "unless a local cache supplies one"
+  // fallback wording would undersell what the section already holds.
   const shaClause = ledger.sha
     ? anchorFromRound !== undefined
-      ? `, anchoring at \`${code(ledger.sha)}\`${ledger.model ? ` certified by \`${code(ledger.model)}\`` : ''} — carried forward from this account's round-${anchorFromRound} marker, the round that certified it; ${
+      ? `, anchoring at \`${code(ledger.sha)}\`${ledger.model ? ` certified by \`${code(ledger.model)}\`` : ''} — carried forward from this account's round-${anchorFromRound} marker${ledger.model ? ', the round that certified it' : ''}; ${
           author
-            ? `round ${ledger.round}'s own anchor stayed with the account that posted it`
+            ? `round ${ledger.round}'s marker carried no anchor this account could use`
             : `round ${ledger.round} itself closed without an anchor`
         }`
       : `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}`

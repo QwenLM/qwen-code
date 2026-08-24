@@ -237,7 +237,7 @@ describe('buildMarkdown section order', () => {
       );
       process.env['QWEN_CODE_MODEL_IDENTITY'] = 'other-model@9f8e7d6c';
       expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
-        'Do NOT pass the reviewed-at sha',
+        'Do NOT pass the anchor above',
       );
     } finally {
       if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
@@ -2520,7 +2520,7 @@ describe('renderLedgerSection', () => {
     // file stayed green: the antecedent that says WHAT to pass, and the
     // statement that the CLI is what validates and scopes it. Without the
     // first, `pass it as --since <sha>` refers to nothing.
-    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('The anchor above is the incremental anchor');
     expect(anchored).toContain('validates it against the fetched history');
     // …and the two fragments the block's own comment claims but does not
     // reach: the command that takes the flag, and what it does with it.
@@ -2546,16 +2546,15 @@ describe('renderLedgerSection', () => {
     );
     expect(noSha).not.toContain('reviewed at');
     // …and the routing tail goes with it: asserting only the space-form
-    // phrase let a mutant hoist the tail out of the ternary, since its own
-    // wording says "reviewed-at sha".
+    // phrase let a mutant hoist the tail out of the ternary, since the tail
+    // does not itself contain the heading phrase.
     expect(noSha).not.toContain('--since');
     // Every sentence of the tail, not just the ones carrying `--since`. The
-    // first one is written "reviewed-at sha" — hyphenated — so it matches
-    // neither the space-form phrase nor `--since`, and could be hoisted out
-    // of the ternary with every assertion above still green: a sha-less
-    // ledger would then render a dangling reference to a reviewed-at sha the
-    // side file deliberately withholds.
-    expect(noSha).not.toContain('reviewed-at sha');
+    // first one reads "The anchor above" — matching neither the space-form
+    // phrase nor `--since` — and could be hoisted out of the ternary with
+    // every assertion above still green: a sha-less ledger would then render
+    // a dangling reference to an anchor the side file deliberately withholds.
+    expect(noSha).not.toContain('The anchor above');
   });
 
   it('says "anchoring at", never "reviewed at", when the anchor was grafted forward', () => {
@@ -2583,6 +2582,11 @@ describe('renderLedgerSection', () => {
     );
     expect(grafted).toContain('round 4 itself closed without an anchor');
     expect(grafted).not.toContain('reviewed at');
+    // …and never the hyphenated form either: anchorRuling's verdict says
+    // "The anchor above", not "the reviewed-at sha" — the heading says
+    // "anchoring at", and the one section must not contradict itself.
+    expect(grafted).not.toContain('reviewed-at');
+    expect(grafted).toContain('The anchor above is the incremental anchor');
     // The routing tail still fires — the graft IS the recovered anchor Step
     // 1 passes, under the same-model contract of the round that made it.
     expect(grafted).toContain(
@@ -2610,11 +2614,13 @@ describe('renderLedgerSection', () => {
     );
     expect(grafted).toContain('the sha never crosses accounts');
     expect(grafted).toContain('not the foreign one');
-    // The graft-over-foreign clause must not claim the foreign round
-    // "closed without an anchor" — it may have closed cleanly; its anchor
-    // was STRIPPED at the seam, which is a different fact.
+    // The graft-over-foreign clause must not claim to know how the foreign
+    // round closed: it may have closed cleanly and had its anchor STRIPPED
+    // at the seam, or been fail-closed and carried none — the renderer
+    // cannot tell a stripped anchor from an absent one, so the clause states
+    // only what it knows: nothing usable crossed.
     expect(grafted).toContain(
-      "round 5's own anchor stayed with the account that posted it",
+      "round 5's marker carried no anchor this account could use",
     );
     expect(grafted).not.toContain('closed without an anchor');
     expect(grafted).not.toContain(
@@ -2633,6 +2639,36 @@ describe('renderLedgerSection', () => {
     expect(ungrafted).toContain(
       'this round is full-range unless a local cache supplies one',
     );
+  });
+
+  it('drops the "certified it" clause when the graft source carries no model', () => {
+    // An attribution-off source round posts a marker with a sha and NO model,
+    // so a graft can carry a model-less anchor. The heading then must not
+    // assert "the round that certified it" beside the ruling's "certified by
+    // nothing" — one section contradicting itself is the exact defect class
+    // the "anchoring at" wording exists to prevent. The ruling's absence text
+    // names BOTH causes of a model-less marker, not just the pre-field one.
+    const graftNoModel = renderLedgerSection(
+      {
+        v: 1,
+        round: 4,
+        findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+      },
+      'm@1a2b3c4d',
+      null,
+      false,
+      null,
+      2,
+    );
+    expect(graftNoModel).toContain('anchoring at `abc1234def56789`');
+    expect(graftNoModel).toContain(
+      "carried forward from this account's round-2 marker",
+    );
+    expect(graftNoModel).not.toContain('the round that certified it');
+    expect(graftNoModel).toContain('attribution off');
+    expect(graftNoModel).toContain('predates the field');
+    expect(graftNoModel).toContain('Do NOT pass the anchor above');
   });
 
   it('refuses when the side file holds a DIFFERENT anchor than the one recovered', () => {
@@ -2713,7 +2749,7 @@ describe('renderLedgerSection', () => {
       ledger('m@9f8e7d6c'),
       'm@1a2b3c4d',
     );
-    expect(otherProvider).toContain('Do NOT pass the reviewed-at sha');
+    expect(otherProvider).toContain('Do NOT pass the anchor above');
     expect(otherProvider).toContain('Review the FULL range');
     expect(otherProvider).not.toContain('--since <sha>');
     // It names both sides, so a maintainer asking "why the full diff again?"
@@ -2736,7 +2772,7 @@ describe('renderLedgerSection', () => {
     // identity at all: both are "unknown", and unknown is a mismatch.
     const preField = renderLedgerSection(ledger(), 'm@1a2b3c4d');
     expect(preField).not.toContain(' by `');
-    expect(preField).toContain('the marker predates the field');
+    expect(preField).toContain('predates the field');
     expect(preField).toContain('Do NOT pass');
     const noRuntime = renderLedgerSection(ledger('m@1a2b3c4d'), '');
     expect(noRuntime).toContain('an unpublished identity');

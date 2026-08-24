@@ -12334,6 +12334,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       'model-b@bbbbbbbb',
     );
     expect(mismatched.body).toContain('re-reads the whole diff');
+    // …and it names WHY — the split clause, never the false "the round it
+    // recovered had none either": this side file visibly holds the grafted
+    // sha, and the operator reading it must be pointed at the identity
+    // mismatch, not away from it.
+    expect(mismatched.body).toContain(
+      'one certified by an identity other than',
+    );
+    expect(mismatched.body).not.toContain('had none either');
     // …and the same graft under a MATCHING identity is usable — the graft
     // breaks the loop, so the disclosure stays silent.
     const matched = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
