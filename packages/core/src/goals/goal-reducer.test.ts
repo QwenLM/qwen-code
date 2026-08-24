@@ -1043,6 +1043,55 @@ describe('token budget transitions', () => {
     expect(resumed).toMatchObject({ status: 'active', tokenBudget: 1_000 });
   });
 
+  it.each(['paused', 'blocked'] as const)(
+    're-arms a spent ceiling when resuming a %s Goal',
+    (status) => {
+      const resumed = reduceGoalControl(
+        goalRecord({ status, tokensUsed: 1_200, tokenBudget: 1_000 }),
+        control(
+          { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+          1_000,
+        ),
+      );
+      expect(resumed).toMatchObject({
+        status: 'active',
+        tokensUsed: 1_200,
+        tokenBudget: 2_200,
+      });
+    },
+  );
+
+  it('clears a spent ceiling on resume or edit when the runtime opts out', () => {
+    const resumed = reduceGoalControl(
+      budgetStopped(),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        Number.POSITIVE_INFINITY,
+      ),
+    );
+    expect(resumed).toMatchObject({ status: 'active', tokensUsed: 1_200 });
+    expect(resumed).not.toHaveProperty('tokenBudget');
+
+    const edited = reduceGoalControl(
+      budgetStopped(),
+      control(
+        {
+          action: 'edit',
+          objective: 'ship without a budget',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        Number.POSITIVE_INFINITY,
+      ),
+    );
+    expect(edited).toMatchObject({
+      status: 'usage_limited',
+      objective: 'ship without a budget',
+      tokensUsed: 1_200,
+    });
+    expect(edited).not.toHaveProperty('tokenBudget');
+  });
+
   it('re-arms a spent ceiling on edit, so the edited Goal can actually run', () => {
     const edited = reduceGoalControl(
       budgetStopped(),
@@ -1098,7 +1147,13 @@ describe('token budget transitions', () => {
 
   it('restores a persisted budget and rejects a malformed one', () => {
     const stored = snapshot(
-      goalRecord({ tokensUsed: 400, tokenBudget: 1_000 }),
+      goalRecord({
+        status: 'usage_limited',
+        tokensUsed: 1_200,
+        tokenBudget: 1_000,
+        lastReason: goalTokenBudgetReason(1_000),
+        limitKind: 'token_budget',
+      }),
     );
     expect(parseGoalSnapshotV2(stored)).toEqual(stored);
     expect(

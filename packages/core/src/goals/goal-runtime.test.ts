@@ -9,6 +9,7 @@ import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -320,6 +321,15 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(asked).toEqual([permit.turnId]);
+  });
+
+  it('arms the default token budget when no grant is supplied', async () => {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    expect(runtime.getSnapshot().goal?.tokenBudget).toBe(
+      GOAL_DEFAULT_TOKEN_BUDGET,
+    );
   });
 
   it('stops autonomous continuation when the budget is spent, and resume re-arms it', async () => {

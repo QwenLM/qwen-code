@@ -67,7 +67,8 @@ export interface GoalResumeGateRecord {
  */
 export function isGoalEvidenceLimited(goal: GoalResumeGateRecord): boolean {
   return (
-    goal.limitKind !== undefined ||
+    goal.limitKind === 'evidence_catalog' ||
+    goal.limitKind === 'checkpoint_request' ||
     (goal.lastReason !== undefined &&
       GOAL_EVIDENCE_LIMIT_REASONS.includes(goal.lastReason))
   );

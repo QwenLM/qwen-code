@@ -58,6 +58,9 @@ describe('isGoalEvidenceLimited', () => {
     expect(
       isGoalEvidenceLimited(goal({ limitKind: 'checkpoint_request' })),
     ).toBe(true);
+    expect(isGoalEvidenceLimited(goal({ limitKind: 'token_budget' }))).toBe(
+      false,
+    );
     expect(isGoalEvidenceLimited(goal())).toBe(false);
   });
 
@@ -98,6 +101,11 @@ describe('canResumeGoal', () => {
     expect(canResumeGoal(goal({ status: 'paused' }))).toBe(true);
     expect(canResumeGoal(goal({ status: 'blocked' }))).toBe(true);
     expect(canResumeGoal(goal({ status: 'usage_limited' }))).toBe(true);
+    expect(
+      canResumeGoal(
+        goal({ status: 'usage_limited', limitKind: 'token_budget' }),
+      ),
+    ).toBe(true);
   });
 
   it('withholds resume from an evidence-limited Goal, by field or by sentinel', () => {
@@ -171,5 +179,16 @@ describe('core is the authority on the evidence-limit sentinels', () => {
     );
     const branches = reducer.match(/if \(reason === GOAL_[A-Z_]+\) \{/g) ?? [];
     expect(branches).toHaveLength(GOAL_EVIDENCE_LIMIT_REASONS.length);
+  });
+
+  it('agrees with goal-reducer.ts on the evidence limit kinds', () => {
+    const reducer = readFileSync(
+      join(repoRoot, 'packages/core/src/goals/goal-reducer.ts'),
+      'utf8',
+    );
+    const kinds = [...reducer.matchAll(/goal\.limitKind === '([^']+)'/g)].map(
+      (match) => match[1],
+    );
+    expect(kinds).toEqual(['evidence_catalog', 'checkpoint_request']);
   });
 });

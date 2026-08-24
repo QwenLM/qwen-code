@@ -171,6 +171,7 @@ export function reduceGoalControl(
   }
   return transitionGoal(current, transition.now, {
     status: 'active',
+    ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
   });
 }
 
@@ -419,20 +420,25 @@ function isEvidenceLimited(goal: GoalRecord): boolean {
 
 /**
  * The budget change an explicit user action (edit, or a resume of a
- * budget-stopped Goal) arms: a spent ceiling moves to `tokensUsed + grant`.
- * An unspent ceiling is left alone, and a Goal with no ceiling stays
- * unbounded -- budgets are armed at creation, never retrofitted.
+ * budget-stopped Goal) arms: a finite grant moves a spent ceiling to
+ * `tokensUsed + grant`, while a non-finite opt-out clears it. An unspent
+ * ceiling is left alone, and a Goal with no ceiling stays unbounded -- budgets
+ * are armed at creation, never retrofitted.
  */
 function rearmedTokenBudget(
   current: GoalRecord,
   grant: number | undefined,
 ): Partial<GoalRecord> {
-  return grant !== undefined &&
-    Number.isFinite(grant) &&
-    current.tokenBudget !== undefined &&
-    current.tokensUsed >= current.tokenBudget
+  if (
+    grant === undefined ||
+    current.tokenBudget === undefined ||
+    current.tokensUsed < current.tokenBudget
+  ) {
+    return {};
+  }
+  return Number.isFinite(grant)
     ? { tokenBudget: current.tokensUsed + grant }
-    : {};
+    : { tokenBudget: undefined };
 }
 
 function transitionGoal(
@@ -440,12 +446,16 @@ function transitionGoal(
   now: number,
   changes: Partial<GoalRecord>,
 ): GoalRecord {
-  return {
+  const transitioned = {
     ...goal,
     ...changes,
     activeTimeMs: elapsedActiveTime(goal, now),
     updatedAt: now,
   };
+  if ('tokenBudget' in changes && changes.tokenBudget === undefined) {
+    delete transitioned.tokenBudget;
+  }
+  return transitioned;
 }
 
 function snapshotOf(goal: GoalRecord | null): GoalSnapshotV2 {
