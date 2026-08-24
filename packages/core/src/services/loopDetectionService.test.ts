@@ -4023,6 +4023,61 @@ describe('LoopDetectionService', () => {
       expect(heuristicService.getLastLoopType()).toBeNull();
     });
 
+    it('halts a pure stream of rejected identical task_list calls on the 5th request (issue #9450)', () => {
+      // A subagent whose model persistently re-emits an unavailable
+      // task_list (undeclared for the subagent, or allowlisted out): every
+      // identical request streams through the guard and is rejected without
+      // executing. Pre-fix noteSuppressedToolCallByCallId unwound the
+      // consecutive-identical increment right back (the count oscillated
+      // 0↔1 — the threshold 5 unreachable), a rejected call never records
+      // a result (the missing-evidence fail-safe unreachable), and the
+      // cap's stuck signal never arms (trackCapKeyRepeat skips stateful
+      // tools while statefulCapKeyRepeat feeds only on recorded results) —
+      // the stream looped to the hard backstop instead of halting on the
+      // 5th identical request like the pre-PR wiring.
+      let fired = false;
+      let firedAt = -1;
+      for (let i = 0; i < 12 && !fired; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`rej-${i}`));
+        if (fired) {
+          firedAt = i + 1;
+          break;
+        }
+        // The rejection lands before the next request streams (agent-core
+        // rejects during batch filtering, ahead of execution).
+        service.noteSuppressedToolCallByCallId(`rej-${i}`);
+      }
+      expect(fired).toBe(true);
+      expect(firedAt).toBe(TOOL_CALL_LOOP_THRESHOLD);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('does not halt a changing-board stream mixing rejected and executed identical calls (issue #9450)', () => {
+      // Rejected calls keep their request-side increments (the pure stream
+      // above must still halt), so the exoneration gate must subtract the
+      // streak's suppressedRequests from the expected result count — or a
+      // MIXED stream of rejected + executed calls whose executed results
+      // keep changing would be permanently one result short and false-halt
+      // on arguments alone (the #9450 false positive re-entering via the
+      // rejection branch).
+      let fired = false;
+      for (let i = 0; i < 8 && !fired; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`rej-${i}`));
+        if (fired) break;
+        service.noteSuppressedToolCallByCallId(`rej-${i}`);
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`exec-${i}`));
+        if (fired) break;
+        fired = service.recordToolResultByCallId(
+          `exec-${i}`,
+          taskListResult(`board state v${i}`, `exec-${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
     it('halts an interleaved frozen poller whose gap rounds previously decayed the streak', () => {
       // Production ordering: requests → Finished → results. A frozen board
       // polled every OTHER round between varied work: pre-fix the poll

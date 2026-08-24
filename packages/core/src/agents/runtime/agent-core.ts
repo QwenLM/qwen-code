@@ -1771,7 +1771,13 @@ export class AgentCore {
         });
         // Never executed: keep the synthetic error out of the loop guards'
         // result evidence and unwind the request-time reservations it made
-        // when streamed (issue #9450).
+        // when streamed (issue #9450). The request-side repetition
+        // increment is KEPT (see noteSuppressedToolCallByCallId): a
+        // subagent persistently re-emitting an unavailable task_list is a
+        // pure stream of rejected calls — no result ever lands to exonerate
+        // it, so the always-on consecutive-identical guard must still halt
+        // it on the 5th identical request instead of oscillating the count
+        // back down forever.
         neverExecutedCallIds.add(callId);
         loopDetector?.noteSuppressedToolCallByCallId(callId);
         continue;

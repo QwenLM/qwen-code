@@ -498,6 +498,18 @@ export class LoopDetectionService {
   // streak (restarted when the streak breaks); `lastFingerprint` survives
   // streak breaks so a state change is still visible across interleaved
   // calls (used by the action-stagnation reset).
+  // `suppressedRequests` counts the suppressed calls (replays, rejections —
+  // see noteSuppressedToolCallByCallId) within the CURRENT streak. A
+  // suppressed call can never produce an exonerating result, so the
+  // consecutive-identical gate's expected-result computation subtracts it:
+  // without that, the request-side count of a mixed stream (suppressed +
+  // executed calls) would permanently outrun the recorded results and the
+  // exoneration gate would be unsatisfiable. The suppressed call's
+  // consecutive-count increment is KEPT (not unwound), so a pure stream of
+  // identical suppressed calls still reaches the threshold — its entry
+  // carries zero result evidence, the expected-result count reduces to
+  // zero, and the gate halts (the fail-safe shape). That is what catches a
+  // subagent persistently re-emitting an unavailable task_list.
   // `consecutiveIdenticalResults` is the stuck-repetition evidence for the
   // global-duplicate detector and the adaptive cap (replacing the
   // request-time global-duplicate counting and the cap's stuck-repetition
@@ -514,6 +526,7 @@ export class LoopDetectionService {
       resultsObserved: number;
       unchangedStreak: number;
       consecutiveIdenticalResults: number;
+      suppressedRequests: number;
       lastFingerprint: string | undefined;
     }
   >();
@@ -670,6 +683,7 @@ export class LoopDetectionService {
         resultsObserved: 0,
         unchangedStreak: 0,
         consecutiveIdenticalResults: 0,
+        suppressedRequests: 0,
         lastFingerprint: undefined,
       };
       this.statefulRepeatState.set(key, state);
@@ -772,17 +786,22 @@ export class LoopDetectionService {
    * for batches that execute nothing instead — recordDaemonToolCalls in the
    * ACP Session). Without this, a replay-suppressed round is
    * indistinguishable from abandonment and disarms the result-aware halts.
-   * The request-side repetition evidence the guards accumulated when the
-   * call streamed in must unwind too: no result will ever land for a
-   * suppressed call, so keeping its increment would leave the result-aware
-   * carve-outs permanently one result short of the request count (the
-   * exoneration gate `resultsObserved >= count - 1` becomes unreachable)
-   * and halt a changing-board poller on arguments alone — the #9450 false
-   * positive re-entering via provider re-emission mid-streak. The daemon
-   * twin never counts suppressed calls (its batch recorder receives only
-   * executable calls), so this keeps the runtimes aligned (issue #9450
-   * requirement #6). Unknown callIds (never streamed through the guards)
-   * are ignored.
+   * The request-side repetition increment the suppressed call made when it
+   * streamed in is KEPT (not unwound): a persistent stream of identical
+   * suppressed calls — a subagent re-emitting an unavailable task_list, a
+   * provider re-emitting the same handled id — is exactly the stuck
+   * pattern the always-on consecutive-identical guard exists to stop, and
+   * no result will ever land for it. Unwinding the increment let such a
+   * stream oscillate the count 0↔1 forever: the threshold unreachable, the
+   * missing-evidence fail-safe unreachable (no result ever records, so no
+   * state entry exists), and the cap's stuck signal unreachable
+   * (trackCapKeyRepeat skips stateful tools) — the loop ran to the hard
+   * backstop instead of halting on the 5th identical request (issue #9450).
+   * The exoneration gate stays satisfiable for MIXED streams (suppressed +
+   * executed calls with changing results) because checkToolCallLoop
+   * subtracts the streak's suppressedRequests from the expected result
+   * count. Unknown callIds (never streamed through the guards) are
+   * ignored.
    *
    * `replaySuppression` marks the CROSS-ROUND REPLAY class (a suppressed
    * re-emission of an already-handled provider call id — the duplicate
@@ -832,12 +851,30 @@ export class LoopDetectionService {
     if (inFlight > 0) {
       this.statefulInFlight.set(key, inFlight - 1);
     }
-    // Unwind the consecutive-identical increment, but only while the streak
-    // still belongs to the suppressed key: a later different call restarts
-    // the count for its own key, and decrementing then would corrupt an
-    // unrelated streak. Floored at zero (a Retry may have reset it since).
-    if (this.lastToolCallKey === key && this.toolCallRepetitionCount > 0) {
-      this.toolCallRepetitionCount--;
+    // The consecutive-identical increment the suppressed call made when it
+    // streamed in is KEPT (see the doc above): count it into the streak's
+    // suppressedRequests instead so the exoneration gate can subtract it
+    // while the threshold still sees the request-side evidence. Only while
+    // the streak still belongs to the suppressed key: a later different
+    // call restarts the count for its own key. The entry is created
+    // lazily here (no recorded result yet) so suppressions landing BEFORE
+    // the streak's first result still balance the gate — for a PURE
+    // suppressed stream the entry then carries zero result evidence, the
+    // expected-result count reduces to zero, and the gate halts exactly
+    // like the missing-evidence fail-safe it replaces.
+    if (this.lastToolCallKey === key) {
+      let state = this.statefulRepeatState.get(key);
+      if (!state) {
+        state = {
+          resultsObserved: 0,
+          unchangedStreak: 0,
+          consecutiveIdenticalResults: 0,
+          suppressedRequests: 0,
+          lastFingerprint: undefined,
+        };
+        this.statefulRepeatState.set(key, state);
+      }
+      state.suppressedRequests++;
     }
     // Drop the window occurrence the alternating-pattern tier pushed when
     // the call streamed in; it carries no result, and leaving it in would
@@ -1068,6 +1105,7 @@ export class LoopDetectionService {
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
         state.consecutiveIdenticalResults = 0;
+        state.suppressedRequests = 0;
       }
       this.statefulResultKeysSinceLastFinished.clear();
       this.statefulRequestedKeysSinceLastFinished.clear();
@@ -1175,6 +1213,7 @@ export class LoopDetectionService {
         if (state) {
           state.resultsObserved = 0;
           state.unchangedStreak = 0;
+          state.suppressedRequests = 0;
         }
       }
       this.lastToolCallKey = key;
@@ -1193,17 +1232,28 @@ export class LoopDetectionService {
         // requests cannot have recorded results yet. Subtract them from the
         // expected count (floored at the recorded evidence) so the gate is
         // judged on the results that CAN have landed; a changed recorded
-        // result still restarts the streak. Missing result evidence (results
-        // never recorded for this streak) fails safe and keeps the pre-#9450
-        // behavior, so the DashScope protection (#5019) is never loosened by
-        // a wiring gap.
+        // result still restarts the streak. Suppressed calls in the streak
+        // (replays, rejections) are subtracted too: they can never produce
+        // an exonerating result, and leaving their request-side increments
+        // in the expected count would keep the gate permanently one result
+        // short for mixed suppressed + executed streams. Missing result
+        // evidence (results never recorded for this streak) fails safe and
+        // keeps the pre-#9450 behavior, so the DashScope protection (#5019)
+        // is never loosened by a wiring gap — that fail-safe is also what
+        // halts a pure stream of rejected/suppressed identical calls (no
+        // state entry ever exists for it), e.g. a subagent persistently
+        // re-emitting an unavailable task_list.
         const state = this.statefulRepeatState.get(key);
         const inFlight = Math.min(
           this.statefulInFlight.get(key) ?? 0,
           this.toolCallRepetitionCount,
         );
+        const suppressedInStreak = Math.min(
+          state?.suppressedRequests ?? 0,
+          this.toolCallRepetitionCount,
+        );
         const expectedResults = Math.max(
-          this.toolCallRepetitionCount - inFlight,
+          this.toolCallRepetitionCount - inFlight - suppressedInStreak,
           state?.resultsObserved ?? 0,
         );
         if (state && state.resultsObserved >= expectedResults) {
@@ -1211,6 +1261,7 @@ export class LoopDetectionService {
             this.toolCallRepetitionCount = 1;
             state.resultsObserved = 0;
             state.unchangedStreak = 0;
+            state.suppressedRequests = 0;
             return false;
           }
         }
@@ -1956,15 +2007,23 @@ export class LoopDetectionService {
     for (const [key, state] of this.statefulRepeatState) {
       if (this.statefulResultKeysSinceLastFinished.has(key)) continue;
       if (this.statefulRequestedKeysSinceLastFinished.has(key)) continue;
-      if (
+      const hadResultEvidence =
         state.consecutiveIdenticalResults > 0 ||
         state.resultsObserved > 0 ||
-        state.unchangedStreak > 0
-      ) {
+        state.unchangedStreak > 0;
+      if (hadResultEvidence || state.suppressedRequests > 0) {
         state.consecutiveIdenticalResults = 0;
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
-        if (this.lastToolCallKey === key) {
+        state.suppressedRequests = 0;
+        if (hadResultEvidence && this.lastToolCallKey === key) {
+          // Dropping the exoneration gate's result evidence while the
+          // consecutive count stands would leave the gate permanently
+          // unsatisfiable, so drop the streak with it. A
+          // suppressedRequests-only entry keeps its count: the gate stays
+          // satisfiable for it (no result evidence to expect), so the
+          // threshold still halts a stream of identical suppressed calls
+          // crossing round-trip boundaries.
           this.lastToolCallKey = null;
           this.toolCallRepetitionCount = 0;
         }
