@@ -1605,14 +1605,14 @@ function analyzeRun(
         getShellConfiguration().shell === 'powershell' &&
         POWERSHELL_LOCATION_PROGRAMS.has(program))
     ) {
-      const variant =
+      const variant: 'cd' | 'popd' | 'pushd' =
         program === 'chdir' || program === 'set-location' || program === 'sl'
           ? 'cd'
-          : program === 'push-location'
+          : program === 'push-location' || program === 'pushd'
             ? 'pushd'
-            : program === 'pop-location'
+            : program === 'pop-location' || program === 'popd'
               ? 'popd'
-              : program;
+              : 'cd';
       const rest = run.slice(index + 1);
       // `Set-Location -Path X` names the directory through a flag; take the
       // flag's value instead of failing the run on the flag itself.
