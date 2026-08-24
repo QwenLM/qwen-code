@@ -1635,6 +1635,148 @@ describe('latestLedger — the split trust surface', () => {
     expect(recovered?.anchorFromRound).toBe(5);
   });
 
+  it('never grafts an anchor the winner itself RAN at — the same-sha stop would abandon the work list', () => {
+    // A fail-closed round at an UNMOVED head — the documented `--comment`
+    // full review of an up-to-date PR, or a model-switch full review — ran
+    // at exactly the head the candidate anchor certifies. Grafting it hands
+    // Step 1 `--since <sha>` with the sha equal to the live head: fetch-pr
+    // rules `upToDate`, and the same-sha stop ends the round before any
+    // agent launches — the winner's work list is never re-ruled, and every
+    // later round at the same head repeats the stop, freezing the PR's
+    // review state until new commits land. Before the graft the side file
+    // had no sha there and the round was full-range; the refuse keeps it so.
+    // (Step 1's fence on the stop itself covers the shapes this equality
+    // cannot see — a missing commit_id, a rewound head.)
+    const head = 'a'.repeat(40);
+    const atHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+    // …but one commit lands between the certified head and the winner's
+    // head, and `sha..HEAD` re-covers a real gap again — the graft rides.
+    const moved = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: 'b'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(moved.recovered?.ledger.sha).toBe(head);
+    expect(moved.recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts an anchor the FOREIGN winner ran at — the same-sha stop would abandon the merged list', () => {
+    // The same abandonment through the foreign seam: the winner is another
+    // account's marker (its anchor stripped), and it ran at the head this
+    // account's own earlier marker certified. A graft there hands Step 1
+    // the same same-sha stop; the merged work list is owed rulings by
+    // whoever runs next, so the refuse is account-blind.
+    const head = 'c'.repeat(40);
+    const ownAtHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', ownAtHead),
+          commit_id: head,
+        },
+        {
+          ...review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts past a union re-capped OVER the findings cap — the merge-generated dropped counts too', () => {
+    // A foreign winner whose union with this account's findings exceeds
+    // LEDGER_MAX_FINDINGS gets its `dropped` only AFTER the re-cap. Reading
+    // the winner's PRE-merge `dropped` (none) would fire the graft past the
+    // capped list — the exact silent-retirement shape the guard exists to
+    // prevent.
+    const ownFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R2-${i + 1}`,
+      sev: 'S' as const,
+      file: 'own.ts',
+      title: `own ${i + 1}`,
+    }));
+    const foreignFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R5-${i + 1}`,
+      sev: 'S' as const,
+      file: 'theirs.ts',
+      title: `theirs ${i + 1}`,
+    }));
+    const ownAnchored: Ledger = {
+      v: 1,
+      round: 2,
+      findings: ownFindings,
+      sha: 'abc1234def567890',
+      model: 'm@1a2b3c4d',
+    };
+    const foreignWinner = `y <!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: foreignFindings,
+    })} -->`;
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(ownAnchored)),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.merged).toBe(true);
+    expect(recovered?.ledger.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(recovered?.ledger.dropped).toBe(2);
+    // The union overflow makes the work list PARTIAL — the graft refuses.
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts over a foreign winner POSTED truncated — its dropped survives the strip', () => {
+    // The winner was itself capped when it posted. `dropped` is not a
+    // volume field, so stripForeignVolume keeps it, and the graft guard
+    // must read it: a graft over a truncated list retires the dropped
+    // entries outside the grafted scope. The own list is empty, so no
+    // merge re-derives the count — the refusal pins the strip's survival.
+    const ownClean =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"abc1234def567890","model":"m@1a2b3c4d"} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"kept"}],"dropped":3} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', ownClean),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.dropped).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
   it('drops the churn state from ANOTHER account, keeping the work list', () => {
     // The streak is the same class of claim as the anchor: a fact ABOUT
     // the round that posted it, certified by the account that ran it.
@@ -2637,6 +2779,36 @@ describe('renderLedgerSection', () => {
       'ci-bot',
     );
     expect(ungrafted).toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+  });
+
+  it('keeps the graft provenance clause in the MERGED branch too — the production shape of a foreign-winner graft', () => {
+    // The merged-foreign branch interpolates the same no-crossing wording,
+    // and a foreign-winner graft over non-empty own findings renders
+    // through it (`mergedOverOwn` true) — the recovery test's exact shape.
+    // Re-inlining the old fallback text in that branch alone would say
+    // "full-range unless a local cache supplies one" beside a grafted
+    // anchor and a `--since` routing verdict: contradictory prose in the
+    // context file the orchestrator acts on, with every test green.
+    const merged = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+      true,
+      null,
+      2,
+    );
+    expect(merged).toContain('MERGED over this account');
+    expect(merged).toContain('the sha never crosses accounts');
+    expect(merged).toContain('not the foreign one');
+    expect(merged).not.toContain(
       'this round is full-range unless a local cache supplies one',
     );
   });

@@ -1141,25 +1141,36 @@ export function recoverLedger(
   // winner. And it is not an advance: the grafted anchor is never newer
   // than the round that certified it, so the next round's `sha..HEAD`
   // re-reads every line the unanchored rounds in between could not certify.
-  // Two more guards, both fail-safe toward the full range. The source must
+  // Three more guards, all fail-safe toward the full range. The source must
   // be a STRICTLY earlier round: two same-round own markers (a concurrent
   // lane) leave one certified and one not, and the renderer cannot say of
-  // one round both "certified it" and "closed without an anchor". And the
+  // one round both "certified it" and "closed without an anchor". The
   // winner's work list must be COMPLETE: a partial list's dropped entries
   // reference code the grafted scope may never re-see — a fail-closed round
   // that ran FULL range sheds findings spanning the whole diff, some before
   // the candidate sha, and scoping past them retires them silently — the
-  // exact shape the serializer's truncation withhold exists to prevent.
-  // Own markers only, and a KNOWN `me` only — on an anonymous walk no
-  // marker is attributable, which is exactly the drive-by shape the
-  // anonymous strip refuses.
+  // exact shape the serializer's truncation withhold exists to prevent. And
+  // the winner must not have RUN at the candidate sha: its `commit_id` is
+  // the head it reviewed at, and when the two are equal the next round's
+  // `--since <sha>` resolves to the head — `upToDate` — whose same-sha stop
+  // ends the round before any ruling on the winner's work list, abandoning
+  // it, and freezing every later round at the same head into the same stop.
+  // That is the exact range the graft's contract claims to re-cover, and at
+  // `sha == HEAD` nothing is re-read at all, so the refuse keeps the round
+  // full-range (Step 1's fence on the stop itself covers the shapes this
+  // equality cannot see — a missing commit_id, a rewound head). Own markers
+  // only, and a KNOWN `me` only — on an anonymous walk no marker is
+  // attributable, which is exactly the drive-by shape the anonymous strip
+  // refuses.
   let anchorFromRound: number | undefined;
   if (
     me &&
     ledger.sha === undefined &&
     (ledger.dropped ?? 0) === 0 &&
     bestOwnAnchor &&
-    bestOwnAnchor.round < ledger.round
+    bestOwnAnchor.round < ledger.round &&
+    (best.commitId === null ||
+      best.commitId.toLowerCase() !== bestOwnAnchor.sha.toLowerCase())
   ) {
     ledger = {
       ...ledger,

@@ -794,6 +794,16 @@ describe('renderMechanismHealth — is the machinery working', () => {
     // as "until one closes cleanly", which an exact-string pin missed.
     expect(r.en).not.toMatch(/until (a round|one) closes cleanly/);
     expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
+    // The termination list names BOTH exits: a round whose own marker
+    // carries an anchor again, and the graft — recovery carrying an
+    // earlier own anchor onto a complete work list ends the full-range
+    // streak one round later with NO marker carrying an anchor. Before the
+    // clause, the disclosure predicted an endless re-read on exactly the
+    // large-PR shapes the graft exists for.
+    expect(r.en).toContain(
+      'or recovery grafts an earlier own anchor onto a complete work list',
+    );
+    expect(r.zh).toContain('或恢复流程把更早的自有锚点嫁接到完整的工作清单上');
     // The design once prescribed a re-anchor round here; the measurements
     // did not bear out its premise, so the shape is disclosed and nothing
     // is recommended.
