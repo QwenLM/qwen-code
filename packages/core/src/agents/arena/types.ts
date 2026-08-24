@@ -58,9 +58,9 @@ export interface ArenaConfig {
   task: string;
   /** Models participating in the Arena */
   models: ArenaModelConfig[];
-  /** Maximum number of rounds per agent (default: 50) */
+  /** Maximum number of rounds per agent. No limit if unset. */
   maxRoundsPerAgent?: number;
-  /** Total timeout in seconds for the entire Arena session (default: 600) */
+  /** Total timeout in seconds for the entire Arena session. No limit if unset. */
   timeoutSeconds?: number;
   /** Approval mode inherited from the main process (e.g., 'auto', 'suggest', etc.) */
   approvalMode?: string;

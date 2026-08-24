@@ -104,7 +104,9 @@ If you want to inspect the complete reasoning path before deciding, each agent's
 
 ## Configuration
 
-Arena behavior can be customized in [settings.json](../configuration/settings.md):
+Arena behavior can be customized in
+[settings.json](../configuration/settings.md). For example, set explicit caps
+if you want to bound an Arena run:
 
 ```json
 {
@@ -116,11 +118,11 @@ Arena behavior can be customized in [settings.json](../configuration/settings.md
 }
 ```
 
-| Setting                   | Description                        | Default         |
-| :------------------------ | :--------------------------------- | :-------------- |
-| `arena.worktreeBaseDir`   | Base directory for arena worktrees | `~/.qwen/arena` |
-| `arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent | `50`            |
-| `arena.timeoutSeconds`    | Timeout for each agent in seconds  | `600`           |
+| Setting                   | Description                                 | Default         |
+| :------------------------ | :------------------------------------------ | :-------------- |
+| `arena.worktreeBaseDir`   | Base directory for arena worktrees          | `~/.qwen/arena` |
+| `arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent          | Unset; no limit |
+| `arena.timeoutSeconds`    | Timeout for the entire Arena run in seconds | Unset; no limit |
 
 ## Best practices
 
