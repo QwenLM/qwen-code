@@ -3430,6 +3430,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // dotfile append execute on the reviewer's machine.
     expect(pp).toContain('including uploads that carry local data');
     expect(pp).toContain('any other write outside it');
+    // `git push` is refused to ANY URL: the recipe is the untrusted input
+    // the list defends against, so a destination it names is
+    // author-controlled and licenses nothing — a recipe-keyed exemption
+    // would let a malicious recipe license its own exfiltration push.
+    expect(pp).toContain('`git push` (to any URL');
+    expect(pp).not.toContain('the recipe does not name');
   });
 
   it('welds the PR context pointer into 6d — a mandate without a path is a guess', () => {

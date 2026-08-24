@@ -163,8 +163,6 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
  */
 export function isPromptPath(path: string): boolean {
   const base = path.split('/').pop() ?? '';
-  // Test code ABOUT prompts pins them; it is not itself followed as one.
-  if (/\.(test|spec)\./.test(base)) return false;
   if (base === 'SKILL.md') return true;
   // Root guidance files agents follow as standing instructions, by each
   // ecosystem's reserved name — they carry operational recipes, and an
@@ -175,6 +173,15 @@ export function isPromptPath(path: string): boolean {
   // Agent and slash-command definitions, and prompts/ directories.
   if (/(^|\/)\.(claude|qwen)\/(agents|commands)\//.test(path)) return true;
   if (/(^|\/)prompts\//.test(path)) return true;
+  // The pipeline's own review rules: load-rules reads them FIRST and bakes
+  // them into every brief — instruction prose it provably follows, matching
+  // none of the reserved shapes above.
+  if (/(^|\/)\.qwen\/review-rules\.md$/.test(path)) return true;
+  // Test code ABOUT prompts pins them; it is not itself followed as one.
+  // Guard the token fallback only: a file in a reserved directory is
+  // followed as instructions under ANY name (FileCommandLoader globs
+  // **/*.md with no test filter), so a `.test.` basename must not hide it.
+  if (/\.(test|spec)\./.test(base)) return false;
   const stem = base.replace(/\.[^.]+$/, '');
   return stem
     .split(/[-_.]/)

@@ -163,6 +163,18 @@ describe('requiredAgents — Step 3A', () => {
     expect(
       keys({ ...withSkill, srcDiffLines: 900, diffLines: 4000 }),
     ).toContain('prose-exec');
+    // Reserved directories hold their files under any basename, and the
+    // pipeline's rules file is prose it provably follows: each owes the
+    // audit even as the diff's ONLY prompt-path change.
+    expect(
+      keys({
+        ...PR,
+        files: [{ path: '.qwen/commands/release-notes.test.md' }],
+      }),
+    ).toContain('prose-exec');
+    expect(
+      keys({ ...PR, files: [{ path: '.qwen/review-rules.md' }] }),
+    ).toContain('prose-exec');
     // But never without a tree to run the repository's tooling in.
     expect(
       keys({
@@ -600,6 +612,17 @@ describe('isPromptPath — the instruction-file detector', () => {
     ['.claude/commands/deploy.md', true],
     ['.qwen/commands/review.md', true],
     ['packages/x/.claude/agents/foo.md', true],
+    // A file in a reserved directory is followed under ANY name:
+    // FileCommandLoader globs **/*.md with no test filter, so a command
+    // named `release-notes.test` loads live and a `.test.` basename must
+    // not hide the file from the execution audit.
+    ['.qwen/commands/release-notes.test.md', true],
+    ['.claude/agents/reviewer.test.md', true],
+    ['prompts/system.test.md', true],
+    // The pipeline's own review rules: load-rules reads them first and
+    // bakes them into every brief, so a rules-only diff owes the audit —
+    // the pre-merge review is the only gate that can execute the change.
+    ['.qwen/review-rules.md', true],
     // Singular and embedded tokens — the alternation's both halves (a
     // `briefs`-only or `prompt`-only mutant flips one of these).
     ['docs/brief.md', true],
