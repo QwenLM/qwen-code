@@ -27,6 +27,7 @@ import { getAgentName, isTeammate } from '../agents/team/identity.js';
 import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
+import { isExplicitPeerTarget } from '../ipc/peer-directory.js';
 import { sendToPeer } from '../ipc/peer-send.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
@@ -86,7 +87,10 @@ class SendMessageInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  private async trySendToPeer(to: string): Promise<ToolResult | null> {
+  private async trySendToPeer(
+    to: string,
+    explicit: boolean = false,
+  ): Promise<ToolResult | null> {
     if (this.params.type) return null;
 
     let approvalMode: ApprovalMode | null;
@@ -105,10 +109,14 @@ class SendMessageInvocation extends BaseToolInvocation<
       case 'disabled':
         return null;
       case 'not-found': {
-        if (outcome.suggestions.length === 0) return null;
+        if (outcome.suggestions.length === 0 && !explicit) return null;
+        const suggestion =
+          outcome.suggestions.length > 0
+            ? ` Did you mean: ${outcome.suggestions.join(', ')}?`
+            : '';
         const msg =
-          `No reachable session is named "${to}". Did you mean: ` +
-          `${outcome.suggestions.join(', ')}? Use list_agents to refresh the list.`;
+          `No reachable session matches "${to}".${suggestion} ` +
+          'Use list_agents to refresh the list.';
         return {
           llmContent: msg,
           returnDisplay: 'No such session.',
@@ -119,7 +127,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         const msg =
           `"${to}" matches more than one live session:\n` +
           outcome.matches.map((match) => `  ${match}`).join('\n') +
-          '\nSend again with the full name [ref] shown by list_agents.';
+          '\nSend again with the exact "to" address shown by list_agents.';
         return {
           llmContent: msg,
           returnDisplay: 'Ambiguous recipient.',
@@ -318,7 +326,13 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
-    // Route 2: an in-process teammate wins a name collision with a peer.
+    const explicitPeerTarget = isExplicitPeerTarget(to);
+    if (explicitPeerTarget) {
+      const peerResult = await this.trySendToPeer(to, true);
+      if (peerResult) return peerResult;
+    }
+
+    // Route 2: an in-process teammate wins a bare-name collision with a peer.
     const teamManager = this.config.getTeamManager();
     const teamFile = teamManager?.getTeamFile();
     const teamAddressExists =
@@ -327,7 +341,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         to === teamFile.leadAgentId ||
         findMemberByName(teamFile.members, to) !== undefined);
 
-    if (!teamAddressExists) {
+    if (!explicitPeerTarget && !teamAddressExists) {
       // Route 3: another Qwen Code session on this machine.
       const peerResult = await this.trySendToPeer(to);
       if (peerResult) return peerResult;

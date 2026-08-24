@@ -63,14 +63,14 @@ export async function sendToPeer(options: {
     return {
       kind: 'ambiguous',
       matches: resolved.matches.map(
-        (peer) => `${peer.name} [${peer.ref}] in ${peer.cwd}`,
+        (peer) => `${formatPeerAddress(peer)} (${peer.name} in ${peer.cwd})`,
       ),
     };
   }
   if (!options.message) return { kind: 'empty' };
 
   const peer = resolved.peer;
-  const address = formatPeerAddress(peer, peers);
+  const address = formatPeerAddress(peer);
   try {
     await sendPeerFrame(
       peer.ipcPath,

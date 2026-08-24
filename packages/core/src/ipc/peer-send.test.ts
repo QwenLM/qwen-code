@@ -95,7 +95,7 @@ describe('sendToPeer', () => {
     expect(outcome).toEqual({
       kind: 'sent',
       peer: worker,
-      address: 'worker',
+      address: 'qwen-session:aaaaaa',
     });
     expect(mocks.sendPeerFrame).toHaveBeenCalledWith(
       worker.ipcPath,
@@ -140,8 +140,8 @@ describe('sendToPeer', () => {
     expect(outcome).toMatchObject({
       kind: 'ambiguous',
       matches: [
-        'worker [aaaaaa] in /work/worker',
-        'worker [bbbbbb] in /work/worker',
+        'qwen-session:aaaaaa (worker in /work/worker)',
+        'qwen-session:bbbbbb (worker in /work/worker)',
       ],
     });
     expect(mocks.sendPeerFrame).not.toHaveBeenCalled();

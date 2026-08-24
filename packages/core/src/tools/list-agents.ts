@@ -70,7 +70,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
         )
       : [];
     const sessions = peers.map((peer) => ({
-      to: formatPeerAddress(peer, peers),
+      to: formatPeerAddress(peer),
       name: peer.name,
       ref: peer.ref,
       cwd: peer.cwd,

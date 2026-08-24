@@ -261,6 +261,33 @@ describe('SendMessageTool — peer-session mode', () => {
     expect(sendToPeerMock).not.toHaveBeenCalled();
   });
 
+  it('routes an advertised peer address past a same-named teammate', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    sendToPeerMock.mockResolvedValue({
+      kind: 'sent',
+      address: 'qwen-session:aaaaaa',
+      peer: { cwd: '/work/peer' },
+    });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: { sendMessage, broadcast: vi.fn() },
+      }),
+    );
+
+    const result = await tool.validateBuildAndExecute(
+      { to: 'qwen-session:aaaaaa', message: 'send to the peer' },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendToPeerMock).toHaveBeenCalledWith({
+      target: 'qwen-session:aaaaaa',
+      message: 'send to the peer',
+      approvalMode: DEFAULT_MODE,
+    });
+  });
+
   it('does not send structured team controls to a peer', async () => {
     const tool = new SendMessageTool(makeTeamConfig());
 
@@ -280,7 +307,10 @@ describe('SendMessageTool — peer-session mode', () => {
   it('asks for a ref instead of guessing an ambiguous session', async () => {
     sendToPeerMock.mockResolvedValue({
       kind: 'ambiguous',
-      matches: ['worker [aaaaaa] in /a', 'worker [bbbbbb] in /b'],
+      matches: [
+        'qwen-session:aaaaaa (worker in /a)',
+        'qwen-session:bbbbbb (worker in /b)',
+      ],
     });
     const tool = new SendMessageTool(makeTeamConfig());
 
@@ -290,8 +320,8 @@ describe('SendMessageTool — peer-session mode', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('worker [aaaaaa]');
-    expect(result.llmContent).toContain('full name [ref]');
+    expect(result.llmContent).toContain('qwen-session:aaaaaa');
+    expect(result.llmContent).toContain('exact "to" address');
   });
 });
 

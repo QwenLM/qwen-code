@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionRegistryRecord } from '../services/session-registry.js';
 import {
   formatPeerAddress,
+  isExplicitPeerTarget,
   listMessageablePeers,
   peerRef,
   resolvePeerTarget,
@@ -101,15 +102,18 @@ describe('peer directory', () => {
     expect(mocks.probePeerSocket).toHaveBeenCalledTimes(2);
   });
 
-  it('resolves a unique name, ref, or reply socket path', () => {
+  it('resolves a unique name, explicit address, or reply socket path', () => {
     const target = peer('worker', 'a1b2c3');
     const peers = [target];
+
+    expect(formatPeerAddress(target)).toBe('qwen-session:a1b2c3');
+    expect(isExplicitPeerTarget(formatPeerAddress(target))).toBe(true);
 
     expect(resolvePeerTarget(peers, 'worker')).toEqual({
       kind: 'one',
       peer: target,
     });
-    expect(resolvePeerTarget(peers, 'A1B2C3')).toEqual({
+    expect(resolvePeerTarget(peers, 'QWEN-SESSION:A1B2C3')).toEqual({
       kind: 'one',
       peer: target,
     });
@@ -119,7 +123,7 @@ describe('peer directory', () => {
     });
   });
 
-  it('requires name [ref] when a name is ambiguous', () => {
+  it('requires an explicit address when a name is ambiguous', () => {
     const a = peer('worker', 'aaaaaa');
     const b = peer('worker', 'bbbbbb');
     const peers = [a, b];
@@ -128,19 +132,56 @@ describe('peer directory', () => {
       kind: 'ambiguous',
       matches: peers,
     });
-    expect(resolvePeerTarget(peers, 'worker [bbbbbb]')).toEqual({
+    expect(resolvePeerTarget(peers, 'qwen-session:bbbbbb')).toEqual({
       kind: 'one',
       peer: b,
     });
-    expect(formatPeerAddress(a, peers)).toBe('worker [aaaaaa]');
+    expect(formatPeerAddress(a)).toBe('qwen-session:aaaaaa');
   });
 
   it('does not guess when short refs collide', () => {
     const a = peer('one', 'aaaaaa');
     const b = peer('two', 'aaaaaa');
-    expect(resolvePeerTarget([a, b], 'aaaaaa')).toEqual({
+    expect(resolvePeerTarget([a, b], 'qwen-session:aaaaaa')).toEqual({
       kind: 'ambiguous',
       matches: [a, b],
+    });
+  });
+
+  it('round-trips advertised addresses containing reserved syntax', () => {
+    const peers = [
+      peer('target [bbbbbb]', 'aaaaaa'),
+      peer('target', 'bbbbbb'),
+      peer('/tmp/path-shaped-name', 'cccccc'),
+    ];
+
+    for (const candidate of peers) {
+      expect(resolvePeerTarget(peers, formatPeerAddress(candidate))).toEqual({
+        kind: 'one',
+        peer: candidate,
+      });
+    }
+  });
+
+  it('keeps explicit and reply-path namespaces separate from names', () => {
+    const named = peer('/tmp/forged.sock', 'aaaaaa');
+    const path = {
+      ...peer('other', 'bbbbbb'),
+      ipcPath: '/tmp/forged.sock [aaaaaa]',
+    };
+    expect(resolvePeerTarget([named, path], formatPeerAddress(named))).toEqual({
+      kind: 'one',
+      peer: named,
+    });
+    expect(
+      resolvePeerTarget([named, path], '/tmp/forged.sock [aaaaaa]'),
+    ).toEqual({ kind: 'one', peer: path });
+
+    const bareName = peer('cccccc', 'dddddd');
+    const bareRef = peer('ref-owner', 'cccccc');
+    expect(resolvePeerTarget([bareName, bareRef], 'cccccc')).toEqual({
+      kind: 'one',
+      peer: bareName,
     });
   });
 });

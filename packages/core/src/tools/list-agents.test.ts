@@ -19,13 +19,8 @@ vi.mock('../ipc/peer-send.js', () => ({
 }));
 vi.mock('../ipc/peer-directory.js', () => ({
   listMessageablePeers: peerMocks.listMessageablePeers,
-  formatPeerAddress: (
-    peer: { name: string; ref: string },
-    peers: Array<{ name: string }>,
-  ) =>
-    peers.filter((candidate) => candidate.name === peer.name).length > 1
-      ? `${peer.name} [${peer.ref}]`
-      : peer.name,
+  formatPeerAddress: (peer: { name: string; ref: string }) =>
+    `qwen-session:${peer.ref}`,
 }));
 
 describe('ListAgentsTool', () => {
@@ -186,14 +181,14 @@ describe('ListAgentsTool', () => {
       ],
       sessions: [
         {
-          to: 'app [aaaaaa]',
+          to: 'qwen-session:aaaaaa',
           name: 'app',
           ref: 'aaaaaa',
           cwd: '/work/a',
           started_at: '1970-01-01T00:00:00.001Z',
         },
         {
-          to: 'app [bbbbbb]',
+          to: 'qwen-session:bbbbbb',
           name: 'app',
           ref: 'bbbbbb',
           cwd: '/work/b',

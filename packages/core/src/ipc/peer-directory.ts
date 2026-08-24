@@ -57,6 +57,8 @@ export type PeerResolution =
   | { kind: 'none' }
   | { kind: 'ambiguous'; matches: PeerSessionInfo[] };
 
+const PEER_ADDRESS_PREFIX = 'qwen-session:';
+
 function resolveMatches(matches: PeerSessionInfo[]): PeerResolution {
   if (matches.length === 0) return { kind: 'none' };
   if (matches.length === 1) return { kind: 'one', peer: matches[0]! };
@@ -70,35 +72,32 @@ export function resolvePeerTarget(
   const trimmed = target.trim();
   if (!trimmed) return { kind: 'none' };
 
+  const explicit = new RegExp(
+    `^${PEER_ADDRESS_PREFIX}([0-9a-f]{6})$`,
+    'i',
+  ).exec(trimmed);
+  if (explicit) {
+    const ref = explicit[1]!.toLowerCase();
+    return resolveMatches(peers.filter((peer) => peer.ref === ref));
+  }
+
   if (isLocalIpcPath(trimmed)) {
     return resolveMatches(peers.filter((peer) => peer.ipcPath === trimmed));
   }
 
-  const withRef = /^(.*?)\s*\[([0-9a-f]{6})\]$/i.exec(trimmed);
-  if (withRef) {
-    const [, name, ref] = withRef;
-    return resolveMatches(
-      peers.filter(
-        (peer) =>
-          peer.ref === ref!.toLowerCase() && (!name || peer.name === name),
-      ),
-    );
-  }
-
-  const byName = peers.filter((peer) => peer.name === trimmed);
-  if (byName.length > 0) return resolveMatches(byName);
-  return resolveMatches(
-    peers.filter((peer) => peer.ref === trimmed.toLowerCase()),
-  );
+  return resolveMatches(peers.filter((peer) => peer.name === trimmed));
 }
 
-export function formatPeerAddress(
-  peer: PeerSessionInfo,
-  peers: readonly PeerSessionInfo[],
-): string {
-  return peers.filter((other) => other.name === peer.name).length > 1
-    ? `${peer.name} [${peer.ref}]`
-    : peer.name;
+export function formatPeerAddress(peer: PeerSessionInfo): string {
+  return `${PEER_ADDRESS_PREFIX}${peer.ref}`;
+}
+
+export function isExplicitPeerTarget(target: string): boolean {
+  const trimmed = target.trim();
+  return (
+    new RegExp(`^${PEER_ADDRESS_PREFIX}[0-9a-f]{6}$`, 'i').test(trimmed) ||
+    isLocalIpcPath(trimmed)
+  );
 }
 
 export function suggestPeerNames(
@@ -110,5 +109,5 @@ export function suggestPeerNames(
   return peers
     .filter((peer) => peer.name.toLowerCase().includes(needle))
     .slice(0, 3)
-    .map((peer) => formatPeerAddress(peer, peers));
+    .map((peer) => formatPeerAddress(peer));
 }
