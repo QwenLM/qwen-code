@@ -200,10 +200,22 @@ jobs:
           # the job's `bash -eo pipefail` a wipe that cannot clear the
           # workspace fails the job here instead of building both checkouts
           # on top of the leftovers. Only the config scrub is best-effort,
-          # mirroring qwen-triage.yml's config-sanitize.
+          # mirroring qwen-triage.yml's config-sanitize. Worktree-scoped
+          # config first, the same defang pair as qwen-triage's hardened
+          # config-sanitize: extensions.worktreeConfig activates
+          # .git/config.worktree, a second local file that `git config
+          # --local` neither lists nor unsets and that CAN carry exec
+          # vectors like core.hooksPath — delete the file and drop the
+          # extension, closing a bypass the allowlist sweep cannot see.
+          # Every git call is anchored to $WS/.git instead of discovering
+          # the repo from the CWD: after the heal above unlinks a symlinked
+          # workspace root, the step's CWD still is the link's target, and
+          # CWD discovery would scrub a repo outside the workspace.
           find "$WS" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
           rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
-          { git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          { git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
 
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

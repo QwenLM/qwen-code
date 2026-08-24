@@ -278,7 +278,7 @@ describe('serve-ab.yml runner routing', () => {
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-3);
+    const tail = executed.slice(-5);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -291,8 +291,18 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[2],
-      '{ git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done',
-      'the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist',
+      'rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
+      "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
+    );
+    assert.equal(
+      tail[3],
+      'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
+      'drop the extension that re-activates the split config file',
+    );
+    assert.equal(
+      tail[4],
+      '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
+      "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
   });
 });

@@ -35,11 +35,12 @@ const wipe = steps.find((s) => s.name === WIPE);
 // `-eo pipefail`, so the exec tests must reproduce that instead of hiding
 // it behind bare `bash -c`.
 const runWipe = (env, options = {}) => {
-  // The kept-.git config scrub ends in `git config --local`, which reads
-  // the CWD's repo; pin it to the fixture so a completing wipe never
-  // scrubs the host checkout's local config. The heal fixtures hand over
-  // a workspace that is a file or a dangling symlink — no cwd to stand in —
-  // so pin the parent instead: a mkdtemp dir, never a repo.
+  // GitHub Actions starts the step with its CWD in GITHUB_WORKSPACE, so
+  // the harness does too — a symlinked root then opens the link's target
+  // as the CWD, exactly the shape the kept-.git tail must contain. The
+  // heal fixtures hand over a workspace that is a file or a dangling
+  // symlink — no cwd to stand in — so pin the parent instead: a mkdtemp
+  // dir, never a repo.
   let cwd = env.GITHUB_WORKSPACE;
   try {
     if (!statSync(cwd).isDirectory()) cwd = dirname(cwd);
@@ -110,12 +111,15 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     // purpose — under the job's `-eo pipefail` a wipe that cannot clear the
     // workspace fails the job here instead of building both checkouts on
     // top of the leftovers. `|| true` may appear only on the kept-.git
-    // config scrub, mirroring qwen-triage.yml's config-sanitize.
+    // defang scrub — the config.worktree defang pair and the allowlist
+    // sweep — mirroring qwen-triage.yml's config-sanitize.
     const loosened = wipe.run
       .split('\n')
       .filter((line) => line.includes('|| true'));
-    expect(loosened).toHaveLength(1);
-    expect(loosened[0]).toContain('git config --local --name-only --list');
+    expect(loosened).toHaveLength(3);
+    expect(loosened[0]).toContain('--git-path config.worktree');
+    expect(loosened[1]).toContain('--unset-all extensions.worktreeConfig');
+    expect(loosened[2]).toContain('config --local --name-only --list');
   });
 
   it('carries the symlink heal, ordered and bounded (#9480)', () => {
@@ -207,6 +211,106 @@ describe('serve-ab pre-checkout workspace wipe', () => {
         expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
       } finally {
         rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'defangs the worktreeConfig split-config bypass',
+    () => {
+      // extensions.worktreeConfig activates .git/config.worktree, a second
+      // local file that `git config --local` neither lists nor unsets — a
+      // planted exec vector there survives the allowlist sweep and fires on
+      // the next job's checkout. The defang deletes the file and drops the
+      // extension, mirroring qwen-triage.yml's hardened config-sanitize.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-wtcfg-'));
+      const ws = join(parent, 'repo');
+      execFileSync('git', ['init', '--quiet', ws]);
+      execFileSync(
+        'git',
+        ['config', '--local', 'extensions.worktreeConfig', 'true'],
+        { cwd: ws },
+      );
+      execFileSync(
+        'git',
+        ['config', '--worktree', 'core.hooksPath', join(parent, 'evil-hooks')],
+        { cwd: ws },
+      );
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        expect(existsSync(join(ws, '.git', 'config.worktree'))).toBe(false);
+        expect(() =>
+          execFileSync(
+            'git',
+            ['config', '--local', 'extensions.worktreeConfig'],
+            { cwd: ws, stdio: 'pipe' },
+          ),
+        ).toThrow();
+        // Full-scope resolution: the planted exec vector no longer resolves.
+        expect(
+          spawnSync('git', ['-C', ws, 'config', '--get', 'core.hooksPath'], {
+            encoding: 'utf8',
+          }).status,
+        ).not.toBe(0);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'never scrubs a repo outside a healed workspace',
+    () => {
+      // The heal unlinks the workspace symlink and recreates it as an empty
+      // real dir, but the step's CWD was opened through the link and still
+      // IS the target repo. The kept-.git tail must stay anchored to
+      // $WS/.git: discovering the repo from the CWD here unsets the
+      // target's local config and deletes its config.worktree — writes
+      // outside the workspace. The target carries the full split-config
+      // shape so every anchored line has its own witness.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-scrub-'));
+      const target = mkdtempSync(join(tmpdir(), 'serve-ab-heal-target-'));
+      execFileSync('git', ['init', '--quiet', target]);
+      execFileSync(
+        'git',
+        ['config', '--local', 'extensions.worktreeConfig', 'true'],
+        { cwd: target },
+      );
+      execFileSync(
+        'git',
+        ['config', '--worktree', 'core.hooksPath', join(target, 'evil')],
+        { cwd: target },
+      );
+      execFileSync('git', ['config', '--local', 'alias.pwned', '!echo pwned'], {
+        cwd: target,
+      });
+      const ws = join(parent, 'repo');
+      symlinkSync(target, ws);
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        // The workspace heals to an empty real dir...
+        expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+        expect(lstatSync(ws).isDirectory()).toBe(true);
+        expect(readdirSync(ws)).toEqual([]);
+        // ...and the link target's repo is untouched: the split file, the
+        // extension, and the hostile local key all survive.
+        expect(existsSync(join(target, '.git', 'config.worktree'))).toBe(true);
+        expect(
+          execFileSync(
+            'git',
+            ['config', '--local', 'extensions.worktreeConfig'],
+            { cwd: target, encoding: 'utf8' },
+          ).trim(),
+        ).toBe('true');
+        expect(
+          execFileSync('git', ['config', '--local', 'alias.pwned'], {
+            cwd: target,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe('!echo pwned');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(target, { recursive: true, force: true });
       }
     },
   );
