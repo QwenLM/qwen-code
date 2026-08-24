@@ -35,6 +35,7 @@ export type StandaloneDirectoryInspection =
 
 export type StandaloneDirectoryEnsureResult =
   | { status: 'ready'; identity: ConversationDirectoryIdentity }
+  | { status: 'created'; identity: ConversationDirectoryIdentity }
   | { status: 'recreated'; identity: ConversationDirectoryIdentity }
   | {
       status: 'compromised';
@@ -203,6 +204,16 @@ export class ConversationWorkspace {
         this.directoryKey(sessionId),
       );
     } catch (error) {
+      // A root that vanished mid-inspection means there is nothing left to
+      // discard: keep the ENOENT-race → `false` contract instead of
+      // reporting an identity violation.
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.reason === 'io_error' &&
+        (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      ) {
+        return false;
+      }
       liveIdentityError(error);
     }
     if (!identity) return false;
@@ -297,7 +308,11 @@ export class ConversationWorkspace {
         root,
         storageSessionId,
       );
-      if (!materialized.created && expected) {
+      if (!materialized.created) {
+        // The directory appeared inside the race window, so it is adopted
+        // only through the same inspection verdict as one found up front —
+        // never as a blind 'ready' carrying whatever the racing creator put
+        // there.
         const raced = await this.inspectStandaloneDirectory(
           storageSessionId,
           expected,
@@ -308,8 +323,10 @@ export class ConversationWorkspace {
           'identity_changed',
         );
       }
+      // 'recreated' is reserved for a directory that vanished after its
+      // identity was captured; a first-ever creation reports 'created'.
       return {
-        status: materialized.created ? 'recreated' : 'ready',
+        status: expected ? 'recreated' : 'created',
         identity: materialized.identity,
       };
     } catch (error) {

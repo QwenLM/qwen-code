@@ -11,7 +11,10 @@ import type {
   MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
@@ -176,6 +179,17 @@ export interface UserMessageContentRenderInfo {
     attachmentId?: string;
   }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -457,6 +471,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** Canonical daemon-owned Goal state for the active session. */
+  goalSnapshot: GoalSnapshotV2 | null;
+  /** @deprecated Prefer goalSnapshot. */
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];

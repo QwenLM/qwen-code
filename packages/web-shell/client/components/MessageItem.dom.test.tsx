@@ -90,7 +90,16 @@ vi.mock('./messages/AssistantMessage', async () => {
   };
 });
 vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
-vi.mock('./messages/ToolGroup', () => ({ ToolGroup: () => null }));
+vi.mock('./messages/ToolGroup', async () => {
+  const React = await import('react');
+  return {
+    ToolGroup: ({ compactSummary }: { compactSummary?: boolean }) =>
+      React.createElement('div', {
+        'data-testid': 'tool-group',
+        'data-compact-summary': String(compactSummary === true),
+      }),
+  };
+});
 vi.mock('./messages/PlanMessage', () => ({ PlanMessage: () => null }));
 vi.mock('./messages/BtwMessage', () => ({ BtwMessage: () => null }));
 vi.mock('./messages/UserShellMessage', () => ({
@@ -230,6 +239,34 @@ describe('MessageItem selectable wrapper', () => {
 });
 
 describe('MessageItem tool group spacing', () => {
+  it('marks only synthetic groups as compact summaries', () => {
+    const synthetic = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('summary-agent-1'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const regular = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('agent-1'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+
+    expect(
+      synthetic
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('true');
+    expect(
+      regular
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('false');
+  });
+
   it('uses larger row spacing only in compact mode', () => {
     const compact = render(
       <I18nProvider language="en">

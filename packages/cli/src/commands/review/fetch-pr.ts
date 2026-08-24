@@ -38,10 +38,11 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import type { ReviewEffort } from './parse-args.js';
+import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -50,6 +51,14 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
+import type { NarrowSelection } from './lib/narrow-diff.js';
+import { assembleSections, selectNarrowing } from './lib/narrow-diff.js';
+import type {
+  IncrementalScope,
+  WidenedScope,
+} from './lib/incremental-scope.js';
+import { widenScope } from './lib/incremental-scope.js';
+import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -60,7 +69,6 @@ import {
 import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
-  parseDiff,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
@@ -216,6 +224,8 @@ type FetchPrResult = PlanReport & {
    * local review's plan has no such field: nothing is posted there.
    */
   prDescriptionHasHan: boolean;
+  /** Source diff lines in the full merge-base range, including on an incremental round. */
+  fullSrcDiffLines?: number;
   /**
    * The model this ROUND started under — the runtime identity at capture
    * time, stamped here because nothing else in the flow remembers it.
@@ -241,7 +251,8 @@ type FetchPrResult = PlanReport & {
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
-   * in this report cover `since..fetchedSha` instead of the merge-base range.
+   * in this report are the merge-base range narrowed to what changed since
+   * the anchor, rather than the whole merge-base range.
    * `upToDate: true` means nothing has landed since the anchor (the anchor is
    * the head, or the commits since it change no bytes) — a fact about the
    * anchor, proven without consulting the base. The diff and plan then cover
@@ -254,13 +265,27 @@ type FetchPrResult = PlanReport & {
    * reason names a CAUSE: a rebase or force-push (`not-an-ancestor`), a sha
    * this history has never seen (`unknown-commit`), an anchor older than the
    * merge base that would scope WIDER than the PR's diff
-   * (`behind-merge-base`), a delta carrying hunks the PR's own diff does not
-   * contain (`hunks-outside-pr-diff` — an "undo per feedback" revert makes an
-   * in-range anchor produce them), a containment check that could not be
-   * RULED because the parser cannot name a path (`containment-unverified`),
-   * a merge base too stale to rule the clamp on (`base-untrusted`), a
-   * capture that threw (`capture-failed`), or a partitioner that refused to
-   * tile (`partition-failed`).
+   * (`behind-merge-base`), a merge base too stale to rule the clamp on
+   * (`base-untrusted`), a capture that threw OR a base-side fault — the
+   * base fetch or the merge-base resolution — failed (`capture-failed`), a
+   * partitioner that refused to tile (`partition-failed`), or a narrowing
+   * that found nothing it could publish (`nothing-to-narrow`). That last one
+   * exists because the scope is BUILT from the PR's own diff rather than
+   * checked against it, and it covers every shape the build can refuse,
+   * deliberately alike: an "undo per feedback" round whose commits put lines
+   * back the way the base had them, so the PR no longer displays the undone
+   * FILE at all (a file the PR still carries publishes its section whole
+   * instead of refusing); a capture on either side whose bytes do not
+   * survive UTF-8; a delta the
+   * parser cannot read; and the fail-closed refusal — the two captures key
+   * the same change differently (a path or a rename git resolves differently
+   * across the two ranges), so narrowing would drop a change the PR's diff
+   * displays. Every shape keeps the full range: wider, never wrong.
+   * On Aone the two ancestry-based reasons (`not-an-ancestor`,
+   * `behind-merge-base`) never occur: an AGit-Flow update amends the head
+   * in place and orphans the cached sha, so the anchor is ruled WITHOUT
+   * ancestry (design D7) and the two heads' diff is read as the update's
+   * delta.
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -279,22 +304,31 @@ export interface IncrementalDecision {
     | 'unknown-commit'
     | 'not-an-ancestor'
     | 'behind-merge-base'
-    | 'hunks-outside-pr-diff'
-    | 'containment-unverified'
+    | 'nothing-to-narrow'
     | 'cross-model-anchor'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
   /**
-   * The scoped range's left side as a FULL sha, present exactly when the
-   * report's diff is the delta (`effective` and not `upToDate`). Downstream
-   * consumers that recompute their own ranges read it instead of
-   * `mergeBaseSha` — Agent 7's test-efficacy probe welds `--base` into its
-   * brief, and probing the full range on a delta-scoped round would spend
-   * the probe budget on already-reviewed hunks and report survivors from
-   * outside this round's scope.
+   * The left side of the range the published scope was assembled from, as a
+   * FULL sha, present exactly when the report's diff is the narrowed scope
+   * (`effective` and not `upToDate`). Downstream consumers that recompute
+   * their own ranges read it — Agent 7's test-efficacy probe welds `--base`
+   * into its brief. It is the merge base, never the anchor: the published
+   * hunks are byte-identical hunks of `mergeBase..head`, so that range
+   * covers every one of them and never a byte the PR's diff does not
+   * display, while the anchor range can carry hunks an undo round netted
+   * out of the PR's diff.
    */
   diffBase?: string;
+  /**
+   * Which files the published scope holds and why, present exactly when the
+   * scope is the narrowed one. `deltaFiles` are what the round touched;
+   * `interaction[]` are still-clean files the one-hop widening pulled back
+   * in, each with the edges that did it, so a chunk brief can point its agent
+   * at the seam rather than order a from-scratch re-review.
+   */
+  scope?: IncrementalScope;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -340,12 +374,33 @@ export interface AnchorProbe {
  * `isCollapsedFromUpstream`) declines to rule in that state rather than
  * ruling on it. `{fetchFailed: true, sha: null}` is not that state — there
  * is no clamp to rule at all, and the delta range needs no base.
+ *
+ * `noAncestry` is the AGit-Flow rule (Aone; design D7). Under AGit-Flow,
+ * updating a CR AMENDS the single commit in place: the amended H2 has H1's
+ * parent, never H1 itself, so the old head is orphaned and the
+ * anchor-behind-head test fails for EVERY update — the amended head never
+ * descends from the cached one. (The clamp additionally fails whenever the
+ * update also rebased onto newer master, since the merge base then moves
+ * past the cached head; a pure amend passes it.) Neither is asked: after
+ * the fetch both heads are local, so `anchor..head` IS the update's delta
+ * (for a pure amend, exactly the amended lines; if the author also rebased
+ * onto newer master, the range additionally carries the rebase drift; the
+ * narrowing join reads it only for which files changed and never lets a
+ * drift byte reach the published scope, falling back to the full range via
+ * `nothing-to-narrow` when the drift touched files outside the CR's diff).
+ * The published scope is still assembled
+ * from the PR's own diff by the narrowing step, so it cannot carry a hunk
+ * the platform does not display, and the `base-untrusted` refusal stays —
+ * it guards a capture against a stale base, not a lineage. The existence
+ * checks also stay: an anchor the object store does not hold (a fresh
+ * clone) cannot be diffed against.
  */
 export function resolveIncrementalAnchor(
   rawSince: string,
   fetchedSha: string,
   probe: AnchorProbe,
   mergeBase: { sha: string | null; fetchFailed: boolean } | null = null,
+  options: { noAncestry?: boolean } = {},
 ): { incremental: IncrementalDecision; diffBase: string | null } {
   // git resolves hex case-insensitively, and an operator pasting an
   // uppercase sha (some UIs render them that way) was refused before any
@@ -383,8 +438,11 @@ export function resolveIncrementalAnchor(
     };
   }
   // Ancestry is asked about the RESOLVED commit, so a non-commit can no
-  // longer reach it and an error here really is the git surface.
-  if (!probe.isAncestor(resolved, fetchedSha)) {
+  // longer reach it and an error here really is the git surface. Not asked
+  // at all under `noAncestry` — see the docstring's AGit-Flow paragraph:
+  // an amend orphans the cached head, so the test would fail for every
+  // update, and the two heads' diff is the update's delta anyway.
+  if (!options.noAncestry && !probe.isAncestor(resolved, fetchedSha)) {
     return {
       incremental: { since, effective: false, reason: 'not-an-ancestor' },
       diffBase: null,
@@ -394,13 +452,28 @@ export function resolveIncrementalAnchor(
   // clamp to rule, stale or otherwise, and the docstring's "a null `sha`
   // skips the clamp" holds — the delta range needs no base at all, so a
   // deleted or renamed base branch must not cost a valid anchor its scope.
+  // NOT an ancestry test — it fires under `noAncestry` too: the narrowing
+  // below assembles the published scope from the base-derived full capture,
+  // and a base the run flagged possibly-stale is one every sibling guard
+  // declines to rule on.
   if (mergeBase?.fetchFailed && mergeBase.sha != null) {
     return {
       incremental: { since, effective: false, reason: 'base-untrusted' },
       diffBase: null,
     };
   }
-  if (mergeBase?.sha != null && !probe.isAncestor(mergeBase.sha, resolved)) {
+  // The clamp. Skipped under `noAncestry` with its sibling: on a rebase
+  // onto newer master the merge base moves PAST the cached head, so the
+  // clamp fires for every amended-and-rebased update — retiring the anchor
+  // there would cost the full range even when the drift stays inside the
+  // CR's files and the narrowing join could still scope (it reads the
+  // delta for its file list only, so no drift byte is published; drift
+  // beyond the CR's files falls back to the full range there anyway).
+  if (
+    !options.noAncestry &&
+    mergeBase?.sha != null &&
+    !probe.isAncestor(mergeBase.sha, resolved)
+  ) {
     return {
       incremental: { since, effective: false, reason: 'behind-merge-base' },
       diffBase: null,
@@ -421,213 +494,6 @@ function fileLineCount(ref: string, path: string): number {
   } catch {
     return 0; // absent at this ref: created by the PR, or deleted by it
   }
-}
-
-/**
- * Does every hunk of `inner` fall inside `outer`, per file?
- *
- * This is the containment an ancestry clamp cannot give. An anchor can be a
- * proper ancestor of the head and still produce a delta whose hunks are absent
- * from the PR's own diff: an "undo per feedback" commit reverts some of the
- * previous round's lines back to base content, so those lines are changed in
- * `anchor..head` and unchanged in `base..head`. A comment anchored on such a
- * hunk 422s the whole Create Review call.
- *
- * The result is TWO facts, not one: DISPROVED containment and an oracle that
- * could not rule are different, and only the first is what
- * `hunks-outside-pr-diff` asserts. A boolean wrapper over this used to exist
- * for the tests' convenience; it collapsed exactly the split the refusal enum
- * pays to keep, so callers take the pair.
- *
- * The grammar is NOT re-implemented here. Three rounds of review found a new
- * shape-tolerance defect in a hand-rolled parser every time — count-less
- * headers, trailing function context, quoted rename headers, deletion
- * junctions — so this reads the sections and hunks out of `parseDiff`, the
- * parser the chunk planner already trusts on these exact captures (it
- * unquotes paths, tracks hunk bodies, and knows the binary and rename
- * shapes). A ruling is then set arithmetic over its output.
- */
-export function containmentRuling(
-  inner: string,
-  outer: string,
-): { ok: boolean; unverified: boolean } {
-  // Both captures reach here already decoded as UTF-8, and that decode is
-  // LOSSY: every byte git emitted that is not valid UTF-8 — in a path or in a
-  // line's content — arrives as one U+FFFD. Distinct bytes therefore become
-  // the same character, and everything below compares decoded strings: two
-  // filenames differing only in an invalid byte share one map key, so one
-  // file's hunks get judged against the other's ranges; two byte-distinct
-  // deleted lines match each other 1:1. Neither is detectable after the
-  // decode, so the oracle declines to rule rather than ruling on text it
-  // knows is not the text git produced. A file that legitimately contains
-  // U+FFFD refuses too — a full review, which is the safe direction.
-  if (inner.includes('�') || outer.includes('�')) {
-    return { ok: false, unverified: true };
-  }
-  const innerSections = sectionsOf(inner);
-  const outerSections = sectionsOf(outer);
-  if (innerSections === null || outerSections === null) {
-    return { ok: false, unverified: true };
-  }
-  return {
-    ok: sectionsContained(innerSections, outerSections),
-    unverified: false,
-  };
-}
-
-/**
- * What one HUNK contributes to a ruling.
- *
- * Two facts, because the two sides of a diff are comparable in different ways.
- * The captures share a head tree, so their NEW-side line numbers name the same
- * lines and compare as numbers. Their OLD sides are different trees — the
- * anchor and the merge base — so old-side line numbers name nothing in common
- * and deletions compare only by CONTENT.
- *
- * The pairing is what makes the content comparison sound. Held per FILE, a
- * `-X` the PR displays in one hunk cleared a `-X` the delta performs thirty
- * lines away in another — a line displayed nowhere near where the delta
- * deletes it. Locality is available (the head tree is shared, which is the
- * same fact the range check already rests on), so it is used: a deletion is
- * matched only against hunks that ENCLOSE the hunk performing it.
- */
-interface HunkFacts {
-  /** New-side range of this hunk. */
-  range: [number, number];
-  /**
-   * This hunk body's `-` lines as `content@junction`.
-   *
-   * The junction is the new-side cursor where the deleted line stood: context
-   * and `+` lines advance it, `-` lines do not — the same walk `parseDiff`
-   * performs. Content alone was not enough. Two hunks can delete the same text
-   * at different places, and matching by text let a delta's `-dup` be cleared
-   * by a `-dup` the PR displays thirty lines away, in a hunk that never
-   * touches the delta's junction. Junctions are comparable for the same reason
-   * ranges are: both captures end at the same head tree.
-   */
-  deletions: string[];
-}
-
-/** `path -> hunks`, via the shared parser. Null if it found nothing in a
- *  non-empty diff, which is the "could not rule" state. */
-function sectionsOf(diffText: string): Map<string, HunkFacts[]> | null {
-  const { files } = parseDiff(diffText);
-  if (diffText.trim() !== '' && files.length === 0) return null;
-  // Split once: `containmentRuling` runs on every incremental capture, and
-  // re-splitting per hunk made it quadratic in the diff size.
-  const lines = diffText.split('\n');
-  const out = new Map<string, HunkFacts[]>();
-  for (const f of files) {
-    // A section with no hunk at all — a mode change, a binary replacement, a
-    // pure rename — carries nothing to compare. It enters as an EMPTY list so
-    // the path check still runs: each used to pass vacuously, which is how a
-    // delta whose only content is a file the PR's own diff never mentions
-    // became the scope.
-    const hunks = out.get(f.path) ?? [];
-    for (const h of f.hunks) {
-      // A pure deletion (`newCount === 0`) sits BETWEEN two post-image lines;
-      // `parseDiff` already clamps its range to the junction, and comparing
-      // that junction against a covering hunk is what keeps a deletion the
-      // PR's own diff performs from being refused.
-      const deletions: string[] = [];
-      // Body lines only. `diffStart` is the `@@` header's own 1-based line
-      // number, so the body begins at that index and ends at `diffEnd - 1`;
-      // starting at the header would read `---` file metadata as a deletion.
-      let cursor = h.newStart;
-      for (let i = h.diffStart; i < h.diffEnd; i++) {
-        const line = lines[i];
-        if (line === undefined) continue;
-        if (line.startsWith('-')) {
-          // Where this line stood on the new side: between the lines the
-          // cursor has and has not yet reached.
-          deletions.push(`${cursor}\u0000${line.slice(1)}`);
-        } else if (
-          line.startsWith('+') ||
-          line === '' ||
-          line.startsWith(' ')
-        ) {
-          // Both occupy a new-side line. A `\ No newline at end of file`
-          // marker is neither, and must not move the cursor.
-          cursor++;
-        }
-      }
-      hunks.push({ range: [h.newStart, h.newEnd], deletions });
-    }
-    out.set(f.path, hunks);
-  }
-  return out;
-}
-
-/** The containment loop over already-parsed sections. */
-function sectionsContained(
-  inner: Map<string, HunkFacts[]>,
-  outer: Map<string, HunkFacts[]>,
-): boolean {
-  for (const [file, hunks] of inner) {
-    const covering = outer.get(file);
-    if (!covering) return false;
-    // A delta section with nothing comparable — a mode change, a pure rename,
-    // a binary replacement — carries no hunk at all, so the loop below iterates
-    // zero times and the section passes vacuously. That is the right answer
-    // only when the PR's own section is equally contentless (two binary
-    // sections, say). When the covering section HAS hunks, the delta is
-    // asserting a change of a kind the PR's diff does not show — an "undo per
-    // feedback" round that reverts round 1's `chmod +x` is exactly this shape —
-    // and vacuous truth is the wrong verdict for it.
-    if (hunks.length === 0 && covering.length > 0) return false;
-
-    // Keyed by `content@junction`, not content. The entry a delta deletion
-    // consumes must be the one the PR displays AT THAT PLACE: matching by text
-    // alone let a `-dup` the PR shows near the top of the file clear a `-dup`
-    // the delta performs thirty lines down, at a junction the PR's diff never
-    // touches. Junctions are comparable for the same reason ranges are — both
-    // captures end at the same head tree.
-    //
-    // ONE budget for the whole file, consumed across every delta hunk, so a
-    // single displayed deletion is spent once. Measured honestly: with the
-    // junction in the key this is not observable — two delta hunks cannot
-    // delete at the same junction — so it is the invariant stated where it
-    // belongs rather than a live guard. Rebuilding it per hunk would make
-    // correctness depend on junction-uniqueness without saying so.
-    const budget = new Map<string, number>();
-    for (const o of covering) {
-      for (const d of o.deletions) budget.set(d, (budget.get(d) ?? 0) + 1);
-    }
-
-    for (const hunk of hunks) {
-      const [start, end] = hunk.range;
-      // Strict containment, no slack. Both captures share the head tree, so
-      // a deletion the PR's own diff performs yields an identical junction
-      // range and is covered at equality; slack for it bought nothing and
-      // accepted a delta hunk one line past the covering hunk — a line
-      // GitHub's PR diff does not display, where an anchored comment 422s
-      // the entire all-or-nothing Create Review call.
-      if (!covering.some((o) => o.range[0] <= start && end <= o.range[1])) {
-        return false;
-      }
-
-      // Deleted lines occupy NO new-side line, so the range check above is
-      // blind to them: what survives a deletion hunk on the new side is its
-      // context, which the covering hunk contains for free. A delta that
-      // deletes a line the PR's own diff never displays passed the range check
-      // outright.
-      //
-      // The discriminator is where the line came from. `-X` in the delta means
-      // X stood at the anchor and is gone at head. If X also stood at the merge
-      // base then the PR — which ends at that same head — must delete it too,
-      // so `-X` appears in the full capture, at the same junction. So the
-      // converse is the refusal: no such entry means the PR introduced X after
-      // the base and took it back out, and GitHub's PR diff shows that line on
-      // neither side. An inline comment anchored there 422s the entire
-      // all-or-nothing Create Review call.
-      for (const deleted of hunk.deletions) {
-        const left = budget.get(deleted) ?? 0;
-        if (left === 0) return false;
-        budget.set(deleted, left - 1);
-      }
-    }
-  }
-  return true;
 }
 
 /**
@@ -682,16 +548,47 @@ const gitProbe: GitProbe = {
   // refs/tags and refs/heads FIRST, so a tag or branch named
   // `origin/<ref>` — likewise pushable, auto-carried at clone time — would
   // satisfy the check with no tracking ref present.
+  //
+  // The exit status is KEPT (gitExit, not gitOpt), like the sibling probes,
+  // but it splits nothing here: git exits 128 identically for a transient
+  // fault and for a deterministic refusal (the base branch deleted on the
+  // remote — the refspec fetch fails every time), so the bound on retrying
+  // the deterministic member lives where the class is ruled — the demotion
+  // arm below and SKILL.md's once-cap — never on the status.
   fetch: (remote, ref) =>
-    gitOpt(
+    gitExit(
       'fetch',
       remote,
       '--',
       `+refs/heads/${ref}:refs/remotes/${remote}/${ref}`,
-    ) !== null && refExists(`refs/remotes/${remote}/${ref}`),
+    ).status === 0 && refExists(`refs/remotes/${remote}/${ref}`),
   refExists,
-  mergeBase: (a, b) =>
-    gitOpt('-c', 'core.commitGraph=false', 'merge-base', a, b),
+  mergeBase: (a, b) => {
+    // Three-way exit split like the anchor probes: exit 1 is the only
+    // deterministic "no common ancestor"; any other status — an exit-128
+    // fatal, the 120s timeout kill, a spawn failure — is the surface being
+    // unavailable, thrown so the round demotes to the retryable class
+    // instead of folding onto the same null and stamping the deterministic
+    // reason. One member folds in anyway, and no exit-status resolution can
+    // split it: git ALSO exits 1 when it cannot read the object store on
+    // the walk, so a fault there is indistinguishable from an orphan
+    // history. The arm below discloses it.
+    //
+    // `core.commitGraph=false` is #9092's pin, kept: the commit-graph is a
+    // cache, and a stale or truncated one answers this walk from data the
+    // object store no longer agrees with — a wrong merge base, which is the
+    // one input every clamp and the whole narrowing are computed against.
+    const { out, status } = gitExit(
+      '-c',
+      'core.commitGraph=false',
+      'merge-base',
+      a,
+      b,
+    );
+    if (status === 0) return out;
+    if (status === 1) return null;
+    throw new GitUnavailable();
+  },
 };
 
 function tryRemove(action: () => void): void {
@@ -703,11 +600,28 @@ function tryRemove(action: () => void): void {
 }
 
 function cleanStale(prNumber: string): void {
-  releaseWorktree(worktreePath(prNumber));
+  // The result is READ, because `releaseWorktree` can now refuse: an ancestor
+  // symlink above the temp dir means the removal would land in whatever
+  // checkout it names, so it declines and says so. Dropping that on the floor
+  // left the sweep looking successful and the next `worktree add` wedged at a
+  // path nobody was told about — the same "something that should be gone is
+  // still there, and nothing said so" the cleanup path reports everywhere else.
+  const { existed, freed, reason } = releaseWorktree(worktreePath(prNumber));
+  if (existed && !freed) {
+    writeStderrLine(
+      `Could not free the stale worktree at ${worktreePath(prNumber)}: ${reason}`,
+    );
+  }
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+      execFileSync('git', ['branch', '-D', ref], {
+        stdio: 'pipe',
+        // Same reason as every other git spawn in this pipeline: a delete must
+        // land in the repository the caller named, not the one the shell's
+        // `GIT_DIR` points at.
+        env: sanitizedGitEnv(),
+      }),
     );
   }
 }
@@ -1040,7 +954,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
@@ -1056,7 +976,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       git('worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          // Same reason as every other git spawn in this pipeline: a delete must
+          // land in the repository the caller named, not the one the shell's
+          // `GIT_DIR` points at.
+          env: sanitizedGitEnv(),
+        }),
       );
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
@@ -1071,14 +997,29 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
     //    the round trip does not do is normalise CRLF (that would rewrite
     //    every hunk of a CRLF file) or drop the trailing newline.
-    const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
-      remote,
-      meta.baseRefName,
-      // QUALIFIED — the head side is dwim-shadowable exactly like the
-      // fetchedSha read above.
-      `refs/heads/${ref}`,
-      gitProbe,
-    );
+    let mergeBaseSha: string | null;
+    let baseFetchFailed: boolean;
+    /** The merge-base probe threw: the surface, not the history. */
+    let mergeBaseUnavailable = false;
+    try {
+      ({ sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
+        remote,
+        meta.baseRefName,
+        // QUALIFIED — the head side is dwim-shadowable exactly like the
+        // fetchedSha read above.
+        `refs/heads/${ref}`,
+        gitProbe,
+      ));
+    } catch (err) {
+      if (!(err instanceof GitUnavailable)) throw err;
+      // An exit other than the deterministic "no common ancestor" — the
+      // probe's exit split throws it. The round degrades like any base-less
+      // one; the fetch result is lost in the throw, and with no sha and the
+      // retryable reason stamped below, nothing rules on it.
+      mergeBaseSha = null;
+      baseFetchFailed = false;
+      mergeBaseUnavailable = true;
+    }
     if (baseFetchFailed) {
       writeStderrLine(
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
@@ -1258,6 +1199,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             },
           },
           { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
+          // The AGit-Flow rule (design D7): an Aone update AMENDS the single
+          // CR commit in place and orphans the cached head, so the head test
+          // refuses every update's anchor (the clamp fires only when the
+          // update also rebased) — rule it without ancestry; the two heads'
+          // diff is the update's delta. A force-pushed GitHub history keeps
+          // the tests: there they are the detection.
+          { noAncestry: platform.kind === 'aone' },
         );
       } catch (err) {
         if (!(err instanceof GitUnavailable)) throw err;
@@ -1308,7 +1256,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
-    let ruling = { ok: true, unverified: false };
+    /** The PR's own hunks, narrowed to what changed since the anchor. */
+    let narrowed: Buffer | null = null;
+    /** What the narrowing selected, before the widening adds to it. */
+    let selection: NarrowSelection | null = null;
+    /** The selection plus one import hop, and the record of why. */
+    let widened: WidenedScope | null = null;
     if (anchor?.diffBase) {
       // An anchor that resolved to the merge base names the range already in
       // hand: re-running the identical `git diff` would spend the capture (and
@@ -1329,54 +1282,95 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
-      } else if (fullText === null && mergeBaseSha !== null) {
-        // The oracle was LOST, not absent: a base was resolved and its capture
-        // threw (the 120s git timeout on the large long-lived PR `--since`
-        // exists for). Scoping now would publish a delta no containment check
-        // ever ran against — the same unchecked scope this guard exists to
-        // refuse, arrived at by an infrastructure failure instead of a bad
-        // anchor.
+      } else if (mergeBaseUnavailable) {
+        // `git merge-base` could not answer: the probe's exit split throws on
+        // every status except the deterministic exit-1 "no common ancestor"
+        // — an exit-128 fatal, the 120s timeout kill, a spawn failure.
+        // Something did fail, and the re-run re-runs exactly that probe, so
+        // this is the retryable class — the same ruling the anchor probes'
+        // GitUnavailable gets.
         demote('capture-failed');
-      } else if (fullText === null) {
-        // Base-FREE: no merge base resolved, so there is no PR diff to be
-        // contained in. That used to be read as licence to publish the delta
-        // unchecked — the one arm where an uncontained scope shipped by design.
-        // But "no diff to check against" is not proof of containment, it is the
-        // absence of any, and every other arm here fails closed on exactly that
-        // distinction. GitHub still renders SOMETHING for the PR, and a delta
-        // never checked against it can still anchor a comment on a line that
-        // render does not display.
-        demote('containment-unverified');
-      } else if (!(ruling = containmentRuling(delta, fullText)).ok) {
-        // Two different facts, one refusal: the oracle DISPROVED containment,
-        // or it could not rule at all (a path shape it does not model). Only
-        // the first is what `hunks-outside-pr-diff` asserts; the second is an
-        // unavailable oracle, reported as `containment-unverified` so the
-        // reason a reader keys on stays true.
-        //
-        // Ancestry containment is not HUNK containment. An ordinary "undo per
-        // feedback" commit reverts some of the anchor round's lines back to
-        // base content: the delta then carries hunks the PR's own diff does
-        // NOT contain, agents review them, and one comment anchored there
-        // 422s the entire Create Review call — all-or-nothing, taking every
-        // other finding with it. The clamp cannot see this (it compares
-        // history, not content), so the delta is checked against the PR's
-        // diff before it is allowed to be the review's scope.
-        demote(
-          ruling.unverified
-            ? 'containment-unverified'
-            : 'hunks-outside-pr-diff',
-        );
+      } else if (mergeBaseSha === null && baseFetchFailed) {
+        // No merge base because the FETCH failed and no local base ref
+        // remained to resolve one from. (A merge-base walk that failed on the
+        // surface is the arm above, not this one.) The class has TWO members
+        // the exit
+        // status cannot split — git exits 128 for BOTH: a transient fault (a
+        // fresh CI clone whose base fetch hit a network blip), where the
+        // re-run re-runs exactly the component that failed and can succeed,
+        // and a deterministic refusal (the base branch deleted on the remote
+        // — the refspec fetch fails identically every time), where it never
+        // will. Something did fail, so this keeps the retryable reason;
+        // SKILL.md's recovery paragraph bounds the retry to ONCE so the
+        // deterministic member cannot re-fail every round until the cap.
+        demote('capture-failed');
+      } else if (mergeBaseSha === null) {
+        // No merge base although the fetch SUCCEEDED: `git merge-base` found
+        // no common ancestor — an unrelated-history PR. There is no PR diff to
+        // narrow against, so no scope is built; but nothing THREW, and calling
+        // it `capture-failed` asserts an infrastructure fault that did not
+        // happen and puts the round in the class SKILL.md's recovery flow
+        // retries. A re-run reproduces this exactly, so it names the
+        // deterministic reason instead. Exit 1 is the only "no common
+        // ancestor" signal the probe keeps — every other exit takes the
+        // retryable arm above. One member folds in anyway: git ALSO exits 1
+        // when it cannot read the object store on the walk, so a fault there
+        // stamps this reason at any exit-status resolution, and the
+        // determinism claimed here is unprovable for that member.
+        demote('nothing-to-narrow');
+      } else if (fullBytes === null || fullText === null) {
+        // A base WAS resolved and its capture threw — the 120s git timeout the
+        // large long-lived PR `--since` exists for. That is infrastructure,
+        // and a re-run can succeed, so this one keeps `capture-failed`.
+        demote('capture-failed');
+      } else if (
+        (selection = selectNarrowing(fullBytes, deltaBytes)) === null
+      ) {
+        // The narrowing found nothing it could publish — all safe, because
+        // keeping the full range costs a wider review and never a wrong one:
+        // the "undo per feedback" round whose commits put lines back the way
+        // the base had them, so the undone FILE no longer appears in
+        // `base..head` at all (an undone file the PR's diff still carries
+        // does not land here — the join fails closed and publishes its
+        // section whole instead); a capture whose bytes do not survive
+        // UTF-8; a delta the parser cannot read; and the fail-closed
+        // refusal — the two captures key the same change differently (a path
+        // or a rename), so narrowing would drop a change the PR's diff
+        // displays.
+        demote('nothing-to-narrow');
+      } else if (
+        // One import hop past what the round touched. The narrowing is sound
+        // in one direction only: a caller cleared against the callee's OLD
+        // shape is unchanged by definition, so no delta capture shows it, and
+        // a scope holding only the touched files retires that seam at the
+        // next re-anchor. The widening never narrows — with no edge to follow
+        // it returns the narrowing's own paths — so the unwidened round is
+        // the floor rather than a second path that could disagree with it.
+        ((widened = widenScope({
+          anchor: anchor.diffBase ?? anchor.incremental.since,
+          selection,
+          readWorktree: containedWorktreeReader(wt),
+        })),
+        (narrowed = assembleSections(selection, widened.paths)) === null)
+      ) {
+        // `assembleSections` selects nothing only when the widened set names
+        // no section the full capture carries, which the guards above already
+        // rule out — but it is the same "nothing to publish" either way, and
+        // the full range is the safe answer to it.
+        demote('nothing-to-narrow');
       } else {
-        if (publish(deltaBytes)) {
+        if (publish(narrowed)) {
           scopedDelta = true;
-          // The scoped range's left side, full-sha, for downstream consumers
-          // that recompute their own diffs (Agent 7's test-efficacy probe
-          // welds --base into its brief) — without it they would probe the
-          // full merge-base range on a delta-scoped round.
-          anchor.incremental.diffBase = anchor.diffBase;
+          anchor.incremental.scope = widened.scope;
+          // The published hunks are byte-identical hunks of
+          // `mergeBaseSha..head`, so that range is what downstream consumers
+          // recomputing their own diffs must probe (Agent 7's test-efficacy
+          // probe welds --base into its brief): it covers every published hunk
+          // and never a byte the PR's diff does not display, while the anchor
+          // range can carry hunks an undo round netted out of it.
+          anchor.incremental.diffBase = mergeBaseSha;
         } else {
-          // The delta captured but could not be written: degrade like any
+          // The scope was built but could not be written: degrade like any
           // other capture failure rather than scoping to a file nobody has.
           demote('capture-failed');
         }
@@ -1505,6 +1499,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
                     : 'no diff could be captured — coverage will be partial.'
               }`,
       );
+    }
+
+    let fullSrcDiffLines: number | undefined;
+    if (fullText !== null) {
+      if (!scopedDelta) {
+        fullSrcDiffLines = plan.srcDiffLines;
+      } else {
+        try {
+          fullSrcDiffLines = buildDiffPlan(
+            fullText,
+            args.maxChunkLines,
+          ).srcDiffLines;
+        } catch {
+          // Advisory measurement only; compose-review stays silent without it.
+        }
+      }
     }
 
     // Aone does not advertise diff stats — fill them from the captured diff
@@ -1672,6 +1682,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffPathAbsolute,
       diffSha256,
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+      ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
@@ -1894,25 +1905,19 @@ export const fetchPrCommand: CommandModule = {
         describe:
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'The review effort. `medium` (balanced) drops the adversarial ' +
-          'personas from the required roster; recorded in the plan so ' +
-          'check-coverage, agent-prompt --roster and compose-review all read ' +
-          'one value. Omit for the full (high) roster.',
-      })
+      .option('effort', EFFORT_OPTION)
       .option('since', {
         type: 'string',
         describe:
           'Incremental anchor: the head sha the last clean review round ' +
           'covered (from the review cache, or the posted ledger marker). ' +
           'Validated against the fetched history here — an anchor that is ' +
-          'unknown or not an ancestor of the head falls back to the full ' +
-          'diff with the reason in the report; a valid one scopes the diff ' +
-          "and the chunk plan to since..head. The decision is the report's " +
-          '`incremental` field.',
+          'unknown, or not an ancestor of the head, falls back to the full ' +
+          'diff with the reason in the report. Ancestry is skipped on ' +
+          'Aone, where an update AMENDS the single CR commit and orphans ' +
+          "the cached head, so the two heads' diff is the update itself; " +
+          'a valid anchor scopes the diff and the chunk plan to ' +
+          "since..head. The decision is the report's `incremental` field.",
       })
       .option('since-model', {
         type: 'string',

@@ -7,6 +7,8 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -80,6 +82,22 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    */
   static isDeepSeekProvider = isDeepSeekProvider;
   static isDeepSeekHostname = isDeepSeekHostname;
+
+  /**
+   * The full ladder, including `max`, only on a verified DeepSeek host.
+   * `isDeepSeekProvider` also routes here on a `deepseek` substring in the
+   * model name, which says nothing about what the endpoint accepts, so the
+   * capability follows the rule the module comment above already states: a
+   * decision about the wire shape DeepSeek's own API exposes uses
+   * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
+   */
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return isDeepSeekHostname(this.contentGeneratorConfig)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEffortsFor(model);
+  }
 
   /**
    * DeepSeek's API requires message content to be a plain string, not an
