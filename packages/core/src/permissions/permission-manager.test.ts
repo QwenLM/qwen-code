@@ -2743,6 +2743,40 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('structured_output')).toBe(true);
     });
 
+    it('computer_use__* tools are exempt from the allowlist (#9827)', async () => {
+      // The generated cua-driver family (35 tools, enabled by default) has
+      // no alias entry, meta-category, or wildcard rule form — its wire
+      // names churn on every cua-driver version bump — and every member is
+      // shouldDefer=true, so the schemas never enter the eager model
+      // request. The gate must not silently deregister the family whenever
+      // the allowlist is active; the legacy tools.core gate never dropped
+      // these either (non-core tools bypassed it).
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['ReadFile', 'Shell'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__click')).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__type_text')).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__get_window_state')).toBe(
+        true,
+      );
+      // Unrelated unlisted built-ins stay gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('a whole-tool deny rule still wins over the computer_use exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['computer_use__click'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('computer_use__click')).toBe(false);
+      expect(await pm.isToolEnabled('computer_use__type_text')).toBe(true);
+    });
+
     it('plan-mode lifecycle tools are exempt from the allowlist (#9827)', async () => {
       // Under the exact reporter configuration the plan-mode system reminder
       // still instructs the model to call exit_plan_mode, so the sanctioned

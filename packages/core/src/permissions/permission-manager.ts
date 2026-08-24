@@ -672,11 +672,12 @@ export class PermissionManager {
    * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
    * check because they are dynamically discovered or essential for system
    * operation, but they ARE subject to the `permissions.allow` registry
-   * allowlist (except MCP tools and `structured_output`, see below) — that
-   * is the documented migration semantic of the legacy `tools.core`
-   * whitelist ("unlisted tools are disabled at registry level") and the
-   * only way to keep e.g. `send_message` / `update_goal` schemas out of
-   * the model request (#9827).
+   * allowlist (except MCP tools, `structured_output`, and the
+   * `computer_use__*` family, see below) — that is the documented migration
+   * semantic of the legacy `tools.core` whitelist ("unlisted tools are
+   * disabled at registry level") and the only way to keep e.g.
+   * `send_message` / `update_goal` schemas out of the model request
+   * (#9827).
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
     const canonicalName = resolveToolName(toolName);
@@ -695,11 +696,22 @@ export class PermissionManager {
     //   `ask_user_question`): the plan-mode system reminder tells the model
     //   to call `exit_plan_mode` to present a plan, so their schemas must
     //   reach the model for the sanctioned plan flow to complete (#9827).
+    // - Computer Use tools (`computer_use__*`): the generated cua-driver
+    //   surface (35 tools, `computerUseEnabled` defaults to true) has no
+    //   alias entry, meta-category, or wildcard rule form — the wire names
+    //   churn on every cua-driver version bump (see tool-names.ts), so no
+    //   concise allow rule can keep the family listed. Every member is
+    //   `shouldDefer=true`, so the schemas never enter the eager model
+    //   request anyway: gating them buys nothing for the schema-shrink
+    //   goal and only strips capability, including ToolSearch
+    //   discoverability. The legacy `tools.core` gate never dropped them
+    //   either (non-core tools bypassed it) (#9827).
     if (
       this.permissionsAllowListActive &&
       canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
       !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
       !canonicalName.startsWith('mcp__') &&
+      !canonicalName.startsWith('computer_use__') &&
       !this.isCoveredByAllowRule(canonicalName)
     ) {
       return false;
