@@ -343,12 +343,11 @@ export interface BridgeOptions {
     provider: () => readonly JournalGrowthSessionLimit[],
   ) => () => void;
   /**
-   * Per-`requestPermission` wall clock. After this many ms with
-   * no client vote, the agent's permission promise resolves as
-   * cancelled — the per-session FIFO can drain instead of poisoning
-   * forever on a missing SSE subscriber. Defaults to 5 minutes.
-   * `0` / `Infinity` / non-finite disable the timeout (matches
-   * legacy behavior, NOT recommended).
+   * Per-`requestPermission` wall clock. After this many ms with no client
+   * vote, the agent's permission promise resolves as cancelled. Defaults to
+   * disabled so human permissions and questions wait for an explicit decision
+   * or session lifecycle cancellation.
+   * `0` / `Infinity` / non-finite disable the timeout.
    */
   permissionResponseTimeoutMs?: number;
   /**
