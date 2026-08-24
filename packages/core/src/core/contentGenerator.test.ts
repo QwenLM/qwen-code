@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createContentGenerator,
   createContentGeneratorConfig,
   AuthType,
   preloadContentGenerator,
   resetPreloadedContentGenerator,
+  validateModelConfig,
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -728,5 +729,111 @@ describe('createContentGeneratorConfig', () => {
     expect(cfg.apiKey).toBeUndefined();
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+});
+
+describe('validateModelConfig - Vertex AI Application Default Credentials', () => {
+  const vertexConfig = {
+    authType: AuthType.USE_VERTEX_AI,
+    model: 'gemini-2.5-pro',
+  } as ContentGeneratorConfig;
+
+  beforeEach(() => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts a keyless Vertex config when a project is configured', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    expect(validateModelConfig(vertexConfig).valid).toBe(true);
+    expect(validateModelConfig(vertexConfig, true).valid).toBe(true);
+  });
+
+  it('still requires credentials for Vertex when no project is configured', () => {
+    const result = validateModelConfig(vertexConfig);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].message).toContain('GOOGLE_API_KEY');
+    expect(result.errors[0].message).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('builds the client in Vertex mode from the auth type alone', async () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+    // Deliberately unset: the mode must not depend on the side effect that
+    // only the CLI pre-flight check writes.
+    vi.stubEnv('GOOGLE_GENAI_USE_VERTEXAI', '');
+    vi.mocked(GoogleGenAI).mockClear();
+    vi.mocked(GoogleGenAI).mockImplementation(
+      () =>
+        ({
+          models: {
+            countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+          },
+        }) as unknown as GoogleGenAI,
+    );
+
+    const generator = await createContentGenerator(
+      { model: 'gemini-2.5-pro', authType: AuthType.USE_VERTEX_AI },
+      {
+        getUsageStatisticsEnabled: () => false,
+        getContentGeneratorConfig: () => ({}),
+        getCliVersion: () => '1.0.0',
+        getTelemetryEnabled: () => false,
+        getSessionId: () => 'test-session',
+      } as unknown as Config,
+    );
+    await generator.countTokens({ model: 'gemini-2.5-pro', contents: 'hello' });
+
+    expect(GoogleGenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ vertexai: true, apiKey: undefined }),
+    );
+  });
+
+  it('keeps the strict error pointing at the keyless alternative', () => {
+    const result = validateModelConfig(vertexConfig, true);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].message).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('does not extend the keyless path to the Gemini API auth type', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    const result = validateModelConfig({
+      authType: AuthType.USE_GEMINI,
+      model: 'gemini-2.5-pro',
+    } as ContentGeneratorConfig);
+
+    expect(result.valid).toBe(false);
+    // The keyless hint is Vertex-specific: recommending a project to a Gemini
+    // API user is the misleading-placeholder advice it exists to prevent.
+    expect(result.errors[0].message).not.toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('keeps failing on the declared key variable when the entry has an envKey', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    const withEnvKey = {
+      ...vertexConfig,
+      apiKeyEnvKey: 'MY_VERTEX_KEY',
+    } as ContentGeneratorConfig;
+
+    expect(validateModelConfig(withEnvKey).valid).toBe(false);
+    expect(validateModelConfig(withEnvKey).errors[0].message).toContain(
+      'MY_VERTEX_KEY',
+    );
+    // Such an entry never takes the ADC path, so the keyless hint must not
+    // appear: it would be advice that cannot work.
+    expect(validateModelConfig(withEnvKey).errors[0].message).not.toContain(
+      'GOOGLE_CLOUD_PROJECT',
+    );
+    expect(validateModelConfig(withEnvKey, true).valid).toBe(false);
+    expect(
+      validateModelConfig(withEnvKey, true).errors[0].message,
+    ).not.toContain('GOOGLE_CLOUD_PROJECT');
   });
 });
