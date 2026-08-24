@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -29,6 +30,7 @@ const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
 export type WorkspaceRememberContextMode = 'workspace' | 'clean';
 export type WorkspaceRememberScope = 'user' | 'project';
+export type WorkspaceRememberTargetScope = WorkspaceRememberScope;
 
 export interface ManagedRememberResult {
   summary?: string;
@@ -39,15 +41,22 @@ export interface ManagedRememberResult {
 export function buildManagedRememberPrompt(
   fact: string,
   projectRoot?: string,
-  options: { wrapUserContent?: boolean } = {},
+  options: {
+    wrapUserContent?: boolean;
+    scope?: WorkspaceRememberTargetScope;
+  } = {},
 ): string {
   const trimmed = fact.trim();
   const projectDir = projectRoot ? getAutoMemoryRoot(projectRoot) : undefined;
   const userDir = getUserAutoMemoryRoot();
   const dirHint =
-    projectDir !== undefined
-      ? ` Choose the destination directory by the type's \`<scope>\`: USER memory at \`${userDir}\` for cross-project facts, PROJECT memory at \`${projectDir}\` for this-project-only facts.`
-      : '';
+    projectDir === undefined
+      ? ''
+      : options.scope === 'project'
+        ? ` Store this memory only in PROJECT memory at \`${projectDir}\`. This explicit project target overrides the memory type's default destination; do not read or write USER memory at \`${userDir}\`.`
+        : options.scope === 'user'
+          ? ` Store this memory only in USER memory at \`${userDir}\`. This explicit user target overrides the memory type's default destination; do not read or write PROJECT memory at \`${projectDir}\`.`
+          : ` Choose the destination directory by the type's \`<scope>\`: USER memory at \`${userDir}\` for cross-project facts, PROJECT memory at \`${projectDir}\` for this-project-only facts.`;
   const content = options.wrapUserContent
     ? `<user-content>\n${trimmed}\n</user-content>`
     : trimmed;
@@ -60,26 +69,37 @@ export function buildBareRememberPrompt(fact: string): string {
 
 async function buildCleanMemorySystemPrompt(
   projectRoot: string,
+  scope?: WorkspaceRememberTargetScope,
 ): Promise<string> {
-  await ensureAutoMemoryScaffold(projectRoot);
-  try {
-    await ensureUserAutoMemoryScaffold();
-  } catch {
-    // User-level memory is best-effort elsewhere in managed memory. Keep
-    // project memory usable if ~/.qwen/memories cannot be scaffolded.
+  const includeProjectMemory = scope !== 'user';
+  const includeUserMemory = scope !== 'project';
+  if (includeProjectMemory) await ensureAutoMemoryScaffold(projectRoot);
+  let userMemory:
+    | { memoryDir: string; indexContent: string | null }
+    | undefined;
+  if (includeUserMemory) {
+    if (scope === 'user') {
+      await ensureUserAutoMemoryScaffold();
+    } else {
+      try {
+        await ensureUserAutoMemoryScaffold();
+      } catch {
+        // User-level memory remains best-effort for automatic scope selection.
+      }
+    }
+    userMemory = {
+      memoryDir: getUserAutoMemoryRoot(),
+      indexContent: await readUserAutoMemoryIndex().catch(() => null),
+    };
   }
-  const [projectIndex, userIndex] = await Promise.all([
-    readAutoMemoryIndex(projectRoot),
-    readUserAutoMemoryIndex().catch(() => null),
-  ]);
+  const projectIndex = includeProjectMemory
+    ? await readAutoMemoryIndex(projectRoot)
+    : null;
 
   return buildManagedAutoMemoryPrompt(
     getAutoMemoryRoot(projectRoot),
     projectIndex,
-    {
-      memoryDir: getUserAutoMemoryRoot(),
-      indexContent: userIndex,
-    },
+    userMemory,
     /* teamSection */ undefined,
     // The remember agent needs the full protocol (type definitions, scope routing,
     // exclusion rules) to write correct memories — do not remove.
@@ -92,8 +112,12 @@ function buildRememberSystemPrompt(memoryPrompt: string): string {
     'You are saving one explicit durable memory for Qwen Code.',
     '',
     'Rules:',
+    '- This is an explicit add request. Unless the supplied content is an exact duplicate, you must use a write or edit tool to create or update a managed memory entry.',
+    '- If the supplied content supersedes a conflicting instruction in the selected memory scope, update that entry so the latest explicit request wins.',
     '- Save only information provided in the task prompt.',
     '- Use the managed auto-memory system only; do not write QWEN.md or AGENTS.md.',
+    '- Do not create or edit MEMORY.md. The caller rebuilds memory indexes after the entry write succeeds.',
+    '- Create or update exactly one managed memory entry, then stop.',
     '- Do not inspect or depend on any user-visible chat session history.',
     '- Use read/list/search/write/edit tools only inside the managed memory directories.',
     '- When finished, report only whether the memory update completed; do not quote or summarize memory content.',
@@ -149,6 +173,7 @@ export async function runManagedRememberByAgent(params: {
   projectRoot: string;
   content: string;
   contextMode: WorkspaceRememberContextMode;
+  scope?: WorkspaceRememberTargetScope;
   abortSignal?: AbortSignal;
 }): Promise<ManagedRememberResult> {
   if (!params.config.isManagedMemoryAvailable()) {
@@ -157,7 +182,10 @@ export async function runManagedRememberByAgent(params: {
     });
   }
 
-  const memoryPrompt = await buildCleanMemorySystemPrompt(params.projectRoot);
+  const memoryPrompt = await buildCleanMemorySystemPrompt(
+    params.projectRoot,
+    params.scope,
+  );
   // The remember agent's system prompt already embeds the full managed
   // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt
   // with forceFullProtocol). AgentCore.buildChatSystemPrompt would otherwise
@@ -181,6 +209,8 @@ export async function runManagedRememberByAgent(params: {
     params.projectRoot,
     {
       bypassBaseAskForScopedPaths: true,
+      includeProjectMemory: params.scope !== 'user',
+      includeUserMemory: params.scope !== 'project',
       restrictReadsToMemoryPaths: true,
     },
   );
@@ -189,6 +219,7 @@ export async function runManagedRememberByAgent(params: {
     config: scopedConfig,
     taskPrompt: buildManagedRememberPrompt(params.content, params.projectRoot, {
       wrapUserContent: true,
+      ...(params.scope ? { scope: params.scope } : {}),
     }),
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: params.config.getMemoryAgentMaxTurns() ?? 6,
@@ -203,37 +234,58 @@ export async function runManagedRememberByAgent(params: {
     ],
     abortSignal: params.abortSignal,
     suppressChatRecording: true,
+    completeAfterFirstSuccessfulWrite: true,
   });
 
   const filesWritten = result.filesWritten ?? [];
+  const entryFilesWritten = filesWritten.filter(
+    (filePath) => path.basename(filePath) !== 'MEMORY.md',
+  );
   if (result.status === 'failed') {
     throw new Error(result.terminateReason || 'Remember agent failed');
   }
   if (result.status === 'cancelled') {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
-  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
+  if (entryFilesWritten.length === 0) {
+    debugLogger.warn('Remember agent completed without writing memory.', {
+      filesTouched: result.filesTouched,
+      finalTextLength: result.finalText?.length ?? 0,
+    });
+    throw Object.assign(new Error('Remember agent did not update any memory'), {
+      code: 'remember_no_update',
+    });
+  }
+  const touchedScopes = classifyTouchedScopes(
+    entryFilesWritten,
+    params.projectRoot,
+  );
+  if (params.scope && touchedScopes.some((scope) => scope !== params.scope)) {
+    throw Object.assign(
+      new Error(
+        `Remember agent wrote outside the requested ${params.scope} scope`,
+      ),
+      { code: 'remember_scope_mismatch' },
+    );
+  }
 
   await Promise.all([
     touchedScopes.includes('project')
       ? rebuildManagedAutoMemoryIndex(params.projectRoot)
       : Promise.resolve(),
     touchedScopes.includes('user')
-      ? rebuildUserAutoMemoryIndex().catch((err: unknown) => {
-          // Mirrors existing managed-memory behavior: user memory is useful
-          // when available, but project memory writes should not fail because
-          // ~/.qwen/memories cannot be indexed.
-          debugLogger.error('User memory index rebuild failed:', err);
-        })
+      ? params.scope === 'user'
+        ? rebuildUserAutoMemoryIndex()
+        : rebuildUserAutoMemoryIndex().catch((err: unknown) => {
+            // Automatic scope selection keeps user memory best-effort.
+            debugLogger.error('User memory index rebuild failed:', err);
+          })
       : Promise.resolve(),
   ]);
 
   return {
-    summary:
-      filesWritten.length > 0
-        ? 'Memory update completed.'
-        : 'No memory files updated.',
-    filesTouched: filesWritten,
+    summary: 'Memory update completed.',
+    filesTouched: entryFilesWritten,
     touchedScopes,
   };
 }

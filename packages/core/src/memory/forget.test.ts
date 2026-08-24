@@ -542,6 +542,54 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     ]);
   });
 
+  it('limits destructive selection to the requested memory scope', async () => {
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        type: 'user',
+        filePath: '/tmp/user/memories/user/shared.md',
+        relativePath: 'user/shared.md',
+        filename: 'shared.md',
+        title: 'Shared',
+        description: 'Shared preference',
+        body: 'Use concise summaries everywhere',
+        mtimeMs: 2,
+      },
+    ]);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        type: 'project',
+        filePath: '/tmp/project/memory/project/local.md',
+        relativePath: 'project/local.md',
+        filename: 'local.md',
+        title: 'Local',
+        description: 'Local preference',
+        body: 'Use concise summaries in this project',
+        mtimeMs: 1,
+      },
+    ]);
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const prompt = options.contents[0]?.parts?.[0]?.text ?? '';
+      expect(prompt).toContain('id: user:user/shared.md');
+      expect(prompt).not.toContain('id: project:project/local.md');
+      return { selectedCandidateIds: ['user:user/shared.md'] };
+    });
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'concise summaries',
+      { config: mockConfig, scope: 'user' },
+    );
+
+    expect(result.matches).toEqual([
+      {
+        topic: 'user',
+        summary: 'Use concise summaries everywhere',
+        filePath: '/tmp/user/memories/user/shared.md',
+        entryIndex: 0,
+      },
+    ]);
+  });
+
   it('can select user-level memories through heuristic search', async () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([

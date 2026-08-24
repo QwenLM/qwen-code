@@ -382,7 +382,7 @@ describe('workspace memory remember routes', () => {
     const post = await request(app)
       .post('/workspace/memory/forget')
       .set('X-Qwen-Client-Id', 'client-1')
-      .send({ query: 'old preference' })
+      .send({ query: 'old preference', scope: 'user' })
       .expect(202);
 
     const taskId = post.body.taskId as string;
@@ -397,6 +397,7 @@ describe('workspace memory remember routes', () => {
     expect(get.body).toMatchObject({
       taskId,
       status: 'completed',
+      scope: 'user',
       result: {
         summary: 'forgot',
         touchedTopics: ['user', 'reference'],
@@ -410,7 +411,10 @@ describe('workspace memory remember routes', () => {
         ],
       },
     });
-    expect(bridge.forgetCalls[0]).toEqual({ query: 'old preference' });
+    expect(bridge.forgetCalls[0]).toEqual({
+      query: 'old preference',
+      scope: 'user',
+    });
     expect(bridge.events[0]).toMatchObject({
       type: 'memory_changed',
       originatorClientId: 'client-1',
@@ -830,16 +834,16 @@ describe('workspace memory remember routes', () => {
 
     first.resolve({
       summary: 'first',
-      filesTouched: [],
-      touchedScopes: [],
+      filesTouched: ['/mem/project/first.md'],
+      touchedScopes: ['project'],
     });
     await waitFor(() => starts.length === 2);
     expect(starts).toEqual(['one', 'two']);
 
     second.resolve({
       summary: 'second',
-      filesTouched: [],
-      touchedScopes: [],
+      filesTouched: ['/mem/project/second.md'],
+      touchedScopes: ['project'],
     });
 
     await request(app)
@@ -850,7 +854,7 @@ describe('workspace memory remember routes', () => {
       .get(`/workspace/memory/remember/${postTwo.body.taskId}`)
       .expect(200)
       .expect((res) => expect(res.body.status).toBe('completed'));
-    expect(bridge.events).toHaveLength(0);
+    expect(bridge.events).toHaveLength(2);
   });
 
   it('serializes remember, forget, and dream tasks in one lane', async () => {
@@ -899,7 +903,7 @@ describe('workspace memory remember routes', () => {
     dream.resolve({ touchedTopics: [], dedupedEntries: 0 });
   });
 
-  it('does not publish memory_changed for no-op remember results', async () => {
+  it('fails no-op remember results without publishing memory_changed', async () => {
     const bridge = buildBridgeStub({
       rememberImpl: vi.fn(async () => ({
         summary: 'nothing to save',
@@ -918,7 +922,15 @@ describe('workspace memory remember routes', () => {
     await request(app)
       .get(`/workspace/memory/remember/${post.body.taskId}`)
       .expect(200)
-      .expect((res) => expect(res.body.status).toBe('completed'));
+      .expect((res) =>
+        expect(res.body).toMatchObject({
+          status: 'failed',
+          error: {
+            code: 'remember_no_update',
+            message: 'Remember agent did not update any memory.',
+          },
+        }),
+      );
     expect(bridge.events).toHaveLength(0);
   });
 

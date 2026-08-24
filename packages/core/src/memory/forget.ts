@@ -127,6 +127,7 @@ function normalizeSummary(summary: string): string {
 async function listIndexedForgetCandidates(
   projectRoot: string,
   abortSignal?: AbortSignal,
+  scope?: AutoMemoryStorageScope,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
   // Uncapped, to match the recall universe (recall.ts scans uncapped): an
@@ -145,6 +146,7 @@ async function listIndexedForgetCandidates(
     { docs: userDocs, storageScope: 'user' as const },
     { docs: projectDocs, storageScope: 'project' as const },
   ]) {
+    if (scope && storageScope !== scope) continue;
     abortSignal?.throwIfAborted();
     for (const doc of docs) {
       abortSignal?.throwIfAborted();
@@ -411,6 +413,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
     config?: Config;
     limit?: number;
     abortSignal?: AbortSignal;
+    scope?: AutoMemoryStorageScope;
   } = {},
 ): Promise<AutoMemoryForgetSelectionResult> {
   options.abortSignal?.throwIfAborted();
@@ -418,6 +421,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
   const candidates = await listIndexedForgetCandidates(
     projectRoot,
     options.abortSignal,
+    options.scope,
   );
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
@@ -633,7 +637,11 @@ export async function forgetManagedAutoMemoryMatches(
 export async function forgetManagedAutoMemoryEntries(
   projectRoot: string,
   query: string,
-  options: { config?: Config; abortSignal?: AbortSignal } = {},
+  options: {
+    config?: Config;
+    abortSignal?: AbortSignal;
+    scope?: AutoMemoryStorageScope;
+  } = {},
   now = new Date(),
 ): Promise<AutoMemoryForgetResult> {
   options.abortSignal?.throwIfAborted();

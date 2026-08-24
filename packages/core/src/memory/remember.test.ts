@@ -141,9 +141,13 @@ describe('remember memory helper', () => {
       systemPrompt: string;
       taskPrompt: string;
       tools: string[];
+      completeAfterFirstSuccessfulWrite?: boolean;
     };
     expect(params.extraHistory).toEqual([]);
     expect(params.preserveEmptyExtraHistory).toBe(true);
+    expect(params.systemPrompt).toContain('This is an explicit add request.');
+    expect(params.systemPrompt).toContain('Do not create or edit MEMORY.md.');
+    expect(params.completeAfterFirstSuccessfulWrite).toBe(true);
     expect(params.tools).toEqual([
       'read_file',
       'grep_search',
@@ -184,12 +188,241 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('enforces an explicit project target at the permission boundary', async () => {
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'focused-tests.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved project memory.',
+      filesTouched: [projectFile],
+      filesWritten: [projectFile],
+    } satisfies ForkedAgentResult);
+
+    const result = await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Prefer focused tests in this working directory.',
+      contextMode: 'workspace',
+      scope: 'project',
+    });
+
+    expect(result.touchedScopes).toEqual(['project']);
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      taskPrompt: string;
+    };
+    expect(params.taskPrompt).toContain('PROJECT memory at');
+    expect(params.taskPrompt).toContain('explicit project target');
+    const pm = params.config.getPermissionManager() as PermissionManager;
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: projectFile,
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'feedback', 'wrong.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: getUserAutoMemoryRoot(),
+      }),
+    ).resolves.toBe('deny');
+    await expect(fs.stat(getUserAutoMemoryRoot())).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects a project-targeted result that reports a user-memory write', async () => {
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'wrong-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [userFile],
+      filesWritten: [userFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Keep this in the working directory.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('enforces an explicit user target at the permission boundary', async () => {
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'shared-preference.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved user memory.',
+      filesTouched: [userFile],
+      filesWritten: [userFile],
+    } satisfies ForkedAgentResult);
+
+    const result = await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Across all working directories, prefer concise answers.',
+      contextMode: 'workspace',
+      scope: 'user',
+    });
+
+    expect(result.touchedScopes).toEqual(['user']);
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      taskPrompt: string;
+    };
+    expect(params.taskPrompt).toContain('USER memory at');
+    expect(params.taskPrompt).toContain('explicit user target');
+    const pm = params.config.getPermissionManager() as PermissionManager;
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: userFile,
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          'feedback',
+          'wrong.md',
+        ),
+      }),
+    ).resolves.toBe('deny');
+    await expect(fs.stat(getAutoMemoryRoot(projectRoot))).rejects.toMatchObject(
+      {
+        code: 'ENOENT',
+      },
+    );
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('rejects a user-targeted result that reports a project-memory write', async () => {
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'wrong-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [projectFile],
+      filesWritten: [projectFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Use this preference everywhere.',
+        contextMode: 'workspace',
+        scope: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('fails an explicit user target when its index cannot be rebuilt', async () => {
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'shared-preference.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [userFile],
+      filesWritten: [userFile],
+    } satisfies ForkedAgentResult);
+    vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValue(
+      new Error('index unavailable'),
+    );
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Use this preference everywhere.',
+        contextMode: 'workspace',
+        scope: 'user',
+      }),
+    ).rejects.toThrow('index unavailable');
+  });
+
+  it('fails when an explicit remember request completes without writing memory', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Done.',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_no_update' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an index-only write as a completed memory update', async () => {
+    const indexFile = path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [indexFile],
+      filesWritten: [indexFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_no_update' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('threads the configured memory agent timeout into the forked agent', async () => {
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
-      filesTouched: [],
-      filesWritten: [],
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
     } satisfies ForkedAgentResult);
     const config = createConfig(projectRoot);
     vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValue(30);
@@ -214,11 +447,16 @@ describe('remember memory helper', () => {
   });
 
   it('keeps the built-in 5-minute default when no timeout is configured', async () => {
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
-      filesTouched: [],
-      filesWritten: [],
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
     } satisfies ForkedAgentResult);
 
     await runManagedRememberByAgent({
@@ -234,11 +472,16 @@ describe('remember memory helper', () => {
   });
 
   it('threads the configured memory agent turn limit into the forked agent', async () => {
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
-      filesTouched: [],
-      filesWritten: [],
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
     } satisfies ForkedAgentResult);
     const config = createConfig(projectRoot);
     vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(25);
@@ -256,11 +499,16 @@ describe('remember memory helper', () => {
   });
 
   it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
-      filesTouched: [],
-      filesWritten: [],
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
     } satisfies ForkedAgentResult);
     const config = createConfig(projectRoot);
     vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(0);

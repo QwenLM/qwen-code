@@ -653,6 +653,7 @@ export type {
   DaemonWorkspaceMemoryForgetResult,
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberContextMode,
+  DaemonWorkspaceMemoryRememberTargetScope,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberResult,
   DaemonWorkspaceMemoryRememberTask,

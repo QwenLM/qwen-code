@@ -34,6 +34,7 @@ type MemoryScopedPermissionManager = Pick<
 export interface MemoryScopedAgentConfigOptions {
   allowShell?: boolean;
   bypassBaseAskForScopedPaths?: boolean;
+  includeProjectMemory?: boolean;
   includeUserMemory?: boolean;
   protectPinnedMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
@@ -85,7 +86,10 @@ function mergePermissionDecision(
 export function isAllowedMemoryPath(
   filePath: string | undefined,
   projectRoot: string,
-  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
+  options: Pick<
+    MemoryScopedAgentConfigOptions,
+    'includeProjectMemory' | 'includeUserMemory'
+  > = {},
 ): boolean {
   if (!filePath) return false;
   return isAllowedResolvedMemoryPath(
@@ -98,9 +102,13 @@ export function isAllowedMemoryPath(
 function isAllowedResolvedMemoryPath(
   resolvedPath: string | undefined,
   projectRoot: string,
-  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
+  options: Pick<
+    MemoryScopedAgentConfigOptions,
+    'includeProjectMemory' | 'includeUserMemory'
+  > = {},
 ): boolean {
   if (!resolvedPath) return false;
+  const includeProjectMemory = options.includeProjectMemory ?? true;
   const includeUserMemory = options.includeUserMemory ?? true;
   const projectMemoryRoot = resolveTrustedMemoryRoot(
     getAutoMemoryRoot(projectRoot),
@@ -108,16 +116,19 @@ function isAllowedResolvedMemoryPath(
   );
   const userMemoryRoot = realpathOrResolved(getUserAutoMemoryRoot());
   const isAllowed = (candidate: string): boolean =>
-    isWithinRoot(candidate, projectMemoryRoot) ||
+    (includeProjectMemory && isWithinRoot(candidate, projectMemoryRoot)) ||
     (includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
   return isAllowed(resolvedPath);
 }
 
 function createPinnedMemoryRoots(
   projectRoot: string,
+  includeProjectMemory: boolean,
   includeUserMemory: boolean,
 ): PinnedMemoryRoot[] {
-  const memoryRoots = [getAutoMemoryRoot(projectRoot)];
+  const memoryRoots = includeProjectMemory
+    ? [getAutoMemoryRoot(projectRoot)]
+    : [];
   if (includeUserMemory) {
     memoryRoots.push(getUserAutoMemoryRoot());
   }
@@ -221,7 +232,33 @@ function resolveTrustedMemoryRoot(literalRoot: string, anchor: string): string {
     // the whole path, matching the behavior before this anchor guard existed.
     return realpathOrResolved(literalRoot);
   }
-  return path.join(realpathOrResolved(anchor), suffix);
+  const resolvedAnchor = realpathOrResolved(anchor);
+  const resolvedAliasRoot = resolveSharedProjectAliasRoot(
+    resolvedAnchor,
+    suffix,
+  );
+  return resolvedAliasRoot ?? path.join(resolvedAnchor, suffix);
+}
+
+function resolveSharedProjectAliasRoot(
+  resolvedAnchor: string,
+  suffix: string,
+): string | undefined {
+  const parts = suffix.split(path.sep);
+  if (parts.length !== 3 || parts[0] !== 'projects') return undefined;
+
+  const projectsRoot = realpathOrResolved(
+    path.join(resolvedAnchor, 'projects'),
+  );
+  const projectAlias = path.join(resolvedAnchor, parts[0], parts[1]);
+  try {
+    if (!fs.lstatSync(projectAlias).isSymbolicLink()) return undefined;
+    const resolvedProject = fs.realpathSync(projectAlias);
+    if (path.dirname(resolvedProject) !== projectsRoot) return undefined;
+    return path.join(resolvedProject, parts[2]);
+  } catch {
+    return undefined;
+  }
 }
 
 function isWithinRoot(filePath: string, root: string): boolean {
@@ -261,6 +298,7 @@ async function evaluateScopedDecision(
     case ToolNames.LS:
       if (!opts.restrictReadsToMemoryPaths) return 'default';
       return isAllowedMemoryPath(ctx.filePath, projectRoot, {
+        includeProjectMemory: opts.includeProjectMemory,
         includeUserMemory: opts.includeUserMemory,
       })
         ? 'allow'
@@ -279,6 +317,7 @@ async function evaluateScopedDecision(
         );
       if (isPinned) return 'deny';
       return isAllowedResolvedMemoryPath(resolvedCandidate, projectRoot, {
+        includeProjectMemory: opts.includeProjectMemory,
         includeUserMemory: opts.includeUserMemory,
       })
         ? 'allow'
@@ -295,9 +334,10 @@ function getScopedDenyRule(
   opts: Required<MemoryScopedAgentConfigOptions>,
   pinnedRoots: readonly PinnedMemoryRoot[],
 ): string | undefined {
-  const allowedRoots = opts.includeUserMemory
-    ? `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)}`
-    : getAutoMemoryRoot(projectRoot);
+  const allowedRoots = [
+    ...(opts.includeProjectMemory ? [getAutoMemoryRoot(projectRoot)] : []),
+    ...(opts.includeUserMemory ? [getUserAutoMemoryRoot()] : []),
+  ].join(' or ');
   switch (ctx.toolName) {
     case ToolNames.SHELL:
       return opts.allowShell
@@ -322,7 +362,10 @@ function getScopedDenyRule(
       const isAllowed = isAllowedResolvedMemoryPath(
         resolvedCandidate,
         projectRoot,
-        { includeUserMemory: opts.includeUserMemory },
+        {
+          includeProjectMemory: opts.includeProjectMemory,
+          includeUserMemory: opts.includeUserMemory,
+        },
       );
       if (
         isAllowed &&
@@ -350,12 +393,17 @@ export function createMemoryScopedAgentConfig(
   const opts: Required<MemoryScopedAgentConfigOptions> = {
     allowShell: options.allowShell ?? false,
     bypassBaseAskForScopedPaths: options.bypassBaseAskForScopedPaths ?? false,
+    includeProjectMemory: options.includeProjectMemory ?? true,
     includeUserMemory: options.includeUserMemory ?? true,
     protectPinnedMemory: options.protectPinnedMemory ?? false,
     restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };
   const pinnedRoots = opts.protectPinnedMemory
-    ? createPinnedMemoryRoots(projectRoot, opts.includeUserMemory)
+    ? createPinnedMemoryRoots(
+        projectRoot,
+        opts.includeProjectMemory,
+        opts.includeUserMemory,
+      )
     : [];
   const basePm = config.getPermissionManager?.();
   const scopedPm: MemoryScopedPermissionManager = {

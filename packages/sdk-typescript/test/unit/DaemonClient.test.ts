@@ -7120,6 +7120,7 @@ describe('DaemonClient', () => {
       await expect(
         client.rememberWorkspaceMemory('remember this', {
           contextMode: 'clean',
+          scope: 'project',
           clientId: 'client-7',
         }),
       ).resolves.toEqual(reply);
@@ -7130,6 +7131,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         content: 'remember this',
         contextMode: 'clean',
+        scope: 'project',
       });
     });
 

@@ -94,6 +94,7 @@ export type {
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeAutoMemoryTopic,

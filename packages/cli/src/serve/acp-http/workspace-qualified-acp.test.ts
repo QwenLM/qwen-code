@@ -1886,16 +1886,34 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: '_qwen/workspace/memory/remember',
-      params: { content: 'secondary-only memory' },
+      params: { content: 'shared memory', scope: 'user' },
     });
 
     await vi.waitFor(() => {
       expect(secondaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalledWith({
-        content: 'secondary-only memory',
+        content: 'shared memory',
         contextMode: 'workspace',
+        scope: 'user',
       });
     });
     expect(primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace remember scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/remember',
+      params: { content: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
   });
 
   it('rejects a WS upgrade to an unknown workspace selector', async () => {

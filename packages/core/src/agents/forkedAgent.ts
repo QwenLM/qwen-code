@@ -64,6 +64,7 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
+import { createChildAbortController } from '../utils/abortController.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
 
@@ -427,6 +428,8 @@ export interface AgentPathParams {
   abortSignal?: AbortSignal;
   /** Suppress chat-recording UI telemetry for hidden internal agents. */
   suppressChatRecording?: boolean;
+  /** Complete the run as soon as the first file write succeeds. */
+  completeAfterFirstSuccessfulWrite?: boolean;
 }
 
 export interface ForkedAgentResult {
@@ -617,28 +620,6 @@ export async function runForkedAgent(
   const pendingMutatingPaths = new Map<string, string[]>();
   const filesWritten = new Set<string>();
 
-  const emitter = new AgentEventEmitter();
-  emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    const filePaths = extractFilePathsFromArgs(event.args);
-    for (const filePath of filePaths) {
-      filesTouched.add(filePath);
-    }
-    if (isMutatingFileTool(event.name)) {
-      pendingMutatingPaths.set(event.callId, filePaths);
-    }
-  });
-  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
-    if (!event.success) {
-      pendingMutatingPaths.delete(event.callId);
-      return;
-    }
-    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
-    pendingMutatingPaths.delete(event.callId);
-    for (const filePath of filePaths) {
-      filesWritten.add(filePath);
-    }
-  });
-
   const initialMessages =
     params.extraHistory &&
     (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
@@ -664,6 +645,38 @@ export async function runForkedAgent(
   };
   const toolConfig: ToolConfig | undefined =
     params.tools !== undefined ? { tools: params.tools } : undefined;
+  const executionController = createChildAbortController(params.abortSignal);
+  let completedAfterWrite = false;
+
+  const emitter = new AgentEventEmitter();
+  emitter.on(AgentEventType.TOOL_CALL, (event) => {
+    const filePaths = extractFilePathsFromArgs(event.args);
+    for (const filePath of filePaths) {
+      filesTouched.add(filePath);
+    }
+    if (isMutatingFileTool(event.name)) {
+      pendingMutatingPaths.set(event.callId, filePaths);
+    }
+  });
+  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+    if (!event.success) {
+      pendingMutatingPaths.delete(event.callId);
+      return;
+    }
+    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+    pendingMutatingPaths.delete(event.callId);
+    for (const filePath of filePaths) {
+      filesWritten.add(filePath);
+    }
+    if (
+      params.completeAfterFirstSuccessfulWrite &&
+      filePaths.length > 0 &&
+      !executionController.signal.aborted
+    ) {
+      completedAfterWrite = true;
+      executionController.abort();
+    }
+  });
 
   try {
     const headless = await AgentHeadless.create(
@@ -683,7 +696,7 @@ export async function runForkedAgent(
     context.set('hook_context', '');
     const execute = () =>
       runWithForkedModelRuntime(modelRuntime, async () => {
-        await headless.execute(context, params.abortSignal);
+        await headless.execute(context, executionController.signal);
       });
 
     if (params.suppressChatRecording) {
@@ -693,12 +706,24 @@ export async function runForkedAgent(
     }
 
     const terminateReason = headless.getTerminateMode();
-    const finalText =
-      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
-      undefined;
+    const finalText = completedAfterWrite
+      ? undefined
+      : toModelVisibleSubagentResult(
+          headless.getFinalText(),
+          terminateReason,
+        ) || undefined;
     const touched = [...filesTouched];
     const written = [...filesWritten];
 
+    if (completedAfterWrite) {
+      return {
+        status: 'completed',
+        terminateReason: AgentTerminateMode.GOAL,
+        finalText,
+        filesTouched: touched,
+        filesWritten: written,
+      };
+    }
     if (terminateReason === AgentTerminateMode.CANCELLED) {
       return {
         status: 'cancelled',
@@ -725,6 +750,7 @@ export async function runForkedAgent(
       filesWritten: written,
     };
   } finally {
+    executionController.abort();
     // Release the per-fork ToolRegistry so AgentTool / SkillTool
     // instances dispose their change-listeners on shared
     // SubagentManager / SkillManager. Same shape as the spawn-path
