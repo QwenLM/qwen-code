@@ -19134,6 +19134,72 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
       });
 
+      it('does not record a fresh boundary when a built-in /advisor prompt is retried', async () => {
+        // A failed `/advisor` throws a turn error, the bridge arms retry,
+        // and the client retries the same content. advisor pushes no
+        // history, so the retry strip is empty — the fail-closed fresh
+        // record must skip advisor-named input exactly like the normal
+        // branch, or it lands a boundary with no positional turn and no
+        // snapshot, failing every strict pairing gate for the session.
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Review complete.',
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.BUILT_IN,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest);
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('keeps the shadowing advisor command record when its prompt is retried', async () => {
+        // The retry fresh-record branch skips advisor-named input, so the
+        // deferred post-resolution block is the shadow's only record site
+        // on the retry path too — exactly one record, not zero and not a
+        // duplicate.
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor check my work' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest);
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).toHaveBeenCalledTimes(1);
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          undefined,
+          'test-session-id########1',
+        );
+      });
+
       it('preserves an expanded slash prompt cancelled before model send', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')

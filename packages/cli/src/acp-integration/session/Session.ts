@@ -5138,7 +5138,16 @@ export class Session implements SessionContext {
                 promptIdentities.length === 1
                   ? promptIdentities[0]
                   : undefined;
-              if (resubmittedPromptIdentity === undefined) {
+              if (
+                resubmittedPromptIdentity === undefined &&
+                // Mirror the normal branch: only `/advisor` defers its
+                // record to after command resolution (a shadowing custom
+                // command keeps its record there). A failed `/advisor`
+                // throws a turn error and retries with an empty strip —
+                // recording here would land a boundary for a turn that
+                // never positionally exists (advisor pushes no history).
+                (!isSlashInput || slashCommandName !== 'advisor')
+              ) {
                 // No adoptable identity (orphan-less or multi-orphan strip):
                 // the resend cannot reuse the original attempt's record.
                 // Record it as a fresh turn so it commits to API history
@@ -5277,6 +5286,9 @@ export class Session implements SessionContext {
               // must keep its transcript records (R18-6). Only `/advisor`
               // defers its user-message record to here — every other slash
               // command was already recorded above, before its action ran.
+              // Retries included: the retry fresh-record branch skips
+              // advisor-named input, so this is the shadow's only record
+              // site on both paths.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
@@ -5285,8 +5297,7 @@ export class Session implements SessionContext {
               if (
                 slashCommandName === 'advisor' &&
                 shouldRecordSlashCommand &&
-                goalTurn?.origin !== 'runtime' &&
-                !isRetry
+                goalTurn?.origin !== 'runtime'
               ) {
                 const recorder = this.config.getChatRecordingService();
                 if (promptDisplayText !== undefined) {
