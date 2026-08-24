@@ -648,11 +648,37 @@ describe('serve-bridge', () => {
         expect(calls[0]?.url).toBe(
           'http://127.0.0.1:4170/session/other-session/approval-mode',
         );
-        expect(JSON.parse(calls[0]?.body ?? '{}')).toMatchObject({
-          mode,
-        });
+        expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ mode });
       },
     );
+
+    it('should allow persistent elevated approval mode changes with allowGlobalScope', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = true;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'auto', persist: true, session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBeUndefined();
+      expect(calls[0]?.url).toBe(
+        'http://127.0.0.1:4170/session/test-session/approval-mode',
+      );
+      expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({
+        mode: 'auto',
+        persist: true,
+      });
+    });
 
     it('should allow read-only agents_manage actions with global scope', async () => {
       const { state } = makeMockState({
