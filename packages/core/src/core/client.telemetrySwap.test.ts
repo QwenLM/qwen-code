@@ -331,6 +331,70 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     expect(bucketA.skills?.totalCalls).toBe(1);
   });
 
+  it('abort keeps the live parent initialized when the rollback re-initialize armed the undo', async () => {
+    // The undo does not always name the abandoned INCOMING session: when a
+    // /branch fails between startNewSession(fork) and initialize() (e.g.
+    // waitForGoalRuntime rethrows), the forward replay never runs, so the
+    // rollback's own re-initialize of the parent arms the still-open
+    // transaction's undo — with the PARENT's id. Clearing
+    // initializedSessionId there would forget a correctly-initialized live
+    // session: the next initialize() of the session the user is already on
+    // would skip the early return and re-replay its stored telemetry on
+    // top of the live aggregate — a permanent double count, plus the loss
+    // of the bucket's never-persisted state (#9844 review).
+    const { config, client } = makeEnv();
+
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    await client.initialize();
+    uiTelemetryService.addEvent(storedApiEvent(5, 'live-1'), SESSION_A);
+    uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
+    expect(totalRequests()).toBe(2);
+
+    // Step 1: /resume B fails AFTER its forward replay. The /resume
+    // rollback puts core back WITHOUT re-initializing; abort restores and
+    // clears initializedSessionId (it still names the abandoned B) —
+    // leaving the client initialized-but-unaware, the precondition for the
+    // trap below.
+    expect(client.beginTelemetrySwap()).toBe(true);
+    config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
+    await client.initialize();
+    expect(totalRequests()).toBe(3);
+    config.swap(SESSION_A); // hook rollback: startNewSession(old), no initialize
+    expect(client.abortTelemetrySwap()).toBe(true);
+    expect(totalRequests()).toBe(2);
+
+    // Step 2: /branch — begin captures the outgoing parent, core swaps to
+    // the fork, then the failure lands BEFORE the forward initialize. The
+    // catch rolls back: startNewSession(parent) + re-initialize, and that
+    // re-initialize arms the undo itself.
+    const FORK = 'fork-of-A';
+    expect(client.beginTelemetrySwap()).toBe(true);
+    config.swap(FORK, { conversation: conversationWith(100, FORK) });
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    await client.initialize();
+    expect(client.abortTelemetrySwap()).toBe(true);
+
+    // The restore itself is exact...
+    expect(totalRequests()).toBe(2);
+    const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
+    expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
+    expect(bucketA.skills?.totalCalls).toBe(1);
+
+    // ...and the abort kept the live parent as the initialized session:
+    // the next same-session initialize early-returns instead of re-replaying
+    // on top of the live aggregate (pre-fix: totalRequests 2 -> 3 and A's
+    // bucket lost its never-persisted skill state).
+    await client.initialize();
+    expect(totalRequests()).toBe(2);
+    expect(
+      uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
+        ?.api.totalRequests,
+    ).toBe(2);
+    expect(
+      uiTelemetryService.getMetricsForSession(SESSION_A).skills?.totalCalls,
+    ).toBe(1);
+  });
+
   it('initialize with a SessionStartSource still honors the transaction', async () => {
     const { config, client } = makeEnv();
 

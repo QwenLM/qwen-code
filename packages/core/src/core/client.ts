@@ -697,10 +697,20 @@ export class GeminiClient {
    * already replayed something else on top.
    *
    * Also forgets `initializedSessionId` when it still names the abandoned
-   * session: undoing the replay without forgetting it would make a retry
-   * early-return and never replay, permanently under-counting the session.
-   * The `/branch` rollback re-initializes the PARENT session first, so by the
-   * time this runs `initializedSessionId` names the parent and is kept.
+   * INCOMING session: undoing the replay without forgetting it would make a
+   * retry early-return and never replay, permanently under-counting the
+   * session. The clear is an identity check, not the assumption that the
+   * undo always names the incoming session — when the swap's forward
+   * `initialize()` never ran (e.g. `/branch` fails between
+   * `startNewSession(fork)` and `initialize()`), the rollback's own
+   * re-initialize arms the undo with the PARENT's id and sets
+   * `initializedSessionId` to it. That session is live and correctly
+   * initialized; clearing it would make the next `initialize()` of the
+   * session the user is already on skip the early return and re-replay its
+   * stored telemetry on top of the live aggregate — a permanent
+   * double-count. The undo belongs to the outgoing session's own
+   * re-initialize exactly when `undo.sessionId` matches the begin-time
+   * `outgoingHint` (#9844 review).
    *
    * Safe to call with no transaction open or nothing armed (no-op). Returns
    * whether an undo was applied.
@@ -717,7 +727,10 @@ export class GeminiClient {
     }
     if (!swap?.undo) return false;
     uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
-    if (this.initializedSessionId === swap.undo.sessionId) {
+    if (
+      swap.undo.sessionId !== swap.outgoingHint &&
+      this.initializedSessionId === swap.undo.sessionId
+    ) {
       this.initializedSessionId = undefined;
     }
     return true;
