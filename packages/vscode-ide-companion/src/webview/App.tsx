@@ -503,18 +503,63 @@ export const App: React.FC = () => {
     return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
+  // Single source of truth for "a fixed overlay layer is mounted". Besides
+  // the modal dialogs (PermissionDrawer / AskUserQuestionDialog /
+  // AccountInfoDialog) this includes webui's SessionSelector, whose backdrop
+  // and dropdown are also fixed z-[999]/z-[1000] layers. Both the
+  // close-effect below and the /model open gate must use this one predicate:
+  // the selector paints beneath every one of these layers, so the two must
+  // never be mounted together in either direction. Keeping the check in one
+  // place is what prevents the two call sites from drifting apart.
   const isOverlayActive = Boolean(
     permissionRequest ||
       askUserQuestionRequest ||
+      // accountInfo doubles as the AccountInfoDialog visibility flag: it is
+      // only set by the on-demand accountInfo message and reset by the
+      // dialog's onClose, so truthy here means "the dialog is up".
       accountInfo ||
       sessionManagement.showSessionSelector,
   );
 
+  // Close the model selector when an overlay takes over: while open the
+  // selector consumes Enter/Escape/arrow keys via a capture-phase document
+  // listener, and since it paints below the overlays those keystrokes must
+  // reach the visible overlay instead. The /model open path is gated on the
+  // same isOverlayActive predicate.
+  //
+  // useLayoutEffect, not useEffect: the close must land inside the same
+  // commit as the overlay's arrival. A passive effect would leave one commit
+  // in which the overlay and the selector are mounted together, with the
+  // selector's capture-phase keydown listener still armed beneath the
+  // visible overlay — an Enter in that window silently switches the model
+  // instead of answering the overlay.
   React.useLayoutEffect(() => {
     if (showModelSelector && isOverlayActive) {
       setShowModelSelector(false);
     }
   }, [showModelSelector, isOverlayActive]);
+
+  // Close the model selector on session takeover: the selector belongs to the
+  // previous conversation, and a session switch/load/clear is an
+  // overlay-equivalent takeover. A non-gesture takeover (e.g.
+  // conversationLoaded on startup/reconnect) fires no mousedown, so the
+  // outside-click close never runs and a stale selector would keep owning
+  // Enter/Escape/arrows over the new conversation.
+  useEffect(() => {
+    const closeSelectorOnSessionTakeover = (event: MessageEvent) => {
+      const message = event.data as { type?: string } | undefined;
+      if (
+        message?.type === 'conversationLoaded' ||
+        message?.type === 'qwenSessionSwitched' ||
+        message?.type === 'conversationCleared'
+      ) {
+        setShowModelSelector(false);
+      }
+    };
+    window.addEventListener('message', closeSelectorOnSessionTakeover);
+    return () =>
+      window.removeEventListener('message', closeSelectorOnSessionTakeover);
+  }, []);
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
