@@ -22,7 +22,7 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isTaskExecutionRaw } from './toolClassification.js';
+import { isSubAgentToolCall } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
@@ -1043,14 +1043,6 @@ function mergeToolCall(
 
 function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
   return status === 'completed' || status === 'failed';
-}
-
-function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'agent' || name === 'task') return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (isTaskExecutionRaw(tool.rawOutput)) return true;
-  return Boolean(tool.args?.subagent_type);
 }
 
 function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
