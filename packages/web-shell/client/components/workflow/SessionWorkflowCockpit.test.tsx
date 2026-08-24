@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
@@ -220,6 +220,53 @@ describe('SessionWorkflowCockpit', () => {
     expect(container.textContent).toContain('依赖于');
     expect(container.textContent).toContain('解除阻塞');
     expect(container.textContent).not.toContain('workflow.dependencies.');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('focuses the back-to-chat entry action under StrictMode effect replay', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <I18nProvider language="en">
+            <SessionWorkflowCockpit
+              sessionId="session-1"
+              connected
+              todos={todos}
+              tools={[]}
+              tasks={[]}
+              onBackToChat={() => undefined}
+              onOpenSubagent={() => undefined}
+            />
+          </I18nProvider>
+        </StrictMode>,
+      );
+    });
+
+    // StrictMode replays mount effects as setup -> cleanup -> setup; without
+    // the entry-focus effect's cleanup the replayed setup skips the init
+    // branch and focus lands on the Overview tab instead.
+    const backToChat = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-back-to-chat"]',
+    );
+    expect(backToChat).not.toBeNull();
+    expect(document.activeElement).toBe(backToChat);
+
+    // Section switches still move focus to the tab after the entry focus.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Needs attention"]',
+        )
+        ?.click();
+    });
+    expect(document.activeElement).toBe(
+      container.querySelector('button[aria-label="Needs attention"]'),
+    );
 
     act(() => root.unmount());
     container.remove();

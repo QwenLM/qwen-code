@@ -226,6 +226,22 @@ export function SessionWorkflowCockpit({
     setSelectedTodoId(attentionTodos[0]?.id);
   }, [attentionTodos, selectedTodoId]);
 
+  // Section switches move focus to the active tab, but never on mount: this
+  // effect is declared before the entry-focus effect below so it observes
+  // focusInitializedRef still false and yields to the entry action; once the
+  // entry focus has run, section switches own focus.
+  useEffect(() => {
+    if (!focusInitializedRef.current) return;
+    (section === 'overview'
+      ? overviewTabRef
+      : attentionTabRef
+    ).current?.focus();
+  }, [section]);
+  // Focus the entry action on mount and whenever todos flip between empty
+  // and non-empty. StrictMode replays setup -> cleanup -> setup without
+  // re-running useRef's initializer, and the refs persist across the replay,
+  // so the cleanup resets the flag; otherwise the replayed setup skips this
+  // branch and focus lands on the Overview tab instead of the entry action.
   useEffect(() => {
     if (
       !focusInitializedRef.current ||
@@ -234,13 +250,11 @@ export function SessionWorkflowCockpit({
       focusInitializedRef.current = true;
       todosWereEmptyRef.current = todosEmpty;
       entryActionRef.current?.focus();
-      return;
     }
-    (section === 'overview'
-      ? overviewTabRef
-      : attentionTabRef
-    ).current?.focus();
-  }, [section, todosEmpty]);
+    return () => {
+      focusInitializedRef.current = false;
+    };
+  }, [todosEmpty]);
 
   if (todosEmpty) {
     return (
