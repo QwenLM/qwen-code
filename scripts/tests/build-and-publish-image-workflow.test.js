@@ -27,7 +27,8 @@ const retryStep =
   workflow.match(
     /- name: 'Build and push Docker image \(retry\)'[\s\S]*?(?=\n[ ]{2}# One issue per version)/,
   )?.[0] ?? '';
-const failureIssueJob = workflow.match(/file-failure-issue:[\s\S]*$/)?.[0] ?? '';
+const failureIssueJob =
+  workflow.match(/file-failure-issue:[\s\S]*$/)?.[0] ?? '';
 const failureIssueScript = readFileSync(
   '.github/scripts/image-build-failure-issue.sh',
   'utf8',
@@ -63,11 +64,23 @@ describe('build-and-publish-image workflow', () => {
 
   it('gates the retry on the first attempt outcome only', () => {
     expect(retryStep).toContain(
-      "if: \"${{ steps.build-and-push.outcome == 'failure' }}\"",
+      'if: "${{ steps.build-and-push.outcome == \'failure\' }}"',
     );
     // failure() would be false once continue-on-error absorbs the first
     // attempt, silently skipping the retry.
     expect(retryStep).not.toContain('failure()');
+  });
+
+  it('pins the first build step id the retry gate references', () => {
+    // steps.build-and-push.outcome only resolves when this exact id exists;
+    // renaming the step would silently disable the retry.
+    expect(buildStep).toContain("id: 'build-and-push'");
+  });
+
+  it('lets a failed retry fail the job', () => {
+    // continue-on-error on the retry would absorb a genuine build failure and
+    // leave the job green, so file-failure-issue would never run.
+    expect(retryStep).not.toContain('continue-on-error');
   });
 
   it('publishes from both build steps through one shared expression', () => {
@@ -80,6 +93,16 @@ describe('build-and-publish-image workflow', () => {
     expect(failureIssueJob).toContain(
       "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')",
     );
+  });
+
+  it('only runs the failure-issue job after a failed in-repo build', () => {
+    // failure() keeps green builds from filing, the repository guard keeps
+    // forks from filing, and needs wires the job to the build it reports on.
+    // Deleting any of these must fail the suite.
+    expect(failureIssueJob).toContain(
+      "failure() && github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(failureIssueJob).toContain("needs: ['build-and-push-to-ghcr']");
   });
 
   it('dedups the failure issue by an exact client-side marker match', () => {
