@@ -12097,6 +12097,11 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'max_tokens' });
 
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'requestRoute=route-a, activeModel=qwen3-code-plus',
+          ),
+        );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
@@ -12143,6 +12148,109 @@ describe('Session', () => {
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not drop a runtime-scoped override using the active route count (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+          model === 'vision-agent' ? 'route-vision' : 'route-primary',
+        );
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        const resolveForModel = vi.fn().mockResolvedValue({
+          contentGenerator: {},
+          contentGeneratorConfig: { model: 'vision-agent' },
+          model: 'vision-agent',
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel,
+        });
+
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockRejectedValueOnce(new Error('compression rate limited'));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'primary route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(resolveForModel).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1',
+          {
+            failClosed: true,
+          },
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('fails closed when runtime-scoped route resolution rejects (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+          model === 'vision-agent' ? 'route-vision' : 'route-primary',
+        );
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('runtime unavailable')),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).rejects.toThrow('runtime unavailable');
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       });
 
       it('records an override send usage under the override route so the next same-override send trips the gate (#9529)', async () => {
@@ -12502,7 +12610,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
-      it('resets the session-local token count when the active chat instance changes', async () => {
+      it('resets session-local route counts when the active chat instance changes', async () => {
         const clearedChat = {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
@@ -12511,12 +12619,15 @@ describe('Session', () => {
           getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as GeminiChat;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
         mockGeminiClient.tryCompressChat
           .mockResolvedValueOnce({
             originalTokenCount: 50,
             newTokenCount: 50,
             compressionStatus: core.CompressionStatus.NOOP,
           })
+          .mockRejectedValueOnce(new Error('compression unavailable'))
           .mockRejectedValueOnce(new Error('compression unavailable'));
         mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
           createStreamWithChunks([
@@ -12540,6 +12651,7 @@ describe('Session', () => {
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
         mockGeminiClient.getChat.mockReturnValue(clearedChat);
+        routeIdentity = 'route-b';
 
         await expect(
           session.prompt({
@@ -12548,7 +12660,15 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        routeIdentity = 'route-a';
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'back to route A' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('continues sending when the compression notification fails', async () => {

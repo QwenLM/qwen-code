@@ -366,6 +366,7 @@ const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
 >();
+const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
@@ -1853,6 +1854,8 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  // Private ACP fallback cache, bounded like GeminiChat without exposing a
+  // cross-package route resolver just for this closeout.
   private readonly lastPromptTokenCountsByRouteKey = new Map<string, number>();
   // The model route that produced `lastPromptTokenCount` (Config
   // .getModelRouteIdentity). ACP model switches keep the same GeminiChat, so
@@ -6823,7 +6826,9 @@ export class Session implements SessionContext {
       if (lastPromptTokenCount > sessionTokenLimit) {
         debugLogger.warn(
           `Session token limit exceeded for prompt ${promptId}: ` +
-            `${lastPromptTokenCount} > ${sessionTokenLimit}. Send dropped.`,
+            `${lastPromptTokenCount} > ${sessionTokenLimit}. ` +
+            `requestRoute=${requestRouteKey}, activeModel=${this.config.getModel()}. ` +
+            'Send dropped.',
         );
         await this.#emitAgentDiagnosticMessageSafely(
           `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
@@ -7150,6 +7155,18 @@ export class Session implements SessionContext {
   #setLastPromptTokenCount(routeKey: string, tokenCount: number): void {
     this.lastPromptTokenCount = tokenCount;
     this.lastPromptTokenCountRouteKey = routeKey;
+    if (
+      !this.lastPromptTokenCountsByRouteKey.has(routeKey) &&
+      this.lastPromptTokenCountsByRouteKey.size >=
+        MAX_RETAINED_SESSION_ROUTE_COUNTS
+    ) {
+      const oldestKey = this.lastPromptTokenCountsByRouteKey
+        .keys()
+        .next().value;
+      if (oldestKey !== undefined) {
+        this.lastPromptTokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
     this.lastPromptTokenCountsByRouteKey.set(routeKey, tokenCount);
   }
 
