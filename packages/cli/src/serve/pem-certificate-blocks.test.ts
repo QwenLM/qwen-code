@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as tls from 'node:tls';
 import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
@@ -79,7 +80,12 @@ const renderBlock = (der: Buffer): string => {
   return `-----BEGIN CERTIFICATE-----\n${wrapped.join('\n')}\n-----END CERTIFICATE-----\n`;
 };
 
-describe('extractCertificateBlocks', () => {
+// `tls.getCACertificates` arrives in Node 22.15, while engines still allow
+// 22.0: there the loader oracle answers `legacy` and the inspection throws,
+// so suites that drive the real oracle skip instead of failing.
+const loaderOracleAvailable = typeof tls.getCACertificates === 'function';
+
+describe.skipIf(!loaderOracleAvailable)('extractCertificateBlocks', () => {
   it('ignores NODE_OPTIONS that only affect eval-based oracle children', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-preload-'));
     const preload = path.join(dir, 'stdout-preload.cjs');
@@ -668,7 +674,7 @@ describe('extractCertificateBlocks', () => {
   });
 });
 
-describe('loadableCertificates', () => {
+describe.skipIf(!loaderOracleAvailable)('loadableCertificates', () => {
   it('parses every block it returns', () => {
     const certs = loadableCertificates(`${LEAF_PEM}${ROOT_PEM}`);
     expect(certs?.map((cert) => cert.subject)).toEqual([

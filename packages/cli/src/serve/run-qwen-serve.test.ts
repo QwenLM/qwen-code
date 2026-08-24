@@ -11,6 +11,7 @@ import { X509Certificate } from 'node:crypto';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
+import * as tls from 'node:tls';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
 import {
@@ -2228,7 +2229,13 @@ gupdQ6qWEKa1z147s84N7ASbhYZhnluZs9t4gpYZ8PavMSggcPhYPxLDFshHkqo=
 -----END CERTIFICATE-----
 `;
 
-describe('describeWorkerTlsTrustGaps', () => {
+// `tls.getCACertificates` arrives in Node 22.15, while engines still allow
+// 22.0: there the loader oracle answers `legacy` and the inspection throws,
+// so tests that drive the real oracle skip instead of failing.
+const loaderOracleAvailable = typeof tls.getCACertificates === 'function';
+const loaderOracleTest = it.skipIf(typeof tls.getCACertificates !== 'function');
+
+describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
   /** The issuing root of TEST_TLS_CERT_FULLCHAIN, on its own. */
@@ -11451,50 +11458,56 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('reads NODE_EXTRA_CA_CERTS from the environment when judging the gap', async () => {
-    // R3-7: nothing drove the wiring that reads the env, resolves it and
-    // hands the contents to describeWorkerTlsTrustGaps — replacing that read
-    // with `undefined` shipped green. Then an operator whose CA genuinely
-    // anchors the chain gets a false UNABLE_TO_VERIFY_LEAF_SIGNATURE warning
-    // on every startup, and the content-based fix becomes dead code.
-    const caDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-operator-ca-')),
-    );
-    const operatorCaPath = path.join(caDir, 'rootCA.pem');
-    fs.writeFileSync(operatorCaPath, TEST_TLS_CERT_ISSUING_ROOT);
-    vi.stubEnv('NODE_EXTRA_CA_CERTS', operatorCaPath);
-    try {
-      const log = await bootTlsDaemonForTrustGapLog(
-        '127.0.0.1',
-        issuedLeafServing,
+  loaderOracleTest(
+    'reads NODE_EXTRA_CA_CERTS from the environment when judging the gap',
+    async () => {
+      // R3-7: nothing drove the wiring that reads the env, resolves it and
+      // hands the contents to describeWorkerTlsTrustGaps — replacing that read
+      // with `undefined` shipped green. Then an operator whose CA genuinely
+      // anchors the chain gets a false UNABLE_TO_VERIFY_LEAF_SIGNATURE warning
+      // on every startup, and the content-based fix becomes dead code.
+      const caDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-operator-ca-')),
       );
-      expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
-    } finally {
-      vi.unstubAllEnvs();
-      fs.rmSync(caDir, { recursive: true, force: true });
-    }
-  });
+      const operatorCaPath = path.join(caDir, 'rootCA.pem');
+      fs.writeFileSync(operatorCaPath, TEST_TLS_CERT_ISSUING_ROOT);
+      vi.stubEnv('NODE_EXTRA_CA_CERTS', operatorCaPath);
+      try {
+        const log = await bootTlsDaemonForTrustGapLog(
+          '127.0.0.1',
+          issuedLeafServing,
+        );
+        expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+      } finally {
+        vi.unstubAllEnvs();
+        fs.rmSync(caDir, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it('still boots and still names the gap when NODE_EXTRA_CA_CERTS is unreadable', async () => {
-    // R3-7(b): the try/catch around the read is what lets a typo'd path
-    // degrade to "it anchors nothing". Without it the throw lands inside the
-    // channel-manager starting closure and channel startup fails on exactly
-    // the case the code says must degrade.
-    vi.stubEnv(
-      'NODE_EXTRA_CA_CERTS',
-      path.join(os.tmpdir(), 'qws-no-such-ca-file.pem'),
-    );
-    try {
-      const log = await bootTlsDaemonForTrustGapLog(
-        '127.0.0.1',
-        issuedLeafServing,
+  loaderOracleTest(
+    'still boots and still names the gap when NODE_EXTRA_CA_CERTS is unreadable',
+    async () => {
+      // R3-7(b): the try/catch around the read is what lets a typo'd path
+      // degrade to "it anchors nothing". Without it the throw lands inside the
+      // channel-manager starting closure and channel startup fails on exactly
+      // the case the code says must degrade.
+      vi.stubEnv(
+        'NODE_EXTRA_CA_CERTS',
+        path.join(os.tmpdir(), 'qws-no-such-ca-file.pem'),
       );
-      expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
-      expect(log).toContain('qws-no-such-ca-file.pem');
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
+      try {
+        const log = await bootTlsDaemonForTrustGapLog(
+          '127.0.0.1',
+          issuedLeafServing,
+        );
+        expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+        expect(log).toContain('qws-no-such-ca-file.pem');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('forwards webhook tasks through the channel worker group', async () => {
     tmpDir = fs.realpathSync(
