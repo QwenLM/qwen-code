@@ -111,6 +111,7 @@ describe('ExtensionFileWatcher', () => {
             type: 'link',
             source: 'relative-linked-extension',
           },
+          trustedLinkSource: linkedSource,
           contextFiles: [],
         },
       ]),
@@ -513,6 +514,7 @@ describe('ExtensionFileWatcher', () => {
             path: activeSource,
             config: {},
             installMetadata: { type: 'link', source: activeSource },
+            trustedLinkSource: activeSource,
             contextFiles: [`${activeSource}/QWEN.md`],
           },
           {
@@ -527,6 +529,7 @@ describe('ExtensionFileWatcher', () => {
             path: activeSource,
             config: {},
             installMetadata: { type: 'link', source: activeSource },
+            trustedLinkSource: activeSource,
             contextFiles: [`${activeSource}/QWEN.md`],
           },
         ],

@@ -69,6 +69,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
           {
             "type": "command",
             "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "shell": "bash",
             "name": "security-check",
             "timeout": 10000
           }
@@ -78,6 +79,10 @@ Command hooks execute commands via child processes. Input JSON is passed through
   }
 }
 ```
+
+> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR` directly. For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- an undefined `$VAR` fails the hook with the variable name in the error.
+
+> **PowerShell command syntax:** A quoted Windows path used as a command must be prefixed with the call operator `& ` (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- otherwise PowerShell echoes it instead of executing it.
 
 ### HTTP Hooks
 

@@ -20,9 +20,7 @@ import type {
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  escapeShellArg,
   getShellConfiguration,
-  type ShellType,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
@@ -37,7 +35,7 @@ import { resolveCommandPath } from '../utils/shell-utils.js';
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /**
- * Resolve a PowerShell executable: pwsh (preferred) → powershell (Windows
+ * Resolve a PowerShell executable: pwsh (preferred) - powershell (Windows
  * 5.1 fallback). Cached per-process with a negative cache (`null`); throws
  * when neither is on PATH.
  */
@@ -65,50 +63,6 @@ export function resolvePowerShellExecutable(): string {
   throw new Error(
     'No PowerShell executable found on PATH (looked for pwsh, powershell)',
   );
-}
-
-/** Match a bare-quoted path (`"..."` or `'...'`); trailer operators only disqualify when UNQUOTED. */
-function isBareQuotedPowerShellCommand(command: string): boolean {
-  const lead = /^[ \t\r\n]*(?:"([^"]*)"|'([^']*)')/.exec(command);
-  if (!lead) return false;
-  const quoted = lead[1] ?? lead[2];
-  // A quoted lead is treated as a path (and gets `& `) only when it carries
-  // path shape — a separator, drive root, or trailing extension. A
-  // string-literal statement (`'a string'`) must not be call-operated.
-  if (!/[/\\]|[a-zA-Z]:.*[/\\]|\.[A-Za-z0-9]+$/.test(quoted)) {
-    return false;
-  }
-  let i = lead[0].length;
-  let state: 'outside' | 'in-double' | 'in-single' = 'outside';
-  while (i < command.length) {
-    const ch = command[i];
-    if (state === 'outside') {
-      if (ch === '"') {
-        state = 'in-double';
-        i++;
-        continue;
-      }
-      if (ch === "'") {
-        state = 'in-single';
-        i++;
-        continue;
-      }
-      // `;`, `|` and `>` do NOT disqualify the prefix: `& "path" > log` /
-      // `& "path"; echo done` are valid PowerShell. `\n` early-exits for
-      // symmetry (same statement separator).
-      if (ch === '\n') return true;
-      i++;
-    } else if (state === 'in-double' && ch === '"') {
-      state = 'outside';
-      i++;
-    } else if (state === 'in-single' && ch === "'") {
-      state = 'outside';
-      i++;
-    } else {
-      i++;
-    }
-  }
-  return true;
 }
 
 /**
@@ -666,44 +620,18 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
-        input,
-        shellConfig.shell,
-      );
-
-      // PowerShell only runs a bare-quoted path via the call operator; the
-      // cmd→powershell fallback must `& ` it or the path is echoed and never
-      // runs. The `& ` decision uses the EXPANDED command: quotes inserted by
-      // placeholder expansion are exactly what needs the call operator, and
-      // prefixing is always safer than silent echo. The explicit-shell
-      // config-error below checks the author's text instead, so injected
-      // quotes can't misattribute a diagnostic to the author's config.
-      let resolvedCommand = command;
-      if (
-        shellConfig.shell === 'powershell' &&
-        isBareQuotedPowerShellCommand(command)
-      ) {
-        if (
-          hookConfig.shell === 'powershell' &&
-          isBareQuotedPowerShellCommand(hookConfig.command)
-        ) {
-          const errorMessage =
-            'Command starts with a quoted path under an explicit powershell shell; prefix it with the call operator (&) so PowerShell executes it instead of echoing it';
-          debugLogger.warn(
-            `Hook configuration error (non-fatal): ${errorMessage}`,
-          );
-          resolve({
-            hookConfig,
-            eventName,
-            success: false,
-            error: new Error(errorMessage),
-            duration: Date.now() - startTime,
-          });
-          return;
-        }
-        resolvedCommand = `& ${command}`;
-      }
+      // PowerShell hooks run with Set-StrictMode -Version 1 (undefined
+      // $VAR throws VariableIsUndefined) AND $ErrorActionPreference = 'Stop'
+      // (converts the otherwise non-terminating VariableIsUndefined into a
+      // script-aborting error, so a $VAR access on a non-final statement of
+      // a multi-statement hook does not get silently shadowed by a later
+      // successful statement resetting $? and exit code 0). The stderr
+      // carries the exact $VAR name into HookExecutionResult for systemMessage
+      // surfacing.
+      const command =
+        shellConfig.shell === 'powershell'
+          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}`
+          : hookConfig.command;
 
       const env = {
         // Hook commands are child processes launched on the agent's behalf,
@@ -718,7 +646,7 @@ export class HookRunner {
 
       const child = childProcess.spawn(
         shellConfig.executable,
-        [...shellConfig.argsPrefix, resolvedCommand],
+        [...shellConfig.argsPrefix, command],
         {
           env,
           cwd: input.cwd,
@@ -875,6 +803,7 @@ export class HookRunner {
         }
 
         const killedBySignal = exitCode === null;
+
         resolve({
           hookConfig,
           eventName,
@@ -910,134 +839,6 @@ export class HookRunner {
         });
       });
     });
-  }
-
-  /**
-   * Expand `$CLAUDE_PROJECT_DIR` / `$GEMINI_PROJECT_DIR` in the command.
-   *
-   * PowerShell branch emits `$env:VAR` (env vars set in `executeCommandHook`)
-   * and lets PowerShell expand it natively in outside / in-double /
-   * in-expandable contexts; the state machine tracks only the four
-   * contexts where PowerShell's expansion differs (in-single, in-verbatim,
-   * in-expandable, backtick-escaped). Command-position placeholders get
-   * `& (…)` wrapping so PowerShell invokes the path instead of treating
-   * `$env:VAR/tail` as division.
-   *
-   * Bash / cmd / sh: simple text replace — bash `$VAR` doesn't expand in
-   * single quotes either, so the in-single substitution is symmetric.
-   */
-  private expandCommand(
-    command: string,
-    input: HookInput,
-    shellType: ShellType,
-  ): string {
-    debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    if (shellType === 'powershell') {
-      const singleQuotedCwd = input.cwd.replace(/'/g, "''");
-      return command.replace(
-        /\$(?:GEMINI|CLAUDE)_PROJECT_DIR([^\s"'();|>&,$*]*)/g,
-        (match, tail, offset) => {
-          let state:
-            | 'outside'
-            | 'in-single'
-            | 'in-double'
-            | 'in-verbatim'
-            | 'in-expandable' = 'outside';
-          for (let i = 0; i < offset; i++) {
-            const ch = command[i];
-            // @'…'@ and @"…"@ openers; only meaningful in `outside`.
-            if (
-              state === 'outside' &&
-              ch === '@' &&
-              (command[i + 1] === "'" || command[i + 1] === '"')
-            ) {
-              state =
-                command[i + 1] === "'" ? 'in-verbatim' : 'in-expandable';
-              i++;
-              continue;
-            }
-            // Here-string closer `'@` / `"@` must be at start of a line
-            // in PowerShell — anchor on `\n` / `\r` so an `'@token` mid-body
-            // does NOT close the here-string.
-            if (
-              (state === 'in-verbatim' || state === 'in-expandable') &&
-              (command[i] === "'" || command[i] === '"') &&
-              command[i + 1] === '@' &&
-              (i === 0 ||
-                command[i - 1] === '\n' ||
-                command[i - 1] === '\r')
-            ) {
-              state = 'outside';
-              i++;
-              continue;
-            }
-            if (state === 'outside' && ch === "'") {
-              state = 'in-single';
-              continue;
-            }
-            if (state === 'in-single' && ch === "'") {
-              state = 'outside';
-              continue;
-            }
-            if (state === 'outside' && ch === '"') {
-              state = 'in-double';
-              continue;
-            }
-            if (state === 'in-double' && ch === '"') {
-              state = 'outside';
-              continue;
-            }
-          }
-          // Backtick-escaped `` `$VAR `` — preserve literal text (backtick
-          // escapes `$` in the rewritten form too).
-          if (state === 'outside' || state === 'in-double') {
-            let j = offset - 1;
-            while (j >= 0 && (command[j] === ' ' || command[j] === '\t')) {
-              j--;
-            }
-            if (j >= 0 && command[j] === '`') {
-              return match;
-            }
-          }
-          if (state === 'in-single') {
-            return singleQuotedCwd + tail;
-          }
-          if (state === 'in-verbatim') {
-            return match;
-          }
-          // outside / in-double / in-expandable — $env:VAR form.
-          const envName = match.startsWith('$GEMINI_')
-            ? 'GEMINI_PROJECT_DIR'
-            : 'CLAUDE_PROJECT_DIR';
-          const envVar = `$env:${envName}`;
-          // Command-position (start of command or after `;` `|` `&` \n):
-          // wrap in `& (…)` so PowerShell executes the path instead of
-          // parsing `$env:VAR/tail` as division.
-          let k = offset - 1;
-          while (k >= 0 && (command[k] === ' ' || command[k] === '\t')) {
-            k--;
-          }
-          const isCommandPosition =
-            k < 0 ||
-            command[k] === ';' ||
-            command[k] === '|' ||
-            command[k] === '&' ||
-            command[k] === '\n' ||
-            command[k] === '\r';
-          if (isCommandPosition) {
-            if (tail.length === 0) {
-              return `& ${envVar}`;
-            }
-            return `& (${envVar} + ${JSON.stringify(tail)})`;
-          }
-          return envVar + tail;
-        },
-      );
-    }
-    return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
   }
 
   /**
