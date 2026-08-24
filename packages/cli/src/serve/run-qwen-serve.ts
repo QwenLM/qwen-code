@@ -773,7 +773,7 @@ export async function verifyWorkerTlsTrust(opts: {
           const failure = error as NodeJS.ErrnoException | null;
           resolve({
             code:
-              failure?.code !== undefined
+              failure?.code != null
                 ? String(failure.code)
                 : 'WORKER_TLS_VERIFY_FAILED',
             message: failure?.message ?? 'TLS verification probe failed.',

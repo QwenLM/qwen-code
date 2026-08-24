@@ -10999,6 +10999,14 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
 
 describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
+  // Some CI containers disable IPv6 entirely; binding ::1 then fails with
+  // EADDRNOTAVAIL.
+  const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
+    (addresses) =>
+      addresses?.some(
+        (info) => info.family === 'IPv6' && info.address === '::1',
+      ),
+  );
 
   afterEach(() => {
     mockChannelWorkerEnabledState.value = undefined;
@@ -11194,19 +11202,23 @@ describe('runQwenServe channel worker supervisor', () => {
     );
   }
 
-  it('writes a worker TLS trust gap to the daemon log at boot', async () => {
-    // R2-6: only the pure describeWorkerTlsTrustGaps was covered, so deleting
-    // this loop, inverting its `tlsOptions && tlsCertPath` guard or feeding it
-    // unresolved values all shipped green — and operators were back in the
-    // silent mode this diagnostic exists to end: daemon boots, /health green,
-    // every channel worker restart-looping with no log line saying why. The
-    // fixture cert covers 127.0.0.1 and localhost, so a ::1 bind is a real
-    // SAN gap on a cert that still pairs with its key and boots.
-    const log = await bootTlsDaemonForTrustGapLog('::1');
+  it.skipIf(!hasIpv6Loopback)(
+    'writes a worker TLS trust gap to the daemon log at boot',
+    async () => {
+      // R2-6: only the pure describeWorkerTlsTrustGaps was covered, so
+      // deleting this loop, inverting its `tlsOptions && tlsCertPath` guard
+      // or feeding it unresolved values all shipped green — and operators
+      // were back in the silent mode this diagnostic exists to end: daemon
+      // boots, /health green, every channel worker restart-looping with no
+      // log line saying why. The fixture cert covers 127.0.0.1 and
+      // localhost, so a ::1 bind is a real SAN gap on a cert that still
+      // pairs with its key and boots.
+      const log = await bootTlsDaemonForTrustGapLog('::1');
 
-    expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
-    expect(log).toContain('::1');
-  });
+      expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+      expect(log).toContain('::1');
+    },
+  );
 
   it('keeps the daemon log quiet when the serving cert covers the dialled host', async () => {
     // The other half of the wiring: a guard stuck on would bury real boot
@@ -11267,6 +11279,36 @@ describe('runQwenServe channel worker supervisor', () => {
     });
 
     expect(failure?.code).toEqual(expect.any(String));
+  });
+
+  it('normalizes a killed TLS trust probe to the generic failure code', async () => {
+    // R29-1: execFile reports error.code === null (not undefined) when its
+    // timeout budget kills the child, so a null-blind check coerced the kill
+    // to the literal code 'null' — a definitive CA-misconfiguration alarm for
+    // an inconclusive probe. Block the child in a required module so the
+    // parent's timeoutMs + 1_000 budget fires before the probe writes its
+    // JSON verdict; the probe script's own handler already null-coalesces.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-kill-')),
+    );
+    const blocker = path.join(tmpDir, 'block.cjs');
+    fs.writeFileSync(blocker, 'for (;;) {}');
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    process.env['NODE_OPTIONS'] = `--require ${blocker}`;
+    try {
+      const failure = await verifyWorkerTlsTrust({
+        daemonUrl: 'https://127.0.0.1:1',
+        caCertPath: path.join(tmpDir, 'ca.pem'),
+        timeoutMs: 250,
+      });
+      expect(failure?.code).toBe('WORKER_TLS_VERIFY_FAILED');
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
   });
 
   it('boots TLS channels and logs once when loader inspection cannot run', async () => {
