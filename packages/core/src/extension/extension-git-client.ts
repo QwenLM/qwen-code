@@ -26,7 +26,18 @@ type UnsafeOptions = NonNullable<SimpleGitOptions['unsafe']>;
 
 function assertCredentialedHttpsSource(source: string): void {
   try {
-    if (new URL(source).protocol === 'https:') return;
+    const parsed = new URL(source);
+    // Git and WHATWG disagree on backslashes and userinfo: a URL that does
+    // not round-trip unchanged, or that carries embedded credentials, can
+    // make git connect to a different host than the one validated here.
+    if (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      parsed.href === source
+    ) {
+      return;
+    }
   } catch {
     // Use the same redacted error for malformed and non-HTTPS sources.
   }
@@ -36,8 +47,10 @@ function assertCredentialedHttpsSource(source: string): void {
 }
 
 // Mirrors the unsafe config-key blocklist matchers in @simple-git/argv-parser
-// (1.1.1 via simple-git 3.36). Re-sync this table on a dependency bump: a new
-// matcher that this table misses fails credentialed installs pre-spawn.
+// (1.1.1 via simple-git 3.36); the parity tests in
+// extension-git-client.test.ts fail when the installed parser drifts from
+// this table, and a matcher the table misses still fails the credentialed
+// install pre-spawn.
 const generatedConfigKeyAllowances = [
   [/alias/, 'allowUnsafeAlias'],
   [/core.askpass/, 'allowUnsafeAskPass'],
@@ -84,7 +97,8 @@ function allowGeneratedConfigKeyFalsePositives(
 // `ssh_askpass` are the non-GIT_* keys @simple-git/argv-parser (1.1.1 via
 // simple-git 3.36) flags as unsafe; inheriting one would also make its
 // pre-spawn check reject every task. The remaining entries block home
-// locations, proxies, TLS trust overrides, and loader injection.
+// locations, proxies, TLS trust overrides, loader injection, and ambient
+// GitHub tokens (credentials are delivered scoped via extraHeader).
 const blockedInheritedEnvKeys = new Set([
   'home',
   'userprofile',
@@ -105,6 +119,8 @@ const blockedInheritedEnvKeys = new Set([
   'pager',
   'prefix',
   'ssh_askpass',
+  'github_token',
+  'gh_token',
 ]);
 
 function isBlockedInheritedEnvKey(key: string): boolean {
