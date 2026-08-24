@@ -3646,7 +3646,12 @@ jobs:
           # Absent from base must imply absent on disk: this cp fails every
           # pre-merge round, so a planted leftover in RUNNER_TEMP would
           # otherwise be digested below and executed as trusted (af-148).
-          rm -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
+          # -rf, not -f: the planted leftover can be a DIRECTORY, which rm -f
+          # cannot remove — the non-zero exit aborts this step under its
+          # ambient -eo pipefail before the tolerant cp, and nothing else
+          # reclaims RUNNER_TEMP on this persistent pool, so every later
+          # round on the host dies at staging until a human clears it.
+          rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
           cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
