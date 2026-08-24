@@ -5410,7 +5410,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5461,7 +5460,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5495,7 +5493,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -6052,7 +6049,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -10236,29 +10232,6 @@ describe('visibleTools', () => {
     expect(set.has('web_fetch')).toBe(true);
     // always returns the same reference
     expect(config.getVisibleTools()).toBe(set);
-  });
-});
-
-describe('computer use settings', () => {
-  const baseParams: ConfigParameters = {
-    targetDir: '.',
-    debugMode: false,
-    model: 'test-model',
-    cwd: '.',
-    chatRecording: false,
-  };
-
-  it('exposes the configured idle timeout', () => {
-    const config = new Config({
-      ...baseParams,
-      computerUseIdleTimeoutMs: 12_345,
-    });
-    expect(config.getComputerUseIdleTimeoutMs()).toBe(12_345);
-  });
-
-  it('leaves the idle timeout undefined when not configured', () => {
-    const config = new Config(baseParams);
-    expect(config.getComputerUseIdleTimeoutMs()).toBeUndefined();
   });
 });
 

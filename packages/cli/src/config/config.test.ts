@@ -4748,6 +4748,18 @@ describe('Output format', () => {
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
   });
 
+  it('should use stream-json format from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.STREAM_JSON);
+  });
+
   it('should prioritize the format from argv', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'json'];
     const argv = await parseArguments();
@@ -4758,6 +4770,18 @@ describe('Output format', () => {
       [],
     );
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
+  });
+
+  it('should prioritize argv over a differing settings format', async () => {
+    process.argv = ['node', 'script.js', '--output-format', 'text'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
   });
 
   it('should error on invalid --output-format argument', async () => {
