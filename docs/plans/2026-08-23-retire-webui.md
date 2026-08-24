@@ -3,7 +3,10 @@
 Status: Draft
 
 Depends on the complete VS Code Web Shell cutover draft
-[#9811](https://github.com/QwenLM/qwen-code/pull/9811).
+[#9811](https://github.com/QwenLM/qwen-code/pull/9811) and the safe,
+document-only HTML export path from
+[#9641](https://github.com/QwenLM/qwen-code/pull/9641). The VS Code adapter
+belongs to #9811 and must not be duplicated here or reintroduced from #9641.
 
 ## Outcome
 
@@ -31,8 +34,8 @@ required to remove the legacy shared package.
 
 ## Prerequisite
 
-The preceding cutover PR must establish all of the following before this PR is
-ready:
+The preceding cutover and export PRs must establish all of the following
+before this PR is ready:
 
 - `packages/web-shell` contains the daemon React providers and hooks it needs;
 - `packages/web-shell` has no package, build, test, or source dependency on
@@ -40,6 +43,8 @@ ready:
 - `packages/vscode-ide-companion` uses the complete Web Shell chat surface and
   has no dependency on `@qwen-code/webui`;
 - all replaced VS Code presentational and interaction code is already deleted.
+- exported HTML uses the schema-validated, bounded document projection and the
+  self-contained Web Shell document renderer from #9641.
 
 If any of those conditions are false, this PR must stay draft rather than add
 a compatibility shim.
