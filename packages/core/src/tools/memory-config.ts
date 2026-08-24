@@ -12,8 +12,8 @@
 export {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
-  getAllGeminiMdFilenames,
-  getCurrentGeminiMdFilename,
+  getAllMemoryFilenames,
+  getCurrentMemoryFilename,
   MEMORY_SECTION_HEADER,
-  setGeminiMdFilename,
+  setMemoryFilename,
 } from '../utils/memory-constants.js';

@@ -207,7 +207,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
-  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
+  // `QWEN.md` (or whatever `getCurrentMemoryFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
   // overwrites. Mechanical only — does NOT call the LLM. To AI-fill

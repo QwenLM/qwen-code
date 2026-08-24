@@ -109,7 +109,7 @@ export interface StructuredError {
   status?: number;
 }
 
-export interface GeminiErrorEventValue {
+export interface LlmErrorEventValue {
   error: StructuredError;
 }
 
@@ -119,7 +119,7 @@ export interface SessionTokenLimitExceededValue {
   message: string;
 }
 
-export interface GeminiFinishedEventValue {
+export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
@@ -345,7 +345,7 @@ export type ServerGeminiUserCancelledEvent = {
 
 export type ServerGeminiErrorEvent = {
   type: GeminiEventType.Error;
-  value: GeminiErrorEventValue;
+  value: LlmErrorEventValue;
 };
 
 export enum CompressionStatus {
@@ -417,7 +417,7 @@ export type ServerGeminiSessionTokenLimitExceededEvent = {
 
 export type ServerGeminiFinishedEvent = {
   type: GeminiEventType.Finished;
-  value: GeminiFinishedEventValue;
+  value: LlmFinishedEventValue;
 };
 
 export type ServerGeminiLoopDetectedEvent = {

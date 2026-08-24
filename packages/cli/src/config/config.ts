@@ -12,11 +12,11 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   loadServerHierarchicalMemory,
   type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
-  setGeminiMdFilename as setServerGeminiMdFilename,
+  setMemoryFilename as setServerMemoryFilename,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
@@ -1613,13 +1613,13 @@ export async function loadCliConfig(
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
-  // directly to the Config constructor in core, and have core handle setGeminiMdFilename.
+  // directly to the Config constructor in core, and have core handle setMemoryFilename.
   // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
   if (settings.context?.fileName) {
-    setServerGeminiMdFilename(settings.context.fileName);
+    setServerMemoryFilename(settings.context.fileName);
   } else {
     // Reset to default context filenames if not provided in settings.
-    setServerGeminiMdFilename(getAllGeminiMdFilenames());
+    setServerMemoryFilename(getAllMemoryFilenames());
   }
 
   // Automatically load output-language.md if it exists

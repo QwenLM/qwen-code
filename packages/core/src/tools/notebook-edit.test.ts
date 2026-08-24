@@ -65,8 +65,8 @@ describe('NotebookEditTool', () => {
       getUserAgent: () => 'test-agent',
       getUserMemory: () => '',
       setUserMemory: vi.fn(),
-      getGeminiMdFileCount: () => 0,
-      setGeminiMdFileCount: vi.fn(),
+      getMemoryFileCount: () => 0,
+      setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
     } as unknown as Config;
     tool = new NotebookEditTool(config);

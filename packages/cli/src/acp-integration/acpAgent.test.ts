@@ -572,7 +572,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     },
   ),
   clearCachedCredentialFile: vi.fn(),
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
     (projectRoot: string) => `${projectRoot}/.qwen/memory`,
   ),

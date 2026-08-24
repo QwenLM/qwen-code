@@ -38,7 +38,7 @@ function createMockConfig({
   return {
     getUserMemory: () => userMemory,
     getAutoMemoryPrompt: () => autoMemoryPrompt,
-    getGeminiMdFileCount: () => fileCount,
+    getMemoryFileCount: () => fileCount,
   } as unknown as Config;
 }
 

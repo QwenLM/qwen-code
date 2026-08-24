@@ -27,7 +27,7 @@ import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
 import { ToolCallStatus } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
+import { RespondingSpinner } from '../RespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
 import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
@@ -267,7 +267,7 @@ export const AgentChatContent = ({
       {/* Spinner */}
       {isRunning && (
         <Box marginX={2} marginTop={1}>
-          <GeminiRespondingSpinner />
+          <RespondingSpinner />
         </Box>
       )}
     </Box>

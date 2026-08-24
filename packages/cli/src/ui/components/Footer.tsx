@@ -22,7 +22,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { Spinner } from './RespondingSpinner.js';
 import {
   GoalPill,
   isLiveGoalSnapshot,
@@ -129,11 +129,11 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     <ShellModeIndicator />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {configInitMessage}
+      <Spinner /> {configInitMessage}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+      <Spinner /> {t('IDE connecting... context may be unavailable')}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
     <Text color={theme.status.warning}>

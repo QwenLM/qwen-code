@@ -13,7 +13,7 @@
  *  - Keyboard events are scoped — no conflict with the main InputPrompt
  *
  * Wraps its content in a local StreamingContext.Provider so reusable
- * components like LoadingIndicator and GeminiRespondingSpinner read the
+ * components like LoadingIndicator and RespondingSpinner read the
  * agent's derived streaming state instead of the main agent's.
  */
 

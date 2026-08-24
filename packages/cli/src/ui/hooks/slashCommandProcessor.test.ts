@@ -252,7 +252,7 @@ describe('useSlashCommandProcessor', () => {
         false, // isProcessing
         setIsProcessing,
         isIdleRef,
-        vi.fn(), // setGeminiMdFileCount
+        vi.fn(), // setMemoryFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -2352,7 +2352,7 @@ describe('useSlashCommandProcessor', () => {
           false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
-          vi.fn(), // setGeminiMdFileCount
+          vi.fn(), // setMemoryFileCount
           createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized

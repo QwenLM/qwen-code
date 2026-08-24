@@ -8,11 +8,11 @@ import type { PartListUnion } from '@google/genai';
 import { partToString } from '../utils/partUtils.js';
 
 /**
- * Represents a request to be sent to the Gemini API.
+ * Represents a request to be sent to the LLM API.
  * For now, it's an alias to PartListUnion as the primary content.
  * This can be expanded later to include other request parameters.
  */
-export type GeminiCodeRequest = PartListUnion;
+export type LlmCodeRequest = PartListUnion;
 
 export function partListUnionToString(value: PartListUnion): string {
   return partToString(value, { verbose: true });

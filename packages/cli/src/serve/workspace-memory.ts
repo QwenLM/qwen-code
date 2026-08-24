@@ -11,7 +11,7 @@ import {
   Storage,
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -502,7 +502,7 @@ interface DiscoveredFile {
 export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
 ): Promise<ServeWorkspaceMemoryStatus> {
-  const filenames = new Set(getAllGeminiMdFilenames());
+  const filenames = new Set(getAllMemoryFilenames());
   const files: DiscoveredFile[] = [];
   const errors: ServeWorkspaceMemoryStatus['errors'] = [];
 

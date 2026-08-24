@@ -20,7 +20,7 @@ import { theme } from '../semantic-colors.js';
 const TMUX_SPINNER_INTERVAL_MS = 750;
 const TMUX_SPINNER_FRAMES = ['. ', '..'];
 
-interface GeminiRespondingSpinnerProps {
+interface RespondingSpinnerProps {
   /**
    * Optional string to display when not in Responding state.
    * If not provided and not Responding, renders null.
@@ -29,14 +29,14 @@ interface GeminiRespondingSpinnerProps {
   spinnerType?: SpinnerName;
 }
 
-export const GeminiRespondingSpinner: React.FC<
-  GeminiRespondingSpinnerProps
+export const RespondingSpinner: React.FC<
+  RespondingSpinnerProps
 > = ({ nonRespondingDisplay, spinnerType = 'dots' }) => {
   const streamingState = useStreamingContext();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   if (streamingState === StreamingState.Responding) {
     return (
-      <GeminiSpinner
+      <Spinner
         spinnerType={spinnerType}
         altText={SCREEN_READER_RESPONDING}
       />
@@ -51,12 +51,12 @@ export const GeminiRespondingSpinner: React.FC<
   return null;
 };
 
-interface GeminiSpinnerProps {
+interface SpinnerProps {
   spinnerType?: SpinnerName;
   altText?: string;
 }
 
-export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
+export const Spinner: React.FC<SpinnerProps> = ({
   spinnerType = 'dots',
   altText,
 }) => {
@@ -81,8 +81,8 @@ export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
   }
 
   if (isTmux) {
-    // Note: must NOT wrap in <Box> here — GeminiSpinner is rendered inside a
-    // <Text> in Footer.tsx (`<Text>...<GeminiSpinner /> {msg}</Text>`), and
+    // Note: must NOT wrap in <Box> here — Spinner is rendered inside a
+    // <Text> in Footer.tsx (`<Text>...<Spinner /> {msg}</Text>`), and
     // Ink forbids <Box> nested inside <Text>. The 2-char fixed-width frames
     // already give us stable layout without an explicit width container.
     return (

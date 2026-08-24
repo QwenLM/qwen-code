@@ -42,7 +42,7 @@ import {
   ideContextStore,
   createDebugLogger,
   getErrorMessage,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
@@ -684,7 +684,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
 
-  const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
+  const [geminiMdFileCount, setMemoryFileCount] = useState<number>(
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
@@ -1927,7 +1927,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isProcessing,
     setIsProcessing,
     isIdleRef,
-    setGeminiMdFileCount,
+    setMemoryFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
@@ -2063,12 +2063,12 @@ export const AppContainer = (props: AppContainerProps) => {
     // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
     if (config.isSafeMode()) {
       config.setUserMemory('');
-      config.setGeminiMdFileCount(0);
+      config.setMemoryFileCount(0);
       config.setContextFilePaths([]);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
-      setGeminiMdFileCount(0);
+      setMemoryFileCount(0);
       historyManager.addItem(
         {
           type: MessageType.INFO,
@@ -2112,12 +2112,12 @@ export const AppContainer = (props: AppContainerProps) => {
       );
 
       config.setUserMemory(memoryContent);
-      config.setGeminiMdFileCount(fileCount);
+      config.setMemoryFileCount(fileCount);
       config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry(conditionalRules, projectRoot),
       );
-      setGeminiMdFileCount(fileCount);
+      setMemoryFileCount(fileCount);
 
       historyManager.addItem(
         {
@@ -3159,7 +3159,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ? Array.isArray(fromSettings)
         ? fromSettings
         : [fromSettings]
-      : getAllGeminiMdFilenames();
+      : getAllMemoryFilenames();
   }, [settings.merged.context?.fileName]);
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);

@@ -22,7 +22,7 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
 import type { PermissionDeniedReason } from '../hooks/types.js';
@@ -172,7 +172,7 @@ function trimPathSlashes(filePath: string): string {
 }
 
 function matchesConfiguredContextFile(normalizedPath: string): boolean {
-  return [...getAllGeminiMdFilenames(), LOCAL_CONTEXT_FILENAME].some(
+  return [...getAllMemoryFilenames(), LOCAL_CONTEXT_FILENAME].some(
     (filename) => {
       const normalizedFilename = trimPathSlashes(
         normalizePathForAutoModePattern(filename),

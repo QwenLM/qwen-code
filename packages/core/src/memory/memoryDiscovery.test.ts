@@ -13,7 +13,7 @@ import {
   formatContextFileDisplayPath,
 } from './memoryDiscovery.js';
 import {
-  setGeminiMdFilename,
+  setMemoryFilename,
   DEFAULT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
@@ -76,7 +76,7 @@ describe('loadServerHierarchicalMemory', () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     // Some tests set this to a different value.
-    setGeminiMdFilename(DEFAULT_CONTEXT_FILENAME);
+    setMemoryFilename(DEFAULT_CONTEXT_FILENAME);
     // Clean up the temporary directory to prevent resource leaks.
     // Use maxRetries option for robust cleanup without race conditions
     await fsPromises.rm(testRootDir, {
@@ -259,7 +259,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load only the global custom context file if present and filename is changed', async () => {
     const customFilename = 'CUSTOM_AGENTS.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     const customContextFile = await createTestFile(
       path.join(homedir, QWEN_DIR, customFilename),
@@ -288,7 +288,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load context files by upward traversal with custom filename', async () => {
     const customFilename = 'PROJECT_CONTEXT.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     const projectContextFile = await createTestFile(
       path.join(projectRoot, customFilename),
@@ -322,7 +322,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load context files from CWD with custom filename (not subdirectories)', async () => {
     const customFilename = 'LOCAL_CONTEXT.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     await createTestFile(
       path.join(cwd, 'subdir', customFilename),
@@ -1323,7 +1323,7 @@ describe('loadServerHierarchicalMemory', () => {
     });
 
     it('dedupes when an extension registers the local slot path explicitly', async () => {
-      // The hierarchical scan iterates `getAllGeminiMdFilenames()`
+      // The hierarchical scan iterates `getAllMemoryFilenames()`
       // (QWEN.md / AGENTS.md) and never produces a `QWEN.local.md` path,
       // so the dedup guard in the slot loader looks unreachable in
       // production paths. It IS reachable, though, via

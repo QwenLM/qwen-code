@@ -469,7 +469,7 @@ describe('Config safe mode', () => {
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
       expect(config.getAutoMemoryPrompt()).toBe('');
-      expect(config.getGeminiMdFileCount()).toBe(0);
+      expect(config.getMemoryFileCount()).toBe(0);
     });
 
     it('records every fixed Config startup phase in order when skipped', async () => {

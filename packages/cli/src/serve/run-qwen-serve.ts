@@ -697,7 +697,7 @@ export function formatChannelWorkerDaemonUrl(
  *   - anything else (object, number, boolean, undefined) → undefined
  *
  * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentGeminiMdFilename()` default — so a malformed value
+ * `getCurrentMemoryFilename()` default — so a malformed value
  * keeps the daemon alive rather than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {

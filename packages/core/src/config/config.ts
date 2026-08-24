@@ -80,7 +80,7 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
-import { setGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -2573,7 +2573,7 @@ export class Config {
     });
     this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
-      setGeminiMdFilename(params.contextFileName);
+      setMemoryFilename(params.contextFileName);
     }
 
     // Create ModelsConfig for centralized model management
@@ -3581,7 +3581,7 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.setGeminiMdFileCount(0);
+      this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3738,7 +3738,7 @@ export class Config {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
     }
-    this.setGeminiMdFileCount(fileCount);
+    this.setMemoryFileCount(fileCount);
     this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
@@ -6377,11 +6377,11 @@ export class Config {
     this.userMemory = newUserMemory;
   }
 
-  getGeminiMdFileCount(): number {
+  getMemoryFileCount(): number {
     return this.geminiMdFileCount;
   }
 
-  setGeminiMdFileCount(count: number): void {
+  setMemoryFileCount(count: number): void {
     this.geminiMdFileCount = count;
   }
 

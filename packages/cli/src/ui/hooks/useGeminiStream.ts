@@ -26,7 +26,7 @@ import {
   type ThoughtSummary,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type GeminiErrorEventValue,
+  type LlmErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
   GeminiEventType as ServerGeminiEventType,
@@ -2095,7 +2095,7 @@ export const useGeminiStream = (
 
   const handleErrorEvent = useCallback(
     (
-      eventValue: GeminiErrorEventValue,
+      eventValue: LlmErrorEventValue,
       userMessageTimestamp: number,
       submitType: SendMessageType,
     ) => {

@@ -9,7 +9,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
 import {
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -40,7 +40,7 @@ export interface InstructionsLoadedNotification {
   parentFilePath?: string;
 }
 
-async function getGeminiMdFilePathsInternal(
+async function getMemoryFilePathsInternal(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
   userHomePath: string,
@@ -63,7 +63,7 @@ async function getGeminiMdFilePathsInternal(
   for (let i = 0; i < dirsArray.length; i += CONCURRENT_LIMIT) {
     const batch = dirsArray.slice(i, i + CONCURRENT_LIMIT);
     const batchPromises = batch.map((dir) =>
-      getGeminiMdFilePathsInternalForEachDir(
+      getMemoryFilePathsInternalForEachDir(
         dir,
         userHomePath,
         fileService,
@@ -91,7 +91,7 @@ async function getGeminiMdFilePathsInternal(
   return Array.from(new Set<string>(paths));
 }
 
-async function getGeminiMdFilePathsInternalForEachDir(
+async function getMemoryFilePathsInternalForEachDir(
   dir: string,
   userHomePath: string,
   fileService: FileDiscoveryService,
@@ -100,7 +100,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
   const allPaths = new Set<string>();
-  const geminiMdFilenames = getAllGeminiMdFilenames();
+  const geminiMdFilenames = getAllMemoryFilenames();
 
   for (const geminiMdFilename of geminiMdFilenames) {
     const resolvedHome = path.resolve(userHomePath);
@@ -206,14 +206,14 @@ async function getGeminiMdFilePathsInternalForEachDir(
   const finalPaths = Array.from(allPaths);
 
   logger.debug(
-    `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
+    `Final ordered ${getAllMemoryFilenames()} paths to read: ${JSON.stringify(
       finalPaths,
     )}`,
   );
   return finalPaths;
 }
 
-async function readGeminiMdFiles(
+async function readMemoryFiles(
   filePaths: string[],
   importFormat: 'flat' | 'tree' = 'tree',
   getMemoryType: (filePath: string) => InstructionMemoryType,
@@ -288,7 +288,7 @@ async function readGeminiMdFiles(
             const message =
               error instanceof Error ? error.message : String(error);
             logger.warn(
-              `Warning: Could not read ${getAllGeminiMdFilenames()} file at ${filePath}. Error: ${message}`,
+              `Warning: Could not read ${getAllMemoryFilenames()} file at ${filePath}. Error: ${message}`,
             );
           }
           logger.debug(`Failed to read: ${filePath}`);
@@ -477,7 +477,7 @@ export async function loadServerHierarchicalMemory(
   // For the server, homedir() refers to the server process's home.
   // This is consistent with how MemoryTool already finds the global path.
   const userHomePath = homedir();
-  const filePaths = await getGeminiMdFilePathsInternal(
+  const filePaths = await getMemoryFilePathsInternal(
     currentWorkingDirectory,
     includeDirectoriesToReadGemini,
     userHomePath,
@@ -530,7 +530,7 @@ export async function loadServerHierarchicalMemory(
 
   if (filePaths.length > 0) {
     const loadReason = options.loadReason ?? 'session_start';
-    const contentsWithPaths = await readGeminiMdFiles(
+    const contentsWithPaths = await readMemoryFiles(
       filePaths,
       importFormat,
       createMemoryTypeClassifier(
@@ -554,7 +554,7 @@ export async function loadServerHierarchicalMemory(
     // (/memory count vs announcement list) may differ; aligning them at
     // the display site is deferred as a follow-up.
     const memoryFilenames = new Set([
-      ...getAllGeminiMdFilenames(),
+      ...getAllMemoryFilenames(),
       LOCAL_CONTEXT_FILENAME,
     ]);
     const memoryItems = contentsWithPaths.filter((item) =>
