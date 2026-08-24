@@ -13,7 +13,10 @@ import {
   type WorkflowTask,
 } from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
-import { WorkflowRunner } from './workflow-runner.js';
+import {
+  WorkflowRunner,
+  WorkflowScriptNotLaunchedError,
+} from './workflow-runner.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
 
 const {
@@ -1032,16 +1035,18 @@ describe('WorkflowRunner', () => {
 
     // A malformed `export const meta` cannot start a run either, and it
     // reaches the same refusal rather than becoming a registered failure.
-    it('refuses a malformed meta literal the same way', async () => {
+    it('refuses a malformed meta literal without leaking internal names', async () => {
       const { config, registry } = configWithRegistry();
-      await expect(
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
-          script: 'export const meta = { name: someIdentifier }\nawait x();',
-          args: undefined,
-        }),
-      ).rejects.toThrow();
+      const error = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'export const meta = { name: someIdentifier }\nawait x();',
+        args: undefined,
+      }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
+      expect((error as Error).message).toContain('invalid meta object literal');
+      expect((error as Error).message).not.toContain('extractAndStripMeta');
+      expect((error as Error).message).not.toContain('has a syntax error');
       expect(registry.list()).toHaveLength(0);
     });
 

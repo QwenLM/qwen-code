@@ -2764,6 +2764,17 @@ describe('createWorkflowSandbox primitives', () => {
       expect(rendered).not.toContain('workflow.js');
     });
 
+    it('preserves author line numbers after a multiline meta block', () => {
+      const rendered = renderFor(`export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+const x: string = 1;`);
+      expect(rendered.split('\n')[0]).toBe('line 6');
+      expect(rendered).toContain('const x: string = 1;');
+    });
+
     it('carries the offending source line and a caret under it', () => {
       const rendered = renderFor('const x: string = 1;');
       const lines = rendered.split('\n');

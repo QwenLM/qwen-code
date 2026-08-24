@@ -191,7 +191,7 @@ export function extractAndStripMeta(source: string): {
     raw = parseWorkflowMetaLiteral(metaSource);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`extractAndStripMeta: invalid meta object literal: ${msg}`);
+    throw new Error(`invalid meta object literal: ${msg}`);
   }
 
   const meta = validateMeta(raw);
@@ -222,14 +222,24 @@ function wrapWorkflowBody(strippedSource: string): string {
  * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
  * compile through one function rather than two lookalikes. Throws exactly what
  * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
- * literal, and V8's `SyntaxError` for a body that does not parse.
+ * literal, and V8's `SyntaxError` for a body that does not parse. The compile
+ * copy masks the meta declaration instead of deleting it so V8's source lines
+ * still match the author's original script.
  */
 export function compileWorkflowScript(scriptSource: string): {
   script: vm.Script;
   meta: WorkflowMeta | null;
 } {
   const { stripped, meta } = extractAndStripMeta(scriptSource);
-  const script = new vm.Script(wrapWorkflowBody(stripped), {
+  const bounds = findMetaBlockBounds(scriptSource);
+  const compilable = bounds
+    ? scriptSource.slice(0, bounds.exportIdx) +
+      scriptSource
+        .slice(bounds.exportIdx, bounds.afterMeta)
+        .replace(/[^\r\n\u2028\u2029]/g, ' ') +
+      scriptSource.slice(bounds.afterMeta)
+    : stripped;
+  const script = new vm.Script(wrapWorkflowBody(compilable), {
     filename: WORKFLOW_SCRIPT_FILENAME,
   });
   return { script, meta };

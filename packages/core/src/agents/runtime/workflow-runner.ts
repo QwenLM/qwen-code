@@ -92,10 +92,10 @@ export class WorkflowRunHandle {
 export class WorkflowScriptNotLaunchedError extends Error {
   constructor(readonly detail: string) {
     super(
-      `Workflow script has a syntax error and was not launched:\n${detail}\n\n` +
+      `Workflow script is invalid and was not launched:\n${detail}\n\n` +
         `Workflow scripts must be plain JavaScript — the usual causes are ` +
         `TypeScript syntax (type annotations, interfaces, generics) and ` +
-        `broken string quoting or escaping.`,
+        `broken string quoting or escaping. Metadata must use literal values.`,
     );
     this.name = 'WorkflowScriptNotLaunchedError';
   }
