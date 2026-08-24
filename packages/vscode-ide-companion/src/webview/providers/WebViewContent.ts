@@ -57,6 +57,32 @@ export class WebViewContent {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Qwen Code</title>
+  <style>
+    html, body, #root {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    body {
+      background: var(--vscode-sideBar-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, sans-serif));
+      font-size: var(--vscode-chat-font-size, 13px);
+    }
+    #root {
+      display: flex;
+      flex-direction: column;
+    }
+  </style>
 </head>
 <body data-extension-uri="${safeExtensionUri}">
   <div id="root"></div>

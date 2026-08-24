@@ -89,6 +89,18 @@ describe('WebViewContent', () => {
     expect(html).toContain('font-src data:;');
   });
 
+  it('fills the VS Code webview without inherited body padding', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('html, body, #root {');
+    expect(html).toContain('height: 100%;');
+    expect(html).toContain('margin: 0;');
+    expect(html).toContain('padding: 0;');
+    expect(html).toContain('box-sizing: border-box;');
+    expect(html).toContain('#root {\n      display: flex;');
+  });
+
   it('does not set data-web-shell-transcript on the body', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
