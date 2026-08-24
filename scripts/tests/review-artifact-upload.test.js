@@ -207,6 +207,24 @@ describe('review artifact upload — naming contract', () => {
     expect(skillMd).toContain(`${days}-day retention window`);
   });
 
+  it('keeps the deferred-marker literal joined between the emitter and the doc', () => {
+    // The collector the marker exists for learns the literal from SKILL.md;
+    // a rename in the emitter must not leave the doc — and every collector
+    // reading it — grepping a string the body no longer emits. Extract from
+    // the EMITTER (the literal heading its block), not from anywhere in the
+    // file: a stale comment mentioning the old literal must not satisfy
+    // this pin while the body emits the new one.
+    const composeTs = readFileSync(
+      'packages/cli/src/commands/review/compose-review.ts',
+      'utf8',
+    );
+    const emitted = composeTs.match(
+      /<!-- (qwen-review-[a-z-]+) -->\\n\\nDeferred under the convergence posture/,
+    )?.[1];
+    expect(emitted).toBe('qwen-review-deferred');
+    expect(skillMd).toContain(`<!-- ${emitted} -->`);
+  });
+
   it('runs on the failure and cancellation paths it exists for', () => {
     // Actions' default success() condition would skip both steps once any
     // earlier step fails — and the killed/failed runs are exactly the runs
@@ -272,14 +290,25 @@ describe('review artifact upload — the stage step, extracted and run', () => {
         join(cwd, '.qwen', 'reviews', '2026-08-23-120000-pr-42.md'),
         join(cwd, '.qwen', 'tmp', 'qwen-review-pr-42-evil.json'),
       );
+      // A planted filename carrying a workflow-command shape across an
+      // embedded newline — legal on the Linux lanes, and the channel a
+      // prompt-injected agent would use to forge `::error::` annotations
+      // (or worse) through step stdout. The step prints nothing
+      // filename-derived, so no command-shaped line may reach stdout.
+      writeFileSync(
+        join(cwd, '.qwen', 'tmp', 'qwen-review-pr-42-note\n::error::forged'),
+        '{}',
+      );
       try {
         const out = runStageStep(cwd, runnerTemp, '42');
         expect(out.status).toBe(0);
+        expect(out.stdout).not.toMatch(/^(::|##\[)/m);
         expect(
           readdirSync(join(runnerTemp, 'qwen-review-upload')).sort(),
         ).toEqual([
           '2026-08-23-120000-pr-42.md',
           'qwen-review-pr-42-findings.json',
+          'qwen-review-pr-42-note\n::error::forged',
         ]);
       } finally {
         rmSync(runnerTemp, { recursive: true, force: true });

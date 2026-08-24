@@ -1884,7 +1884,12 @@ jobs:
           find .qwen/tmp -maxdepth 1 -type f \
             -name "qwen-review-pr-${PR_NUMBER}-*" \
             -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
-          ls -l "$STAGE" || true
+          # NO listing of the staged files: filenames are agent-writable
+          # (a prompt-injected agent can plant one containing newlines and
+          # `::error::`-shaped text), step stdout is parsed for workflow
+          # commands, and the agent's own output is stop-commands-wrapped
+          # upstream precisely so this channel stays closed ('Run review').
+          # The artifact itself is the record of what staged.
 
       # The upload reads only the staged directory, never a
       # contributor-writable tree. The name carries run_attempt: a re-run
