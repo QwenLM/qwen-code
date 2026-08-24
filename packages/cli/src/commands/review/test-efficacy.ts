@@ -1929,35 +1929,38 @@ export function runProbeSuite(
     // together.
     detached: true,
   };
-  let r: SpawnSyncReturns<string>;
   try {
-    r = spawnSync(
-      process.execPath,
-      [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-      runnerOptions,
-    );
-  } finally {
-    // The parent's copies of the channel: the child carried its own across
-    // the spawn, and the reads below need the parent's closed.
-    closeSync(reportFd);
-    closeSync(stderrFd);
-  }
-  // Best effort, after EVERY outcome including the timeout: on a clean exit
-  // the group is already gone. Negative-pid kills are POSIX-only; on Windows
-  // this throws and the behaviour stays as it was. The pid is also what the
-  // teardown hook kills when its queued signal fires after an interrupt
-  // landed mid-spawn; clearing it once the group is dead keeps a recycled
-  // pid from ever being killed as if it were this group.
-  setRunnerTeardownGroup(r.pid);
-  if (r.pid) {
+    let r: SpawnSyncReturns<string>;
     try {
-      process.kill(-r.pid, 'SIGKILL');
-    } catch {
-      // Nothing left in the group to kill.
+      r = spawnSync(
+        process.execPath,
+        [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+        runnerOptions,
+      );
+    } finally {
+      // The parent's copies of the channel: the child carried its own
+      // across the spawn, and the reads below need the parent's closed.
+      // Also the close a vitest-resolution throw (argv is built inside
+      // this try) would otherwise skip.
+      closeSync(reportFd);
+      closeSync(stderrFd);
     }
-  }
-  setRunnerTeardownGroup(undefined);
-  try {
+    // Best effort, after EVERY outcome including the timeout: on a clean
+    // exit the group is already gone. Negative-pid kills are POSIX-only;
+    // on Windows this throws and the behaviour stays as it was. The pid is
+    // also what the teardown hook kills when its queued signal fires after
+    // an interrupt landed mid-spawn; clearing it once the group is dead
+    // keeps a recycled pid from ever being killed as if it were this
+    // group.
+    setRunnerTeardownGroup(r.pid);
+    if (r.pid) {
+      try {
+        process.kill(-r.pid, 'SIGKILL');
+      } catch {
+        // Nothing left in the group to kill.
+      }
+    }
+    setRunnerTeardownGroup(undefined);
     // Read the channel back now that nothing in the group is still writing.
     // A missing report is "the runner produced none" — classified below the
     // way an empty capture always was — never a throw on its own. EMPTY
@@ -1991,8 +1994,8 @@ export function runProbeSuite(
       }
     }
     // A finished report outranks the spawn's error/signal: a suite whose
-    // teardown hangs after the runner writes its verdict still produced that
-    // verdict, and the deadline's kill then lands on a done run.
+    // teardown hangs after the runner writes its verdict still produced
+    // that verdict, and the deadline's kill then lands on a done run.
     return {
       perFile: classifyProbeRun(
         r.status ?? 1,
@@ -2004,6 +2007,8 @@ export function runProbeSuite(
       exposed,
     };
   } finally {
+    // Every path out of the spawn-and-read — including a vitest-resolution
+    // throw during argv building — removes the channel directory.
     rmSync(reportDir, { recursive: true, force: true });
   }
 }
