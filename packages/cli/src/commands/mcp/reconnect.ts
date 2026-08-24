@@ -180,6 +180,7 @@ async function reconnectAllMcpServers(): Promise<void> {
   writeStdoutLine('Reconnecting to all MCP servers...\n');
 
   let config: Config | undefined;
+  let failedCount = 0;
   try {
     config = await createMinimalConfig();
 
@@ -188,6 +189,7 @@ async function reconnectAllMcpServers(): Promise<void> {
         await discoverAndVerifyConnection(config, serverName);
         writeStdoutLine(`✓ ${serverName}: Reconnected successfully`);
       } catch (error) {
+        failedCount++;
         const message = error instanceof Error ? error.message : String(error);
         writeStdoutLine(`✗ ${serverName}: Failed - ${message}`);
       }
@@ -198,6 +200,17 @@ async function reconnectAllMcpServers(): Promise<void> {
     if (config) {
       await config.shutdown();
     }
+  }
+
+  // Per-server errors are caught and reported above; without this throw the
+  // handler's `process.exit(exitCode)` never runs and `--all` exits 0 even
+  // when some (or all) servers failed verification — the single-server path
+  // exits 1 for the identical failure. Wrapper scripts running
+  // `qwen mcp reconnect --all || alert` would never alert.
+  if (failedCount > 0) {
+    throw createReconnectError(
+      `Failed to reconnect ${failedCount} of ${serverNames.length} configured server(s).`,
+    );
   }
 }
 

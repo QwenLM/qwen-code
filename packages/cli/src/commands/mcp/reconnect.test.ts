@@ -297,6 +297,8 @@ describe('mcp reconnect command', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '✓ server-two: Reconnected successfully',
       );
+      // All servers verified live → no failure exit.
+      expect(mockProcessExit).not.toHaveBeenCalled();
     });
 
     it('should print message when no servers configured', async () => {
@@ -341,6 +343,13 @@ describe('mcp reconnect command', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '✗ server-two: Failed - Timeout',
       );
+      // A partial failure must still exit non-zero so wrapper scripts
+      // (`qwen mcp reconnect --all || alert`) can see it — matching the
+      // single-server path, which exits 1 for the identical failure.
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect 1 of 2 configured server(s).',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
     });
   });
 
