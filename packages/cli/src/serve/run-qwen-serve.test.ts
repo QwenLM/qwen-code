@@ -57,6 +57,7 @@ import * as serverModule from './server.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
+import { applyOpenWithAuth } from './open-with-auth.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -10447,6 +10448,35 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('rejects before creating a listener when required Web Shell assets disappear after pre-check', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const resolveWebShellDir = vi
+      .spyOn(webShellResolver, 'resolveWebShellDir')
+      .mockReturnValueOnce('/tmp/web-shell')
+      .mockReturnValueOnce(undefined);
+    const httpServerFactory = vi.fn(() => {
+      throw new Error('listener created');
+    });
+    const serveOptions = {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace: tmpDir,
+      maxSessions: 1,
+    };
+
+    applyOpenWithAuth(serveOptions);
+
+    await expect(
+      runQwenServe(serveOptions, {
+        bridge: makeFakeBridge(),
+        httpServerFactory,
+      }),
+    ).rejects.toThrow('--open-with-auth requires built Web Shell assets.');
+    expect(resolveWebShellDir).toHaveBeenCalledTimes(2);
+    expect(httpServerFactory).not.toHaveBeenCalled();
   });
 
   it('exposes the trimmed bearer token as resolvedToken', async () => {

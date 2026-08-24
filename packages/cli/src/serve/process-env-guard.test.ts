@@ -164,7 +164,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
-        'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -179,6 +178,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:VITEST_WORKER_ID': 1,
         whole: 6,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/serve-token.ts',
+    {
+      reason:
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
     },
   ],
   [

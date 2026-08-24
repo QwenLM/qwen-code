@@ -55,6 +55,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
+  request_shutdown: 'RequestShutdown',
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
