@@ -591,9 +591,28 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+    const hostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (hosted)',
+    );
+    const selfHostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (self-hosted)',
+    );
 
     expect(webShellJob).toContain('ubuntu_runner');
-    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
-    expect(webShellJob).toContain('--with-deps chromium');
+    expect(hostedInstall).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium',
+    );
+    expect(hostedInstall).toContain(
+      'node node_modules/@playwright/test/node_modules/playwright/cli.js install chromium',
+    );
+    expect(selfHostedInstall).toContain(
+      'node node_modules/playwright/cli.js install chromium',
+    );
+    expect(selfHostedInstall).toContain(
+      'node node_modules/@playwright/test/node_modules/playwright/cli.js install chromium',
+    );
+    expect(selfHostedInstall).not.toContain('install --with-deps chromium');
   });
 });
