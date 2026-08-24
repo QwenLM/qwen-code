@@ -89,6 +89,7 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -206,6 +207,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -271,10 +273,8 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import {
-  insertAfterFunctionResponses,
-  normalizePartList,
-} from '../../utils/nonInteractiveHelpers.js';
+import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -323,7 +323,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -484,6 +484,10 @@ function getAbortAwareEndTurnStopReason(
 ): PromptResponse['stopReason'] {
   // Parent cancellation wins over a simultaneous terminal path.
   return signal.aborted ? 'cancelled' : 'end_turn';
+}
+
+function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
+  return reason === 'timeout' || reason === 'session_closed';
 }
 
 type RunToolResult = {
@@ -1599,6 +1603,57 @@ function collectMcpServerMentionRefs(
   }
 }
 
+/**
+ * Register `create_sub_session` on a daemon session's tool registry — the one
+ * registry the core-side gate in `Config.createToolRegistry` cannot cover,
+ * because `config.initialize()` builds it before the {@link Session}
+ * constructor wires the sub-session spawner. Registries built later (sub-agent
+ * / override rebuilds) pick the tool up from that gate instead;
+ * `copyDiscoveredToolsFrom` never carries built-ins.
+ *
+ * Gated on the spawner being wired: only daemon-backed sessions wire it (see
+ * {@link Session.#registerSubSessionSpawner}). A standalone `--acp` session's
+ * peer is the editor, which does not implement the bridge's `qwen/control/*`
+ * methods — declaring the tool there would only advertise an action whose
+ * every call fails with JSON-RPC -32601.
+ *
+ * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
+ * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
+ * out of the model's action space instead of only failing at execution. Being
+ * session-scoped, the tool is absent from the workspace tools inventory the
+ * daemon serves from its bootstrap registry — that panel lists workspace tools,
+ * and a daemon-only tool that exists per session is deliberately not one.
+ */
+export async function registerCreateSubSessionTool(
+  config: Config,
+): Promise<void> {
+  if (!config.getSubSessionSpawner()) {
+    return;
+  }
+  const permissionManager = config.getPermissionManager();
+  if (
+    permissionManager &&
+    !(await permissionManager.isToolEnabled(ToolNames.CREATE_SUB_SESSION))
+  ) {
+    return;
+  }
+  const toolRegistry = config.getToolRegistry();
+  toolRegistry.registerTool(new CreateSubSessionTool(config));
+  // The registration lands after `config.initialize()` → `startChat()` already
+  // snapshotted the chat's tool declarations, and the tool is deferred — so it
+  // stays filtered out of the declarations until revealed. Reveal it and
+  // refresh the snapshot so the model is actually offered the tool this
+  // session. Pin the reveal so a `/clear`-style `startChat` re-run
+  // re-declares it: the startup preload that would otherwise restore it is
+  // all-or-nothing on a schema-size budget (and off entirely when the
+  // operator threshold is ≤ 0 / non-finite), so an unpinned reveal would
+  // silently drop the tool from the declarations on the first `/clear` in
+  // those configurations.
+  toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
+  toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
+  await config.getGeminiClient().setTools();
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -1899,10 +1954,13 @@ export class Session implements SessionContext {
   /**
    * Call ids of the ask_user_question being re-hung by the current restore
    * turn, if any. While set, a permission cancel that the bridge resolved as
-   * an unattended timeout does NOT persist the fabricated decline — the
-   * transcript keeps the dangling call so a later load can re-hang it again.
+   * an unattended timeout / session close, or an abort of the restore wait,
+   * does NOT persist the fabricated decline — the transcript keeps the
+   * dangling call so a later load can re-hang it again.
    */
   private restoringAskUserQuestionCallIds: Set<string> | undefined;
+  /** Once any restored call is unattended-terminated, remaining batch skips follow. */
+  private restoredAskUserQuestionSkipPersistence = false;
 
   // Implement SessionContext interface
   readonly sessionId: string;
@@ -2874,15 +2932,26 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
-   * in interactive TUI / headless, where no bridge exists.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller.
+   * Wired only on daemon-backed sessions: the daemon stamps every child it
+   * spawns with `QWEN_CODE_SERVE=1` (see `acp-bridge/src/spawnChannel.ts` and
+   * `serve/channel-worker-supervisor.ts`). A standalone `--acp` session — an
+   * editor companion spawning the same command line — hosts its peer in the
+   * editor, which does not implement the bridge's `qwen/control/*` methods, so
+   * a spawner there would only power a tool whose every call fails with
+   * JSON-RPC -32601. Interactive TUI / headless never construct a Session at
+   * all. Where no spawner is wired, {@link registerCreateSubSessionTool} and
+   * the core-side registry gate leave the tool out of the model's action space
+   * instead of declaring it forever unable to run.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
    * in-flight requests and prompts serialize per-session, not per-child.
    */
   #registerSubSessionSpawner(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
     this.config.setSubSessionSpawner(async (req) => {
       const resp = await this.client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
@@ -4793,21 +4862,27 @@ export class Session implements SessionContext {
             // block in GeminiClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            try {
-              const fileHistoryService = this.config.getFileHistoryService();
-              await fileHistoryService.makeSnapshot(promptId);
+            // Restore continuations record no user message; rewindToTurn()
+            // indexes snapshots by user-turn position, so skip them.
+            if (!isRestoreAskUserQuestion) {
               try {
-                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-                if (latestSnapshot) {
-                  this.config
-                    .getChatRecordingService()
-                    ?.recordFileHistorySnapshot(latestSnapshot);
+                const fileHistoryService = this.config.getFileHistoryService();
+                await fileHistoryService.makeSnapshot(promptId);
+                try {
+                  const latestSnapshot = fileHistoryService
+                    .getSnapshots()
+                    .at(-1);
+                  if (latestSnapshot) {
+                    this.config
+                      .getChatRecordingService()
+                      ?.recordFileHistorySnapshot(latestSnapshot);
+                  }
+                } catch (e) {
+                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
                 }
               } catch (e) {
-                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+                debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
               }
-            } catch (e) {
-              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -4890,6 +4965,7 @@ export class Session implements SessionContext {
 
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
+            let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
@@ -4916,6 +4992,7 @@ export class Session implements SessionContext {
                     .map((call) => call.id)
                     .filter((id): id is string => typeof id === 'string'),
                 );
+                this.restoredAskUserQuestionSkipPersistence = false;
                 // The permission-timeout persistence skip only needs to
                 // cover the run itself — the durable record is written on
                 // runToolCalls' return path.
@@ -4934,6 +5011,7 @@ export class Session implements SessionContext {
                   );
                 } finally {
                   this.restoringAskUserQuestionCallIds = undefined;
+                  this.restoredAskUserQuestionSkipPersistence = false;
                 }
                 if (
                   toolRun.stopAfterPermissionCancel ||
@@ -5007,7 +5085,19 @@ export class Session implements SessionContext {
                       noticePart,
                     ]),
                   };
-                  this.pendingWorktreeNotice = null;
+                  restorePostAnswerNoticesAttached = true;
+                }
+                if (nextMessage?.parts && this.pendingRecoveredAgentsNotice) {
+                  const noticePart = {
+                    text: `<system-reminder>\n${this.pendingRecoveredAgentsNotice}\n</system-reminder>\n\n`,
+                  };
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(nextMessage.parts, [
+                      noticePart,
+                    ]),
+                  };
+                  restorePostAnswerNoticesAttached = true;
                 }
               }
 
@@ -5016,6 +5106,9 @@ export class Session implements SessionContext {
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   this.#getCurrentChat().addHistory(nextMessage);
+                  if (restorePostAnswerNoticesAttached) {
+                    this.#clearPendingRestoreNotices();
+                  }
                   return { stopReason: 'cancelled' };
                 }
 
@@ -5061,11 +5154,22 @@ export class Session implements SessionContext {
                     // history before the send, so dropping it here on a
                     // non-cancelled failure would lose the orphaned turn the
                     // user never got an answer to.
+                    const preserveFullMessage =
+                      isContinue || sendResult.stopReason === 'cancelled';
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
-                      isContinue || sendResult.stopReason === 'cancelled',
+                      preserveFullMessage,
                     );
+                    if (
+                      preserveFullMessage &&
+                      restorePostAnswerNoticesAttached
+                    ) {
+                      this.#clearPendingRestoreNotices();
+                    }
                     return { stopReason: sendResult.stopReason };
+                  }
+                  if (restorePostAnswerNoticesAttached) {
+                    this.#clearPendingRestoreNotices();
                   }
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
@@ -6753,6 +6857,25 @@ export class Session implements SessionContext {
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
     return { responseStream };
+  }
+
+  #clearPendingRestoreNotices(): void {
+    this.pendingWorktreeNotice = null;
+    this.pendingRecoveredAgentsNotice = null;
+  }
+
+  #markUnattendedRestoredAskUserQuestion(): void {
+    this.restoredAskUserQuestionSkipPersistence = true;
+  }
+
+  #shouldSkipRestoredAskUserQuestionPersistence(
+    callId: string | undefined,
+  ): boolean {
+    return (
+      typeof callId === 'string' &&
+      this.restoringAskUserQuestionCallIds?.has(callId) === true &&
+      this.restoredAskUserQuestionSkipPersistence
+    );
   }
 
   #preserveUnsentMessageHistory(
@@ -9143,8 +9266,14 @@ export class Session implements SessionContext {
       orderedRecords.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
-        // in-memory result is produced.
-        if (record.skipPersistence === true) {
+        // in-memory result is produced. The flag check is retroactive on
+        // purpose: an answered sibling queued before the batch ended
+        // unattended must stay dangling too, or the persisted user turn
+        // would make the trailing model turn unrestorable.
+        if (
+          record.skipPersistence === true ||
+          this.#shouldSkipRestoredAskUserQuestionPersistence(record.callId)
+        ) {
           return;
         }
         this.config
@@ -9183,6 +9312,9 @@ export class Session implements SessionContext {
           callId,
           toolName,
           responseParts: [part],
+          ...(this.#shouldSkipRestoredAskUserQuestionPersistence(callId)
+            ? { skipPersistence: true }
+            : {}),
           metadata: {
             callId,
             status: 'error',
@@ -9979,18 +10111,24 @@ export class Session implements SessionContext {
 
     const cancelBeforeExecutionIfAborted = (
       toolName = fc.name ?? 'unknown_tool',
-    ) =>
-      activeToolAbortSignal.aborted
-        ? earlyErrorResponse(
-            new Error('Tool call was cancelled before execution.'),
-            toolName,
-            {
-              status: 'cancelled',
-              errorType: undefined,
-              executionStatus: 'not_started',
-            },
-          )
-        : undefined;
+    ) => {
+      if (!activeToolAbortSignal.aborted) return undefined;
+      if (this.restoringAskUserQuestionCallIds?.has(callId) === true) {
+        this.#markUnattendedRestoredAskUserQuestion();
+      }
+      return earlyErrorResponse(
+        new Error('Tool call was cancelled before execution.'),
+        toolName,
+        {
+          status: 'cancelled',
+          errorType: undefined,
+          executionStatus: 'not_started',
+          ...(this.#shouldSkipRestoredAskUserQuestionPersistence(callId)
+            ? { skipPersistence: true }
+            : {}),
+        },
+      );
+    };
 
     const initialCancellation = cancelBeforeExecutionIfAborted();
     if (initialCancellation) return initialCancellation;
@@ -10821,6 +10959,12 @@ export class Session implements SessionContext {
                 if (!wasAborted) {
                   onStopAfterPermissionCancel?.();
                 }
+                if (
+                  wasAborted &&
+                  this.restoringAskUserQuestionCallIds?.has(callId) === true
+                ) {
+                  this.#markUnattendedRestoredAskUserQuestion();
+                }
                 const permissionFailureMessage = isExitPlanModeTool
                   ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
                   : planShellDecision.classification === 'unknown'
@@ -10844,6 +10988,11 @@ export class Session implements SessionContext {
                       : ToolErrorType.UNHANDLED_EXCEPTION,
                     executionStatus: 'not_started',
                     stopAfterPermissionCancel: !wasAborted,
+                    ...(this.#shouldSkipRestoredAskUserQuestionPersistence(
+                      callId,
+                    )
+                      ? { skipPersistence: true }
+                      : {}),
                   },
                 );
               }
@@ -10951,17 +11100,23 @@ export class Session implements SessionContext {
                     'Switch-to-Default outcome must be normalized before execution.',
                   );
                 case ToolConfirmationOutcome.Cancel: {
-                  // A restored ask_user_question whose permission wait timed
-                  // out (nobody was there to answer) must not persist the
+                  // A restored ask_user_question whose permission wait ended
+                  // unattended (timeout, session closed) must not persist the
                   // fabricated decline — leave the transcript dangling so a
                   // later load can re-hang the question. A deliberate user
                   // cancel persists, matching live decline handling.
                   const cancelReason = (
                     output as { _meta?: Record<string, unknown> | null }
                   )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
-                  const skipPersistence =
-                    cancelReason === 'timeout' &&
+                  const unattendedRestore =
+                    isUnattendedRestorePermissionCancel(cancelReason) &&
                     this.restoringAskUserQuestionCallIds?.has(callId) === true;
+                  if (unattendedRestore) {
+                    this.#markUnattendedRestoredAskUserQuestion();
+                  }
+                  const skipPersistence =
+                    unattendedRestore ||
+                    this.#shouldSkipRestoredAskUserQuestionPersistence(callId);
                   // Route through the terminal helper so the declined call is
                   // emitted and recorded consistently without marking its span
                   // as an error.
