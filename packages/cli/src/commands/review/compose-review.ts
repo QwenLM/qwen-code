@@ -21,7 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
-import { roundModelIdFrom } from './lib/round-model.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -1357,7 +1357,7 @@ export function composeReview(
   // one review. The previous volume rides out of the same read for the
   // same reason — a marker pairing one round's number with another's count
   // is a trend nobody can read back.
-  const prevFacts = prevLedgerFacts(input.planPath);
+  const prevFacts = prevLedgerFacts(input.planPath, runtimeModelId);
   const prevRound = prevFacts.round;
   // The convergence verdict, decided HERE — beside the one side-file read
   // that owns `prevRound` — and never inside the body composer, so this
@@ -1758,8 +1758,19 @@ const EMPTY_PREV_FACTS = {
  * single marker. They degrade independently — the side file is a
  * best-effort recovery, and a round with no volume recorded (every round
  * before the field shipped) is not a round that posted nothing.
+ *
+ * `runtimeModelId` is the identity this round runs under. A GRAFTED anchor
+ * (the side file carries `anchorFromRound` — `pr-context` carried it
+ * forward from an earlier own marker because the previous round closed
+ * without one) is usable only under the same-model contract, exactly as
+ * Step 1's gate rules: when the certifier mismatches, the round re-reads
+ * the full diff and the chain is still broken, and the self-check below
+ * must still say so.
  */
-function prevLedgerFacts(planPath: string | undefined): {
+function prevLedgerFacts(
+  planPath: string | undefined,
+  runtimeModelId?: string,
+): {
   round: number;
   posted?: number;
   /**
@@ -1784,7 +1795,11 @@ function prevLedgerFacts(planPath: string | undefined): {
    * names no usable predecessor.
    */
   churnRounds: number;
-  /** Whether it carried an incremental anchor at all. */
+  /**
+   * Whether it carried an incremental anchor THIS round can use — a
+   * grafted one whose certifier mismatches does not count (Step 1's gate
+   * refuses it, so the chain is still broken).
+   */
   anchored: boolean;
 } {
   try {
@@ -1802,7 +1817,11 @@ function prevLedgerFacts(planPath: string | undefined): {
       // `foreign` is a side-file field, not a marker field: it records how
       // THIS machine obtained the list, which is nothing the marker riding a
       // public body could be trusted to state about itself.
-    ) as Ledger & { foreign?: unknown; merged?: unknown };
+    ) as Ledger & {
+      foreign?: unknown;
+      merged?: unknown;
+      anchorFromRound?: unknown;
+    };
     const round =
       Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
     // Read through the ledger's own volume reader rather than a local
@@ -1879,10 +1898,25 @@ function prevLedgerFacts(planPath: string | undefined): {
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
       merged: round !== 0 && prev.merged === true,
-      // The previous round's anchor, as a yes/no. Two consecutive withholds
-      // are the shape the self-check discloses; the sha itself is Step 1's
-      // business, not this read's.
-      anchored: round !== 0 && typeof prev.sha === 'string' && prev.sha !== '',
+      // The previous round's anchor, as a yes/no THIS round can use. Two
+      // consecutive withholds are the shape the self-check discloses; the
+      // sha itself is Step 1's business, not this read's. A CERTIFIED
+      // anchor counts on presence alone. A GRAFTED one (the side file
+      // records `anchorFromRound` — carried forward from an earlier own
+      // marker because the previous round closed without one) counts only
+      // under the same-model contract: when its certifier mismatches the
+      // identity this round runs under, Step 1's gate refuses it and the
+      // round re-reads the full diff, so the chain is still broken and the
+      // disclosure must not be silenced by a sha the round cannot use.
+      anchored:
+        round !== 0 &&
+        typeof prev.sha === 'string' &&
+        prev.sha !== '' &&
+        (typeof prev.anchorFromRound !== 'number' ||
+          certifierMatchesRound(
+            typeof prev.model === 'string' ? prev.model : undefined,
+            runtimeModelId ?? '',
+          )),
       // Travels with the volume it qualifies, and with the round, for the
       // same reason both of those do.
       ...(round === 0 ||
