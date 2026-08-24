@@ -86,6 +86,9 @@ export function createExtensionGitClient(
     // @simple-git/argv-parser scans the whole key with unanchored matchers.
     // Enable only categories matched by this product-generated key.
     // The child environment below remains allowlisted.
+    // Enabled categories relax the blocklist for every task on this client,
+    // including argv `-c` entries. Callers must never pass user- or
+    // extension-derived arguments or config through a client created here.
     allowGeneratedConfigKeyFalsePositives(unsafe, credentialConfigKey);
   }
   const git = simpleGit(baseDir, {
