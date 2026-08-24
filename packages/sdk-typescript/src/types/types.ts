@@ -405,9 +405,13 @@ export interface QueryOptions {
    * (non-core built-ins such as `send_message` are unaffected).
    * Separately, `permissions.allow` in settings.json (requires restart)
    * activates a registry-level allowlist: when at least one allow rule is
-   * configured there, built-in tools not covered by any allow rule are not
-   * registered either (#9827). Note the SDK `allowedTools` parameter is a
-   * pure auto-approval grant and does NOT restrict tool registration.
+   * configured there, built-in tools not covered by any allow or ask rule
+   * are not registered either (MCP tools, the `--json-schema`
+   * `structured_output` contract, the plan-mode lifecycle tools, and the
+   * `computer_use__*` family are exempt) (#9827). The SDK `allowedTools`
+   * parameter cannot activate the allowlist on its own, but while the
+   * allowlist is active its rules are merged into the effective allow set
+   * and count toward coverage, keeping covered built-ins registered.
    * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
    * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
@@ -444,11 +448,14 @@ export interface QueryOptions {
    * - Checked after `excludeTools` but before `canUseTool` callback
    * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
-   * - Does NOT restrict tool registration — built-in tool schemas are still
-   *   sent to the model. This parameter maps to the CLI `--allowed-tools`
-   *   flag, a pure auto-approval grant. To hide unlisted built-in tools from
-   *   the model request, set `permissions.allow` in settings.json (requires
-   *   restart); that key activates the registry allowlist (#9827)
+   * - Alone does NOT restrict tool registration: this parameter maps to the
+   *   CLI `--allowed-tools` flag and cannot activate the registry allowlist
+   *   by itself. While a settings-provided `permissions.allow` allowlist is
+   *   active, however, these rules are merged into the effective allow set
+   *   and count toward coverage, so covered built-ins stay registered
+   *   (#9827). To hide unlisted built-in tools from the model request, set
+   *   `permissions.allow` in settings.json (requires restart); that key
+   *   activates the registry allowlist
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

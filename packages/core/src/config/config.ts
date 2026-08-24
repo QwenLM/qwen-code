@@ -1059,8 +1059,14 @@ export interface ConfigParameters {
      * (never `--allowed-tools`, the SDK `allowedTools` param, or the
      * legacy `tools.allowed` key). When it contains at least one valid
      * rule, the registry-level allowlist activates: built-in tools not
-     * covered by any allow rule are excluded from registration, so their
-     * schemas are never sent to the model (#9827).
+     * covered by any allow or ask rule are excluded from registration, so
+     * their schemas are never sent to the model (MCP tools, the
+     * `--json-schema` `structured_output` contract, the plan-mode
+     * lifecycle tools, and the `computer_use__*` family are exempt)
+     * (#9827). Only this subset can ACTIVATE the allowlist; while it is
+     * active, `--allowed-tools` / SDK `allowedTools` rules are merged
+     * into the effective allow set and still count toward coverage,
+     * keeping covered built-ins registered.
      */
     registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
