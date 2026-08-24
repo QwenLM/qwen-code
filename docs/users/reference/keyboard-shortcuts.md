@@ -34,12 +34,12 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Tab`                                                 | Autocomplete the current suggestion if one exists.                                                                                                                                                                                                                                                                        |
 | `Up Arrow`                                            | Row up, then snap to start, then history prev.                                                                                                                                                                                                                                                                            |
 | `Ctrl+A` / `Home`                                     | Move the cursor to the beginning of the line.                                                                                                                                                                                                                                                                             |
-| `Ctrl+B` / `Left Arrow`                               | Move the cursor one character to the left.                                                                                                                                                                                                                                                                                |
+| `Ctrl+B` / `Left Arrow`                               | Move the cursor one character to the left. While the `@` completion menu shows category tabs, use `Ctrl+B` (the arrow switches tabs).                                                                                                                                                                                     |
 | `Ctrl+C`                                              | Clear the input prompt                                                                                                                                                                                                                                                                                                    |
 | `Esc` (double press)                                  | Clear the input prompt.                                                                                                                                                                                                                                                                                                   |
 | `Ctrl+D` / `Delete`                                   | Delete the character to the right of the cursor.                                                                                                                                                                                                                                                                          |
 | `Ctrl+E` / `End`                                      | Move the cursor to the end of the line.                                                                                                                                                                                                                                                                                   |
-| `Ctrl+F` / `Right Arrow`                              | Move the cursor one character to the right.                                                                                                                                                                                                                                                                               |
+| `Ctrl+F` / `Right Arrow`                              | Move the cursor one character to the right. While the `@` completion menu shows category tabs, use `Ctrl+F` (the arrow switches tabs).                                                                                                                                                                                    |
 | `Ctrl+H` / `Backspace`                                | Delete the character to the left of the cursor.                                                                                                                                                                                                                                                                           |
 | `Ctrl+K`                                              | Delete from the cursor to the end of the line.                                                                                                                                                                                                                                                                            |
 | `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`      | Move the cursor one word to the left.                                                                                                                                                                                                                                                                                     |
@@ -81,14 +81,18 @@ Focus the Background tasks pill in the footer (use `Down Arrow` from an empty co
 
 ## Suggestions
 
-| Shortcut                             | Description                                                              |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| `Down Arrow` / `Ctrl+N`              | Navigate down through the suggestions.                                   |
-| `Tab` / `Enter`                      | Accept the selected suggestion.                                          |
-| `Up Arrow` / `Ctrl+P`                | Navigate up through the suggestions.                                     |
-| `Right Arrow`                        | Accept a ghost-text suggestion when the prompt is empty.                 |
-| `Ctrl+Tab` / `Ctrl+Right Arrow`      | Switch to the next completion category when category tabs are shown.     |
-| `Ctrl+Shift+Tab` / `Ctrl+Left Arrow` | Switch to the previous completion category when category tabs are shown. |
+| Shortcut                | Description                                                                                                                         |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions.                                                                                              |
+| `Tab` / `Enter`         | Accept the selected suggestion.                                                                                                     |
+| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.                                                                                                |
+| `Right Arrow`           | Switch to the next completion category when category tabs are shown. Also accepts a ghost-text suggestion when the prompt is empty. |
+| `Left Arrow`            | Switch to the previous completion category when category tabs are shown.                                                            |
+
+> Note: while the `@` completion menu is showing category tabs, `Left Arrow` and
+> `Right Arrow` switch categories instead of moving the cursor. Press `Esc` to
+> dismiss the menu first if you need to move the cursor. `Alt/Option+Arrow` word
+> movement is unaffected.
 
 ## History Search
 

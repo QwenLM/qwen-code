@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text, useIsScreenReaderEnabled } from 'ink';
-import { useCallback, useRef, useState } from 'react';
+import { Box, Text, useIsScreenReaderEnabled, type DOMElement } from 'ink';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -20,7 +20,11 @@ import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
-export const Composer = () => {
+interface ComposerProps {
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
@@ -142,6 +146,7 @@ export const Composer = () => {
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 
@@ -152,7 +157,7 @@ export const Composer = () => {
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (
-          !isScreenReaderEnabled && <Footer />
+          !isScreenReaderEnabled && <Footer containerRef={footerRef} />
         ))}
     </Box>
   );

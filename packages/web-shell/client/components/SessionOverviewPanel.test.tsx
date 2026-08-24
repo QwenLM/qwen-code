@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
@@ -34,7 +35,7 @@ let statusState: {
 let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
 // Stable client object (per test) so the other-workspace hook's load callback
 // keeps a stable identity and its effect doesn't loop.
-let workspaceClient: { listWorkspaceSessions: ReturnType<typeof vi.fn> };
+let workspaceClient: { listWorkspaceSessionsPage: ReturnType<typeof vi.fn> };
 
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
 const statusReload = vi.fn(async () => statusState.report);
@@ -46,7 +47,29 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => ({
     client: workspaceClient,
     capabilities: connectionState.capabilities,
+    workspaceCwd: connectionState.workspaceCwd,
   }),
+}));
+
+vi.mock('../hooks/useScopedSessions', () => ({
+  useScopedSessions: (
+    _workspaceCwd: string | undefined,
+    options: { pollIntervalMs?: number } = {},
+  ) => {
+    const inFlight = React.useRef(false);
+    React.useEffect(() => {
+      if (options.pollIntervalMs === undefined) return;
+      const timer = setInterval(() => {
+        if (document.hidden || inFlight.current) return;
+        inFlight.current = true;
+        void sessionsReload().finally(() => {
+          inFlight.current = false;
+        });
+      }, options.pollIntervalMs);
+      return () => clearInterval(timer);
+    }, [options.pollIntervalMs]);
+    return { ...sessionsState, reload: sessionsReload };
+  },
 }));
 
 const { SessionOverviewPanel, deriveSessionCards } = await import(
@@ -100,9 +123,9 @@ beforeEach(() => {
   statusState = { report: { full: { sessions: [] } } };
   otherWorkspaceSessions = {};
   workspaceClient = {
-    listWorkspaceSessions: vi.fn(
-      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
-    ),
+    listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
+      sessions: otherWorkspaceSessions[cwd] ?? [],
+    })),
   };
   sessionsReload.mockClear();
   statusReload.mockClear();
@@ -245,6 +268,17 @@ describe('deriveSessionCards', () => {
     expect(cards[0].clientCount).toBe(2);
   });
 
+  it('passes bound PRs through to the card', () => {
+    const prs = [
+      { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+      { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+    ];
+    const cards = deriveSessionCards([session('s', { prs })], [], undefined);
+    expect(cards[0].prs).toEqual(prs);
+    const bare = deriveSessionCards([session('bare')], [], undefined);
+    expect(bare[0].prs).toBeUndefined();
+  });
+
   it('does not expose opaque route ids as model names', () => {
     const cards = deriveSessionCards(
       [session('s')],
@@ -286,7 +320,29 @@ describe('SessionOverviewPanel', () => {
     render();
     const label = container!.querySelector('ul li button') as HTMLButtonElement;
     act(() => label.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run');
+    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+  });
+
+  it("passes the owning workspace cwd when clicking another workspace's session", async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = Array.from(container!.querySelectorAll('ul li button')).find(
+      (b) => b.textContent?.trim() === 'Beta',
+    ) as HTMLButtonElement;
+    act(() => beta.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
   });
 
   it('always shows selection + the "Open in new tab" batch action', () => {
@@ -488,7 +544,7 @@ describe('SessionOverviewPanel', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     await flushAsync();
-    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
     // No workspace badge on a single-workspace daemon.
     expect(container!.textContent).not.toContain('wsB');
   });
@@ -578,9 +634,9 @@ describe('SessionOverviewPanel polling', () => {
     try {
       render();
       await vi.advanceTimersByTimeAsync(10); // settle the initial fan-out
-      workspaceClient.listWorkspaceSessions.mockClear();
+      workspaceClient.listWorkspaceSessionsPage.mockClear();
       await vi.advanceTimersByTimeAsync(3100); // one list-poll tick
-      expect(workspaceClient.listWorkspaceSessions).toHaveBeenCalledWith(
+      expect(workspaceClient.listWorkspaceSessionsPage).toHaveBeenCalledWith(
         '/wsB',
         expect.objectContaining({ archiveState: 'active' }),
       );

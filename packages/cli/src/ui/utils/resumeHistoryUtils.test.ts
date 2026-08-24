@@ -55,6 +55,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -119,6 +120,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -145,12 +147,14 @@ describe('resumeHistoryUtils', () => {
       ...goal,
       turnCount: 1,
       activeTimeMs: 10,
+      tokensUsed: 0,
       updatedAt: 2,
     };
     const rejected = {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 20,
+      tokensUsed: 0,
       updatedAt: 3,
     };
     const checkpointed = {
@@ -169,6 +173,7 @@ describe('resumeHistoryUtils', () => {
         ],
       },
       activeTimeMs: 30,
+      tokensUsed: 0,
       updatedAt: 4,
     };
     const limited = {
@@ -176,6 +181,7 @@ describe('resumeHistoryUtils', () => {
       status: 'usage_limited' as const,
       lastReason: 'provider failed',
       activeTimeMs: 40,
+      tokensUsed: 0,
       updatedAt: 5,
     };
     const conversation = {
@@ -327,6 +333,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -392,6 +399,15 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('does not fall back to hidden text when displayText is empty', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'internal channel instructions' }] },
+        systemPayload: { displayText: '', hookContext: '' },
+      });
+      expect(items).toEqual([]);
     });
 
     it('prefers displayText over the tag-strip fallback', () => {
@@ -623,6 +639,96 @@ describe('resumeHistoryUtils', () => {
       text: 'save logs',
       sentToModel: false,
     });
+  });
+
+  it('restores media-reference mid-turn messages as an attachment placeholder', () => {
+    // Image-only mid-turn messages are recorded with an empty displayText and
+    // attachmentReferences; resuming must not fall back to the raw internal prefix.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          subtype: 'mid_turn_user_message',
+          message: {
+            parts: [
+              {
+                text: '\n[User message received during tool execution]: ',
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            attachmentReferences: [
+              {
+                type: 'image',
+                attachmentId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(
+      session,
+      makeConfig({ replace: mockTool }),
+      40,
+    );
+
+    expect(items).toContainEqual({
+      id: 41,
+      type: 'user',
+      text: '[User message with attachments]',
+      sentToModel: false,
+    });
+  });
+
+  it('restores media-reference ordinary user messages as an attachment placeholder', () => {
+    // Image-only prompts are recorded with an empty displayText and
+    // attachmentReferences; resuming must keep the prompt visible instead of
+    // dropping it from the restored history.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: 'aW1n' },
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'image',
+                attachmentId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([
+      { id: 51, type: 'user', text: '[User message with attachments]' },
+    ]);
   });
 
   it('restores ordinary user messages from clean display text', () => {
@@ -1050,6 +1156,55 @@ describe('resumeHistoryUtils', () => {
         type: 'gemini',
         text: 'Follow-up',
         timestamp: new Date('2026-01-15T18:00:00.000Z').getTime(),
+      },
+    ]);
+  });
+
+  it('skips hidden slash command invocations but replays their results on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/model',
+            sentToModel: false,
+            hiddenInvocation: true,
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/model',
+            outputHistoryItems: [
+              { type: 'info', text: 'Kept model as qwen3-max' },
+            ],
+          },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([
+      { id: 41, type: 'info', text: 'Kept model as qwen3-max' },
+      {
+        id: 42,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
       },
     ]);
   });

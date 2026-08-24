@@ -55,6 +55,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
+  request_shutdown: 'RequestShutdown',
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
@@ -512,6 +513,13 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
 }
 
 /**

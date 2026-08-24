@@ -19,6 +19,7 @@ import {
   unescapeMarkdownDollars,
 } from './inline-math.js';
 import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -49,8 +50,8 @@ const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 const SAFETY_MARGIN = 4;
 
 const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 
@@ -371,7 +372,10 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     } else if (/^https?:\/\//.test(fullMatch)) {
       const visible = applyColor(fullMatch, theme.text.link);
       if (canHyperlink) {
-        const trimmedUrl = trimTrailingUrlPunctuation(fullMatch);
+        const trimmedUrl = trimTrailingUrlPunctuation(
+          fullMatch,
+          text[index + fullMatch.length],
+        );
         rendered = isSafeOscScheme(trimmedUrl)
           ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
           : visible;

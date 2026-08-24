@@ -50,7 +50,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
 
 jobs:
   classify_pr:
@@ -179,7 +179,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
@@ -288,6 +309,15 @@ jobs:
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
+
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
@@ -444,6 +474,55 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test ${{ env.HELPER_TESTS }}'
 
+      # The install-script packaging suite needs zip/unzip, and throws on a
+      # CI host that ships neither, so a silent skip there is impossible.
+      # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
+      # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
+      # without tmux (the hosted ubuntu-latest image ships none), would
+      # silently skip every real-tmux behaviour — holder survival, matching,
+      # server reaping, refusal contracts — inside a green required check.
+      # Until it lands, the tmux half installs a tool nothing here uses;
+      # that is deliberate, so the tooling is in place before the suite that
+      # depends on it (qwen-autofix.yml already installs tmux the same way).
+      - name: 'Install tmux and zip tooling'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
+        # hang the job toward its 60-minute cap nor red the required check —
+        # continue-on-error absorbs the step-level timeout. The apt calls
+        # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
+        # step cap) so the guard below still runs: when the step-level
+        # timeout fires there is no `|| echo`, and the lane loses its
+        # tooling with no annotation to say so.
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
+            # Advisory here too: a broken-but-installed tmux (dangling
+            # symlink, missing lib) must not fail the required Test check
+            # before a single test has run.
+            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
+            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
+            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+          elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
+            # Root-container lanes have no sudo (and need none): apt-get
+            # runs as-is. Advisory, not a gate: an apt hiccup must not red
+            # this step before a single test has run — the suites carry
+            # their own signal (the real-tmux suite skips; the zip suite
+            # throws on CI). ::warning:: (not a plain echo) so a lane
+            # where the install PERMANENTLY fails shows the loss in the
+            # check UI instead of hiding it in a multi-thousand-line log.
+            timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
+            # Same advisory contract as the root branch; sudo -n here so a
+            # runner without passwordless sudo fails fast instead of
+            # hanging on a password prompt toward the step's bound.
+            timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          else
+            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          fi
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -458,7 +537,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
       # Release guard for the Chrome extension: build, package, and scan real
       # artifacts for forbidden adapter signatures instead of leaving
@@ -501,6 +604,7 @@ jobs:
           IDEALAB_API_KEY: ''
           MINIMAX_API_KEY: ''
           MODELSCOPE_API_KEY: ''
+          MOONSHOT_API_KEY: ''
           OPENROUTER_API_KEY: ''
           REQUESTY_API_KEY: ''
           XAI_API_KEY: ''
@@ -508,6 +612,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
+          npm run typecheck:integration
           npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
@@ -574,7 +679,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
@@ -756,7 +882,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
@@ -862,7 +1012,31 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
 
   post_coverage_comment:
     name: 'Post Coverage Comment'
@@ -960,7 +1134,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose

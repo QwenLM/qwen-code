@@ -1,5 +1,8 @@
 name: 'SDK Python'
 
+permissions:
+  contents: 'read'
+
 on:
   pull_request:
     branches:
@@ -7,6 +10,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-python/**'
+      - 'packages/core/src/config/approval-modes.json'
       - '.github/workflows/sdk-python.yml'
   push:
     branches:
@@ -14,6 +18,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-python/**'
+      - 'packages/core/src/config/approval-modes.json'
       - '.github/workflows/sdk-python.yml'
 
 jobs:

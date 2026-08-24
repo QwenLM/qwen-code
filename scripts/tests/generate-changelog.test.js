@@ -294,6 +294,67 @@ describe('formatRelease', () => {
     expect(block).toContain('### Highlights');
     expect(block).toContain('Easier session recovery.');
   });
+
+  it('unwraps the v2 digest appendix and drops its screenshots', () => {
+    const block = formatRelease({
+      version: '1.2.3',
+      date: '2026-01-02',
+      htmlUrl: 'https://example.com/v1.2.3',
+      body: [
+        '<!-- qwen-release-notes:v2 -->',
+        '',
+        '## Highlights',
+        '',
+        '- Easier session recovery. ([#1](https://example.com/pr/1))',
+        '',
+        '## Web Shell',
+        '',
+        '- Upload files from the composer. ([#2](https://example.com/pr/2))',
+        '  ![before](https://github.com/user-attachments/assets/abc-123)',
+        '',
+        '---',
+        '',
+        '## 中文摘要',
+        '',
+        '### 亮点',
+        '',
+        '- 会话恢复更容易。 ([#1](https://example.com/pr/1))',
+        '',
+        '<details>',
+        '<summary>Complete Change List (2 pull requests)</summary>',
+        '',
+        '### Features',
+        '',
+        '- web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
+        '',
+        '</details>',
+        '',
+        '**Full Changelog**: https://example.com/compare/v1...v2',
+      ].join('\n'),
+      entries: [],
+    });
+
+    expect(block).toContain('### Highlights');
+    expect(block).toContain('### Web Shell');
+    expect(block).toContain('### 中文摘要');
+    expect(block).toContain('#### 亮点');
+    // The collapsed appendix becomes a plain heading and keeps its entries,
+    // landing at the same sibling rank v1's Complete Change List reaches.
+    expect(block).toContain('\n### Complete Change List (2 pull requests)\n');
+    expect(block).toContain('\n#### Features\n');
+    expect(block).not.toContain('#### Complete Change List');
+    expect(block).not.toContain('##### Features');
+    expect(block).toContain(
+      'web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
+    );
+    expect(block).not.toContain('<details>');
+    expect(block).not.toContain('</details>');
+    expect(block).not.toContain('<summary>');
+    expect(block).not.toContain('user-attachments');
+    // The release-page divider before the Chinese block is release chrome.
+    expect(block).not.toContain('\n---\n');
+    expect(block).not.toContain('qwen-release-notes:v2');
+  });
 });
 
 describe('selectStableReleases', () => {

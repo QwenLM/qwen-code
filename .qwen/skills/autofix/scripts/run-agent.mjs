@@ -22,10 +22,11 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
-// burning 2 hours per round for zero work. Legitimate runs are never that
-// quiet: the longest silence the fleet tolerates elsewhere is the review
-// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
-// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// burning 2 hours per round for zero work. Streamed agent events keep active
+// runs observable; the longest silence the fleet tolerates elsewhere is the
+// review pipeline's 10-minute stream-idle window for thinking phases on
+// ~1M-token contexts, so twice that is the default. Distinct from
+// QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
 // shorter than this window (the review workflow's 18-minute repair pass)
 // always reaches the absolute timer first.
@@ -37,6 +38,9 @@ const QWEN_IDLE_TIMEOUT_MS =
   Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
+const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
+const OVERSIZED_STREAM_JSON_LINE_NOTICE =
+  '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -166,13 +170,31 @@ function recoverableApiError(output) {
 
 function writeHandoff(workdir, message) {
   mkdirSync(workdir, { recursive: true });
-  writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
+  const handoffPath = file(workdir, 'handoff.md');
+  // A non-empty handoff.md is an agent-written verdict — the same
+  // convention missing() and the gate's -s checks apply — and a verdict
+  // must not be reclassified by a synthesized note.
+  if (existsSync(handoffPath) && statSync(handoffPath).size > 0) return;
+  writeFileSync(handoffPath, `${message}\n`);
 }
 
 function isLoopGuardOutput(output) {
   return (
     output.includes('turn_tool_call_cap') ||
     output.includes('Loop detection halted the run')
+  );
+}
+
+function streamResultOutput(event) {
+  if (!event || event.type !== 'result') return '';
+  return [event.error?.message, event.result]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+}
+
+function isLoopGuardResult(event) {
+  return (
+    event?.is_error === true && isLoopGuardOutput(streamResultOutput(event))
   );
 }
 
@@ -190,14 +212,16 @@ function runQwen(options, prompt) {
     flags: 'w',
   });
   log.on('error', () => {});
-  let outputTail = '';
-  let loopDetected = false;
+  let diagnosticTail = '';
+  let stdoutCarry = '';
+  let discardingOversizedStdoutLine = false;
+  let terminalResult;
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
   let lastOutputAt = Date.now();
   // The sandbox launcher prints the container name before the container
-  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // starts (packages/cli/src/serve/sandbox.ts), so the FIRST match is this
   // run's own container — the kill-path reap below relies on that ownership.
   let sandboxName = '';
   let lineCarry = '';
@@ -207,10 +231,74 @@ function runQwen(options, prompt) {
   let sandboxRemoval = null;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      [
+        '--yolo',
+        '--output-format',
+        'stream-json',
+        '--include-partial-messages',
+        '--prompt',
+        prompt,
+      ],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
+
+    const appendDiagnostic = (text) => {
+      diagnosticTail = (diagnosticTail + text).slice(-20_000);
+    };
+
+    const consumeStreamJsonLine = (line, terminated) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        lastOutputAt = Date.now();
+        if (event?.type === 'result') terminalResult = event;
+        if (event?.type !== 'stream_event') {
+          process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+        }
+      } catch {
+        appendDiagnostic(`${line}${terminated ? '\n' : ''}`);
+        process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+      }
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      const parts = text.split('\n');
+      for (const [index, part] of parts.entries()) {
+        const terminated = index < parts.length - 1;
+        if (!discardingOversizedStdoutLine) {
+          const remaining = MAX_STREAM_JSON_LINE_LENGTH - stdoutCarry.length;
+          if (part.length <= remaining) {
+            stdoutCarry += part;
+          } else {
+            stdoutCarry = '';
+            discardingOversizedStdoutLine = true;
+          }
+        }
+        if (terminated) {
+          if (discardingOversizedStdoutLine) {
+            process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+          } else {
+            consumeStreamJsonLine(stdoutCarry, true);
+          }
+          stdoutCarry = '';
+          discardingOversizedStdoutLine = false;
+        }
+      }
+      if (final) {
+        if (discardingOversizedStdoutLine) {
+          process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+        } else {
+          consumeStreamJsonLine(stdoutCarry, false);
+        }
+        stdoutCarry = '';
+        discardingOversizedStdoutLine = false;
+      }
+    };
 
     const finish = (result) => {
       if (settled) return;
@@ -218,12 +306,18 @@ function runQwen(options, prompt) {
       clearTimeout(timer);
       clearTimeout(killTimer);
       clearInterval(idleTimer);
-      const apiErrorInfo = recoverableApiError(outputTail);
+      consumeStreamJson('', true);
+      const terminalOutput = streamResultOutput(terminalResult);
+      const apiErrorInfo = recoverableApiError(
+        result.status === 0
+          ? terminalOutput
+          : `${diagnosticTail}\n${terminalOutput}`,
+      );
       const payload = {
         ...result,
         timedOut,
         idleTimedOut,
-        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        loopDetected: isLoopGuardResult(terminalResult),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
@@ -237,8 +331,7 @@ function runQwen(options, prompt) {
       }
     };
 
-    const record = (chunk, stream) => {
-      lastOutputAt = Date.now();
+    const record = (chunk, stream, source) => {
       const text = chunk.toString('utf8');
       if (!sandboxName) {
         lineCarry += text;
@@ -256,14 +349,18 @@ function runQwen(options, prompt) {
           }
         }
       }
-      outputTail = (outputTail + text).slice(-20_000);
-      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
+      if (source === 'stdout') {
+        consumeStreamJson(text);
+      } else {
+        lastOutputAt = Date.now();
+        appendDiagnostic(text);
+        stream.write(chunk);
+      }
       log.write(chunk);
-      stream.write(chunk);
     };
 
-    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
-    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr, 'stderr'));
     child.on('error', (error) => finish({ error, status: null, signal: null }));
     child.on('close', (status, signal) =>
       finish({ error: null, status, signal }),
@@ -394,7 +491,33 @@ const result = await runQwen(options, prompt);
 // timeout) so the leak warning and the removal itself settle before this
 // process exits and the next step inspects the host.
 if (result.sandboxRemoval) await result.sandboxRemoval;
-if (result.error || result.signal || result.status !== 0) {
+const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+const hasOutputVerdict = spec.anyOutput
+  ? presentOutputs.length > 0
+  : missingOutputs.length === 0;
+// A zero-byte handoff.md is not a verdict — the same non-empty convention
+// missing() and the gate's -s checks apply, so the two layers cannot
+// classify an empty file oppositely.
+const hasHandoffVerdict = !missing(options.workdir, ['handoff.md']).includes(
+  'handoff.md',
+);
+const apiErrorWithoutVerdict =
+  result.status === 0 &&
+  result.apiError &&
+  !hasOutputVerdict &&
+  !existsSync(file(options.workdir, 'failure.md')) &&
+  // A handoff is a verdict too: an agent that reached its BLOCKED stop must
+  // not be reclassified as a bare API blip by an error render in the tail.
+  !hasHandoffVerdict;
+if (
+  result.error ||
+  result.signal ||
+  result.status !== 0 ||
+  apiErrorWithoutVerdict
+) {
   const detail = result.error
     ? result.error.message
     : result.idleTimedOut
@@ -403,8 +526,26 @@ if (result.error || result.signal || result.status !== 0) {
         ? `timeout (${QWEN_TIMEOUT_MS}ms)`
         : result.signal
           ? `signal ${result.signal}`
-          : `status ${String(result.status)}`;
+          : apiErrorWithoutVerdict
+            ? 'recoverable API error without an agent verdict'
+            : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
+    if (hasHandoffVerdict) {
+      // A handoff is a verdict here too: the agent stopped under
+      // instruction and wrote its decision, then qwen died (crash,
+      // budget kill, loop guard). Synthesizing a failure.md would
+      // shadow the note — the gate reads failure.md first and would
+      // report a failed fix, and the timeout/api-error sentinels would
+      // re-hand the item the brake stopped on the next scan. Mirror the
+      // sibling arm that preserves an agent-written failure.md across
+      // the same crash, and exit 0 like the status-0 handoff path so
+      // the check color matches the outcome the gate reports from the
+      // preserved note.
+      console.error(
+        `Qwen failed during ${options.mode}: ${detail}; preserving agent-written handoff.md.`,
+      );
+      process.exit(0);
+    }
     if (result.loopDetected) {
       writeFailure(
         options.workdir,
@@ -462,7 +603,7 @@ if (result.error || result.signal || result.status !== 0) {
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
   }
-  process.exit(result.status ?? 1);
+  process.exit(result.status === 0 ? 1 : (result.status ?? 1));
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
@@ -475,18 +616,32 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
   process.exit(0);
 }
 
-const missingOutputs = missing(options.workdir, spec.outputs);
-const presentOutputs = spec.outputs.filter(
-  (name) => !missingOutputs.includes(name),
-);
+// A handoff the AGENT itself wrote — the growth-brake BLOCKED stop: the
+// feedback told it to defer to a human, so the round ends without a fix
+// verdict. Same standing as failure.md: a real, human-facing outcome, NOT
+// the missing-output failure class (which once reported a deliberate stop as
+// "finished without required output file(s)" and buried the brake's decision
+// under a generic failure.md). Honored only when no spec output exists: if
+// address-summary.md or no-action.md coexists, the runner exits on that
+// verdict, and the GATE decides the round — its handoff branch runs before
+// the no-action branch, so a deliberate stop outranks a co-written
+// no-change verdict and cannot close silently as "no action needed".
+if (!hasOutputVerdict && hasHandoffVerdict) {
+  const content = readFileSync(file(options.workdir, 'handoff.md'), 'utf8');
+  // Neutralize `::` workflow commands in agent-written content before it
+  // reaches the step log ('Show run artifacts' does the same).
+  console.error(
+    `Autofix agent wrote handoff.md:\n${content.replaceAll('::', ';;')}`,
+  );
+  process.exit(0);
+}
+
 if (spec.exclusiveOutput && presentOutputs.length > 1) {
   const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
   fail(message);
 }
-const ok = spec.anyOutput
-  ? missingOutputs.length < spec.outputs.length
-  : missingOutputs.length === 0;
+const ok = hasOutputVerdict;
 if (!ok) {
   const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);

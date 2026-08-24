@@ -34,8 +34,8 @@ function fakeGit(opts: {
 describe('resolveMergeBase', () => {
   it('prefers the remote-tracking ref, which is all a CI checkout has', () => {
     const git = fakeGit({
-      refs: ['origin/main', 'main'],
-      bases: { 'origin/main..pr-head': 'aaa111' },
+      refs: ['refs/remotes/origin/main', 'origin/main', 'main'],
+      bases: { 'refs/remotes/origin/main..pr-head': 'aaa111' },
     });
     const r = resolveMergeBase('origin', 'main', 'pr-head', git);
     expect(r).toEqual({ sha: 'aaa111', baseFetchFailed: false });
@@ -56,7 +56,7 @@ describe('resolveMergeBase', () => {
   it('falls through when the tracking ref exists but has no merge-base', () => {
     // An unrelated history on the remote ref: keep looking rather than give up.
     const git = fakeGit({
-      refs: ['origin/main', 'main'],
+      refs: ['refs/remotes/origin/main', 'origin/main', 'main'],
       bases: { 'main..pr-head': 'ccc333' },
     });
     expect(resolveMergeBase('origin', 'main', 'pr-head', git).sha).toBe(
@@ -70,8 +70,8 @@ describe('resolveMergeBase', () => {
     // review silently examines a diff nobody wrote.
     const git = fakeGit({
       fetchOk: false,
-      refs: ['origin/main'],
-      bases: { 'origin/main..pr-head': 'stale1' },
+      refs: ['refs/remotes/origin/main'],
+      bases: { 'refs/remotes/origin/main..pr-head': 'stale1' },
     });
     expect(resolveMergeBase('origin', 'main', 'pr-head', git)).toEqual({
       sha: 'stale1',
@@ -88,14 +88,47 @@ describe('resolveMergeBase', () => {
   });
 
   it('returns null when a ref resolves but shares no history', () => {
-    const git = fakeGit({ refs: ['origin/main', 'main'] });
+    const git = fakeGit({
+      refs: ['refs/remotes/origin/main', 'origin/main', 'main'],
+    });
     expect(resolveMergeBase('origin', 'main', 'pr-head', git).sha).toBeNull();
   });
 
   it('fetches the base branch before probing any ref', () => {
-    const git = fakeGit({ refs: ['origin/main'], bases: {} });
+    const git = fakeGit({ refs: ['refs/remotes/upstream/develop'], bases: {} });
     resolveMergeBase('upstream', 'develop', 'head', git);
     expect(git.calls[0]).toBe('fetch upstream develop');
-    expect(git.calls[1]).toBe('refExists upstream/develop');
+    expect(git.calls[1]).toBe('refExists refs/remotes/upstream/develop');
+  });
+
+  it('propagates a mergeBase throw — a surface failure is not "none"', () => {
+    // The caller demotes on this propagation: a catch added HERE would fold
+    // a surface failure back into {sha: null} and let the deterministic
+    // reason be stamped over an exit that a re-run might fix.
+    const git = fakeGit({ refs: ['refs/remotes/origin/main'] });
+    git.mergeBase = () => {
+      throw new Error('surface unavailable');
+    };
+    expect(() => resolveMergeBase('origin', 'main', 'pr-head', git)).toThrow(
+      'surface unavailable',
+    );
+  });
+
+  it('never merge-bases through an origin/<name> shadow tag', () => {
+    // A tag literally named `origin/main` — a pushable, server-controlled
+    // refname a plain clone auto-carries — resolves FIRST for the
+    // unqualified name (refs/tags before refs/remotes). The qualified
+    // candidate must win so the base is the tracking ref, not the shadow.
+    const git = fakeGit({
+      refs: ['origin/main', 'refs/remotes/origin/main'],
+      bases: {
+        'origin/main..pr-head': 'shadow-tag-base',
+        'refs/remotes/origin/main..pr-head': 'true-base',
+      },
+    });
+    expect(resolveMergeBase('origin', 'main', 'pr-head', git).sha).toBe(
+      'true-base',
+    );
+    expect(git.calls).not.toContain('mergeBase origin/main pr-head');
   });
 });

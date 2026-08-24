@@ -9,6 +9,11 @@ on:
       source:
         required: true
         type: 'string'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID:
+        required: true
+      ALIYUN_OSS_ACCESS_KEY_SECRET:
+        required: true
   workflow_dispatch:
     inputs:
       version:

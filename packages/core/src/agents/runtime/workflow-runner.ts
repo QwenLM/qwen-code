@@ -35,6 +35,7 @@ import { resolveSavedWorkflowScript } from './workflow-saved.js';
 export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
+  toolUseId?: string;
   script?: string;
   scriptPath?: string;
   args: unknown;
@@ -104,10 +105,14 @@ export class WorkflowRunner {
       throw new Error('Background workflow start was cancelled.');
     }
     const callerWasAbortedBeforeStart = options.signal.aborted;
+    const registry = config.getWorkflowRunRegistry?.();
+    let entry: WorkflowTask | undefined;
+    const isCurrentEntry = (): boolean =>
+      registry === undefined ||
+      (entry !== undefined && registry.get(runId) === entry);
     const controller = runInBackground
       ? createAbortController()
       : createChildAbortController(options.signal);
-    const registry = config.getWorkflowRunRegistry?.();
     const dispatch =
       options.dispatch ??
       createProductionDispatch(
@@ -115,14 +120,22 @@ export class WorkflowRunner {
         controller.signal,
         (outputTokens) => budget.recordSpent(outputTokens),
         registry
-          ? (emitter) => registry.bridgeApprovalEvents(runId, emitter)
+          ? (emitter, dispatchId) =>
+              isCurrentEntry()
+                ? registry.bridgeApprovalEvents(
+                    runId,
+                    emitter,
+                    dispatchId,
+                    entry,
+                  )
+                : () => undefined
           : undefined,
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
-    let entry: WorkflowTask | undefined;
     try {
       entry = registry?.register({
         runId,
+        toolUseId: options.toolUseId,
         meta: null,
         status: 'running',
         startTime: Date.now(),
@@ -131,6 +144,13 @@ export class WorkflowRunner {
         tokenBudgetTotal: budget.total,
         script,
         scriptPath,
+        args: options.args,
+        ...(options.resumeFromRunId
+          ? {
+              sourceRunId: options.resumeFromRunId,
+              startMode: 'retry' as const,
+            }
+          : {}),
         isBackgrounded: runInBackground,
       });
     } catch (error) {
@@ -138,7 +158,7 @@ export class WorkflowRunner {
       throw error;
     }
     const emitUpdate = (): void => {
-      if (!entry || !options.onUpdate) return;
+      if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
         options.onUpdate(entry);
       } catch {
@@ -147,22 +167,50 @@ export class WorkflowRunner {
     };
     const emitter: WorkflowOrchestratorEmitter = {
       phaseStarted: (title) => {
+        if (!isCurrentEntry()) return;
         registry?.onPhaseStarted(runId, title);
         emitUpdate();
       },
       agentDispatched: () => {
+        if (!isCurrentEntry()) return;
         registry?.onAgentDispatched(runId);
         emitUpdate();
       },
       agentCompleted: () => {
+        if (!isCurrentEntry()) return;
         // No emitUpdate: budgetUpdated fires right after and renders both
         // updates together (avoids 2x TUI redraws per agent).
         registry?.onAgentCompleted(runId);
       },
-      // Deliberate no-op: logs are snapshotted at terminal via
-      // setRecentLogs; per-line emit would cause up to 10k TUI redraws.
-      logAppended: () => {},
+      dispatchQueued: (event) => {
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchQueued(runId, event);
+        emitUpdate();
+      },
+      dispatchStarted: (dispatchId, startedAt) => {
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchStarted(runId, dispatchId, startedAt);
+        emitUpdate();
+      },
+      dispatchSettled: (dispatchId, error, endedAt) => {
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchSettled(
+          runId,
+          dispatchId,
+          error,
+          endedAt,
+          !runInBackground && options.signal.aborted,
+        );
+        emitUpdate();
+      },
+      // The registry records this without firing a status update, avoiding a
+      // TUI redraw per line while retaining the real replay timestamp.
+      logAppended: (line) => {
+        if (!isCurrentEntry()) return;
+        registry?.onLogAppended(runId, line);
+      },
       budgetUpdated: (spent, total) => {
+        if (!isCurrentEntry()) return;
         registry?.onBudgetUpdated(runId, spent, total);
         emitUpdate();
       },
@@ -171,7 +219,10 @@ export class WorkflowRunner {
     const scheduler = new WorkflowDispatchScheduler(
       resolveConcurrencyLimit(),
       controller.signal,
-      ({ state }) => registry?.onDispatchStateChange(runId, state),
+      ({ state }) => {
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchStateChange(runId, state);
+      },
     );
 
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
@@ -253,6 +304,7 @@ export class WorkflowRunner {
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
             });
             await writeWorkflowSnapshot(config, entry);
+            await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {

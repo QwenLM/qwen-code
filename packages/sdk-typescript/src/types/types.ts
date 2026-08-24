@@ -142,6 +142,7 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   // Common
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   // Metadata
   description?: string;
@@ -193,6 +194,24 @@ export interface CLIMcpServerConfig {
  * ```
  */
 export type McpServerConfig = CLIMcpServerConfig | SDKMcpServerConfig;
+
+export type EffortTier = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface EffortOverride {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+}
+
+export interface EffortStatus {
+  applied: boolean;
+  override: EffortOverride | null;
+  /**
+   * Human-readable reason assembled by the CLI for why the effort was not
+   * applied. Absent when the CLI predates this field or the effort applied;
+   * derive a fallback from `applied`/`override` when missing.
+   */
+  reason?: string;
+}
 
 /**
  * Type guard to check if a config is an SDK MCP server
@@ -288,7 +307,7 @@ export interface QueryOptions {
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+  permissionMode?: PermissionMode;
 
   /**
    * Custom permission handler for tool execution approval.
@@ -457,7 +476,7 @@ export interface QueryOptions {
   agents?: SubagentConfig[];
 
   /**
-   * Initial reasoning effort tier applied at session start.
+   * Initial reasoning effort tier requested at session start.
    *
    * Controls the depth of model reasoning/thinking. Higher tiers produce more
    * thorough reasoning at the cost of latency and tokens. Provider adapters
@@ -471,7 +490,7 @@ export interface QueryOptions {
    *
    * Use {@link Query.setEffort} to change the tier at runtime.
    */
-  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  effort?: EffortTier;
 
   /**
    * Include partial messages in the response stream.

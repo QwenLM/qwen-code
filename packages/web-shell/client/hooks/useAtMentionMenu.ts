@@ -25,7 +25,8 @@ export interface AtMentionProviderView {
 }
 
 export interface AtMentionItem extends WebShellAtItem {
-  kind?: 'insert' | 'directory' | 'mcp-server';
+  kind?: 'insert' | 'directory' | 'mcp-server' | 'upload';
+  fileKind?: DirectoryEntry['kind'];
   targetPath?: string;
   serverName?: string;
 }
@@ -172,13 +173,23 @@ export interface UseAtMentionMenuOptions {
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  /**
+   * Invoked when the user selects the synthetic "Upload file" item in the
+   * file provider. Receives the directory currently being browsed and a
+   * callback that re-inserts the mention query removed before the picker
+   * opened — call it when the picker closes without an upload so the typed
+   * text is not lost. When absent (upload unsupported), the item is hidden.
+   */
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 }
 
 const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
 const EMPTY_PROVIDERS: readonly WebShellAtProvider[] = [];
 const SEARCH_DEBOUNCE_MS = 150;
 const ITEM_LIMIT = 50;
-const FILE_ROOT_ITEM_LIMIT = ITEM_LIMIT + 1;
+// The empty-query file root view prefixes the current-directory item and,
+// when upload is available, the upload item ahead of the file entries.
+const FILE_ROOT_ITEM_LIMIT = ITEM_LIMIT + 2;
 export const FILE_PROVIDER_ID = 'files';
 const EXTENSIONS_PROVIDER_ID = 'extensions';
 export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
@@ -528,6 +539,15 @@ function sanitizeInsertText(raw: string): string {
   return stripped.length > 0 ? stripped : SAFE_DISPLAY_FALLBACK;
 }
 
+/**
+ * Build the composer insert text for a workspace file reference, e.g.
+ * `@path/to/file `. Shared by the @ file provider and the file-upload flow so
+ * both escape identically (filenames with spaces / non-ASCII / `%` are common).
+ */
+export function fileReferenceInsertText(filePath: string): string {
+  return `@${escapeAtReferenceText(sanitizeInsertText(filePath))} `;
+}
+
 function safeDisplayText(raw: string | undefined): string {
   if (raw === undefined) return SAFE_DISPLAY_FALLBACK;
   return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
@@ -632,6 +652,7 @@ function createComposerTagForItem(
       id: `file:${serialized}`,
       kind: 'file',
       value: item.description ?? item.label,
+      ...(item.fileKind ? { metadata: { fileKind: item.fileKind } } : {}),
       serialized,
     };
   }
@@ -644,6 +665,7 @@ function createFileProvider(
   getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
+  getUploadItem: () => AtMentionItem | null,
 ): WebShellAtProvider {
   return {
     id: FILE_PROVIDER_ID,
@@ -676,14 +698,18 @@ function createFileProvider(
             description: sanitizeDisplayText(dirPath),
             insertText: directoryInsertText(dirPath),
             kind: 'insert',
+            fileKind: 'directory',
           };
+          // The upload item only shows with an empty entry query (like the
+          // current-directory item) so it never pollutes filtered results.
+          const uploadItem = entryQuery ? null : getUploadItem();
           return [
+            ...(uploadItem ? [uploadItem] : []),
             ...(entryQuery ? [] : [currentDirectoryItem]),
-            ...entries.map((entry): AtMentionItem => {
+            ...entries.slice(0, ITEM_LIMIT).map((entry): AtMentionItem => {
               const path = joinWorkspacePath(dirPath, entry.name);
               const safeName = safeDisplayText(entry.name);
               const safePath = sanitizeDisplayText(path);
-              const safeInsertPath = sanitizeInsertText(path);
               if (entry.kind === 'directory') {
                 return {
                   id: `dir:${path}`,
@@ -697,8 +723,9 @@ function createFileProvider(
                 id: `file:${path}`,
                 label: safeName,
                 description: safePath,
-                insertText: `@${escapeAtReferenceText(safeInsertPath)} `,
+                insertText: fileReferenceInsertText(path),
                 kind: 'insert',
+                fileKind: entry.kind,
               };
             }),
           ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT);
@@ -727,8 +754,9 @@ function createFileProvider(
           .map((file) => ({
             id: file,
             label: safeDisplayText(file),
-            insertText: `@${escapeAtReferenceText(sanitizeInsertText(file))} `,
+            insertText: fileReferenceInsertText(file),
             kind: 'insert',
+            fileKind: 'file',
           }));
       } catch (error) {
         if (!signal.aborted) {
@@ -903,6 +931,7 @@ export function useAtMentionMenu({
   builtinProviders,
   providers = EMPTY_PROVIDERS,
   createInlineTagEffect,
+  onUploadRequest,
 }: UseAtMentionMenuOptions) {
   const { t } = useI18n();
   const [state, setState] = useState<AtMentionMenuState | null>(null);
@@ -926,6 +955,16 @@ export function useAtMentionMenu({
         () => builtinCacheRef.current,
         t('at.category.files'),
         t('at.category.files.description'),
+        () =>
+          onUploadRequest
+            ? {
+                id: 'upload-file',
+                label: t('at.files.upload'),
+                description: t('at.files.upload.description'),
+                kind: 'upload',
+                insertText: '',
+              }
+            : null,
       ),
       createExtensionProvider(
         () => workspaceActionsRef.current,
@@ -950,7 +989,7 @@ export function useAtMentionMenu({
       ...builtinAtProviders,
       ...getRegisteredCustomProviders(providers),
     ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [builtinProviders, providers, t, workspaceActionsRef]);
+  }, [builtinProviders, providers, t, workspaceActionsRef, onUploadRequest]);
   const allProvidersRef = useRef(allProviders);
   allProvidersRef.current = allProviders;
 
@@ -1182,8 +1221,11 @@ export function useAtMentionMenu({
           }
           setMenu((prev) => {
             if (!prev || prev.level !== 'items') return prev;
+            // The file provider prepends prefix items whenever its entry
+            // query is empty (e.g. `@src/`), not only for `query === ''`;
+            // filtered queries are already capped inside the provider.
             const maxItems =
-              providerId === FILE_PROVIDER_ID && query.length === 0
+              providerId === FILE_PROVIDER_ID
                 ? FILE_ROOT_ITEM_LIMIT
                 : ITEM_LIMIT;
             return {
@@ -1819,6 +1861,49 @@ export function useAtMentionMenu({
       if (current.selectedProviderId) {
         lastSelectedProviderIdRef.current = current.selectedProviderId;
       }
+      if (item.kind === 'upload') {
+        // Menu items are not recomputed when upload availability changes,
+        // so a stale item can be accepted after the handler disappears;
+        // dropping the typed query in that case would silently eat it.
+        if (disabledRef.current || !onUploadRequest) {
+          close();
+          return true;
+        }
+        const removedText = view.state.sliceDoc(current.from, current.to);
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert: '' },
+          selection: { anchor: current.from },
+        });
+        const docAfterRemoval = view.state.doc;
+        // Typed queries (`@src/`) browse a directory derived from the query
+        // text without syncing fileDirectoryRef, so re-derive the same
+        // directory the panel is displaying.
+        const { dirPath } = splitFileQuery(
+          current.query,
+          fileDirectoryRef.current,
+        );
+        onUploadRequest(dirPath, () => {
+          const doc = view.state.doc;
+          // Tolerate a pure end-append — the upload flow's own completed
+          // `@file` tags land there while the picker is open and never move
+          // the insertion point. Whole-doc session swaps flush this callback
+          // before the swap, so a foreign doc never reaches here.
+          if (
+            current.from > doc.length ||
+            doc.length < docAfterRemoval.length ||
+            doc.sliceString(0, docAfterRemoval.length) !==
+              docAfterRemoval.toString()
+          ) {
+            return;
+          }
+          view.dispatch({
+            changes: { from: current.from, insert: removedText },
+            selection: { anchor: current.from + removedText.length },
+          });
+        });
+        close();
+        return true;
+      }
       if (
         current.selectedProviderId === FILE_PROVIDER_ID &&
         item.kind === 'directory' &&
@@ -1918,7 +2003,9 @@ export function useAtMentionMenu({
       createInlineTagEffect,
       scheduleLoadItems,
       scheduleLoadMcpResourceItems,
+      disabledRef,
       viewRef,
+      onUploadRequest,
     ],
   );
 

@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageEmitter } from './MessageEmitter.js';
 import type { SessionContext } from '../types.js';
-import { apiActivityTracker, type Config } from '@qwen-code/qwen-code-core';
+import {
+  apiActivityTracker,
+  type Config,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core';
 
 describe('MessageEmitter', () => {
   let mockContext: SessionContext;
@@ -118,29 +122,6 @@ describe('MessageEmitter', () => {
     });
   });
 
-  describe('emitGoalTerminal', () => {
-    it('should send a goal terminal update in metadata', async () => {
-      const event = {
-        kind: 'achieved' as const,
-        condition: 'ship goal support',
-        iterations: 2,
-        durationMs: 1234,
-        lastReason: 'The requested support is complete.',
-      };
-
-      await emitter.emitGoalTerminal(event);
-
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '' },
-        _meta: {
-          goalTerminal: event,
-        },
-      });
-    });
-  });
-
   describe('emitGoalStatus', () => {
     it('should send a goal status update in metadata', async () => {
       const status = {
@@ -158,6 +139,60 @@ describe('MessageEmitter', () => {
         _meta: {
           goalStatus: status,
         },
+      });
+    });
+  });
+
+  describe('emitGoalState', () => {
+    it('sends canonical state with the legacy projection used by replay', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship ACP Goal support',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        },
+      };
+
+      await emitter.emitGoalState(snapshot, 'create');
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: snapshot,
+          goalStatus: {
+            kind: 'set',
+            condition: 'ship ACP Goal support',
+            iterations: 0,
+            setAt: 1234,
+            durationMs: 0,
+          },
+        },
+      });
+    });
+
+    it('emits an authoritative status snapshot without inventing a cause', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      };
+
+      await emitter.emitGoalState(snapshot);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: snapshot },
       });
     });
   });

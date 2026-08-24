@@ -157,6 +157,46 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session model metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('model', null, {
+        type: 'system',
+        subtype: 'session_model',
+        message: undefined,
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      }),
+      record('root', 'model'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'model',
+        path: 'subtype',
+      }),
+    );
+  });
+
+  it('accepts the workflow agent retry marker as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('root', null),
+      record('retry', 'root', {
+        type: 'system',
+        subtype: 'agent_retry',
+        message: undefined,
+        systemPayload: { attempt: 2 },
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'retry',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts Realtime dialogue as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('realtime-user', null, {
@@ -179,6 +219,28 @@ describe('prepareTranscriptRecords', () => {
       record('goal-runtime', 'goal-state', {
         subtype: 'goal_runtime',
       }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        path: 'subtype',
+      }),
+    );
+  });
+
+  it('accepts branch_checkpoint as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('checkpoint', null, {
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        message: undefined,
+        systemPayload: {
+          assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+          checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+        },
+      }),
+      record('root', 'checkpoint'),
     ]);
 
     expect(prepared.diagnostics).not.toContainEqual(
