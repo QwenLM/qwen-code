@@ -31,6 +31,29 @@ GROWTH_ALLOWANCE="${WORKFLOW_SIZE_GROWTH_ALLOWANCE:-4096}"
 # the slack for the next unreviewed 25 KB.
 SLACK_BYTES=20000
 
+# The ratchet compares the worktree against a checked-in baseline, so a
+# workflow that grew on main without the same-PR baseline bump leaves every
+# OTHER open PR failing a gate on a file it never touched (red-walled the
+# queue twice in two weeks: #9747, #9822). When the caller passes the PR's
+# base commit in WORKFLOW_SIZE_BASE_SHA, the growth branch below hard-fails
+# only if the PR actually changed the file; a byte-identical copy means the
+# staleness is main-side drift and earns a warning instead. An unresolvable
+# base (local run, fetch failure) falls back to the strict failure — the
+# ratchet fails closed, never open. One residual window stays by design: if
+# main edits the same workflow again after the PR branched, the comparison
+# against the new base sees the PR's older copy as different and fails closed
+# until that PR rebases — self-healing, and still fail-closed, so it is left
+# alone rather than wiring the PR's changed-files list into a gate that today
+# needs no API call.
+BASE_SHA="${WORKFLOW_SIZE_BASE_SHA:-}"
+file_matches_base() {
+  local file="$1"
+  [[ -n "${BASE_SHA}" ]] || return 1
+  git rev-parse --verify --quiet "${BASE_SHA}^{commit}" >/dev/null ||
+    git fetch --depth=1 --quiet origin "${BASE_SHA}" || return 1
+  git show "${BASE_SHA}:${file}" 2>/dev/null | cmp -s - "${file}"
+}
+
 status=0
 declare -A baseline=()
 if [[ -r "${BASELINE_FILE}" ]]; then
@@ -75,8 +98,12 @@ for file in .github/workflows/*.yml .github/workflows/*.yaml; do
     echo "::error file=${file}::${file} has no entry in ${BASELINE_FILE}. Add '${size} ${file##*/}' so its growth is tracked."
     status=1
   elif ((size > base + GROWTH_ALLOWANCE)); then
-    echo "::error file=${file}::${file} grew to ${size} bytes, $((size - base)) over its recorded ${base} (allowance ${GROWTH_ALLOWANCE}). Move prose into a sibling .md and long steps into .github/scripts/ — or, if the growth is real, update ${BASELINE_FILE} in this PR and say why."
-    status=1
+    if file_matches_base "${file}"; then
+      echo "::warning file=${file}::${file} is ${size} bytes, $((size - base)) over its recorded ${base}, but the file is unchanged from this PR's base — the baseline went stale on main, not in this PR. Bump ${BASELINE_FILE} on main (a one-line PR saying why); unrelated PRs are not blocked."
+    else
+      echo "::error file=${file}::${file} grew to ${size} bytes, $((size - base)) over its recorded ${base} (allowance ${GROWTH_ALLOWANCE}). Move prose into a sibling .md and long steps into .github/scripts/ — or, if the growth is real, update ${BASELINE_FILE} in this PR and say why."
+      status=1
+    fi
   elif ((size + SLACK_BYTES < base)); then
     echo "::warning file=${file}::${file} is ${size} bytes, $((base - size)) under its recorded ${base} — lower the entry in ${BASELINE_FILE} so the slack is not banked."
   fi

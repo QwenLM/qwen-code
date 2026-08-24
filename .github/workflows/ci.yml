@@ -317,6 +317,11 @@ jobs:
       # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
       - name: 'Check workflow file size'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          # Lets the growth ratchet tell "this PR grew the workflow" apart
+          # from "the baseline went stale on main" so one author's missing
+          # baseline bump cannot red-wall every unrelated open PR (#9904).
+          WORKFLOW_SIZE_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
         run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
