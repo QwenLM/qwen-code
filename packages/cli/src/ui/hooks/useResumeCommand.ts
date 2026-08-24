@@ -170,6 +170,14 @@ export function useResumeCommand(
         //    pattern: if anything fails between core swap and UI swap,
         //    the catch block rolls core back to the old session so the
         //    user is not stranded with a half-live client.
+        //
+        // Open the telemetry swap transaction BEFORE the core swap: the
+        // initialize() below replays the resumed session's stored usage
+        // straight into the process-wide aggregate, and the catch path must
+        // be able to put it back (#9833). The transaction arms its own
+        // snapshot inside the client's replay decision, so opening it early
+        // costs nothing when no replay happens.
+        config.getGeminiClient()?.beginTelemetrySwap?.();
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
@@ -189,8 +197,16 @@ export function useResumeCommand(
 
         // 2. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the resumed session but recorder writing
-        //    into the old JSONL (split-brain).
+        //    into the old JSONL (split-brain). The commit point is the
+        //    stats-provider re-key itself: from here on a failure must not
+        //    roll core back OR undo the telemetry replay — the re-keyed
+        //    display would read the abandoned session's dropped bucket as
+        //    zeros, and core would be split-brained against the UI key.
+        //    The remaining steps (name, history items, notice) are display
+        //    state for a swap that has already committed.
         startNewSession(sessionId);
+        uiSwapped = true;
+        config.getGeminiClient()?.commitTelemetrySwap?.();
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
@@ -204,7 +220,6 @@ export function useResumeCommand(
             Date.now(),
           );
         }
-        uiSwapped = true;
 
         // SessionStart hook is handled during chat initialization so its
         // additionalContext can be injected into the resumed model context.
@@ -239,6 +254,18 @@ export function useResumeCommand(
                 `Rollback after failed /resume init failed: ${rollbackErr}`,
               );
           }
+          // Core is back on the old session: put the usage aggregate (and
+          // the two affected session buckets) back to pre-swap state,
+          // dropping the abandoned session's replayed history. Must run
+          // AFTER the rollback above — restore overwrites, so anything the
+          // rollback itself replayed is correctly superseded (#9833).
+          config.getGeminiClient()?.abortTelemetrySwap?.();
+        } else {
+          // Either the core swap never happened (nothing was replayed —
+          // the transaction is unarmed) or the UI already committed (the
+          // replay belongs to the session the user is on). Both close the
+          // transaction without restoring.
+          config.getGeminiClient()?.commitTelemetrySwap?.();
         }
         addItem(
           {

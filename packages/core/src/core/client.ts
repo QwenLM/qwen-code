@@ -107,6 +107,7 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
 import {
@@ -350,6 +351,15 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 export class GeminiClient {
   private chat?: GeminiChat;
   private initializedSessionId: string | undefined;
+  /**
+   * Open session-swap telemetry transaction, if any. See
+   * {@link beginTelemetrySwap} for the lifetime contract. Holds the undo for
+   * the replay the current swap's `initialize()` performed, armed by
+   * {@link armTelemetrySwapUndo} inside the replay branches.
+   */
+  private telemetrySwap?: {
+    undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
+  };
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -466,6 +476,7 @@ export class GeminiClient {
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     if (restoreRuntime) {
+      this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
         uiTelemetryService.addEvent(event, sessionId);
@@ -490,6 +501,7 @@ export class GeminiClient {
         );
       }
     } else if (resumedSessionData) {
+      this.armTelemetrySwapUndo(sessionId);
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -576,6 +588,100 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Opens a session-swap telemetry transaction for the `/resume` / `/branch`
+   * hooks (#9833).
+   *
+   * Lifetime contract: one call per swap attempt, closed by exactly one
+   * {@link commitTelemetrySwap} (the UI swap committed — the replayed history
+   * now belongs to the session the user is on) or
+   * {@link abortTelemetrySwap} (the swap failed and core rolled back — put
+   * the usage aggregate back). The undo is armed lazily by
+   * {@link armTelemetrySwapUndo} inside `initialize()`'s replay branches, so
+   * it is scoped to the ONE replay this swap performs:
+   *
+   * - A replay outside any transaction (process-startup `Config.initialize()`,
+   *   ACP) arms nothing — there is no owning swap to settle it, and a
+   *   process-lived undo would let a much later failed swap restore a
+   *   process-start snapshot and wipe everything accrued since.
+   * - `initialize()` only replays when its private `initializedSessionId`
+   *   differs from the config session id. The hooks cannot see that fact, so
+   *   the snapshot is taken here, inside the replay decision, never keyed on
+   *   a caller's guess.
+   *
+   * Idempotent within a swap: opening while a transaction is already open
+   * keeps the existing one (the earliest snapshot is the correct pre-swap
+   * state).
+   */
+  beginTelemetrySwap(): void {
+    this.telemetrySwap ??= {};
+  }
+
+  /**
+   * The swap committed: drop the armed undo without restoring. The replayed
+   * history legitimately belongs to the session the user is now on, and a
+   * later failed swap must restore ITS OWN pre-swap snapshot, never this one.
+   * Safe to call with no transaction open (no-op).
+   */
+  commitTelemetrySwap(): void {
+    this.telemetrySwap = undefined;
+  }
+
+  /**
+   * The swap failed and core rolled back: restore the usage aggregate (and
+   * the two affected session buckets) to the state captured before this
+   * swap's replay. Overwrites rather than subtracts, so it stays correct
+   * when the rollback's own re-`initialize()` (the `/branch` path) has
+   * already replayed something else on top.
+   *
+   * Also forgets `initializedSessionId` when it still names the abandoned
+   * session: undoing the replay without forgetting it would make a retry
+   * early-return and never replay, permanently under-counting the session.
+   * The `/branch` rollback re-initializes the PARENT session first, so by the
+   * time this runs `initializedSessionId` names the parent and is kept.
+   *
+   * Safe to call with no transaction open or nothing armed (no-op). Returns
+   * whether an undo was applied.
+   */
+  abortTelemetrySwap(): boolean {
+    const swap = this.telemetrySwap;
+    this.telemetrySwap = undefined;
+    if (!swap?.undo) return false;
+    uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
+    if (this.initializedSessionId === swap.undo.sessionId) {
+      this.initializedSessionId = undefined;
+    }
+    return true;
+  }
+
+  /**
+   * Arms the undo for the replay the current `initialize()` call is about to
+   * perform. Called only by the replay branches; a fresh-start `initialize()`
+   * replays nothing, and an undo armed there would outlive the transaction.
+   *
+   * `??=` on the undo: within one swap only the FIRST replay's pre-state is
+   * the correct restore point — on the `/branch` rollback the re-initialize
+   * of the parent runs while the failed swap's undo is still outstanding.
+   * No-ops when no transaction is open (replay outside a swap).
+   *
+   * The snapshot also covers the session the process is currently on
+   * (`initializedSessionId` still names it at arm time): the `/branch`
+   * rollback re-initializes that session, and the re-initialize's
+   * `resetSession` wipes its live bucket — only what the transcript persists
+   * comes back (skill invocations never do), so the undo must put the
+   * captured bucket back.
+   */
+  private armTelemetrySwapUndo(sessionId: string): void {
+    if (!this.telemetrySwap || this.telemetrySwap.undo) return;
+    this.telemetrySwap.undo = {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(
+        sessionId,
+        this.initializedSessionId,
+      ),
+    };
   }
 
   getHistory(curated: boolean = false): Content[] {

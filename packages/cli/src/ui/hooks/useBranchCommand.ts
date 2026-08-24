@@ -197,6 +197,14 @@ export function useBranchCommand(
         //    block below — without it, a failure between swap and UI
         //    update would leave core on the fork while UI still shows
         //    the parent, silently recording user input into an orphan.
+        //
+        // Open the telemetry swap transaction BEFORE the core swap: the
+        // initialize() below replays the fork's stored usage (the parent's
+        // whole history) straight into the process-wide aggregate, and the
+        // catch path must be able to put it back (#9833). The transaction
+        // arms its own snapshot inside the client's replay decision, so
+        // opening it early costs nothing when no replay happens.
+        config.getGeminiClient()?.beginTelemetrySwap?.();
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -204,10 +212,13 @@ export function useBranchCommand(
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
-        //    the parent JSONL (the inverse split-brain). `uiSwapped` is
-        //    set immediately after the UI commits so any subsequent
-        //    failure (hook, remount, announce) skips the catch
-        //    block's core rollback.
+        //    the parent JSONL (the inverse split-brain). The commit point
+        //    is the stats-provider re-key itself: from here on a failure
+        //    must not roll core back OR undo the telemetry replay — the
+        //    re-keyed display would read the fork's dropped bucket as
+        //    zeros. `uiSwapped` gates the catch block's core rollback;
+        //    post-commit failures (history items, remount, announce) are
+        //    non-fatal and surfaced as an error item.
         const rawItems = buildResumedHistoryItems(resumed, config);
         const collapseOnResume =
           options.settings.merged.ui?.history?.collapseOnResume ?? false;
@@ -219,10 +230,11 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        uiSwapped = true;
+        config.getGeminiClient()?.commitTelemetrySwap?.();
         clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
-        uiSwapped = true;
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.
@@ -281,6 +293,19 @@ export function useBranchCommand(
                 `Rollback after failed /branch init failed: ${rollbackErr}`,
               );
           }
+          // Core is back on the parent: put the usage aggregate (and the
+          // two affected session buckets) back to pre-swap state. Must run
+          // AFTER the rollback's re-initialize above — that re-initialize
+          // replays the parent's history on top of the fork's already-
+          // committed replay, and restore overwrites rather than subtracts,
+          // so the final state is exactly pre-swap (#9833).
+          config.getGeminiClient()?.abortTelemetrySwap?.();
+        } else {
+          // Either the core swap never happened (nothing was replayed —
+          // the transaction is unarmed) or the UI already committed (the
+          // replay belongs to the session the user is on). Both close the
+          // transaction without restoring.
+          config.getGeminiClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {
           try {
