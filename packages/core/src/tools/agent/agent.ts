@@ -2197,6 +2197,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Get the results
       const subagentRawText = subagent.getFinalText();
       const terminateMode = subagent.getTerminateMode();
+      // Which loop detector fired when the subagent stopped on a loop
+      // (issue #9450). The FINISH event handler augmented terminateReason
+      // with it, but the display update below merge-overwrites that —
+      // re-apply the same augmentation here or the committed task card
+      // (execute() returns this.currentDisplay) shows bare LOOP_DETECTED.
+      const loopType = subagent.getLoopType();
       const finalText = appendStopHookBlockingCapWarning(
         toModelVisibleSubagentResult(subagentRawText, terminateMode),
         stopHookWarning,
@@ -2236,7 +2242,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.updateDisplay(
           {
             status: success ? 'completed' : 'failed',
-            terminateReason: terminateMode,
+            terminateReason: loopType
+              ? `${terminateMode} (${loopType})`
+              : terminateMode,
             result: finalText,
             executionSummary,
           },

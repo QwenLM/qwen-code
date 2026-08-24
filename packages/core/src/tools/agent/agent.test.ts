@@ -2183,6 +2183,7 @@ describe('AgentTool', () => {
           failedToolCalls: 0,
         }),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
       } as unknown as AgentHeadless;
 
       mockContextState = {
@@ -2236,6 +2237,37 @@ describe('AgentTool', () => {
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
+    });
+
+    it('keeps the loop attribution on the final task card when the subagent stops on a loop (issue #9450)', async () => {
+      // The FINISH handler augments terminateReason with the loop type,
+      // but the post-await display update merge-overwrites currentDisplay
+      // and execute() returns that display as the committed card — so the
+      // update must re-apply the augmentation or the card collapses back
+      // to bare LOOP_DETECTED and the failed task is unattributable.
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.LOOP_DETECTED,
+      );
+      vi.mocked(mockAgent.getLoopType).mockReturnValue('turn_tool_call_cap');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.type).toBe('task_execution');
+      expect(display.status).toBe('failed');
+      expect(display.terminateReason).toBe(
+        `${AgentTerminateMode.LOOP_DETECTED} (turn_tool_call_cap)`,
+      );
     });
 
     it('rejects working_dir when the resolved subagent config runs in the background', async () => {
@@ -3720,6 +3752,7 @@ describe('AgentTool', () => {
           failedToolCalls: 0,
         }),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
       } as unknown as AgentHeadless;
 
       mockContextState = {
@@ -4984,6 +5017,7 @@ describe('AgentTool', () => {
           failedToolCalls: 0,
         }),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
       } as unknown as AgentHeadless;
 
       mockContextState = {
@@ -5180,6 +5214,7 @@ describe('AgentTool', () => {
           failedToolCalls: 0,
         }),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
       } as unknown as AgentHeadless;
 
       mockContextState = {
@@ -5531,6 +5566,7 @@ describe('AgentTool', () => {
           failedToolCalls: 0,
         }),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
       } as unknown as AgentHeadless;
 
       vi.mocked(mockAgent.execute).mockImplementation(async () => {
@@ -5914,6 +5950,7 @@ describe('AgentTool', () => {
         executeExternalInputs: vi.fn().mockResolvedValue(undefined),
         getFinalText: vi.fn().mockReturnValue('Monitor done'),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getLoopType: vi.fn().mockReturnValue(null),
         getExecutionSummary: vi.fn().mockReturnValue({}),
         // Background spawn subscribes to the core's event emitter to
         // populate the entry's recentActivities buffer. Return a stub
