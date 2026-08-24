@@ -834,6 +834,11 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
+    permissionManager?: {
+      isToolEnabled: (name: string) => Promise<boolean>;
+      findMatchingDenyRule: (ctx: unknown) => string | undefined;
+      isPermissionsAllowListActive: () => boolean;
+    };
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -866,6 +871,7 @@ describe('CoreToolScheduler', () => {
         setApprovalMode: options.setApprovalMode ?? vi.fn(),
         getPermissionsAllow: () => [],
         getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
+        getPermissionManager: () => options.permissionManager,
         getContentGeneratorConfig: () => ({
           model: 'test-model',
           authType: 'gemini',
@@ -3456,6 +3462,111 @@ describe('CoreToolScheduler', () => {
     }
     expect(execute).not.toHaveBeenCalled();
     expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it('attributes a registry-allowlist miss to permissions.allow, not a deny rule (#9827)', async () => {
+    // When isToolEnabled rejects because the tool is not covered by the
+    // active permissions.allow allowlist, findMatchingDenyRule finds
+    // nothing — nothing was ever asked or declined. The error must point
+    // at the real config knob instead of citing a nonexistent deny rule.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'allowlist-miss',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-allowlist-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toContain('permissions.allow');
+      expect(message).toContain(ToolNames.SEND_MESSAGE);
+      expect(message).not.toContain('declined');
+      expect(message).not.toContain('deny rule');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy declined message when the tool is disabled without an active allowlist (#9827)', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'disabled-no-allowlist',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-disabled-no-allowlist',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "send_message", but that permission was declined.',
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('preserves cancellation when permission evaluation resolves after abort', async () => {

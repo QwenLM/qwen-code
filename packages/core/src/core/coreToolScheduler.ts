@@ -2470,10 +2470,19 @@ export class CoreToolScheduler {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
             });
-            const ruleInfo = matchingRule
-              ? ` Matching deny rule: "${matchingRule}".`
-              : '';
-            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            let permissionErrorMessage: string;
+            if (matchingRule) {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
+            } else if (pm.isPermissionsAllowListActive()) {
+              // The tool was rejected by the `permissions.allow` registry
+              // allowlist, not by any deny rule: it is not covered by an
+              // allow/ask rule and so was never registered. Point at the
+              // real config knob instead of a denial that never happened
+              // (nothing was ever asked or declined on this path).
+              permissionErrorMessage = `"${reqInfo.name}" is not covered by any permissions.allow rule in the active registry allowlist, so the tool is not available. Add a rule covering it to settings permissions.allow (or permissions.ask) and restart to re-enable it.`;
+            } else {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
