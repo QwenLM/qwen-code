@@ -4896,6 +4896,59 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it('keeps the fallback probe signal live after the drain abort (no spurious AbortError)', async () => {
+      // Regression for the empty-fallback probe: the shared stream guard aborts
+      // the per-request controller the moment the source stream drains, which
+      // happens before the probe runs. The probe must NOT inherit that
+      // already-aborted signal, or the SDK rejects it immediately with a
+      // spurious AbortError instead of surfacing the provider's real error
+      // (e.g. a 402 credit-balance response). Model the SDK's abort semantics:
+      // the probe's `create` rejects at call time when handed an aborted signal.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            // Empty stream: drains immediately, after which the guard aborts
+            // the per-request controller and the fallback probe runs.
+          })(),
+        )
+        .mockImplementationOnce(
+          (_req: unknown, opts: { signal?: AbortSignal }) => {
+            if (opts?.signal?.aborted) {
+              const abortErr = new Error('The operation was aborted');
+              abortErr.name = 'AbortError';
+              return Promise.reject(abortErr);
+            }
+            return Promise.reject(new Error('402 credit balance is too low'));
+          },
+        );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _chunk of stream) {
+          void _chunk;
+        }
+      }).rejects.toThrow('402 credit balance is too low');
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+    });
+
     it.each([
       { case: 'an empty buffer', partialJson: '' },
       { case: 'a partial buffer', partialJson: '{"file_path":' },

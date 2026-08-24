@@ -468,7 +468,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const inner = this.processStreamWithEmptyFallback(
       this.redactStreamErrors(guardedStream),
       anthropicRequest,
-      perRequestAc.signal,
+      // The empty-stream fallback probe needs a signal that is still live
+      // after the source stream drains. The shared stream guard aborts
+      // `perRequestAc` in its `finally` the moment the source drains — which
+      // happens before the probe runs — so pass the caller's signal instead;
+      // the probe derives its own short-lived child from it.
+      request.config?.abortSignal,
       headers,
       telemetryAttempt,
     );
@@ -1657,6 +1662,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     let response: Message;
+    // Derive a fresh short-lived child for the probe from the caller's signal.
+    // Reusing the per-request controller is wrong here: the shared stream guard
+    // already aborted it when the source drained (its `finally` cleanup), and
+    // passing an already-aborted signal makes the SDK reject immediately with
+    // a spurious AbortError instead of surfacing the provider's real error
+    // (e.g. a 402 credit-balance response). A child of the caller's signal
+    // keeps the probe cancellable by the user while ignoring the drain abort,
+    // and aborting it once the probe settles releases the SDK's abort listener.
+    const probeAc = createChildAbortController(abortSignal);
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
       const fallbackAttempt = reportAnthropicFollowingRequest(
@@ -1664,13 +1678,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         telemetryAttempt,
       );
       response = (await this.client.messages.create(fallbackRequest, {
-        signal: abortSignal,
+        signal: probeAc.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
       reportAnthropicResponse(fallbackAttempt, response);
       yield this.converter.convertAnthropicResponseToGemini(response);
     } catch (error) {
       throw redactProxyError(error);
+    } finally {
+      probeAc.abort();
     }
   }
 
