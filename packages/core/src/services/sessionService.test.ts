@@ -1832,6 +1832,36 @@ describe('SessionService', () => {
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
 
+    it('commits usage when a later transcript deletion fails', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      const unlinkError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      unlinkSyncSpy
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => {
+          throw unlinkError;
+        });
+
+      await expect(sessionService.removeSession(sessionIdA)).rejects.toBe(
+        unlinkError,
+      );
+
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(commitUsageBeforeTranscriptDeletion).toHaveBeenCalledTimes(1);
+      const commitOrder = vi.mocked(commitUsageBeforeTranscriptDeletion).mock
+        .invocationCallOrder[0]!;
+      expect(commitOrder).toBeGreaterThan(
+        unlinkSyncSpy.mock.invocationCallOrder[0]!,
+      );
+      expect(commitOrder).toBeLessThan(
+        unlinkSyncSpy.mock.invocationCallOrder[1]!,
+      );
+    });
+
     it('should clear session organization when removing a session', async () => {
       const warnings: string[] = [];
       sessionService = new SessionService('/test/project/root', {

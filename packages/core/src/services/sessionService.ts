@@ -2278,14 +2278,17 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
-      const preparedUsage: PreparedUsageBeforeTranscriptDeletion[] = [];
+      const preparedUsage = new Map<
+        string,
+        PreparedUsageBeforeTranscriptDeletion
+      >();
       const preparedSessionIds = new Set<string>();
       for (const identity of physicalSnapshot.identities) {
         const prepared = await this.prepareUsageSalvageBestEffort(
           identity.filePath,
         );
         if (prepared && !preparedSessionIds.has(prepared.record.sessionId)) {
-          preparedUsage.push(prepared);
+          preparedUsage.set(identity.filePath, prepared);
           preparedSessionIds.add(prepared.record.sessionId);
         }
       }
@@ -2294,9 +2297,9 @@ export class SessionService {
       this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
       for (const identity of physicalSnapshot.identities) {
         this.removeFileIfExists(identity.filePath);
-      }
-      for (const prepared of preparedUsage) {
-        this.commitUsageSalvageBestEffort(prepared);
+        this.commitUsageSalvageBestEffort(
+          preparedUsage.get(identity.filePath) ?? null,
+        );
       }
       options.assertCanMutate?.();
       this.removeWorktreeSidecars(sessionId);
