@@ -364,6 +364,7 @@ const EN: Messages = {
   'agentType.general-purpose': 'General-purpose',
   'agentType.explore': 'Explore',
   'agentType.statusline-setup': 'Status Line Setup',
+  'agentType.review-agent': 'Review Agent',
   'agentType.test-engineer': 'Test Engineer',
   'agentType.fork': 'Fork',
   'timeline.parallelAgents': 'Parallel agents',
@@ -1369,6 +1370,9 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
@@ -1434,6 +1438,8 @@ const EN: Messages = {
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
+  'queue.commandGoalBlocked':
+    'Slash commands are unavailable while a Goal owns the session or its state is loading.',
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
   'queue.shellDropped': (v) => {
@@ -2602,6 +2608,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -3425,6 +3433,7 @@ const ZH: Messages = {
   'agentType.general-purpose': '通用',
   'agentType.explore': '探索',
   'agentType.statusline-setup': '状态栏设置',
+  'agentType.review-agent': '代码评审',
   'agentType.test-engineer': '测试工程师',
   'agentType.fork': '分支',
   'timeline.parallelAgents': '并行智能体',
@@ -4370,6 +4379,9 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
@@ -4431,6 +4443,8 @@ const ZH: Messages = {
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
+  'queue.commandGoalBlocked':
+    'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
@@ -5503,6 +5517,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,

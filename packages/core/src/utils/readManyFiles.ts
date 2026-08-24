@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { getErrorMessage, isAbortError } from './errors.js';
 import type {
+  FileType,
   ProcessedFileReadResult,
   ProcessSingleFileContentOptions,
 } from './fileUtils.js';
@@ -188,10 +189,12 @@ export async function readManyFiles(
         seenFiles.add(fullPath);
         let shouldUseTextHandle = false;
         let shouldSnapshot = false;
+        let validatedFileType: FileType | undefined;
         if (validatedIdentity) {
           const standardFileSystem =
             config.getFileSystemService() instanceof StandardFileSystemService;
           const fileType = await detectFileType(fullPath);
+          validatedFileType = fileType;
           shouldUseTextHandle = standardFileSystem && fileType === 'text';
           shouldSnapshot =
             !shouldUseTextHandle &&
@@ -243,7 +246,9 @@ export async function readManyFiles(
               displayPath,
               snapshot?.stats,
               validateAfterRead,
-              undefined,
+              !snapshot && validatedFileType
+                ? { fileType: validatedFileType }
+                : undefined,
               fullPath,
             );
           } finally {
@@ -473,7 +478,7 @@ async function readFileContent(
   validateAfterRead?: () => Promise<boolean>,
   processOptions?: Pick<
     ProcessSingleFileContentOptions,
-    'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes'
+    'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes' | 'fileType'
   >,
   canonicalPath?: string,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {

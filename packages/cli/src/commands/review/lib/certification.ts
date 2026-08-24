@@ -70,7 +70,7 @@ export function declaresOwnUncoverable(
  * not one per half. This wrapper only spreads it over a record's call list;
  * every path atom below routes through it.
  *
- * The name is deliberately not `namesPath`: `utils/findings.ts` has a
+ * The name is deliberately not `namesPath`: `findings.ts` has a
  * module-private `namesPath` that matches a path named in PROSE on a name
  * boundary — it credits `rm /plan/chunk-3.brief.md` for naming the brief.
  * Unifying these two would make `openedBrief` credit an agent for deleting a

@@ -20,6 +20,9 @@ const {
   writeFileSyncMock,
   rmSyncMock,
   mkdirSyncMock,
+  getPlatformReaderMock,
+  registryDefaultRef,
+  writeStdoutLineMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghApiAllMock: vi.fn(),
@@ -29,6 +32,11 @@ const {
   writeFileSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
+  getPlatformReaderMock: vi.fn(),
+  registryDefaultRef: {
+    current: undefined as ((hint?: { host?: string }) => unknown) | undefined,
+  },
+  writeStdoutLineMock: vi.fn(),
 }));
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -41,6 +49,36 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
   };
+});
+
+// The spy pins the GitHub reader by default: the GitHub-path tests must
+// NOT ride detection's cwd-origin probe — from a clone whose origin is an
+// Aone host (an internal mirror, exactly the environment this PR family
+// targets) the probe reroutes them onto the REAL aoneReader and the suite
+// dies in ensureAoneAuthenticated instead of exercising the mocked gh
+// path. True-detection routing is pinned where it lives
+// (lib/platform/registry.test.ts). An Aone `--host` hint still delegates
+// to the real registry — it short-circuits before the cwd probe — and the
+// Aone suite below overrides the mock wholesale.
+vi.mock('./lib/platform/registry.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const real = actual['getPlatformReader'] as (hint?: unknown) => unknown;
+  const isAoneHost = actual['isAoneHost'] as (host?: string) => boolean;
+  const { githubReader } = await import('./lib/platform/github.js');
+  const pinnedDefault = (hint?: { host?: string }) =>
+    isAoneHost(hint?.host) ? real(hint) : githubReader;
+  registryDefaultRef.current = pinnedDefault;
+  getPlatformReaderMock.mockImplementation(pinnedDefault);
+  return {
+    ...actual,
+    getPlatformReader: getPlatformReaderMock,
+  };
+});
+
+// The handler's stdout summary (the blocker count) is asserted below.
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, writeStdoutLine: writeStdoutLineMock };
 });
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -62,6 +100,7 @@ import {
   truncatedHeadings,
   buildMarkdown,
   carriesBlockerSignal,
+  isIssueBlocker,
   extractCodeRefs,
   classifyInlineThreads,
   fullBody,
@@ -630,6 +669,63 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
   });
 });
 
+describe('buildMarkdown — ledger carriers never self-promote (Aone summary channel)', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'master',
+    headRefName: 'sha',
+    headRefOid: 'sha',
+    state: 'opened',
+  } as PrMetadata;
+  const marker =
+    '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[{"id":"R1-1","sev":"C","file":"src/a.ts","title":"the guard is wrong"}]} -->';
+
+  it('excludes a Critical-bearing carrier summary from blocker promotion', () => {
+    // On Aone the posted round summary is a path-less comment, so it rides
+    // the issue channel; its visible `**[Critical]**` line used to
+    // self-promote it beside the ledger section and the inline roots that
+    // already carry the same findings.
+    const summary: RawComment = {
+      id: 9,
+      user: { login: 'ci-bot' },
+      body: `Round 1 summary.\n\n**[Critical]** R1-1: the guard is wrong\n\n${marker}`,
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [summary], []);
+    expect(md).not.toContain('## Blockers to re-check');
+    // The summary's visible prose still settles into "Already discussed" —
+    // on Aone the thread channel is the only place it renders at all.
+    const discussed = md.indexOf('## Already discussed');
+    expect(discussed).toBeGreaterThanOrEqual(0);
+    expect(md.indexOf('Round 1 summary.')).toBeGreaterThan(discussed);
+  });
+
+  it('strips the marker JSON out of a settled carrier snippet', () => {
+    const summary: RawComment = {
+      id: 9,
+      user: { login: 'ci-bot' },
+      body: `Round 1 summary.\n${marker}`,
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [summary], []);
+    expect(md).toContain('Round 1 summary.');
+    // The machine JSON never renders into the context file; the parsed copy
+    // travels in the ledger section.
+    expect(md).not.toContain('qwen-review-ledger');
+  });
+
+  it('still promotes a genuine human blocker on the issue channel', () => {
+    const human: RawComment = {
+      id: 4,
+      user: { login: 'maintainer' },
+      body: 'still broken: the guard checks the wrong variable (blocker)',
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [human], []);
+    expect(md).toContain('## Blockers to re-check');
+    expect(md).toContain('still broken: the guard checks the wrong variable');
+  });
+});
+
 describe('extractCodeRefs', () => {
   it('pulls the locations a blocker points at, with line numbers', () => {
     expect(
@@ -884,6 +980,34 @@ describe('carriesBlockerSignal', () => {
     );
     expect(carriesBlockerSignal('LGTM, nice work')).toBe(false);
     expect(carriesBlockerSignal(undefined)).toBe(false);
+  });
+});
+
+// The issue channel's one promotion gate. On Aone this pipeline's own round
+// summaries ride it (path-less comments), and their visible `**[Critical]**`
+// lines match carriesBlockerSignal — the carrier check is what keeps them
+// out of "Blockers to re-check" (their findings are already owned by the
+// ledger section and the inline roots).
+describe('isIssueBlocker', () => {
+  const marker =
+    '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[{"id":"R1-1","sev":"C","file":"a.ts","title":"t"}]} -->';
+
+  it('promotes a genuine blocker on the issue channel', () => {
+    expect(isIssueBlocker('still broken: the guard misfires (blocker)')).toBe(
+      true,
+    );
+    expect(isIssueBlocker('**[Critical]** auth bypass')).toBe(true);
+  });
+
+  it("does not promote a body carrying this pipeline's ledger marker", () => {
+    expect(
+      isIssueBlocker(`Round 1 summary.\n**[Critical]** R1-1: x\n\n${marker}`),
+    ).toBe(false);
+    // The marker alone decides — a carrier with no blocker signal was never
+    // promoted anyway, and an ordinary body without one still is not.
+    expect(isIssueBlocker(`clean round\n${marker}`)).toBe(false);
+    expect(isIssueBlocker('no blockers here')).toBe(false);
+    expect(isIssueBlocker(undefined)).toBe(false);
   });
 });
 
@@ -1356,6 +1480,41 @@ describe('latestLedger — the split trust surface', () => {
     expect(own?.ledger).toEqual(anchored);
   });
 
+  it('drops the churn state from ANOTHER account, keeping the work list', () => {
+    // The streak is the same class of claim as the anchor: a fact ABOUT
+    // the round that posted it, certified by the account that ran it.
+    // `stripAnchor` drops the range claim at this seam; left riding,
+    // a foreign marker's `churnRounds` reaches the side file through the
+    // identity-known write path, and any account that can submit a review
+    // can plant a streak — this account's next honest above-bar round then
+    // files the non-convergence blocker on a pull request that never
+    // churned. The work list still crosses: Step 6 re-rules it entry by
+    // entry against the code at HEAD, and the round counter is a shared id
+    // space. Only the streak state cannot be re-vouched across accounts.
+    const churning: Ledger = {
+      v: 1,
+      round: 4,
+      findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+      churnRounds: 4,
+    };
+    const foreign = latestLedger(
+      [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'maintainer',
+    );
+    expect(foreign?.ledger.churnRounds).toBeUndefined();
+    expect(foreign?.ledger.findings).toEqual(churning.findings);
+    expect(foreign?.ledger.round).toBe(4);
+    // The OWN account's churn state round-trips through the same seam: it is
+    // this account's certified streak, the state `compose-review` must carry
+    // on. A seam that stripped wholesale would reset the count on every
+    // recovery and make the blocker unreachable on a genuinely churning PR.
+    const own = latestLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'bot',
+    );
+    expect(own?.ledger.churnRounds).toBe(4);
+  });
+
   it("recovers the winning review's own commit_id as the age reference", () => {
     // The reference must come from the SAME review the ledger came from — a
     // recovery that took the newest ledger but another review's commit_id
@@ -1554,6 +1713,7 @@ describe('latestLedger — the split trust surface', () => {
     const own =
       'x <!-- qwen-review-ledger {"v":1,"round":9,"findings":[],' +
       '"posted":4,"prevPosted":2,"fresh":3,"floor":"c",' +
+      '"churnRounds":2,' +
       '"sha":"deadbeef00112233"} -->';
     const anonymous = latestLedger(
       [review('maintainer', '2026-01-09T00:00:00Z', own)],
@@ -1564,6 +1724,16 @@ describe('latestLedger — the split trust surface', () => {
     expect(anonymous?.ledger.fresh).toBe(3);
     expect(anonymous?.ledger.floor).toBe('c');
     expect(anonymous?.ledger.sha).toBeUndefined();
+    // ...and the churn group goes WITH the anchor, not with the volume —
+    // the asymmetry is the point of carrying both strips. A blip in
+    // `gh api user` makes every marker read foreign; the volume is kept
+    // because a number nobody can attribute is not a number a stranger
+    // chose, but the streak DECIDES the non-convergence blocker, so a
+    // foreign one riding the anonymous walk into the side file would re-date
+    // a streak across a round this account never ran and arm the blocker a
+    // round early. Unpinned, a refactor gating this strip on `me &&` —
+    // mirroring the volume strip's deliberate asymmetry — ships green.
+    expect(anonymous?.ledger.churnRounds).toBeUndefined();
   });
 
   it("restores this account's own volume when it restores its own findings", () => {
@@ -1597,6 +1767,38 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.floor).toBe('c');
     // The foreign numbers are gone, not merely outranked.
     expect(found?.ledger.prevPosted).toBeUndefined();
+  });
+
+  it("restores this account's own churn state beside its own volume", () => {
+    // The union exists so a foreign marker cannot erase own data, and the
+    // churn state is own data exactly the way the volume is: the own marker
+    // describes the SAME round the winner claims, so its streak is this
+    // account's certified count FOR that round. Restoring only the volume
+    // group dropped `churnRounds` for exactly the round it described, on
+    // the routine multi-bot event this union fires for — `prevLedgerFacts`
+    // then read 0 and the non-convergence blocker needed a full fresh
+    // streak to re-arm: a drive-by poster mirroring the round number each
+    // round suppressed it indefinitely, with no attacker involved at all.
+    const own =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-9","sev":"C","file":"a.ts","title":"certified"}' +
+      '],"posted":6,"churnRounds":4} -->';
+    // The foreign marker carries its OWN churn state as well: the seam
+    // strip must keep it out of the winner, and the restore must not let
+    // it outrank or keep out the own numbers.
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":99,"churnRounds":1} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    expect(found?.merged).toBe(true);
+    expect(found?.ledger.churnRounds).toBe(4);
   });
 
   it('restores an own TRUE-ZERO volume even with nothing to merge', () => {
@@ -2327,6 +2529,13 @@ describe('renderLedgerSection', () => {
     expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
     expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
     expect(md).toContain('owed a this-round ruling');
+    // The parenthetical reads as exhaustive, so it must ENUMERATE: a round
+    // that takes it as the whole vocabulary rules a fix-induced case as
+    // `fixed` plus a fresh id — the induced census stays 0 and the churn
+    // streak never arms.
+    expect(md).toContain(
+      '(fixed / still stands / cannot tell / fix-induced / superseded by <class-id>)',
+    );
   });
 });
 
@@ -2929,6 +3138,38 @@ describe('runPrContext identity failure (handler level)', () => {
     expect(ctx).toContain("MERGED over this account's own latest findings");
     expect(ctx).not.toContain('THEIR claims');
   });
+
+  it('round-trips the review commit_id through the GitHub reader into the side file', async () => {
+    // The age reference crosses TWO mapping seams: the reader's
+    // `commit_id → commitId` spread and `toRawReview`'s `commitId →
+    // commit_id` spread before `recoverLedger` ever sees it. Every
+    // recovery test above builds its RawReviews by hand, so dropping
+    // EITHER spread left the suite green — the reader seam had no
+    // witness. The persisted side file is where compose-review later
+    // reads the age reference back.
+    currentUserMock.mockReturnValue('bot');
+    const head = 'e'.repeat(40);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 31,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"S","file":"a.ts","title":"t"}]} -->',
+          commit_id: head,
+        },
+      ]);
+    await run();
+    const sideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(sideWrite).toBeDefined();
+    expect(String(sideWrite?.[1])).toContain(`"commitId": "${head}"`);
+  });
 });
 
 describe('runPrContext host baking (handler level)', () => {
@@ -3011,5 +3252,321 @@ describe('runPrContext host baking (handler level)', () => {
     process.env['GH_HOST'] = 'my_ghe';
     const written = await runHandler({});
     expect(written).not.toContain('--host');
+  });
+});
+
+describe('runPrContext pr_number guard (handler level)', () => {
+  // Every sibling command pins the identical guard (fetch-pr 'refuses a
+  // non-positive pr_number before any side effect', issue-context 'exits 2
+  // on a fractional pr_number'); pr-context's was untested. A future edit
+  // dropping the guard — or restoring a bare `Number()` check that admits
+  // `0x10`/`5.`/`1e3` — lets the malformed number reach the platform
+  // reader, surfacing a confusing a1/gh error instead of the usage-class
+  // refusal. The leading-zero and over-safe-magnitude spellings pin the
+  // round-trip half: both PASS `isPositivePrNumber`, but `Number()`
+  // normalizes them away from the raw string that labels the heading and
+  // the prev-ledger side file — a `007` run and a `7` run would then
+  // write/read different side files and the round counter would restart.
+  it.each([
+    '0',
+    '-3',
+    '5.',
+    '5.0',
+    '0x10',
+    '1e3',
+    '007',
+    '0123',
+    '9007199254740993',
+    '99999999999999999999',
+  ])('refuses pr_number %s before any platform call', async (bad) => {
+    getPlatformReaderMock.mockClear();
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: bad,
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/pr_number must be a positive integer/);
+    expect(getPlatformReaderMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('prContextCommand handler — Aone routing', () => {
+  // The reader seam is stubbed at the registry: these tests pin what
+  // pr-context does with a normalized Aone context (the a1-side mapping
+  // has its own suite in lib/platform/aone.test.ts).
+  const LEDGER_MARKER =
+    '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"src/a.ts","line":5,"title":"the off-by-one"}]} -->';
+  const aoneContext = {
+    title: 'fix the loop bound',
+    body: 'the CR description',
+    authorLogin: 'author-a',
+    state: 'opened',
+    baseRefName: 'master',
+    headRefName: 'sha123',
+    headRefOid: 'sha123',
+    comments: [
+      {
+        id: 21,
+        author: 'reviewer-b',
+        body: 'a blocking gap in the guard',
+        createdAt: '2026-08-19T09:00:00Z',
+        path: 'src/a.ts',
+        line: 5,
+      },
+      {
+        id: 22,
+        author: 'author-a',
+        body: 'will fix',
+        createdAt: '2026-08-19T09:30:00Z',
+        path: 'src/a.ts',
+        line: 5,
+        parentId: 21,
+      },
+      {
+        id: 23,
+        author: 'review-bot',
+        body: `Round 3 summary.\n\n**[Critical]** R3-1: the off-by-one in src/a.ts:5\n\n${LEDGER_MARKER}`,
+        createdAt: '2026-08-20T09:00:00Z',
+      },
+      {
+        id: 24,
+        author: 'someone',
+        body: 'general chatter',
+        createdAt: '2026-08-20T10:00:00Z',
+      },
+      {
+        // A long NON-blocker open root — renders as a truncated snippet,
+        // which is the only shape that emits a comment-body refetch.
+        id: 25,
+        author: 'reviewer-c',
+        body: `a long observation about the loop. ${'It keeps going. '.repeat(30)}`,
+        createdAt: '2026-08-20T11:00:00Z',
+        path: 'src/b.ts',
+        line: 9,
+      },
+      {
+        // A long path-LESS issue comment — the maintainer out-of-band
+        // channel's truncation shape, and the only ISSUE-kind refetch the
+        // suite exercises: it pins the per-MR `--pr` rule's issue branch.
+        id: 26,
+        author: 'someone',
+        body: `a long general observation about the CR. ${'It keeps going. '.repeat(30)}`,
+        createdAt: '2026-08-20T12:00:00Z',
+      },
+    ],
+    verdicts: [],
+    ledgerCarriers: [
+      {
+        id: 23,
+        author: 'review-bot',
+        body: `Round 3 summary.\n\n**[Critical]** R3-1: the off-by-one in src/a.ts:5\n\n${LEDGER_MARKER}`,
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T09:00:00Z',
+      },
+      {
+        id: 24,
+        author: 'someone',
+        body: 'general chatter',
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T10:00:00Z',
+      },
+      {
+        id: 26,
+        author: 'someone',
+        body: `a long general observation about the CR. ${'It keeps going. '.repeat(30)}`,
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T12:00:00Z',
+      },
+    ],
+  };
+  const aoneStub = {
+    kind: 'aone',
+    ensureAuthenticated: vi.fn(),
+    resolveRepo: () => ({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+      groupPath: 'g/p',
+    }),
+    getPrMeta: () => ({ number: 7, headSha: 'sha123', webUrl: '' }),
+    getClosingIssues: () => [],
+    getIssue: () => ({
+      number: 0,
+      ownerRepo: '',
+      title: '',
+      body: '',
+      comments: [],
+    }),
+    fetchDiff: () => '',
+    getCommentBody: () => '',
+    fetchHeadRefSpec: () => 'refs/merge-requests/7/head',
+    getFetchMeta: () => ({
+      headRefOid: 'sha123',
+      baseRefName: 'master',
+      isCrossRepository: false,
+    }),
+    // vi.fn (implementations survive the beforeEach clearAllMocks) so the
+    // identity-gate test can swap the context and observe the lookup.
+    getReviewContext: vi.fn(() => structuredClone(aoneContext)),
+    getCurrentUser: vi.fn(() => 'review-bot'),
+  };
+
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getPlatformReaderMock.mockImplementation(() => aoneStub);
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+
+  afterEach(() => {
+    getPlatformReaderMock.mockImplementation(registryDefaultRef.current!);
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  async function runHandler(extra: Record<string, unknown>) {
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '7',
+      owner_repo: 'g/p',
+      out: '/tmp/ctx-aone.md',
+      ...extra,
+    });
+    // The ledger side file is written BEFORE the context file — find the
+    // context by path, not by call order.
+    const call = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).endsWith('ctx-aone.md'),
+    );
+    return call?.[1] as string;
+  }
+
+  it('renders the Aone context and never touches gh', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    // The routing hint is FORWARDED, not discarded: an Aone MR reviewed from
+    // a cwd whose origin is not Aone must not fall through cwd detection to
+    // githubReader (gh would then read github.com's same-named owner/repo).
+    expect(getPlatformReaderMock).toHaveBeenCalledWith({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghApiAllMock).not.toHaveBeenCalled();
+    expect(written).toContain('# PR #7 — fix the loop bound');
+    expect(written).toContain('- **Author:** @author-a');
+    expect(written).toContain('- **State:** opened');
+    expect(written).toContain('`master` ← `sha123`');
+    // Aone reports no diff stats — the line degrades instead of printing
+    // zeros (an asserted empty diff).
+    expect(written).toContain('- **Diff:** not reported by the platform');
+    expect(written).toContain('the CR description');
+    // The inline blocker promotes into the re-check section.
+    expect(written).toContain('## Blockers to re-check');
+    expect(written).toContain('a blocking gap in the guard');
+    // The thread channel renders under "Already discussed".
+    expect(written).toContain('general chatter');
+  });
+
+  it('recovers the machine ledger from a posted summary comment', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(written).toContain('## Previous /review round (machine ledger)');
+    expect(written).toContain('Round 3');
+    expect(written).toContain('R3-1');
+    // The carrier is this account's own (getCurrentUser === author) — the
+    // section must not read it as another account's claims.
+    expect(written).not.toContain('another account');
+    // The side file carries the recovered round. writeAtomic writes a
+    // `.<pid>.tmp` first, so match the prefix, not the exact name.
+    const sideCall = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('qwen-review-pr-7-prev-ledger.json'),
+    );
+    expect(sideCall).toBeDefined();
+    expect(String(sideCall?.[1])).toContain('"round": 3');
+  });
+
+  it('looks up the current user when only ledger carriers exist', async () => {
+    // A repeat-round MR whose inline threads all resolved: zero inline
+    // comments, prior qwen summaries present. The identity gate keys on
+    // CARRIERS, not reviews (always empty on Aone — the platform has no
+    // review objects): reverting it to `reviews.length` skips the lookup,
+    // the recovery walks anonymous, and the account's own summary renders
+    // as another account's claims. This fixture kills that mutant.
+    (aoneStub.getReviewContext as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      {
+        ...structuredClone(aoneContext),
+        comments: structuredClone(aoneContext.comments).filter(
+          (c) => c.path === undefined,
+        ),
+      },
+    );
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(aoneStub.getCurrentUser).toHaveBeenCalled();
+    expect(written).toContain('## Previous /review round (machine ledger)');
+    expect(written).not.toContain('another account');
+  });
+
+  it('bakes --pr and --host into EVERY emitted refetch command', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    const refs = [...written.matchAll(/comment-body \d+ --kind \w+[^\n)]*/g)];
+    expect(refs.length).toBeGreaterThan(0);
+    for (const ref of refs) {
+      expect(ref[0]).toContain('--pr 7');
+      expect(ref[0]).toContain('--host gitlab.alibaba-inc.com');
+    }
+    // The issue-channel branch explicitly: Aone issue-comment ids are
+    // MR-scoped too, so a truncation there carries the same addressing. A
+    // mutant restoring the GitHub assumption (issue ids are global) emits
+    // this refetch without --pr and dies here.
+    expect(written).toContain(
+      'comment-body 26 --kind issue --pr 7 --repo g/p --host gitlab.alibaba-inc.com',
+    );
+  });
+
+  it("never promotes this pipeline's own Critical-bearing summary into the re-check section or the blocker count", async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    // The round-3 summary carries a visible `**[Critical]**` line AND the
+    // ledger marker; its findings are owned by the ledger section and the
+    // inline roots. Promoting the carrier as well would render the same
+    // Critical three times and spend BLOCKER_SECTION_BUDGET on the
+    // pipeline's own prose until a genuine human blocker degrades to a
+    // budget-spent snippet.
+    const section = written.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0); // the inline blocker promotes
+    expect(written.indexOf('Round 3 summary')).toBeGreaterThan(
+      written.indexOf('## Description'),
+    );
+    // The marker JSON never renders into the context file.
+    expect(written).not.toContain('qwen-review-ledger');
+    // stdout counts the same walk the file renders from: one blocker (the
+    // inline root), not two.
+    const countLine = writeStdoutLineMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes('blocker(s) to re-check'));
+    expect(countLine).toContain('1 blocker(s) to re-check');
+  });
+
+  it('never bakes an ambient GH_HOST into Aone refetch commands', async () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    const written = await runHandler({});
+    // A flagless run still forwards `{ host: undefined }` — the hint shape
+    // the detection keys on, distinct from a dropped argument.
+    expect(getPlatformReaderMock).toHaveBeenCalledWith({ host: undefined });
+    expect(written).not.toContain('--host ghe.example.com');
+    // The refetches still carry --pr (per-MR addressing is host-agnostic).
+    expect(written).toContain('--pr 7');
   });
 });
