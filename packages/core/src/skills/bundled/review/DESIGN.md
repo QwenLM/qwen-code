@@ -1096,7 +1096,7 @@ Measured with a recording endpoint, on a 6-file / 115-line diff, driving one rea
 | deferral applied to subagents          | 10             | 7,758       | 84,537    |
 | `review-agent` (explicit list)         | 6              | 3,447       | 55,897    |
 
-Of the 51, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
+Of the 51 measured at the time, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
 
 The per-turn record behind the first and last rows, so the totals above can be re-derived rather than taken on trust — `system` + `messages` + `tools` is that turn's whole prompt:
 
@@ -1140,7 +1140,7 @@ The test file is on that list for a reason that is easy to miss: it imports `REV
 
 **Per-turn token counts** (the 21,178 / 3,447 / 55,897 figures) come from pointing the product at a recording OpenAI-compatible endpoint and tokenising each captured request body with cl100k. `qwen review agent-prompt --plan <plan> --roster` builds the launch prompt; one orchestrator turn launches one dimension agent, and the endpoint answers with that agent's own scripted `read_file` calls so it walks all four turns. What matters is that the record keeps the request **whole**: `qwen review mock-provider` truncates its record at 8 KB, which is smaller than a single tool block, so its log cannot be the source for these numbers.
 
-**The environment is part of the measurement.** The 51-tool arm is the product default, not a local quirk: 35 of the 51 are `computer_use__*`, and `tools.computerUse.enabled` defaults to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
+**The environment is part of the measurement.** The 51-tool arm was the product default at the time, not a local quirk: 35 of the 51 were `computer_use__*`, and `tools.computerUse.enabled` defaulted to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
 
 **Run-level figures** (688 vs 542 calls, 59.5M vs 29.5M input, the 95%/93% cache rates) need no harness at all — they are two real reviews of one PR, read back from the product's own ledger:
 

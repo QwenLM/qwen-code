@@ -50,6 +50,7 @@ import {
   type SdkControlServerTransportOptions,
 } from '../daemon-mcp/SdkControlServerTransport.js';
 import { ControlRequestType } from '../types/protocol.js';
+import type { PermissionMode } from '../types/permission-mode.js';
 
 interface PendingControlRequest {
   resolve: (response: Record<string, unknown> | null) => void;
@@ -1004,7 +1005,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);
   }
 
-  async setPermissionMode(mode: string): Promise<void> {
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_PERMISSION_MODE, {
       mode,
     });
