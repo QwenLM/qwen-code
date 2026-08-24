@@ -614,6 +614,13 @@ describe('UpdateGoalTool', () => {
                 proofKind: 'delivered_output',
               },
               {
+                uuid: 'letter-y',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'Y',
+                proofKind: 'delivered_output',
+              },
+              {
                 uuid: 'current-external-fact',
                 provenance: 'tool_result',
                 turnId: permit.turnId,
@@ -628,7 +635,7 @@ describe('UpdateGoalTool', () => {
                 proofKind: 'delivered_output',
               },
             ],
-            lineageTurnIds: [permit.turnId],
+            lineageTurnIds: ['prior-turn', permit.turnId],
           },
         }),
         getSnapshotForPermit: vi.fn(() => activeSnapshot()),
@@ -647,12 +654,12 @@ describe('UpdateGoalTool', () => {
 
     expect(recordTerminalProposal).toHaveBeenCalledWith(
       permit,
-      expect.objectContaining({ evidenceRefs: ['letter-x'] }),
+      expect.objectContaining({ evidenceRefs: ['letter-x', 'letter-y'] }),
     );
     expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
-      'autoCitedCurrentDeliveredOutput',
-    );
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      autoCitedCurrentDeliveredOutput: ['letter-y'],
+    });
   });
 
   it('leaves a blocked proposal to cite whatever it chose', async () => {
