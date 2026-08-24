@@ -7682,7 +7682,7 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
-    it('stamps the current-session task request with its own session id', async () => {
+    it('uses the trusted daemon prompt id for a current-session task', async () => {
       vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
         id: 'cron-1',
         cron: '5 9 * * *',
@@ -7692,18 +7692,26 @@ describe('Session', () => {
       expect(create).toBeTypeOf('function');
 
       await expect(
-        create?.({
-          cron: '5 9 * * *',
-          prompt: 'continue',
-          recurring: true,
-          promptId: 'prompt-1',
-        }),
+        core.runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-prompt-id',
+          },
+          () =>
+            create?.({
+              cron: '5 9 * * *',
+              prompt: 'continue',
+              recurring: true,
+              promptId: 'test-session-id########1',
+            }),
+        ),
       ).resolves.toEqual({ id: 'cron-1', cron: '5 9 * * *' });
       expect(mockClient.extMethod).toHaveBeenCalledWith(
         'qwen/control/scheduled-task/create-current',
         {
           callerSessionId: 'test-session-id',
-          promptId: 'prompt-1',
+          promptId: 'daemon-prompt-id',
           cron: '5 9 * * *',
           prompt: 'continue',
           recurring: true,

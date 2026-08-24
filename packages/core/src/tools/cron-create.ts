@@ -11,6 +11,7 @@ import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 /** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
 function formatDays(days: number): string {
@@ -136,7 +137,7 @@ class CronCreateInvocation extends BaseToolInvocation<
 
       return { llmContent, returnDisplay };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       return {
         llmContent: `Error creating cron job: ${message}`,
         returnDisplay: message,

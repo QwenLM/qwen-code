@@ -2998,7 +2998,7 @@ export class Session implements SessionContext {
           SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
           {
             callerSessionId: this.sessionId,
-            promptId: req.promptId,
+            promptId: getInvocationContext()?.promptId ?? req.promptId,
             cron: req.cron,
             prompt: req.prompt,
             recurring: req.recurring,

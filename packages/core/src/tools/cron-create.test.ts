@@ -170,6 +170,29 @@ describe('CronCreateTool', () => {
     expect(await readCronTasks(tmpDir)).toHaveLength(0);
   });
 
+  it('surfaces a plain-object daemon error for current-session mode', async () => {
+    const message = 'The caller session does not own the active prompt';
+    config = makeConfig(7, async () => {
+      throw { code: -32602, message };
+    });
+    tool = new CronCreateTool(config);
+
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({
+          cron: '*/5 * * * *',
+          prompt: 'keep working',
+          durable: true,
+          sessionMode: 'current',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(result.llmContent).toBe(`Error creating cron job: ${message}`);
+    expect(result.returnDisplay).toBe(message);
+    expect(result.error).toEqual({ message });
+  });
+
   it('rejects current-session mode for a session-only job', async () => {
     const result = await tool
       .build({
