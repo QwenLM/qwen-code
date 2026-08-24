@@ -55,12 +55,27 @@ const activeGoal = (
         evidenceCursor: { recordId: 'cursor-1' },
         turnCount: active.iterations,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: active.setAt,
         updatedAt: active.setAt,
         ...(active.lastReason ? { lastReason: active.lastReason } : {}),
       },
     },
     active,
+  };
+};
+
+const goalWithStatus = (
+  condition: string,
+  status: 'paused' | 'blocked' | 'usage_limited' | 'complete',
+): BridgeSessionGoal => {
+  const base = activeGoal(condition);
+  return {
+    ...base,
+    snapshot: {
+      ...base.snapshot,
+      goal: { ...base.snapshot.goal!, status },
+    },
   };
 };
 
@@ -165,6 +180,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 2000,
         hasActivePrompt: true,
+        snapshot: goals['s2'].snapshot,
       },
       {
         sessionId: 's1',
@@ -174,8 +190,52 @@ describe('GET /goals', () => {
         setAt: 1000,
         lastReason: 'two tests still fail',
         hasActivePrompt: false,
+        snapshot: goals['s1'].snapshot,
       },
     ]);
+  });
+
+  it.each(['paused', 'blocked', 'usage_limited'] as const)(
+    'lists a %s goal so its controls stay reachable',
+    async (status) => {
+      // A stopped goal is exactly the one the user needs to find in order to
+      // resume it; listing only active goals hides it from the Goals page.
+      const goals: Record<string, BridgeSessionGoal> = {
+        s1: goalWithStatus('resume me', status),
+      };
+      const app = makeApp({
+        listWorkspaceSessions: () => [summary('s1')],
+        getSessionGoal: async (id) => goals[id],
+      });
+
+      const res = await request(app).get('/goals');
+
+      expect(res.status).toBe(200);
+      expect(res.body.goals).toHaveLength(1);
+      expect(res.body.goals[0]).toMatchObject({
+        sessionId: 's1',
+        condition: 'resume me',
+      });
+    },
+  );
+
+  it('filters out a completed goal', async () => {
+    // Without the exclusion a finished goal is listed forever.
+    const goals: Record<string, BridgeSessionGoal> = {
+      s1: goalWithStatus('already done', 'complete'),
+      s2: activeGoal('still running'),
+    };
+    const app = makeApp({
+      listWorkspaceSessions: () => [summary('s1'), summary('s2')],
+      getSessionGoal: async (id) => goals[id],
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(
+      res.body.goals.map((goal: { sessionId: string }) => goal.sessionId),
+    ).toEqual(['s2']);
   });
 
   it('drops a session whose probe rejects rather than failing the whole list', async () => {
@@ -199,6 +259,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 1000,
         hasActivePrompt: false,
+        snapshot: activeGoal('keep going').snapshot,
       },
     ]);
 

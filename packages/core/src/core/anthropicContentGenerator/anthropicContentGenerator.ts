@@ -6,8 +6,6 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -29,7 +27,6 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
-import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildAnthropicUsageMetadata } from './usage.js';
@@ -445,41 +442,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return drainThenCleanup();
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    try {
-      const estimator = new RequestTokenEstimator();
-      const result = await estimator.calculateTokens(request);
-
-      return {
-        totalTokens: result.totalTokens,
-      };
-    } catch (error) {
-      debugLogger.warn(
-        'Failed to calculate tokens with tokenizer, ' +
-          'falling back to simple method:',
-        error,
-      );
-
-      const content = JSON.stringify(request.contents);
-      const totalTokens = Math.ceil(content.length / 4);
-      return {
-        totalTokens,
-      };
-    }
-  }
-
   async embedContent(
     _request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     throw new Error('Anthropic does not support embeddings.');
   }
-
-  useSummarizedThinking(): boolean {
-    return false;
-  }
-
   private buildHeaders(useProxyIdentity: boolean): Record<string, string> {
     // Beta headers are computed per-request in buildPerRequestHeaders so they
     // stay in sync with what the request body actually carries — see #3788

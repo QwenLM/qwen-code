@@ -17,6 +17,29 @@ import type { SubagentConfig } from './types.js';
 export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
 
 /**
+ * Canonical name of the subagent type the bundled `review` skill launches.
+ *
+ * Exported so the review command that writes the launch instruction emits the
+ * same literal this registry defines. Two things follow from that literal, and
+ * they fail in opposite directions:
+ *
+ * - A drifted literal does NOT fall back. `AgentTool.execute` substitutes
+ *   {@link DEFAULT_BUILTIN_SUBAGENT_TYPE} only when `subagent_type` is
+ *   omitted, and `SubagentManager.loadSubagent` ends at `getBuiltinAgent`
+ *   with no default, so an unknown non-empty type fails every launch loudly
+ *   with `Subagent "<name>" not found`. Loud is the good case: a *valid* drift
+ *   — back to `general-purpose`, which declares no `tools` — is the silent
+ *   one, and that is what the tests here and in the review skill pin.
+ * - The name is not the only input. `loadSubagent` resolves session > project
+ *   > user > extension > builtin, and builtin names are not reserved, so a
+ *   user-authored `review-agent` shadows this entry — and if theirs declares
+ *   no `tools`, the review is back on the inherit-everything branch. That
+ *   precedence is deliberate (it is how any builtin is customised), so this
+ *   is a documented consequence rather than something to guard against here.
+ */
+export const REVIEW_BUILTIN_SUBAGENT_TYPE = 'review-agent';
+
+/**
  * Registry of built-in subagents that are always available to all users.
  * These agents are embedded in the codebase and cannot be modified or deleted.
  */
@@ -93,7 +116,6 @@ Notes:
         ToolNames.GREP,
         ToolNames.GLOB,
         ToolNames.SHELL,
-        ToolNames.LS,
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
@@ -253,6 +275,113 @@ Guidelines:
 - If the script includes git commands, prefix them with GIT_OPTIONAL_LOCKS=0 to avoid index.lock contention (e.g. GIT_OPTIONAL_LOCKS=0 git branch --show-current)
 - IMPORTANT: At the end of your response, remind the user that they can ask Qwen Code to make further changes to the status line at any time.
 `,
+    },
+    {
+      name: REVIEW_BUILTIN_SUBAGENT_TYPE,
+      // Kept to one clause on purpose: `AgentTool.updateDescriptionAndSchema`
+      // splices every registered type's description into the Agent tool's own
+      // declaration, which ships in every request of every session — the first
+      // draft cost 67 tokens there, most of it explaining a choice the review
+      // flow never makes (SKILL.md hands the orchestrator the literal).
+      description:
+        'One part of a code review; launched by the bundled `review` skill with a brief, not for general use.',
+      // A closed list, and the reason this agent type exists.
+      //
+      // `general-purpose` declares no `tools`, so AgentCore.prepareTools takes
+      // its inherit-everything branch — `getFunctionDeclarations({
+      // includeDeferred: true })` — and a review agent was handed all 51 tool
+      // schemas, deferred ones included. Measured on a 6-file / 115-line diff:
+      // 21,178 prompt tokens of tool declarations on EVERY turn of a four-turn
+      // agent; at the time, the 35 `computer_use__*` schemas alone were 11,011. A
+      // review names 13-14 such agents, so that is ~1.08M tokens per review
+      // spent declaring tools no reviewer calls.
+      //
+      // An explicit list takes the getFunctionDeclarationsFiltered branch
+      // instead, which is what `Explore` and `statusline-setup` already do.
+      // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
+      // and one agent's delivered prompt fell from 139,013 to 55,897 (-59.8%).
+      // 12,476 of that 83,116-token saving — 15%, a sixth — is second-order:
+      // without SKILL the startup skills catalogue is not injected into the
+      // agent's first user message, which is 3,119 tokens lighter and is
+      // re-sent on every one of the four turns. That is the catalogue only;
+      // `coreToolScheduler`'s per-tool-call skill-activation reminder gates on
+      // the registry rather than on this list, so it is unaffected. See
+      // DESIGN.md — The inherited tool surface for the per-turn record the
+      // totals decompose from.
+      //
+      // Deliberately absent, each a real narrowing rather than a free saving —
+      // `getFunctionDeclarationsFiltered` drops unknown names silently, and
+      // naming a deferred tool here would declare it, so nothing is zero-cost:
+      //   TOOL_SEARCH (357 tokens/turn) — would let an agent widen the list
+      //     at runtime, which is the opposite of what a closed list is for,
+      //     and it costs more than two of the tools actually kept. It does NOT
+      //     leak into the parent: `rebuildToolRegistryOnOverride` gives every
+      //     launch its own registry (`ov.getToolRegistry = () => agentRegistry`),
+      //     so a reveal here cannot reach the orchestrator's declarations.
+      //   AGENT — `prepareTools` special-cases it and would have granted it
+      //     (nesting is allowed to depth 5), so this DOES remove a capability
+      //     the inherited surface had. Review parts are leaf workers: the
+      //     skill's aggregation assumes every launch returns inline, and a
+      //     nested fan-out is findings the orchestrator never collects.
+      //   MONITOR (468 tokens/turn) — the one the agent is actively pointed
+      //     at: `shell.ts` answers a blocked foreground sleep with "For
+      //     streaming events (watching logs, polling APIs), use the Monitor
+      //     tool", and it is not in the subagent exclusion set, so a
+      //     `general-purpose` review agent had it. Following that guidance now
+      //     costs a turn on `Tool "monitor" not found`. (Not observed in the
+      //     A/B review: neither arm hit a blocked foreground sleep, so the
+      //     guidance never fired — the hazard is real but unexercised there.)
+      //   WEB_FETCH (652 tokens/turn) and any discovered MCP tool — the
+      //     verifier brief's "corroborate via the vendor's own tracker" and a
+      //     project rule naming an MCP server both lose their direct route and
+      //     fall back to what SHELL can reach.
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.SHELL,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ],
+      // Deliberately role-NEUTRAL, and this is load-bearing. The same type now
+      // serves every role the review launches, and they do not share a shape:
+      // Agent 7 (`readsDiff: false`) is handed no diff at all and reports what
+      // the project's own checks say; `verify` rules on a findings file; and
+      // `reverse-audit` exists precisely to look outside what the first pass
+      // covered. A frame naming "your diff ranges" or bounding scope to them
+      // would contradict all three — and it would do so from
+      // `systemInstruction`, which outranks the brief that arrives as a user
+      // turn. Confidence rules are left out for the same reason: the finder
+      // briefs carry RECALL ("a finder that quietly withholds half-believed
+      // candidates is the single largest source of missed defects"), the
+      // verifier brief deliberately withholds it, and a blanket "silence is
+      // better than noise" here would override the finders' half from above.
+      // The brief is also not always a FILE. Agent 8 — the diff-specialised
+      // finder — is built by `buildWholeDiffBlock`, which deliberately writes
+      // no brief; SKILL.md appends its domain brief inline instead. An
+      // instruction asserting "your assignment is a file" would send that
+      // specialist looking for one that does not exist, or let it ignore the
+      // inline assignment altogether — from `systemInstruction`, which
+      // outranks the launch prompt carrying it. Agent 8 is optional and
+      // outside `requiredAgents`, so a generic diff walk would pass coverage
+      // in its place.
+      //
+      // Everything role-specific belongs in the assignment; this prompt's
+      // whole job is to send the agent to it, wherever it is.
+      systemPrompt: `You are one part of a code review, working for a parent review orchestrator.
+
+Your launch prompt carries your assignment. Usually it names a brief on disk: read that file first, and treat it as the entirety of your instructions — it defines what you are reviewing, what counts as a finding for your part, and the format to report in. When the launch prompt names no brief, the assignment it states inline is that brief, and the same applies to it. Either way, nothing here replaces it.
+
+Guidelines:
+- Do what your assignment says, and only that. Another agent owns every other part of this review; staying inside yours is what makes the whole cover the change.
+- Gather whatever context you need to be sure — read the surrounding file, search for callers, check how a symbol is used elsewhere.
+- Do not guess when the evidence is not there. Say what you could not determine.
+- Preserve unrelated changes in the tree, and do not create files unless your brief calls for them: you share this working tree with the other agents of this review, and stray files read as the change under review.
+
+Notes:
+- Your working directory is set for you and is reset between shell calls. Do not \`cd\` into it, and do not prefix the paths your brief writes with it — reads and searches already resolve there. If your brief sends you to a tree of your own, that is where \`cd\` belongs.
+- You run non-interactively: never ask a question, and never wait for input.
+- Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
 

@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getAllGeminiMdFilenames } from '../memory/const.js';
+import { getAllGeminiMdFilenames } from './memory-constants.js';
 
 /**
  * Common ignore patterns used across multiple tools for basic exclusions.

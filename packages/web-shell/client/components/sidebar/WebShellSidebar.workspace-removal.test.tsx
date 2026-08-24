@@ -29,6 +29,7 @@ const {
   sessionActions,
   channelState,
   invalidateSessionCatalog,
+  refreshWorkspaceSessionCatalog,
   renameSessionCatalog,
   refreshSessionCatalogQueries,
   useSessionCatalogPollingSpy,
@@ -99,6 +100,7 @@ const {
   };
   const useChannels = vi.fn(() => channelState);
   const invalidateSessionCatalog = vi.fn();
+  const refreshWorkspaceSessionCatalog = vi.fn();
   const renameSessionCatalog = vi.fn();
   const refreshSessionCatalogQueries = vi.fn();
   const useSessionCatalogPollingSpy = vi.fn();
@@ -161,6 +163,7 @@ const {
     sessionActions,
     channelState,
     invalidateSessionCatalog,
+    refreshWorkspaceSessionCatalog,
     renameSessionCatalog,
     refreshSessionCatalogQueries,
     useSessionCatalogPollingSpy,
@@ -211,6 +214,10 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         invalidateSessionCatalog(workspaceCwd);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
+      refreshWorkspace: (workspaceCwd: string) => {
+        refreshWorkspaceSessionCatalog(workspaceCwd);
+        for (const listener of catalogListeners) listener(workspaceCwd);
+      },
       renamed: (
         workspaceCwd: string,
         sessionId: string,
@@ -219,6 +226,9 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         renameSessionCatalog(workspaceCwd, sessionId, displayName);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
+      // These tests render pages straight from listWorkspaceSessions, so the
+      // store-owned pin toggle has no loaded catalog pages to patch.
+      toggleSessionPinned: vi.fn(),
     }),
     useSessionCatalogPolling: useSessionCatalogPollingSpy,
     useSessionCatalogQuery: (
@@ -776,6 +786,7 @@ beforeEach(() => {
   workspaceActions.addWorkspace.mockReset();
   workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
   invalidateSessionCatalog.mockReset();
+  refreshWorkspaceSessionCatalog.mockReset();
   renameSessionCatalog.mockReset();
   refreshSessionCatalogQueries.mockReset();
   useSessionCatalogPollingSpy.mockReset();
@@ -1370,6 +1381,7 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    refreshWorkspaceSessionCatalog.mockClear();
 
     await selectSessionMenuItem('Locked delete', 'Delete');
     await act(async () => {
@@ -1377,12 +1389,20 @@ describe('WebShellSidebar workspace removal', () => {
       await secondaryDelete.mock.results.at(-1)?.value;
     });
     expect(secondaryDelete).toHaveBeenCalledWith(['locked-delete']);
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+    refreshWorkspaceSessionCatalog.mockClear();
 
     await selectSessionMenuItem('Locked archive', 'Archive');
     await act(async () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive']);
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+    refreshWorkspaceSessionCatalog.mockClear();
 
     await selectSessionMenuItem('Locked color', 'Group');
     const blue = Array.from(
@@ -1397,6 +1417,10 @@ describe('WebShellSidebar workspace removal', () => {
       color: 'blue',
       groupId: null,
     });
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+    refreshWorkspaceSessionCatalog.mockClear();
 
     await selectSessionMenuItem('Locked color', 'Group');
     const namedGroup = Array.from(
@@ -1411,6 +1435,10 @@ describe('WebShellSidebar workspace removal', () => {
       groupId: 'secondary-group',
       color: null,
     });
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+    refreshWorkspaceSessionCatalog.mockClear();
 
     await act(async () => {
       click(inlineSessionAction('Locked pinned', 'Unpin')!);
@@ -1419,6 +1447,9 @@ describe('WebShellSidebar workspace removal', () => {
     expect(secondaryOrganization).toHaveBeenCalledWith('locked-pinned', {
       isPinned: false,
     });
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
@@ -1522,6 +1553,21 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('shows a native tooltip for the workspace create-group action', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    await expandWorkspace('other');
+
+    const createGroupButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Create group"]',
+    );
+    expect(createGroupButton).not.toBeNull();
+    expect(createGroupButton?.getAttribute('title')).toBe('Create group');
   });
 
   it('applies items and inlineItems consistently to locked normal, pinned, and archived rows', async () => {
@@ -2351,6 +2397,9 @@ describe('WebShellSidebar workspace removal', () => {
     expect(updateSessionMetadata).toHaveBeenCalledWith('other-session', {
       displayName: 'Renamed other session',
     });
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/project',
+    );
     expect(sessionActions.renameSession).not.toHaveBeenCalled();
     expect(onLoadSession).not.toHaveBeenCalled();
   });
