@@ -2177,7 +2177,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -6106,12 +6106,14 @@ export function registerSessionRoutes(
                     },
                   ),
                 )
-              : Promise.resolve(
-                  listLiveWorkspaceSessionsForResponse(
-                    runtime.bridge,
-                    key,
-                    options,
-                  ),
+              : listLiveWorkspaceSessionsForResponse(
+                  runtime.bridge,
+                  key,
+                  options,
+                  {
+                    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    signal: controller.signal,
+                  },
                 );
           const result =
             liveRuntime && deps.conversationRuntimeActivity

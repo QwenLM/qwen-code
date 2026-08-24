@@ -9823,7 +9823,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
           );
         }
       }
@@ -9898,7 +9898,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const bound = metadata.pr;
         const existing = entry.prs ?? [];
         const latest = existing[existing.length - 1];
-        if (latest?.number === bound.number && latest.url === bound.url) {
+        if (
+          latest?.number === bound.number &&
+          latest.url === bound.url &&
+          // A re-bind carrying a new state is a change: the live entry,
+          // the metadata event, and the catalog revision must all see it.
+          (bound.state === undefined || bound.state === latest.state)
+        ) {
           // Same binding repeated — no change, no event.
         } else {
           // Re-binding a number refreshes it and moves it to latest; an

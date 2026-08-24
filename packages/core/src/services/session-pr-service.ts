@@ -204,24 +204,46 @@ export function upsertSessionPr(
 
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. Returns null
- * when the sidecar is absent/invalid or nothing changed (no write then).
+ * a refresh sweep never reshuffles the badge's "latest" entry. Returns the
+ * number of entries rewritten; 0 when the sidecar is absent/invalid or
+ * nothing changed (no write then).
  */
 export function updateSessionPrStates(
   filePath: string,
   states: ReadonlyMap<number, SessionPrState>,
-): Promise<SessionPr[] | null> {
+): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
     const existing = await readSessionPrs(filePath);
-    if (!existing) return null;
-    let changed = false;
+    if (!existing) return 0;
+    let changed = 0;
     const next = existing.map((entry) => {
       const state = states.get(entry.number);
       if (state === undefined || state === entry.state) return entry;
-      changed = true;
+      changed += 1;
       return { ...entry, state };
     });
-    if (!changed) return null;
+    if (changed === 0) return 0;
+    await writeSessionPrs(filePath, next);
+    return changed;
+  });
+}
+
+/**
+ * Replace the sidecar with a precomputed list atomically with respect to
+ * concurrent mutations: the planner runs inside the mutation queue against
+ * the freshest list, so a plan-then-write cycle cannot clobber a binding
+ * that lands between the caller's read and write. The planner returns the
+ * replacement list, or null to leave the file untouched. Resolves with the
+ * persisted list, or null when nothing changed.
+ */
+export function replaceSessionPrs(
+  filePath: string,
+  plan: (existing: SessionPr[]) => SessionPr[] | null,
+): Promise<SessionPr[] | null> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const next = plan(existing);
+    if (next === null) return null;
     await writeSessionPrs(filePath, next);
     return next;
   });

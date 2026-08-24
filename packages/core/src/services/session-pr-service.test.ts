@@ -12,6 +12,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   mergeSessionPrLists,
   readSessionPrs,
+  replaceSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
   writeSessionPrs,
@@ -221,25 +222,27 @@ describe('updateSessionPrStates', () => {
       filePath,
       new Map([[100, 'merged']]),
     );
-    expect(updated?.map((p) => p.number)).toEqual([100, 101]);
-    expect(updated?.[0]?.state).toBe('merged');
-    expect(updated?.[0]?.createdAt).toBe(entry(100).createdAt);
-    expect(updated?.[1]?.state).toBe('open');
+    expect(updated).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(persisted?.[1]?.state).toBe('open');
   });
 
-  it('returns null without writing when nothing changes', async () => {
+  it('returns 0 without writing when nothing changes', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
-  it('returns null when the sidecar is absent', async () => {
+  it('returns 0 when the sidecar is absent', async () => {
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
@@ -248,12 +251,52 @@ describe('updateSessionPrStates', () => {
       updateSessionPrStates(filePath, new Map([[100, 'merged']])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
-    expect(updated?.[0]?.state).toBe('merged');
+    expect(updated).toBe(1);
     expect(prs?.map((p) => p.number)).toEqual([100, 101]);
     // Whichever ran second read the first's write — nothing was clobbered.
     const persisted = await readSessionPrs(filePath);
     expect(persisted?.find((p) => p.number === 100)?.state).toBe('merged');
     expect(persisted?.find((p) => p.number === 101)).toBeDefined();
+  });
+});
+
+describe('replaceSessionPrs', () => {
+  it('runs the planner against the freshest list inside the queue', async () => {
+    // The planner must see the result of mutations queued ahead of it —
+    // planning from a stale outer read would clobber a binding that lands
+    // between the caller's read and write.
+    await writeSessionPrs(filePath, [entry(100)]);
+    const seen: number[][] = [];
+    const upsert = upsertSessionPr(filePath, {
+      number: 101,
+      url: entry(101).url,
+    });
+    const replace = replaceSessionPrs(filePath, (existing) => {
+      seen.push(existing.map((p) => p.number));
+      return [...existing, entry(102)];
+    });
+    await Promise.all([upsert, replace]);
+    expect(seen).toEqual([[100, 101]]);
+    expect((await readSessionPrs(filePath))?.map((p) => p.number)).toEqual([
+      100, 101, 102,
+    ]);
+  });
+
+  it('leaves the file untouched when the planner returns null', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(await replaceSessionPrs(filePath, () => null)).toBeNull();
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('persists the planner result and returns it', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const persisted = await replaceSessionPrs(filePath, (existing) =>
+      existing.filter((p) => p.number !== 100),
+    );
+    expect(persisted).toEqual([]);
+    // An empty list reads back as null (isValidSessionPrList rejects it).
+    expect(await readSessionPrs(filePath)).toBeNull();
   });
 });
 
