@@ -289,6 +289,14 @@ describe('assign-pr-owner: workflow invariants', () => {
     const runStep = assignJob.steps.find((step) => step.run);
     assert.ok(runStep.env.GH_TOKEN);
     assert.equal(doc.env?.GH_TOKEN, undefined);
+    // Same pin as the issue script: a hardcoded or dropped DRY_RUN turns
+    // event-triggered runs into permanent no-ops, and breaking the
+    // inputs.number fallback breaks every manual dispatch.
+    assert.equal(
+      runStep.env.PR_NUMBER,
+      '${{ github.event.pull_request.number || inputs.number }}',
+    );
+    assert.equal(runStep.env.DRY_RUN, "${{ inputs.dry_run || 'false' }}");
   });
 
   it('checks out the trusted base, credential-free and sparse', () => {
