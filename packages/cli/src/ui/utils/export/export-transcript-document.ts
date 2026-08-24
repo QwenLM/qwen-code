@@ -1823,20 +1823,98 @@ function isSafeExportPath(value: unknown): value is string {
 }
 
 function redactHomePaths(value: string): string {
+  const urlPattern =
+    /\b(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|file:(?:\/\/)?)[^\s<>"'`]+/gi;
+  let result = '';
+  let cursor = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    const index = match.index;
+    result += redactStandaloneHomePaths(value.slice(cursor, index));
+    result += /^file:/i.test(match[0])
+      ? redactFileUrlHomePath(match[0])
+      : match[0];
+    cursor = index + match[0].length;
+  }
+  return result + redactStandaloneHomePaths(value.slice(cursor));
+}
+
+function redactStandaloneHomePaths(value: string): string {
   return value
     .replace(
-      /file:\/\/\/(?:[A-Za-z]:\/)?(?:Users|home)\/[^\s/]+(?=\/|\s|$)/gi,
-      'file://[home]',
+      /(^|[^A-Za-z0-9+/,])(\/[^\s<>"'`]+)/g,
+      (_match, prefix: string, path: string) =>
+        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
     )
     .replace(
-      /(?<![A-Za-z0-9+/,])\/(?:Users|home)\/[^\s/]+(?=\/|\s|$)/g,
-      '[home]',
+      /(^|[^A-Za-z0-9+/,])([A-Za-z]:\\[^\s<>"'`]+)/g,
+      (_match, prefix: string, path: string) =>
+        `${prefix}${redactHomePathToken(path, '\\') ?? path}`,
     )
     .replace(
-      /(?<![A-Za-z0-9+/,])[A-Za-z]:\\Users\\[^\s\\]+(?=\\|\s|$)/gi,
-      '[home]',
-    )
-    .replace(/%2F(?:Users|home)%2F[^%/?\s]+/gi, '[home]');
+      /(^|[^A-Za-z0-9%])(%[0-9A-Fa-f]{2}[^\s<>"'`]*)/g,
+      (_match, prefix: string, path: string) =>
+        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
+    );
+}
+
+function redactFileUrlHomePath(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'file:') return value;
+    const components = normalizedUrlPathComponents(url.pathname);
+    const redacted = redactHomePathComponents(components, '/');
+    return redacted ? `file://${redacted}` : value;
+  } catch {
+    return redactStandaloneHomePaths(value);
+  }
+}
+
+function redactHomePathToken(
+  value: string,
+  separator: '/' | '\\',
+): string | undefined {
+  return redactHomePathComponents(
+    normalizedUrlPathComponents(value),
+    separator,
+  );
+}
+
+function redactHomePathComponents(
+  components: readonly string[],
+  separator: '/' | '\\',
+): string | undefined {
+  const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
+  if (
+    !/^(?:Users|home)$/i.test(components[rootIndex] ?? '') ||
+    components[rootIndex + 1] === undefined
+  ) {
+    return undefined;
+  }
+  const suffix = components.slice(rootIndex + 2).join(separator);
+  return `[home]${suffix ? `${separator}${suffix}` : ''}`;
+}
+
+function normalizedUrlPathComponents(pathname: string): string[] {
+  let decoded = pathname;
+  for (let pass = 0; pass < 3; pass += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  const components: string[] = [];
+  for (const component of decoded.replaceAll('\\', '/').split('/')) {
+    if (!component || component === '.') continue;
+    if (component === '..') {
+      components.pop();
+    } else {
+      components.push(component);
+    }
+  }
+  return components;
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { adaptAcpTranscriptUpdates } from './acpTranscriptAdapter.js';
+import {
+  adaptAcpTranscriptUpdates,
+  createAcpTranscriptAdapterState,
+  reduceAcpTranscriptUpdate,
+} from './acpTranscriptAdapter.js';
 
 const scopeKey = 'workspace-a:session-a';
 
@@ -89,6 +93,40 @@ describe('ACP transcript adapter', () => {
     expect(result.blocks).toMatchObject([
       { kind: 'shell', segmentId: 'shell-1' },
       { kind: 'user', segmentId: 'image-1' },
+    ]);
+  });
+
+  it('keeps recorded user identity stable while its lanes merge', () => {
+    const updates = (
+      [
+        ['A', 'record-1:0'],
+        ['[Attachment is no longer available]', 'record-1:1'],
+        ['B', 'record-1:2'],
+        ['C', 'record-1:2'],
+      ] as const
+    ).map(([text, segmentId]) => ({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        qwenDiscreteMessage: true,
+        qwenTranscript: { segmentId, sourceRecordIds: ['record-1'] },
+      },
+    }));
+    let state = createAcpTranscriptAdapterState();
+    const ids: string[] = [];
+    for (const update of updates) {
+      state = reduceAcpTranscriptUpdate(state, update, scopeKey, 0);
+      ids.push(state.blocks[0]?.id ?? '');
+    }
+
+    expect(new Set(ids).size).toBe(1);
+    expect(state.compatible).toBe(true);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        text: 'A\n[Attachment is no longer available]\nBC',
+        segmentId: 'record-1:2',
+      },
     ]);
   });
 

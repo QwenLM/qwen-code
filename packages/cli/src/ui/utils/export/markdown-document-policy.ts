@@ -189,7 +189,7 @@ export function sanitizeMarkdownDocument(
     if (node.type === 'link') {
       const source = node.url ?? '';
       const safe = policy.normalizeUrl(source);
-      if (safe === source) return false;
+      if (safe === source) return;
       policy.onUrlChange(safe ? 'url_sanitized' : 'url_rejected');
       replacements.push({
         ...range,

@@ -789,6 +789,9 @@ function appendTextDelta(
     if (existing.promptId === undefined && event.promptId !== undefined) {
       existing.promptId = event.promptId;
     }
+    if (event.segmentId !== undefined) {
+      existing.segmentId = event.segmentId;
+    }
     if (kind === 'assistant' && event.branchRecordId) {
       existing.branchRecordId = event.branchRecordId;
     }

@@ -112,6 +112,13 @@ function getBlockIdentity(
 ): readonly string[] | undefined {
   if (block.kind === 'tool') return ['toolCallId', block.toolCallId];
   if (block.kind === 'permission') return ['requestId', block.requestId];
+  if (
+    block.kind === 'user' &&
+    block.sourceRecordIds &&
+    block.sourceRecordIds.length > 0
+  ) {
+    return ['sourceRecordIds', ...block.sourceRecordIds];
+  }
   if (block.segmentId) return ['segmentId', block.segmentId];
   if (
     block.kind === 'user' ||

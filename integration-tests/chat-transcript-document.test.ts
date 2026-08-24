@@ -521,6 +521,7 @@ describe('ExportTranscriptDocument browser gate', () => {
           'assistant',
           [
             '![tracking](https://example.invalid/track.png)',
+            '[![nested-tracking](https://example.invalid/nested-track.png?u=victim)](https://example.com)',
             '![inline-safe](data:image/png;base64,iVBORw0KGgo=)',
           ].join('\n'),
         ),
@@ -566,6 +567,9 @@ describe('ExportTranscriptDocument browser gate', () => {
       .toBe('true');
     expect(await page.locator('body').innerText()).toContain(
       '[image omitted: tracking]',
+    );
+    expect(await page.locator('body').innerText()).toContain(
+      '[image omitted: nested-tracking]',
     );
     expect(
       await page.locator('img[alt="inline-safe"]').getAttribute('src'),

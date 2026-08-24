@@ -7792,7 +7792,7 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
-  it('separates recorded user segments without duplicating existing newlines', () => {
+  it('separates recorded user lanes without splitting one segment', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
@@ -7805,8 +7805,22 @@ describe('R5 review batch — coverage additions', () => {
         },
         {
           type: 'user.text.delta',
-          text: 'second',
+          text: '[Attachment is no longer available]',
           segmentId: 'record-1:1',
+          sourceRecordIds: ['record-1'],
+          meta: { qwenDiscreteMessage: true },
+        },
+        {
+          type: 'user.text.delta',
+          text: 'second',
+          segmentId: 'record-1:2',
+          sourceRecordIds: ['record-1'],
+          meta: { qwenDiscreteMessage: true },
+        },
+        {
+          type: 'user.text.delta',
+          text: 'third',
+          segmentId: 'record-1:2',
           sourceRecordIds: ['record-1'],
           meta: { qwenDiscreteMessage: true },
         },
@@ -7815,7 +7829,11 @@ describe('R5 review batch — coverage additions', () => {
     );
 
     expect(state.blocks).toMatchObject([
-      { kind: 'user', text: 'first\nsecond' },
+      {
+        kind: 'user',
+        text: 'first\n[Attachment is no longer available]\nsecondthird',
+        segmentId: 'record-1:2',
+      },
     ]);
   });
 

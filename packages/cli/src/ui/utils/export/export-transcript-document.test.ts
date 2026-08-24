@@ -155,7 +155,12 @@ describe('ExportTranscriptDocumentV1', () => {
                   'Windows C:\\Users\\alice\\private.txt',
                   'URI file:///Users/alice/private.txt',
                   'Windows URI file:///C:/Users/alice/private.txt',
+                  'Hosted URI file://localhost/home/alice/private.txt',
+                  'Remote host URI file://host/Users/alice/private.txt',
+                  'Encoded host URI file://host/%2Fhome%2Falice%2Fprivate.txt',
                   'HOME=/home/alice/private.txt',
+                  'Case variants /users/alice/private.txt /HOME/bob/private.txt',
+                  'Normalized /home//alice/private.txt /home/./alice/private.txt',
                   '--dir=/Users/alice/private.txt',
                   'encoded=%2Fhome%2Falice%2Fprivate.txt',
                   '![safe](data:image/png;base64,/home/AA)',
@@ -175,11 +180,60 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).toContain('Windows [home]\\private.txt');
     expect(text).toContain('URI file://[home]/private.txt');
     expect(text).toContain('Windows URI file://[home]/private.txt');
+    expect(text).toContain('Hosted URI file://[home]/private.txt');
+    expect(text).toContain('Remote host URI file://[home]/private.txt');
+    expect(text).toContain('Encoded host URI file://[home]/private.txt');
+    expect(text).toContain(
+      'Case variants [home]/private.txt [home]/private.txt',
+    );
+    expect(text).toContain('Normalized [home]/private.txt [home]/private.txt');
     expect(text).toContain('data:image/png;base64,/home/AA');
     expect(text).not.toContain('/Users/alice');
     expect(text).not.toContain('C:\\Users\\alice');
     expect(text).not.toContain('/home/alice');
     expect(text).not.toContain('%2Fhome%2Falice');
+  });
+
+  it('does not treat remote URL paths as local home paths', () => {
+    const urls = [
+      'https://example.com./home/alice/notes.txt',
+      'https://[::1]/home/alice/notes.txt',
+    ];
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('remote-url-text', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: urls.join('\n') }],
+          },
+        }),
+        record('remote-url-tools', 'remote-url-text', {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: urls.map((url, index) => ({
+              functionCall: {
+                id: `fetch-${index}`,
+                name: 'web_fetch',
+                args: { url },
+              },
+            })),
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+    const fetchUrls = document.blocks.flatMap((block) =>
+      block.kind === 'tool' && block.preview.kind === 'web_fetch'
+        ? [block.preview.url]
+        : [],
+    );
+
+    expect(text).toBe(urls.join('\n'));
+    expect(fetchUrls).toEqual(urls);
   });
 
   it('preserves visible turns across excluded causal system records', () => {
@@ -1129,6 +1183,23 @@ describe('ExportTranscriptDocumentV1', () => {
         ...envelope,
         blocks: [
           {
+            id: 'user-file-home-path',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Leaked file://localhost/HOME/alice/private.txt',
+            streaming: false,
+          },
+        ],
+      }),
+    ).toThrowError('home_path_forbidden');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...envelope,
+        blocks: [
+          {
             id: 'user-raster-data',
             kind: 'user',
             clientReceivedAt: 0,
@@ -1276,6 +1347,15 @@ describe('ExportTranscriptDocumentV1', () => {
       {
         value: envelope([
           block('user-safe', 'user', {
+            text: '[![remote](https://example.invalid/nested-track.png)](https://example.com)',
+            streaming: false,
+          }),
+        ]),
+        error: 'invalid_markdown_image',
+      },
+      {
+        value: envelope([
+          block('user-safe', 'user', {
             text: '[credential](https://alice:password@example.com/path?token=canary)',
             streaming: false,
           }),
@@ -1405,8 +1485,10 @@ describe('ExportTranscriptDocumentV1', () => {
               {
                 text: [
                   '![remote](https://example.invalid/track.png)',
+                  '[![nested remote](https://example.invalid/nested-track.png?u=victim)](https://example.com)',
                   '![svg](data:image/svg+xml;base64,PHN2Zy8+)',
                   '![safe](data:image/png;base64,iVBORw0KGgo=)',
+                  '[![nested safe](data:image/png;base64,iVBORw0KGgo=)](https://example.com)',
                   '',
                   '![animated reference][animated-gif]',
                   '',
@@ -1439,6 +1521,7 @@ describe('ExportTranscriptDocumentV1', () => {
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
 
     expect(text).not.toContain('track.png');
+    expect(text).not.toContain('nested-track.png');
     expect(text).not.toContain('<img');
     expect(text).toContain('inline-code.png');
     expect(text).toContain('fenced-code.png');
@@ -1448,6 +1531,9 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).toContain('odd-escape.png');
     expect(text).not.toContain('image/svg+xml');
     expect(text).toContain('data:image/png;base64,iVBORw0KGgo=');
+    expect(text).toContain(
+      '[![nested safe](data:image/png;base64,iVBORw0KGgo=)](https://example.com)',
+    );
     expect(text).not.toContain('![animated reference](');
     expect(document.metadata).toMatchObject({
       complete: false,
@@ -1456,7 +1542,7 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(document.diagnostics).toContainEqual({
       code: 'markdown_image_rejected',
       severity: 'warning',
-      count: 6,
+      count: 7,
     });
   });
 
