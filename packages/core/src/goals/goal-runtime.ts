@@ -888,7 +888,11 @@ export function createGoalRuntime(
           permit: attempt.permit,
         });
       }
-      if (window.truncated) {
+      // A truncated window still compresses: `shouldCheckpoint` stays true
+      // whenever anything was captured, and folding that into claims is what
+      // frees the budget. Only a window that captured nothing at all has
+      // nothing to salvage, and that is the state this stops the Goal in.
+      if (window.truncated && !window.shouldCheckpoint) {
         await recordCheckpointFailure(
           attempt,
           GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
