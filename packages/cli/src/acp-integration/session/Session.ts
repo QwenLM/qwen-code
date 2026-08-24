@@ -9653,6 +9653,24 @@ export class Session implements SessionContext {
         this.duplicateProviderToolCallResponseIds,
       );
 
+      // A suppressed stateful replay keeps its key alive across the batch
+      // boundary: mirror core's suppression mark (core marks
+      // statefulResultKeysSinceLastFinished in noteSuppressedToolCallByCallId)
+      // so the abandonment decay skips it. Without this, a MIXED batch —
+      // the suppressed replay alongside at least one executable call —
+      // skipped the empty-batch early return, found the replayed key in
+      // neither skip set (requestedStatefulKeys is built from executable
+      // calls only), and decayAbandonedDaemonStreaks wiped the live
+      // frozen-board streak — keeping statefulMaxResultRepeat below the
+      // stuck threshold indefinitely and drifting from core (issue #9450
+      // requirement #6).
+      if (toolLoopState && isStatefulReadTool(request.name)) {
+        (toolLoopState.statefulResultKeysSinceLastBatch ??=
+          new Set<string>()).add(
+          getToolCallRepeatKey(request.name, request.args),
+        );
+      }
+
       const response = createDuplicateProviderToolCallResponse(request);
       debugLogger.debug(
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +

@@ -11499,6 +11499,96 @@ describe('Session', () => {
           expect(execute).toHaveBeenCalledTimes(20);
         });
 
+        it('still halts a frozen daemon poller when MIXED batches interleave a suppressed replay with an executable call (issue #9450)', async () => {
+          // Mixed-batch variant of the replay-interleave regression: one
+          // executed poll per cycle, then two MIXED rounds that each
+          // suppress a task_list replay alongside an EXECUTABLE generic
+          // call. Pre-fix the batch was non-empty (no
+          // calls.length === 0 early return), requestedStatefulKeys held
+          // only the executable call, and once the previous result's mark
+          // was consumed the replayed key sat in neither skip set —
+          // decayAbandonedDaemonStreaks wiped the frozen-board streak and
+          // recomputed statefulMaxResultRepeat to 0, so the stuck signal
+          // never reached GLOBAL_DUPLICATE_THRESHOLD and the detected
+          // stuck loop ran to the hard backstop (core survives this shape
+          // via noteSuppressedToolCallByCallId's mark; requirement #6).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          const fingerprint = core.getToolCallFingerprint(
+            'task_list',
+            TASK_LIST_ARGS,
+          );
+          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+            new Map(
+              Array.from({ length: 15 }, (_, index) => [
+                `replayed_task_list_${index}`,
+                fingerprint,
+              ]),
+            ),
+          );
+          const loopState = freshLoopState();
+
+          let replayOrdinal = 0;
+          const runMixedRound = (round: number) =>
+            (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-mixed-${round}`,
+              [
+                {
+                  id: `replayed_task_list_${replayOrdinal++}`,
+                  name: 'task_list',
+                  args: TASK_LIST_ARGS,
+                },
+                {
+                  id: `generic_${round}`,
+                  name: 'generic_tool',
+                  args: { step: round },
+                },
+              ],
+              loopState,
+            );
+
+          let fired = false;
+          for (let round = 0; round < 60 && !fired; round++) {
+            if (round % 3 !== 0) {
+              // Two MIXED rounds per cycle (each one suppressed replay +
+              // one executable generic call): the first mixed boundary
+              // consumes the previous poll's result mark, so pre-fix the
+              // SECOND mixed boundary wiped the streak every cycle
+              // (peakSeries 1,1,0,…) and the stuck signal never armed.
+              const mixedResult = await runMixedRound(round);
+              fired = mixedResult.loopDetected ?? false;
+              continue;
+            }
+            const result = await runTaskListPoll(loopState, round);
+            fired = result.loopDetected ?? false;
+          }
+
+          // The suppression mark carries the replayed key through the
+          // mixed-batch boundaries, so the streak arms the stuck signal
+          // exactly as in the replay-only control: the halt lands at
+          // totalToolCalls 21 (soft cap 20 + 1).
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBe(21);
+        });
+
         it('still halts a frozen daemon poller interleaved every other batch with other work (issue #9450)', async () => {
           // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
           // cap's stateful stuck signal is the ONLY live halt path. A
