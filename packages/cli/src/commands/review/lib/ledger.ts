@@ -794,9 +794,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // pull request ever ran. Same invariant the finding-id filter enforces
     // above: a claim about rounds that did not exist is not read.
     const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
-    // Same read, same round-clamp, for the floor trigger's streak: it counts
-    // the same rounds inside the same writable marker.
-    const flatRounds = Math.min(streakOf(raw.flatRounds) ?? 0, raw.round);
+    // Same read for the floor trigger's streak — with the honest-maximum
+    // clamp `prevLedgerFacts` applies on the other route into the trigger:
+    // the signal that advances the streak gates on round >= 3, so at round
+    // N no honest marker carries more than N - 2, and a planted one
+    // claiming more would engage the floor off rounds the signal could
+    // never have measured.
+    const flatRounds = Math.min(
+      streakOf(raw.flatRounds) ?? 0,
+      Math.max(raw.round - 2, 0),
+    );
     // The floor qualifies `posted`, so it survives only beside it: a floor
     // alone would let a later round compare postures across rounds whose
     // volumes it does not have, which is not a comparison anyone can act on.

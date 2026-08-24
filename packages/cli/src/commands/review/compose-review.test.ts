@@ -11266,8 +11266,47 @@ describe('the signal-driven early floor (#9903)', () => {
     expect(parseLedger(r.body)?.floor).toBe('c');
   });
 
+  it('discloses the early engagement in the deferral header when enforcement moved nothing', () => {
+    // The compliant latched round per SKILL's marker routing: the model
+    // deferred its Suggestions itself, so `reroute` is empty and
+    // `floorEnforcedNote` never renders — the deferral header is the ONLY
+    // disclosure site left, and an unexplained early floor reads as a
+    // pipeline fault. The header must carry the note on its own line.
+    sideFile(firingPrev({ round: 4, flatRounds: 2, fresh: 9, posted: 9 }));
+    const r = compose({
+      draftedComments: [{ path: 'a.ts', line: 3, body: '**[Critical]** boom' }],
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'c.ts',
+          line: 9,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'rename the flag',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain(
+      'Deferred under the convergence posture (round 5, not a blocker) — the floor engaged early: the first-time-finding rate has not fallen for 2 consecutive round(s)',
+    );
+  });
+
   it('resets below the bar on a round whose rate fell — no carry-on-unmeasured', () => {
     sideFile(firingPrev({ round: 4, flatRounds: 1, fresh: 9, posted: 9 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('resets on a predecessor that posted under a closed floor — the trend is not comparable', () => {
+    // The streak's reliance on the trend's `floorChanged` guard is carried
+    // by the measurement's `floor: 'o'` argument: a predecessor that posted
+    // under an explicit `critical` floor recorded a suppressed fresh count,
+    // and a volume measured across that posture change is exactly what the
+    // rendered diagnosis calls non-comparable. The streak resets instead of
+    // advancing toward an engagement credited to it.
+    sideFile(firingPrev({ round: 4, flatRounds: 1, floor: 'c' }));
     const r = compose();
     expect(r.floorEnforced).toEqual([]);
     expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
@@ -11298,6 +11337,63 @@ describe('the signal-driven early floor (#9903)', () => {
     expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
   });
 
+  it('measures ONLY auto rounds — an explicit suggestion floor resets the streak', () => {
+    // The trigger lives ONLY in the `auto` arm, so its measurement must
+    // too: this round ran with the posture explicitly OFF, and a streak
+    // advanced here would engage the floor on a later auto round off a
+    // round the operator had taken out of the posture — the
+    // false-engagement direction the design's error asymmetry excludes.
+    // The marker stamps floor `o` exactly like an open auto round (the
+    // vocabulary has no letter for `suggestion`), so the trend's own
+    // `floorChanged` guard cannot see the change — only this gate can.
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('measures ONLY auto rounds — an explicit critical floor resets the streak', () => {
+    // Same gate, the other posture variant: under an explicit `critical`
+    // floor the posted set is suppressed, and the round's own rendered
+    // diagnosis calls the trend non-comparable — the streak must not
+    // advance off a volume measured across that posture change.
+    // Enforcement still fires here, but on the explicit floor itself.
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+    expect(parseLedger(r.body)?.floor).toBe('c');
+  });
+
+  it('a streak reset under an explicit floor engages nothing when auto returns', () => {
+    // The witness chain: rounds 1–3 under `auto` with round 3 firing
+    // (`flatRounds: 1`), round 4 under an explicit `suggestion` floor
+    // resets the streak, and round 5 back on `auto` starts below the bar
+    // again — no latch, no early engagement, the round-6 schedule intact.
+    sideFile(firingPrev({ round: 3, flatRounds: 1 }));
+    const explicit = compose({ severityFloor: 'suggestion' });
+    expect(parseLedger(explicit.body)?.flatRounds).toBeUndefined();
+    sideFile({ ...parseLedger(explicit.body)! });
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+  });
+
+  it('measures ONLY rounds the signal can measure — a planted round-2 streak clamps below the bar', () => {
+    // The signal gates on round >= 3, so no honest run carries a streak at
+    // round 2 — the honest maximum at round N is N - 2. A planted side file
+    // claiming the bar at round 2 would otherwise latch and engage at round
+    // 3, a full round ahead of the earliest honest engagement (round 4).
+    sideFile(firingPrev({ round: 2, flatRounds: 2 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
+    // The round re-measures honestly from zero: one firing round, one step.
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+  });
+
   it('an explicit suggestion floor overrides the latch — the operator keeps the posture', () => {
     sideFile(firingPrev({ round: 4, flatRounds: 2 }));
     const r = compose({ severityFloor: 'suggestion' });
@@ -11313,6 +11409,18 @@ describe('the signal-driven early floor (#9903)', () => {
     const r = compose({ contextUnavailable: true });
     expect(r.floorEnforced).toEqual([]);
     expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('the latch survives a context-unavailable blip — the pinned streak holds', () => {
+    // A transient GitHub outage on a LATCHED PR must not wipe the pinned
+    // streak from the marker: released here, the floor disengages and
+    // rounds 4–5 return to full-volume Suggestion posting until the streak
+    // rebuilds from zero — contradicting the pin's own contract. The floor
+    // itself still fails open for the unknowable round.
+    sideFile(firingPrev({ round: 4, flatRounds: 2 }));
+    const r = compose({ contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
   });
 
   it('does not pre-empt the round-6 schedule — auto-resolved stays its own kind', () => {
@@ -11339,17 +11447,18 @@ describe('the signal-driven early floor (#9903)', () => {
     expect(r.body).not.toContain('engaged early');
   });
 
-  it('clamps a planted streak to the round it rides — the latch cannot pin rounds the PR never ran', () => {
+  it('clamps a planted streak to the honest maximum the round it rides can carry', () => {
     // The side file is the same untrusted shape as the marker. A planted
-    // `flatRounds` reaches the bar only up to the rounds that exist — the
-    // disclosure names the clamped count, and the latch pins THAT value,
-    // never the planted one.
+    // `flatRounds` reaches at most the HONEST maximum of the round it rides
+    // — round N can have measured N - 2 firing rounds — and the engaging
+    // round then adds its own measurement to THAT value, never to the
+    // plant: the disclosure names the clamped count, and the latch pins it.
     sideFile(firingPrev({ round: 3, flatRounds: 9999 }));
     const r = compose();
     expect(r.floorEnforced).toEqual([1, 2]);
-    expect(r.body).toContain('for 3 consecutive round(s)');
+    expect(r.body).toContain('for 2 consecutive round(s)');
     expect(r.body).not.toContain('9999');
-    expect(parseLedger(r.body)?.flatRounds).toBe(3);
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
   });
 
   it('reads no streak off a round-0 side file — the trigger cannot engage round 1', () => {

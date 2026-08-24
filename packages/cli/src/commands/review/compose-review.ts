@@ -571,11 +571,13 @@ function floorResolvesCritical(
  * exists as code, here, where the drafts are already in hand.
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
- * explicit `critical` floor at any round, or `auto` at round ≥ 6 with the
- * round knowable. Everything else fails OPEN exactly as the posture itself
- * does — an unrecognisable floor, `auto` before round 6, `auto` in the
- * context-unavailable state (the round is unknowable), `--severity-floor
- * suggestion` (posture off): a posting bar in doubt posts. The rounds-2–5
+ * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
+ * with the flat-trend streak at its bar (#9903) — always with the round
+ * knowable. Everything else fails OPEN exactly as the posture itself does —
+ * an unrecognisable floor, `auto` before round 6 with the streak below its
+ * bar, `auto` in the context-unavailable state (the round is unknowable),
+ * `--severity-floor suggestion` (posture off): a posting bar in doubt
+ * posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
  *
@@ -706,8 +708,10 @@ export interface ComposeReviewInput {
   suggestionsDroppedAsDuplicates?: string[];
   /**
    * The findings the convergence posture deferred — Step 6's round-aware
-   * posting discipline (from round 6, or under an explicit `--severity-floor
-   * critical`, and the rounds-2-5 code-age rule). TYPED entries — see
+   * posting discipline (from round 6 — or earlier once the flat-trend
+   * streak engages the floor, #9903 — or under an explicit
+   * `--severity-floor critical`, and the rounds-2-5 code-age rule). TYPED
+   * entries — see
    * `DeferredEntry`: only otherwise-postable high-confidence Suggestions
    * belong here (a `Critical` is relocated into the body Criticals, a
    * `Nice to have` is refused; low-confidence findings stay terminal-only and
@@ -1561,9 +1565,28 @@ export function composeReview(
   // floor's own context-unavailable arm stays disengaged for that round.
   const prevFlat = prevFacts.flatRounds;
   const flatLatched = prevFlat >= FLAT_STREAK_TO_ENGAGE;
+  // The measurement is gated where the arm is gated: the trigger lives ONLY
+  // in the `auto` arm, and a round the operator ran under an explicit floor
+  // is not a measurement the auto posture licensed. `suggestion` turns the
+  // posture off, and `critical` suppresses the posted set the trend reads —
+  // yet the measurement below cannot see either, because it computes the
+  // trend as this round's floor were open and the marker vocabulary has no
+  // letter for `suggestion` (both stamp `o`, and the trend's `floorChanged`
+  // guard compares only what the markers recorded). Left ungated, such a
+  // round advances the streak and the latch then engages off rounds the
+  // operator had explicitly taken out of the posture — the false-engagement
+  // direction the error asymmetry above excludes. Absence folds to `auto`
+  // exactly as `criticalFloorKind` does; an unrecognisable floor is a
+  // posture this module cannot read and advances nothing — fail open.
+  const foldedFloor = normalizeSeverityFloor(input.severityFloor);
+  const floorIsAuto =
+    foldedFloor === 'auto' ||
+    (foldedFloor === undefined &&
+      (input.severityFloor === undefined || input.severityFloor === null));
   const flatFires =
     !flatLatched &&
     input.contextUnavailable !== true &&
+    floorIsAuto &&
     diagnoseConvergence({
       round: Math.min(prevRound + 1, LEDGER_MAX_ROUND),
       // Only the trend matters below; the diagnosis's display volume is
@@ -2001,12 +2024,18 @@ function prevLedgerFacts(planPath: string | undefined): {
     // posted ordinal ("the 10000th round…") after a single counted one.
     const churnRounds =
       round === 0 ? 0 : Math.min(streakOf(prev.churnRounds) ?? 0, round);
-    // Same read, same clamp, same travel-with-round rule as the churn
-    // streak it rides beside — the side file is the same untrusted shape,
-    // and an unclamped flat streak would engage the floor off rounds the
-    // pull request never ran.
+    // Same read, same travel-with-round rule as the churn streak it rides
+    // beside — the side file is the same untrusted shape, and an unclamped
+    // flat streak would engage the floor off rounds the pull request never
+    // ran. Clamped TIGHTER than the churn streak, to the HONEST maximum:
+    // the signal that advances it gates on round >= 3, so at round N no
+    // honest run carries more than N - 2, and a planted file claiming more
+    // names rounds the signal could never have measured — engaging the
+    // floor a round ahead of the earliest honest engagement.
     const flatRounds =
-      round === 0 ? 0 : Math.min(streakOf(prev.flatRounds) ?? 0, round);
+      round === 0
+        ? 0
+        : Math.min(streakOf(prev.flatRounds) ?? 0, Math.max(round - 2, 0));
     // Through the ledger's OWN admission test, not a local restatement of
     // two of its checks. The side file is the same untrusted shape as a
     // marker, arriving by a different route: a file written before the id
@@ -6371,8 +6400,9 @@ export function verdictLine(r: ComposeReviewResult): string {
   // existed must render its line, not throw over a feature it predates.
   if ((r.floorEnforced?.length ?? 0) > 0) {
     // "RESOLVED critical floor", like both sibling disclosure surfaces: the
-    // enforcement also fires under `auto` from round 6, where no literal
-    // critical floor exists in the invocation — the round resolved to one.
+    // enforcement also fires under `auto` from round 6 — and earlier once
+    // the flat-trend streak engages the floor (#9903) — where no literal
+    // critical floor exists in the invocation; the round resolved to one.
     line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the resolved critical floor)`;
   }
   // Last, and phrased so the terminal line alone carries the ask: this is the

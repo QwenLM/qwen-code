@@ -723,6 +723,10 @@ describe('persistRecoveredLedger', () => {
           fresh: 3,
           floor: 'c',
           churnRounds: 2,
+          // The flat streak rides the same shed: an anonymous advance must
+          // not carry EITHER streak into the rebuilt file (pinned by the
+          // whole-object equality below).
+          flatRounds: 2,
         }),
       );
       persistRecoveredLedger(
@@ -827,7 +831,13 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+        JSON.stringify({
+          v: 1,
+          round: 3,
+          findings: [],
+          churnRounds: 2,
+          flatRounds: 2,
+        }),
       );
       persistRecoveredLedger(
         side,
@@ -845,9 +855,12 @@ describe('persistRecoveredLedger', () => {
         },
         { noOwnReview: false, identityKnown: true },
       );
-      expect(
-        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
-      ).toBeUndefined();
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.churnRounds).toBeUndefined();
+      // The flat term must not leak past the `ownMarkerRead === false`
+      // guard either: resurrected here, a stale latched value (>= bar)
+      // re-engages the floor with no measurement at all.
+      expect(written.flatRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -923,7 +936,13 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+        JSON.stringify({
+          v: 1,
+          round: 3,
+          findings: [],
+          churnRounds: 2,
+          flatRounds: 2,
+        }),
       );
       persistRecoveredLedger(
         side,
@@ -936,9 +955,9 @@ describe('persistRecoveredLedger', () => {
         },
         { noOwnReview: false, identityKnown: true },
       );
-      expect(
-        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
-      ).toBeUndefined();
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.churnRounds).toBeUndefined();
+      expect(written.flatRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1019,8 +1038,10 @@ describe('persistRecoveredLedger', () => {
             // every marker is foreign and the strip fires), so the fixture
             // supplies one deliberately: the assertion below is about THIS
             // seam shedding it, and over a churn-free fixture it would hold
-            // vacuously and pin nothing.
+            // vacuously and pin nothing. The flat streak rides the same
+            // group and is planted for the same reason.
             churnRounds: 4,
+            flatRounds: 4,
           },
           commitId: null,
           reviewId: 40,
@@ -1049,9 +1070,11 @@ describe('persistRecoveredLedger', () => {
       // ...and the streak goes with them. This is the one path that writes a
       // whole recovered ledger to the file, so if the recovery-seam strip
       // ever loosened, a stranger's streak would land here intact and arm
-      // the non-convergence blocker off someone else's count. The seam
-      // defends itself rather than trusting that invariant to hold forever.
+      // the non-convergence blocker off someone else's count — or latch the
+      // floor off someone else's flat streak. The seam defends itself
+      // rather than trusting that invariant to hold forever.
       expect(written.churnRounds).toBeUndefined();
+      expect(written.flatRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
