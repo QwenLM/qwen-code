@@ -3413,6 +3413,234 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('commits deferred-flush presentations when the flushed batch terminates a Goal turn (R28-3)', async () => {
+    // R28-3: the deferred-batch flush decoded the delivery contract
+    // stricter than its producer. A flushed batch taking the
+    // `terminatesGoalTurn` exit plants its results into history via
+    // addHistory and returns `undefined` — documented as "accepted at
+    // settlement … presentations ARE backed by history" — but the flush
+    // gate committed only on `flushedAccepted === true`, silently
+    // discarding those history-backed presentations, while the direct
+    // path (scheduler settlement) decodes `undefined` as accepted
+    // (`deliveryAccepted !== false`). The schema sits in the model
+    // context yet uncommitted in the #6721 ledger, so the model's
+    // subsequent direct tool_call is refused and must burn a redundant
+    // re-search. The flush now decodes `!== false` like the scheduler.
+    const presentations = [
+      { name: 'cron_create', fingerprint: 'fp-goal-flush' },
+    ];
+    const commitSpy = vi.fn();
+    mockConfig.getToolRegistry = vi.fn(() => ({
+      commitProxySchemaPresentations: commitSpy,
+      getProxySchemaPresentationSnapshot: vi.fn(() => new Map()),
+      getProxySchemaPresentationGeneration: vi.fn(() => 0),
+      restoreProxySchemaPresentationSnapshot: vi.fn(),
+      hasPresentedProxySchema: vi.fn(() => false),
+      isDeferredProxyPairRegistered: vi.fn(() => true),
+    })) as unknown as ReturnType<typeof mockConfig.getToolRegistry>;
+
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-flush',
+      revision: 1,
+      turnId: 'turn-goal-flush',
+    };
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const runtime = {
+      permitForTurn: vi.fn(() => permit),
+      finishTurn,
+      getSnapshot: vi.fn(() => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'flush terminates the goal turn',
+          status: 'complete' as const,
+          evidenceCursor: { recordId: 'record-goal-flush' },
+          turnCount: 1,
+          activeTimeMs: 20,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      })),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+
+    let resolveUserStream!: () => void;
+    const userStreamGate = new Promise<void>((resolve) => {
+      resolveUserStream = resolve;
+    });
+    mockSendMessageStream.mockImplementation(() =>
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'goal-search',
+            name: 'tool_search',
+            args: { query: 'cron' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-flush',
+            goalContext: permit,
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'goal-finisher',
+            name: 'update_goal',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-flush',
+            goalContext: permit,
+          },
+        };
+        // Stay active so the batch completing below is DEFERRED.
+        await userStreamGate;
+      })(),
+    );
+
+    const searchResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'goal-search',
+          name: 'tool_search',
+          response: { output: '<functions>cron_create</functions>' },
+        },
+      },
+    ];
+    const goalResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'goal-finisher',
+          name: 'update_goal',
+          response: { output: 'proposal recorded' },
+        },
+      },
+    ];
+    const searchCall: TrackedCompletedToolCall = {
+      request: {
+        callId: 'goal-search',
+        name: 'tool_search',
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-goal-flush',
+        goalContext: permit,
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'goal-search',
+        responseParts: searchResponseParts,
+        errorType: undefined,
+        pendingProxySchemaPresentations: presentations,
+      },
+      tool: { displayName: 'ToolSearch' },
+      invocation: {
+        getDescription: () => 'goal-search',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const goalCall: TrackedCompletedToolCall = {
+      request: {
+        callId: 'goal-finisher',
+        name: 'update_goal',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-goal-flush',
+        goalContext: permit,
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'goal-finisher',
+        responseParts: goalResponseParts,
+        errorType: undefined,
+        terminateTurn: true,
+      },
+      tool: { displayName: 'UpdateGoal' },
+      invocation: {
+        getDescription: () => 'goal-finisher',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | undefined;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let submission!: Promise<void>;
+    await act(async () => {
+      submission = result.current.submitQuery(
+        'work the goal',
+        SendMessageType.UserQuery,
+        'prompt-goal-flush',
+        { submittedPrompt: 'work the goal' },
+      );
+    });
+    await waitFor(() => expect(capturedOnComplete).toBeDefined());
+
+    // The batch completes while the user-query stream is still active →
+    // deferred into pendingCompletedToolBatchesRef.
+    await act(async () => {
+      await capturedOnComplete?.([searchCall, goalCall]);
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    // Release the user-query stream: the turn-end drain flushes the
+    // deferred batch. The mixed batch takes the terminatesGoalTurn exit —
+    // addHistory plants the schema-bearing results, and the flush must
+    // commit the carried presentations for the history-backed delivery.
+    await act(async () => {
+      resolveUserStream();
+    });
+    await act(async () => {
+      await submission;
+    });
+
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [...searchResponseParts, ...goalResponseParts],
+    });
+    await waitFor(() => {
+      expect(commitSpy).toHaveBeenCalledWith(presentations);
+    });
+    expect(finishTurn).toHaveBeenCalledWith(permit);
+    // The goal exit returns before submitQuery — no continuation send.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
   it('finishes a Goal turn without another model call after update_goal', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-complete',

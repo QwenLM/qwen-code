@@ -4231,7 +4231,15 @@ export const useGeminiStream = (
               // real result. Committing a dropped call's presentations would
               // open the #6721 gate for a schema that never entered the
               // model context, so filter to the delivered set.
-              if (flushedAccepted === true && flushedDeliveredIds) {
+              // Decode the flush result exactly like the scheduler's
+              // settlement (`deliveryAccepted !== false`, R28-3): the
+              // `terminatesGoalTurn` exit plants the batch into history via
+              // addHistory and returns `undefined` — "accepted at
+              // settlement, presentations ARE backed by history" — so a
+              // strict `=== true` check silently discards history-backed
+              // presentations. Every discard exit returns an explicit
+              // `false` (R20-4), so `!== false` cannot admit one.
+              if (flushedAccepted !== false && flushedDeliveredIds) {
                 const deliveredIds = flushedDeliveredIds;
                 const deliveredTools = flushedTools.filter((toolCall) =>
                   deliveredIds.has(toolCall.request.callId),
