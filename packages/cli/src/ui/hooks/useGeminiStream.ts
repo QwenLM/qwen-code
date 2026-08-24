@@ -260,6 +260,14 @@ function detectNestedFunctionResponseMedia(parts: PartListUnion): {
  * payload keeps its shape but carries no raw bytes. Returns the input unchanged
  * (identity) when no nested media matched.
  */
+function stringifyStructuredToolOutput(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function replaceNestedFunctionResponseMedia(
   parts: PartListUnion,
   match: 'image' | 'audio',
@@ -295,12 +303,18 @@ function replaceNestedFunctionResponseMedia(
     const response = (rest['response'] ?? {}) as Record<string, unknown>;
     const key = typeof response['error'] === 'string' ? 'error' : 'output';
     const current = response[key];
+    // A structured (non-string) output — core's convertToFunctionResponse
+    // passes tool-supplied functionResponse parts through verbatim — must be
+    // preserved, not erased: stringify it and append the note, so the tool
+    // result survives even though the nested media it carried is omitted.
     const nextResponse = {
       ...response,
       [key]:
         typeof current === 'string' && current.length > 0
           ? `${current}\n\n${note}`
-          : note,
+          : current === undefined || current === null || current === ''
+            ? note
+            : `${stringifyStructuredToolOutput(current)}\n\n${note}`,
     };
     return {
       ...part,

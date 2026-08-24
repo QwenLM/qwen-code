@@ -1470,6 +1470,86 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('preserves a structured pass-through output while fail-closing its nested image', async () => {
+    // Core's convertToFunctionResponse passes a tool-supplied functionResponse
+    // part through verbatim, so response.output can be a structured (non-string)
+    // value. Appending the fail-closed note must not erase it: the replacer must
+    // stringify the structured output and append the note, not replace the value
+    // (which would delete the tool result while the note claims only the image
+    // was omitted).
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ audio: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'audio-model\0',
+    );
+
+    // A pass-through tool result whose response.output is a STRUCTURED value
+    // and that nests an image the audio-only override cannot see.
+    await act(async () => {
+      await result.current.submitQuery(
+        [
+          {
+            functionResponse: {
+              id: 'tool-call-structured',
+              name: 'custom_tool',
+              response: { output: { probeKey: 'PROBE_STRUCTURED_VALUE_42' } },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+              ],
+            },
+          } as never,
+        ],
+        SendMessageType.ToolResult,
+      );
+    });
+
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    // The image bytes are stripped and the fail-closed note is present...
+    expect(sent).not.toContain('image/png');
+    expect(sent).not.toContain('aW1hZ2U=');
+    expect(sent).toContain('was not sent');
+    // ...but the structured tool result is PRESERVED, not erased.
+    expect(sent).toContain('probeKey');
+    expect(sent).toContain('PROBE_STRUCTURED_VALUE_42');
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Image returned by a tool was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it('clamps oversized nested tool-result media the route supports', async () => {
     // The gate passing a SUPPORTED modality through must not skip the
     // QWEN_CODE_MAX_INLINE_MEDIA_BYTES ceiling every other routing path
