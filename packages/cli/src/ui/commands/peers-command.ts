@@ -135,8 +135,7 @@ export const peersCommand: SlashCommand = {
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
       const enabled =
-        context.services.settings?.merged?.agents?.crossSessionMessaging ===
-        true;
+        context.services.config?.isCrossSessionMessagingEnabled() === true;
       return {
         type: 'message',
         messageType: enabled ? 'error' : 'info',
