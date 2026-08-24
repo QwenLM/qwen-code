@@ -22,7 +22,6 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isTodoWriteToolName } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -999,11 +998,8 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
-  // Sub-agent calls and todo_write updates each stand alone in their own group
-  // box instead of being crammed in with the tools around them: an agent renders
-  // an expandable panel, and a todo update is its own collapsible checklist.
-  const isStandalone = (t: DaemonMessageToolCall) =>
-    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
+  // TodoWrite merges like any other tool.
+  const isStandalone = (t: DaemonMessageToolCall) => isSubAgentToolCall(t);
   const last = messages[messages.length - 1];
   if (
     last &&
