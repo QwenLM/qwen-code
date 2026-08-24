@@ -51,6 +51,12 @@ export interface PendingTranscriptToolCall {
   readonly toolName: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
+  /**
+   * The transcript's own id when dedup renamed `callId` (`<id>:2`). Skip
+   * sets derived from chat history hold RAW ids, so finalize must match
+   * against both.
+   */
+  readonly rawCallId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -83,6 +89,7 @@ export interface TranscriptReplayMachineOptions {
   readonly gaps?: readonly TranscriptReplayGapInput[];
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
+  readonly skipFinalizeCallIds?: ReadonlySet<string>;
 }
 
 export interface TranscriptReplayMachine {
@@ -554,8 +561,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (
+        skip &&
+        (skip.has(pending.callId) ||
+          (pending.rawCallId !== undefined && skip.has(pending.rawCallId)))
+      )
+        continue;
       this.pendingToolCalls.delete(pending.callId);
       this.report(
         'missing_tool_result',
@@ -830,6 +844,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             toolName,
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+            ...(explicitId !== undefined && explicitId !== callId
+              ? { rawCallId: explicitId }
+              : {}),
           });
         }
       }
@@ -939,9 +956,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload,
         this.goalState?.goal ?? null,
       );
+      const goalControlCommand = projectGoalControlCommand(
+        payload.cause,
+        payload.snapshot,
+      );
       this.goalState = payload.snapshot;
       this.goalCause = payload.cause;
       if (bookkeepingOnly) return;
+      if (goalControlCommand) {
+        yield emit(
+          createTranscriptMessageUpdate({
+            role: 'user',
+            text: goalControlCommand,
+            ...meta,
+            extra: {
+              source: 'goal_control',
+              'qwen.session.recordId': record.uuid,
+            },
+          }),
+        );
+      }
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1119,6 +1153,40 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ...(path ? { path } : {}),
     });
   }
+}
+
+function projectGoalControlCommand(
+  cause: GoalStateCause,
+  snapshot: GoalSnapshotV2,
+): string | undefined {
+  switch (cause) {
+    case 'create':
+    case 'replace':
+      return snapshot.goal ? `/goal ${snapshot.goal.objective}` : undefined;
+    case 'edit':
+      return snapshot.goal
+        ? `/goal edit ${snapshot.goal.objective}`
+        : undefined;
+    case 'pause':
+    case 'resume':
+    case 'clear':
+      return `/goal ${cause}`;
+    case 'turn_finished':
+    case 'checkpoint':
+    case 'verifier_accept':
+    case 'verifier_reject':
+    case 'complete':
+    case 'blocked':
+    case 'usage_limited':
+    case 'migrated':
+      return undefined;
+    default:
+      return assertNever(cause);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported Goal state cause: ${String(value)}`);
 }
 
 function parseTranscriptGoalStatus(

@@ -8,9 +8,11 @@
 //!
 //! Element indices match the markdown produced by [`walk_tree`]: a depth-first,
 //! pre-order traversal of the target application's windows, numbering the
-//! nodes that advertise AT-SPI actions OR a Value interface (see is_indexable). `perform_action`, `set_value`, and
-//! `get_element_bounds` index into that same ordered set.
+//! nodes accepted by the shared [`is_indexable`] capability predicate.
+//! `perform_action`, `set_value`, and `get_element_bounds` index into that same
+//! ordered set.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -18,20 +20,33 @@ use anyhow::{anyhow, Result};
 use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
-use atspi::{CoordType, Interface, State};
+use atspi::{CoordType, Interface, State, StateSet};
 
-use super::AtspiNode;
+use super::{AtspiIdentity, AtspiNode};
 
 /// Per-call D-Bus timeout: a single unresponsive accessible (common in large,
 /// lazily-built trees like Chromium's) must not stall the whole walk.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// Overall budget for one tree walk / operation.
 const OP_TIMEOUT: Duration = Duration::from_secs(25);
+/// Startup may run before `serve` binds its socket or MCP reads stdin. A
+/// reachable but wedged accessibility bus must not hold either entry point
+/// forever. The worker is deliberately left running after this readiness
+/// budget so a late registry reply can still establish the process-lifetime
+/// listener.
+const LISTENER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Run `fut` with [`CALL_TIMEOUT`]; `None` on timeout so the caller can skip
 /// the node and keep walking rather than blocking forever.
 async fn call<T>(fut: impl std::future::Future<Output = T>) -> Option<T> {
     tokio::time::timeout(CALL_TIMEOUT, fut).await.ok()
+}
+
+async fn before_snapshot_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, work).await
 }
 
 /// Drive an AT-SPI op `work` on the runtime, bounded by [`OP_TIMEOUT`].
@@ -105,17 +120,109 @@ async fn shared_connection() -> Result<&'static AccessibilityConnection> {
 /// Establish the process-lifetime listener before accessibility-aware apps are
 /// launched. Idempotent; later calls reuse the same connection.
 pub fn ensure_listener_active() -> Result<()> {
-    let connect = || runtime().block_on(async { shared_connection().await.map(|_| ()) });
-    if tokio::runtime::Handle::try_current().is_ok() {
-        // The daemon builds its registry from its Tokio entry-point. Calling
-        // Runtime::block_on there panics even though this module owns a separate
-        // runtime, so initialize the AT-SPI connection on a plain thread and
-        // wait for it before accessibility-aware apps can launch.
-        std::thread::spawn(connect)
-            .join()
-            .map_err(|_| anyhow!("AT-SPI listener initialization thread panicked"))?
-    } else {
-        connect()
+    wait_for_listener_startup(LISTENER_STARTUP_TIMEOUT, || {
+        runtime().block_on(async { shared_connection().await.map(|_| ()) })
+    })
+}
+
+fn wait_for_listener_startup(
+    timeout: Duration,
+    connect: impl FnOnce() -> Result<()> + Send + 'static,
+) -> Result<()> {
+    let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("cua-atspi-listener".into())
+        .spawn(move || {
+            let _ = completed_tx.send(connect());
+        })
+        .map_err(|error| anyhow!("could not spawn AT-SPI listener initialization: {error}"))?;
+
+    match completed_rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "AT-SPI listener initialization did not complete within {} ms; continuing in the background",
+            timeout.as_millis()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(anyhow!("AT-SPI listener initialization thread panicked"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod listener_startup_tests {
+    use super::wait_for_listener_startup;
+    use anyhow::anyhow;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn healthy_listener_initialization_completes_before_readiness_returns() {
+        let initialized = Arc::new(AtomicBool::new(false));
+        let initialized_in_worker = initialized.clone();
+
+        wait_for_listener_startup(Duration::from_secs(1), move || {
+            initialized_in_worker.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect("healthy listener startup");
+
+        assert!(initialized.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unreachable_listener_initialization_returns_its_error() {
+        let error = wait_for_listener_startup(Duration::from_secs(1), || {
+            Err(anyhow!("synthetic AT-SPI connection failure"))
+        })
+        .expect_err("unreachable listener must fail");
+
+        assert!(error
+            .to_string()
+            .contains("synthetic AT-SPI connection failure"));
+    }
+
+    #[test]
+    fn stalled_listener_is_bounded_and_keeps_initializing_in_background() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate_in_worker = gate.clone();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_worker = completed.clone();
+        let started_at = Instant::now();
+
+        let error = wait_for_listener_startup(Duration::from_millis(50), move || {
+            let (lock, ready) = &*gate_in_worker;
+            let released = lock.lock().expect("listener gate lock");
+            drop(
+                ready
+                    .wait_while(released, |released| !*released)
+                    .expect("listener gate wait"),
+            );
+            completed_in_worker.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("stalled listener must exceed the readiness budget");
+
+        assert!(error.to_string().contains("continuing in the background"));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "stalled initialization exceeded its bounded wait"
+        );
+        let (lock, ready) = &*gate;
+        *lock.lock().expect("release listener gate") = true;
+        ready.notify_one();
+
+        let completion_deadline = Instant::now() + Duration::from_secs(1);
+        while !completed.load(Ordering::SeqCst) && Instant::now() < completion_deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "timed-out initialization worker was not allowed to finish"
+        );
     }
 }
 
@@ -144,7 +251,47 @@ struct Visited<'a> {
     /// Chromium keeps its document on the application's ordinary AT-SPI bus,
     /// where descendant Window extents already include the document origin.
     on_web_process_bus: bool,
+    /// Position of the application top-level (frame/window) this node descends
+    /// from, in `app.get_children()` order. AT-SPI exposes one application per
+    /// process, so a multi-window app publishes every window's controls in one
+    /// tree; this is what lets a caller that named an exact native window prove
+    /// which of those windows a node actually lives in.
+    frame_ordinal: usize,
+    identity: Option<AtspiIdentity>,
     acc: AccessibleProxy<'a>,
+}
+
+#[derive(Debug)]
+struct WalkStatus {
+    complete: bool,
+    truncated: bool,
+    incomplete_notes: Vec<String>,
+}
+
+impl WalkStatus {
+    fn complete() -> Self {
+        Self {
+            complete: true,
+            truncated: false,
+            incomplete_notes: Vec::new(),
+        }
+    }
+
+    fn incomplete(&mut self, note: &'static str) {
+        self.complete = false;
+        if !self
+            .incomplete_notes
+            .iter()
+            .any(|existing| existing == note)
+        {
+            self.incomplete_notes.push(note.into());
+        }
+    }
+
+    fn truncate(&mut self, note: &'static str) {
+        self.truncated = true;
+        self.incomplete(note);
+    }
 }
 
 /// Role names that denote embedded web/document content. An editable beneath
@@ -232,6 +379,20 @@ impl RawObjectRef {
     }
 }
 
+async fn canonical_unique_owner(
+    dbus: &atspi::zbus::fdo::DBusProxy<'_>,
+    name: &str,
+) -> Option<String> {
+    if name.starts_with(':') {
+        return Some(name.to_owned());
+    }
+    let bus_name = atspi::zbus::names::BusName::try_from(name.to_owned()).ok()?;
+    call(dbus.get_name_owner(bus_name))
+        .await
+        .and_then(Result::ok)
+        .map(|owner| owner.to_string())
+}
+
 /// Read Accessible.GetChildren without deserializing the bus-name field as a
 /// `UniqueName`. WebKitGTK's embedded WebProcess exposes a well-known name
 /// containing a UUID; D-Bus can address it, but the stricter AT-SPI wrapper
@@ -270,6 +431,50 @@ async fn pid_of(
     dbus.get_connection_unix_process_id(bus).await.ok()
 }
 
+/// Keep the first matching application as a compatibility fallback, but allow
+/// a later registration with a real child tree to win. Some Qt processes
+/// publish an empty application object before their populated one (#2678,
+/// #2706).
+struct ApplicationSelection<T> {
+    target_pid: u32,
+    fallback: Option<T>,
+    populated: Vec<T>,
+}
+
+impl<T> ApplicationSelection<T> {
+    fn new(target_pid: u32) -> Self {
+        Self {
+            target_pid,
+            fallback: None,
+            populated: Vec::new(),
+        }
+    }
+
+    fn matches_pid(&self, candidate_pid: Option<u32>) -> bool {
+        candidate_pid == Some(self.target_pid)
+    }
+
+    /// Retain every populated exact-PID candidate so resolution can reject an
+    /// ambiguous registry instead of silently choosing whichever entry sorted
+    /// first. The first childless candidate remains the compatibility fallback
+    /// for applications that genuinely expose no top-level accessibles.
+    fn consider_matching(&mut self, candidate: T, has_children: bool) {
+        if has_children {
+            self.populated.push(candidate);
+        } else if self.fallback.is_none() {
+            self.fallback = Some(candidate);
+        }
+    }
+
+    fn into_selected(mut self) -> std::result::Result<Option<T>, usize> {
+        match self.populated.len() {
+            0 => Ok(self.fallback),
+            1 => Ok(self.populated.pop()),
+            count => Err(count),
+        }
+    }
+}
+
 /// Locate the application accessible whose backing process is `pid`.
 async fn app_for_pid<'a>(
     conn: &'a AccessibilityConnection,
@@ -306,6 +511,7 @@ async fn app_for_pid<'a>(
         "registry root has {} application(s); seeking pid {pid}",
         apps.len()
     );
+    let mut selection = ApplicationSelection::new(pid);
     for child in apps {
         // A modal-grabbed app can't answer the pid query; skip it after
         // CALL_TIMEOUT rather than blocking the whole walk on it.
@@ -320,22 +526,49 @@ async fn app_for_pid<'a>(
             }
         };
         dlog!("  app bus={:?} pid={:?}", child.name_as_str(), cpid);
-        if cpid == Some(pid) {
-            let child = match RawObjectRef::from_atspi(&child) {
-                Some(child) => child,
-                None => continue,
-            };
-            return match call(accessible_for(conn, &child)).await {
-                Some(r) => r.map(Some),
-                None => {
-                    dlog!("  accessible_for timed out for pid {pid}");
-                    Ok(None)
-                }
-            };
+        if !selection.matches_pid(cpid) {
+            continue;
         }
+        let child = match RawObjectRef::from_atspi(&child) {
+            Some(child) => child,
+            None => continue,
+        };
+        let app = match call(accessible_for(conn, &child)).await {
+            Some(Ok(app)) => app,
+            Some(Err(error)) => {
+                dlog!("  accessible_for failed for pid {pid}: {error:#}");
+                continue;
+            }
+            None => {
+                dlog!("  accessible_for timed out for pid {pid}");
+                continue;
+            }
+        };
+        let has_children = match call(app.get_children()).await {
+            Some(Ok(children)) => !children.is_empty(),
+            Some(Err(error)) => {
+                dlog!("  get_children failed for pid {pid}: {error:#}");
+                false
+            }
+            None => {
+                dlog!("  get_children timed out for pid {pid}");
+                false
+            }
+        };
+        dlog!("  matching app has_children={has_children}");
+        selection.consider_matching(app, has_children);
     }
-    dlog!("no application accessible matched pid {pid}");
-    Ok(None)
+    match selection.into_selected() {
+        Ok(Some(app)) => Ok(Some(app)),
+        Ok(None) => {
+            dlog!("no application accessible matched pid {pid}");
+            Ok(None)
+        }
+        Err(count) => Err(anyhow!(
+            "ambiguous AT-SPI application selection for pid {pid}: \
+             {count} populated application accessibles matched"
+        )),
+    }
 }
 
 /// Depth-first, pre-order walk of an application's windows. Mirrors the old
@@ -345,7 +578,128 @@ async fn collect_visited<'a>(
     conn: &'a AccessibilityConnection,
     pid: u32,
 ) -> Result<Option<Vec<Visited<'a>>>> {
-    collect_visited_bounded(conn, pid, None, None).await
+    collect_visited_bounded(conn, pid, 0, None, None)
+        .await
+        .map(|walked| walked.map(|(visited, _, _)| visited))
+}
+
+/// Screen-space distance between an AT-SPI frame's extents and a native
+/// window's geometry. Lower is a better correspondence; `None` when the frame
+/// reports no usable extents.
+fn frame_geometry_distance(
+    frame: (i32, i32, i32, i32),
+    window: &crate::x11::WindowInfo,
+) -> Option<u64> {
+    let (fx, fy, fw, fh) = frame;
+    if fw <= 0 || fh <= 0 {
+        return None;
+    }
+    let dx = i64::from(fx) - i64::from(window.x);
+    let dy = i64::from(fy) - i64::from(window.y);
+    let dw = i64::from(fw) - i64::from(window.width);
+    let dh = i64::from(fh) - i64::from(window.height);
+    Some(dx.unsigned_abs() + dy.unsigned_abs() + dw.unsigned_abs() + dh.unsigned_abs())
+}
+
+/// Server-side decorations offset a frame's reported origin from the native
+/// window's outer geometry, so an exact match is not required. The correlation
+/// must still be unambiguous: the best candidate has to be within this budget
+/// AND beat the runner-up by [`FRAME_MATCH_MARGIN_PX`].
+const FRAME_MATCH_TOLERANCE_PX: u64 = 160;
+
+/// How decisively the best frame must beat the second-best. Two windows of
+/// genuinely similar geometry are not disambiguated by this heuristic, and a
+/// caller that needs proof of window identity must get a refusal instead of a
+/// coin flip.
+const FRAME_MATCH_MARGIN_PX: u64 = 24;
+
+/// Pick the unique application top-level that corresponds to native window
+/// `xid`, or `None` when the correspondence cannot be proven.
+///
+/// AT-SPI publishes one application per process: every window of a multi-window
+/// app shares a single tree, and the protocol exposes no window handle to join
+/// on. Geometry is the available bridge — `Component.GetExtents` in screen
+/// coordinates against the X11 outer geometry the caller already named. This
+/// refuses ties rather than guessing, because callers use the result to decide
+/// which window they are about to act inside.
+fn correlate_frame_to_window(
+    candidates: &[(usize, (i32, i32, i32, i32))],
+    window: &crate::x11::WindowInfo,
+) -> Option<usize> {
+    let mut scored: Vec<(u64, usize)> = candidates
+        .iter()
+        .filter_map(|(ordinal, extents)| {
+            frame_geometry_distance(*extents, window).map(|distance| (distance, *ordinal))
+        })
+        .collect();
+    scored.sort_by_key(|(distance, ordinal)| (*distance, *ordinal));
+    let (best_distance, best_ordinal) = *scored.first()?;
+    if best_distance > FRAME_MATCH_TOLERANCE_PX {
+        return None;
+    }
+    if let Some((runner_up, _)) = scored.get(1) {
+        if runner_up.saturating_sub(best_distance) < FRAME_MATCH_MARGIN_PX {
+            return None;
+        }
+    }
+    Some(best_ordinal)
+}
+
+/// Resolve native window `xid` to the ordinal of the application top-level that
+/// renders it, or `None` when that cannot be proven. `None` means the walk stays
+/// application-wide: callers that merely want a tree carry on, and callers that
+/// need window identity must refuse.
+async fn resolve_window_frame(
+    conn: &AccessibilityConnection,
+    pid: u32,
+    xid: u64,
+    seeds: &[RawObjectRef],
+) -> Option<usize> {
+    if seeds.len() == 1 {
+        // One top-level: the caller's window is the only thing this
+        // application could be showing, and no geometry round-trip can make
+        // that more certain.
+        return Some(0);
+    }
+    let window = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .find(|candidate| candidate.xid == xid)?;
+    let mut candidates: Vec<(usize, (i32, i32, i32, i32))> = Vec::new();
+    for (ordinal, oref) in seeds.iter().enumerate() {
+        let Some(Ok(acc)) = call(accessible_for(conn, oref)).await else {
+            continue;
+        };
+        // Menus, tooltips and other transients are top-level accessibles too;
+        // only real windows can correspond to a native window id.
+        let role = match call(acc.get_role_name()).await {
+            Some(Ok(role)) => role,
+            _ => continue,
+        };
+        if !matches!(
+            role.as_str(),
+            "frame" | "window" | "dialog" | "alert" | "file chooser"
+        ) {
+            continue;
+        }
+        let Some(Ok(proxies)) = call(acc.proxies()).await else {
+            continue;
+        };
+        let Some(Ok(component)) = call(proxies.component()).await else {
+            continue;
+        };
+        if let Some(Ok(extents)) = call(component.get_extents(CoordType::Screen)).await {
+            candidates.push((ordinal, extents));
+        }
+    }
+    let resolved = correlate_frame_to_window(&candidates, &window);
+    if resolved.is_none() {
+        dlog!(
+            "could not correlate xid {xid} to one of pid {pid}'s {} top-level frame(s); \
+             walk stays application-scoped",
+            candidates.len()
+        );
+    }
+    resolved
 }
 
 /// `collect_visited` with caller-supplied caps.
@@ -357,28 +711,57 @@ async fn collect_visited<'a>(
 async fn collect_visited_bounded<'a>(
     conn: &'a AccessibilityConnection,
     pid: u32,
+    xid: u64,
     max_elements: Option<usize>,
     max_depth: Option<usize>,
-) -> Result<Option<Vec<Visited<'a>>>> {
+) -> Result<Option<(Vec<Visited<'a>>, Option<usize>, WalkStatus)>> {
     let app = match app_for_pid(conn, pid).await? {
         Some(a) => a,
         None => return Ok(None),
     };
     let zconn = conn.connection();
+    let dbus = atspi::zbus::fdo::DBusProxy::new(zconn)
+        .await
+        .map_err(|error| anyhow!("DBus proxy unavailable: {error}"))?;
+    let mut status = WalkStatus::complete();
 
-    // Stack of (object ref, depth, in_web_doc). Seed with the app's windows;
-    // push children reversed so siblings pop left-to-right and each subtree
-    // completes before the next sibling (pre-order). `in_web_doc` is inherited
-    // from ancestors so editables in page content can be told from chrome.
-    let mut stack: Vec<(RawObjectRef, usize, bool)> = match call(app.get_children()).await {
+    // Stack of (object ref, depth, in_web_doc, frame_ordinal). Seed with the
+    // app's windows; push children reversed so siblings pop left-to-right and
+    // each subtree completes before the next sibling (pre-order). `in_web_doc`
+    // is inherited from ancestors so editables in page content can be told from
+    // chrome. `frame_ordinal` is the seed's position in `get_children()` order
+    // and is likewise inherited, so every node carries the identity of the
+    // top-level window it belongs to.
+    let seeds: Vec<RawObjectRef> = match call(app.get_children()).await {
         Some(Ok(children)) => children
             .into_iter()
             .filter_map(|child| RawObjectRef::from_atspi(&child))
-            .rev()
-            .map(|r| (r, 0usize, false))
             .collect(),
-        _ => Vec::new(),
+        _ => {
+            status.incomplete("application_children_unavailable");
+            Vec::new()
+        }
     };
+
+    // Resolve which seed is the caller's window before walking, from the same
+    // child list the walk is about to seed from. Re-reading `get_children()`
+    // later could observe a different window set, and an ordinal resolved
+    // against one list but applied to another names the wrong window.
+    let scoped_frame = if xid == 0 {
+        None
+    } else {
+        resolve_window_frame(conn, pid, xid, &seeds).await
+    };
+    if xid != 0 && scoped_frame.is_none() {
+        status.incomplete("window_scope_unresolved");
+    }
+
+    let mut stack: Vec<(RawObjectRef, usize, bool, usize)> = seeds
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, r)| (r, 0usize, false, ordinal))
+        .rev()
+        .collect();
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
@@ -399,14 +782,17 @@ async fn collect_visited_bounded<'a>(
     // time out too. Give up after a few so type_text falls back to XTEST in a
     // few seconds rather than ~25s.
     let mut consecutive_timeouts = 0u32;
+    let mut owner_cache: HashMap<String, Option<String>> = HashMap::new();
 
-    while let Some((oref, depth, inherited_web_doc)) = stack.pop() {
+    while let Some((oref, depth, inherited_web_doc, frame_ordinal)) = stack.pop() {
         if budget == 0 {
             dlog!("node budget exhausted; truncating walk");
+            status.truncate("max_elements_reached");
             break;
         }
         if std::time::Instant::now() >= deadline {
             dlog!("collect_visited time budget exhausted; returning partial walk");
+            status.truncate("walk_deadline_reached");
             break;
         }
         budget -= 1;
@@ -426,15 +812,18 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(a)) => a,
             Some(Err(error)) => {
                 dlog!("  accessible_for failed: {error:#}");
+                status.incomplete("accessible_proxy_unavailable");
                 continue;
             }
             None => {
+                status.incomplete("accessible_proxy_timeout");
                 consecutive_timeouts += 1;
                 if consecutive_timeouts >= 3 {
                     dlog!(
                         "{} consecutive AT-SPI timeouts (accessible_for); app unresponsive, bailing walk",
                         consecutive_timeouts
                     );
+                    status.truncate("provider_unresponsive");
                     break;
                 }
                 continue;
@@ -451,17 +840,20 @@ async fn collect_visited_bounded<'a>(
             // A completed-but-errored call is node-specific; keep walking.
             Some(Err(error)) => {
                 dlog!("  get_interfaces failed: {error:#}");
+                status.incomplete("interfaces_unavailable");
                 continue;
             }
             // A timeout means the app didn't answer in CALL_TIMEOUT. A run of
             // these means the whole app is wedged — bail so callers fall back.
             None => {
+                status.incomplete("interfaces_timeout");
                 consecutive_timeouts += 1;
                 if consecutive_timeouts >= 3 {
                     dlog!(
                         "{} consecutive AT-SPI timeouts; app unresponsive, bailing walk",
                         consecutive_timeouts
                     );
+                    status.truncate("provider_unresponsive");
                     break;
                 }
                 continue;
@@ -482,6 +874,18 @@ async fn collect_visited_bounded<'a>(
             call(acc.get_state()),
             call(raw_children(zconn, &oref)),
         );
+        if !matches!(&role_r, Some(Ok(_))) {
+            status.incomplete("role_unavailable");
+        }
+        if !matches!(&name_r, Some(Ok(_))) {
+            status.incomplete("name_unavailable");
+        }
+        if !matches!(&state_r, Some(Ok(_))) {
+            status.incomplete("state_unavailable");
+        }
+        if !matches!(&children_r, Some(Ok(_))) {
+            status.incomplete("children_unavailable");
+        }
         let role = match role_r {
             Some(Ok(r)) => r,
             _ => String::new(),
@@ -503,7 +907,7 @@ async fn collect_visited_bounded<'a>(
         let enabled = state_r
             .as_ref()
             .and_then(|state| state.as_ref().ok())
-            .map(|state| state.contains(State::Enabled) && state.contains(State::Sensitive));
+            .map(is_enabled_state);
         let selectable = state_r
             .as_ref()
             .and_then(|state| state.as_ref().ok())
@@ -573,6 +977,8 @@ async fn collect_visited_bounded<'a>(
                         }
                     }
                 }
+            } else {
+                status.incomplete("interface_proxies_unavailable");
             }
         }
 
@@ -589,16 +995,34 @@ async fn collect_visited_bounded<'a>(
         // would exceed the cap.
         let descend = max_depth.map(|d| depth + 1 <= d).unwrap_or(true);
         if descend {
-            match children_r {
+            match &children_r {
                 Some(Ok(children)) => {
-                    for c in children.into_iter().rev() {
-                        stack.push((c, depth + 1, child_in_web_doc));
+                    for c in children.iter().rev().cloned() {
+                        stack.push((c, depth + 1, child_in_web_doc, frame_ordinal));
                     }
                 }
                 Some(Err(error)) => dlog!("  get_children failed: {error:#}"),
                 None => dlog!("  get_children timed out"),
             }
+        } else if matches!(&children_r, Some(Ok(children)) if !children.is_empty()) {
+            status.truncate("max_depth_reached");
         }
+
+        let unique_owner = match owner_cache.get(&oref.name) {
+            Some(owner) => owner.clone(),
+            None => {
+                let owner = canonical_unique_owner(&dbus, &oref.name).await;
+                owner_cache.insert(oref.name.clone(), owner.clone());
+                owner
+            }
+        };
+        if unique_owner.is_none() {
+            status.incomplete("unique_owner_unavailable");
+        }
+        let identity = unique_owner.map(|unique_owner| AtspiIdentity {
+            unique_owner,
+            object_path: oref.path.clone(),
+        });
 
         visited.push(Visited {
             depth,
@@ -616,12 +1040,14 @@ async fn collect_visited_bounded<'a>(
             focused,
             in_web_doc,
             on_web_process_bus: is_web_process_bus(&oref.name),
+            frame_ordinal,
+            identity,
             acc,
         });
     }
 
     dlog!("walked pid {pid}: {} node(s)", visited.len());
-    Ok(Some(visited))
+    Ok(Some((visited, scoped_frame, status)))
 }
 
 /// Render visited nodes into the markdown + node list `walk_tree` returns.
@@ -631,10 +1057,18 @@ async fn collect_visited_bounded<'a>(
 /// `parent_at_depth` tracks the most recently emitted actionable index at
 /// each depth, so descendants can look up their parent_element_index without
 /// a second pass.
-fn render(visited: &[Visited<'_>]) -> (String, Vec<AtspiNode>) {
+///
+/// `only_frame` restricts what is *emitted* to one application top-level while
+/// leaving the index space application-wide. Element indices are the contract
+/// between a snapshot and every actuator that later takes one
+/// (`perform_action`, `focus_element`, `set_value`, …), and those resolve an
+/// index against the whole application. Renumbering per window would make a
+/// window-scoped snapshot's indices name different elements at actuation time.
+fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<AtspiNode>) {
     let mut md = String::new();
     let mut nodes = Vec::new();
     let mut idx = 0usize;
+    let mut current_frame: Option<usize> = None;
     // Sparse stack: parent_at_depth[d] = Some(idx) for the actionable node
     // most recently emitted at depth d. When a new node appears at depth d,
     // its parent_element_index is the closest ancestor at depth < d that has
@@ -643,6 +1077,14 @@ fn render(visited: &[Visited<'_>]) -> (String, Vec<AtspiNode>) {
     let mut parent_at_depth: Vec<Option<usize>> = Vec::new();
 
     for v in visited {
+        // Ancestry never spans two top-levels, so a frame change retires every
+        // recorded parent. Without this a window's first descendants could
+        // inherit a parent index from the previous window's subtree.
+        if current_frame != Some(v.frame_ordinal) {
+            current_frame = Some(v.frame_ordinal);
+            parent_at_depth.clear();
+        }
+        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal);
         let indent = "  ".repeat(v.depth);
         // Resolve parent: walk parent_at_depth from v.depth-1 down to 0.
         let parent_element_index = if v.depth == 0 {
@@ -654,6 +1096,12 @@ fn render(visited: &[Visited<'_>]) -> (String, Vec<AtspiNode>) {
         };
 
         if is_indexable(v) {
+            if !emit {
+                // Consume the index without emitting: indices stay aligned with
+                // the application-wide walk the actuators perform.
+                idx += 1;
+                continue;
+            }
             let act_str = v.actions.join(",");
             let val_part = match &v.value {
                 Some(val) if !val.is_empty() => format!(" value=\"{val}\""),
@@ -682,6 +1130,7 @@ fn render(visited: &[Visited<'_>]) -> (String, Vec<AtspiNode>) {
                 depth: v.depth,
                 parent_element_index,
                 in_web_content: v.in_web_doc,
+                identity: v.identity.clone(),
             });
             // Record this actionable index at its depth, and invalidate any
             // deeper entries from a previous subtree.
@@ -693,7 +1142,7 @@ fn render(visited: &[Visited<'_>]) -> (String, Vec<AtspiNode>) {
                 parent_at_depth[deeper] = None;
             }
             idx += 1;
-        } else if !v.name.is_empty() {
+        } else if emit && !v.name.is_empty() {
             md.push_str(&format!(
                 "{indent}- {role} = \"{name}\"\n",
                 role = v.role,
@@ -711,6 +1160,16 @@ fn format_value(v: f64) -> String {
     format!("{v:?}")
 }
 
+/// Interpret the positive AT-SPI states that establish user operability.
+///
+/// GTK3 commonly publishes both `Enabled` and `Sensitive`. GTK4's native
+/// exporter derives widget operability from its `disabled` accessibility state
+/// and publishes `Sensitive` alone for an enabled widget. Either positive state
+/// therefore establishes operability; an empty set still means disabled.
+fn is_enabled_state(state: &StateSet) -> bool {
+    state.contains(State::Enabled) || state.contains(State::Sensitive)
+}
+
 /// Whether a walked node is exposed as an indexed, usable element.
 ///
 /// Historically this was "the node advertises AT-SPI Actions" (buttons, menu
@@ -718,7 +1177,10 @@ fn format_value(v: f64) -> String {
 /// selectable list rows. GTK list rows expose Component + Selectable state but
 /// no Action even though a coordinate click on their bounds is operable. Keep
 /// every such control in the shared index space so physical-input fallbacks can
-/// address it without inventing pixels in the caller.
+/// address it without inventing pixels in the caller. Some GTK4 buttons expose
+/// only Component plus their control role; include those only when the state set
+/// positively verifies that they are enabled. Passive component-backed labels
+/// and containers remain outside the index.
 ///
 /// This predicate is the single source of truth for the element-index space and
 /// MUST be applied identically in `render` and in every `action_nodes` filter
@@ -726,29 +1188,93 @@ fn format_value(v: f64) -> String {
 /// any divergence would desync indices between the snapshot and the operations.
 fn is_indexable(v: &Visited) -> bool {
     is_indexable_capabilities(
+        &v.role,
         !v.actions.is_empty(),
         v.has_editable,
         v.has_value,
         v.selectable,
+        v.has_component,
         v.enabled,
     )
 }
 
+fn select_indexable_target<'v, 'a>(
+    visited: &'v [Visited<'a>],
+    idx: usize,
+    identity: Option<&AtspiIdentity>,
+) -> Result<&'v Visited<'a>> {
+    if let Some(identity) = identity {
+        let mut matches = visited
+            .iter()
+            .filter(|node| is_indexable(node) && node.identity.as_ref() == Some(identity));
+        let target = matches.next().ok_or_else(|| {
+            anyhow!(
+                "stale AT-SPI identity {}{}: owner disappeared or object was removed",
+                identity.unique_owner,
+                identity.object_path
+            )
+        })?;
+        if matches.next().is_some() {
+            return Err(anyhow!(
+                "ambiguous AT-SPI identity {}{}",
+                identity.unique_owner,
+                identity.object_path
+            ));
+        }
+        return Ok(target);
+    }
+    let action_nodes = visited
+        .iter()
+        .filter(|node| is_indexable(node))
+        .collect::<Vec<_>>();
+    action_nodes
+        .get(idx)
+        .copied()
+        .ok_or_else(|| anyhow!("element {idx} not found (total: {})", action_nodes.len()))
+}
+
 fn is_indexable_capabilities(
+    role: &str,
     has_action: bool,
     has_editable: bool,
     has_value: bool,
     has_selectable_state: bool,
+    has_component: bool,
     enabled: Option<bool>,
 ) -> bool {
-    (has_action || has_editable || has_value || has_selectable_state) && enabled != Some(false)
+    let normalized_role = role.trim().to_ascii_lowercase();
+    let pixel_addressable_control = has_component
+        && enabled == Some(true)
+        && matches!(normalized_role.as_str(), "button" | "push button");
+    !is_passive_role(&normalized_role)
+        && (has_action
+            || has_editable
+            || has_value
+            || has_selectable_state
+            || pixel_addressable_control)
+        && enabled == Some(true)
 }
 
 // ── Public (sync) entry points ───────────────────────────────────────────────
 
 pub fn walk_tree(pid: u32) -> Result<Option<(String, Vec<AtspiNode>)>> {
     walk_tree_bounded(pid, 0, None, None)
-        .map(|snapshot| snapshot.map(|(markdown, nodes, _)| (markdown, nodes)))
+        .map(|snapshot| snapshot.map(|walked| (walked.markdown, walked.nodes)))
+}
+
+/// One accessibility snapshot, plus whether it was provably narrowed to the
+/// caller's window.
+pub struct WalkedTree {
+    pub markdown: String,
+    pub nodes: Vec<AtspiNode>,
+    pub bounds: Vec<(usize, i32, i32, u32, u32)>,
+    /// True when a non-zero `xid` was resolved to exactly one application
+    /// top-level and the snapshot contains only that window's nodes. False
+    /// means the snapshot spans every window the application publishes.
+    pub window_scoped: bool,
+    pub complete: bool,
+    pub truncated: bool,
+    pub incomplete_notes: Vec<String>,
 }
 
 /// Walk the AT-SPI tree with caller-supplied node + depth caps.
@@ -759,7 +1285,7 @@ pub fn walk_tree_bounded(
     xid: u64,
     max_elements: Option<usize>,
     max_depth: Option<usize>,
-) -> Result<Option<(String, Vec<AtspiNode>, Vec<(usize, i32, i32, u32, u32)>)>> {
+) -> Result<Option<WalkedTree>> {
     walk_tree_bounded_with_timeout(pid, xid, max_elements, max_depth, OP_TIMEOUT)
 }
 
@@ -769,25 +1295,61 @@ pub(super) fn walk_tree_bounded_with_timeout(
     max_elements: Option<usize>,
     max_depth: Option<usize>,
     timeout: Duration,
-) -> Result<Option<(String, Vec<AtspiNode>, Vec<(usize, i32, i32, u32, u32)>)>> {
+) -> Result<Option<WalkedTree>> {
     runtime().block_on(async {
+        // Tree traversal and bounds collection form one snapshot. Keep one
+        // deadline for both phases so a dead AT-SPI peer cannot outlive the
+        // operation timeout while resolving geometry.
+        let deadline = tokio::time::Instant::now() + timeout;
         let walk = async {
             let conn = shared_connection().await?;
-            collect_visited_bounded(conn, pid, max_elements, max_depth).await
+            collect_visited_bounded(conn, pid, xid, max_elements, max_depth).await
         };
-        let visited = match tokio::time::timeout(timeout, walk).await {
+        let walked = match before_snapshot_deadline(deadline, walk).await {
             Ok(result) => result?,
             Err(_) => {
                 dlog!("walk_tree timed out for pid {pid}");
                 return Ok(None);
             }
         };
-        let Some(visited) = visited else {
+        let Some((visited, scoped_frame, mut status)) = walked else {
             return Ok(None);
         };
-        let (markdown, nodes) = render(&visited);
-        let bounds = element_bounds_for_visited(&visited, pid, xid).await;
-        Ok(Some((markdown, nodes, bounds)))
+        let (markdown, nodes) = render(&visited, scoped_frame);
+        let bounds = match before_snapshot_deadline(
+            deadline,
+            element_bounds_for_visited(&visited, pid, xid),
+        )
+        .await
+        {
+            Ok(bounds) => bounds,
+            Err(_) => {
+                dlog!("element bounds timed out for pid {pid}");
+                status.incomplete("element_bounds_timeout");
+                Vec::new()
+            }
+        };
+        // Bounds are keyed by the application-wide element index, so drop the
+        // entries for windows this snapshot no longer shows.
+        let bounds = if scoped_frame.is_some() {
+            let emitted: std::collections::HashSet<usize> =
+                nodes.iter().filter_map(|node| node.element_index).collect();
+            bounds
+                .into_iter()
+                .filter(|(index, ..)| emitted.contains(index))
+                .collect()
+        } else {
+            bounds
+        };
+        Ok(Some(WalkedTree {
+            markdown,
+            nodes,
+            bounds,
+            window_scoped: scoped_frame.is_some(),
+            complete: status.complete,
+            truncated: status.truncated,
+            incomplete_notes: status.incomplete_notes,
+        }))
     })
 }
 
@@ -1071,18 +1633,19 @@ pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
 }
 
 /// Write into the exact indexed editable exposed by the caller's snapshot.
-pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
+pub fn type_into_editable_at(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+    text: &str,
+) -> Result<()> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
-                .iter()
-                .filter(|node| is_indexable(node))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             if write_into_editable_target(target, text).await? {
                 Ok(())
             } else {
@@ -1092,13 +1655,8 @@ pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
                 let refreshed = collect_visited(conn, pid)
                     .await?
                     .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-                let refreshed_target = refreshed
-                    .iter()
-                    .filter(|node| is_indexable(node))
-                    .nth(idx)
-                    .ok_or_else(|| {
-                        anyhow!("element {idx} disappeared after AT-SPI focus refresh")
-                    })?;
+                let refreshed_target = select_indexable_target(&refreshed, idx, identity.as_ref())
+                    .map_err(|_| anyhow!("element {idx} disappeared after AT-SPI focus refresh"))?;
                 if write_into_editable_target(refreshed_target, text).await? {
                     Ok(())
                 } else {
@@ -1439,17 +1997,18 @@ pub fn invoke_menu_path(pid: u32, path: &[String]) -> Result<()> {
     )
 }
 
-pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
+pub fn perform_action(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+) -> Result<(String, bool)> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes.get(idx).ok_or_else(|| {
-                anyhow!("element {idx} not found (total: {})", action_nodes.len())
-            })?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
 
             // Suspected no-op: actuating `do_action(0)` on a passive display role
             // (a `label`/`static`/`image` indexed only for its Value interface) or a
@@ -1497,23 +2056,76 @@ pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
     )
 }
 
-/// Invoke an indexed scroll target's directional AT-SPI action.
-///
-/// Chromium exposes scrollable web regions as named actions such as
-/// `scrollDown`/`scrollForward`; using that accessibility route avoids the
-/// X11 `Button5` event path that Chromium silently drops in background mode.
-pub fn scroll_element(pid: u32, idx: usize, direction: &str, amount: usize) -> Result<()> {
+pub fn perform_secondary_action(
+    pid: u32,
+    idx: usize,
+    identity: AtspiIdentity,
+    requested: &str,
+) -> Result<String> {
+    let requested = requested.to_owned();
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
+            let target = select_indexable_target(&visited, idx, Some(&identity))?;
+            if target.enabled == Some(false) {
+                return Err(anyhow!("element {idx} is disabled"));
+            }
+            if requested.is_empty() {
+                return Err(anyhow!("secondary action must not be empty"));
+            }
+            let matches = target
+                .actions
                 .iter()
-                .filter(|v| is_indexable(v))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+                .enumerate()
+                .filter(|(_, action)| action.as_str() == requested)
+                .collect::<Vec<_>>();
+            let [(action_index, action_name)] = matches.as_slice() else {
+                return Err(anyhow!(
+                    "secondary action '{requested}' is unavailable or ambiguous; advertised actions: {}",
+                    target.actions.join(", ")
+                ));
+            };
+            let action = target
+                .acc
+                .proxies()
+                .await
+                .map_err(|error| anyhow!("interface proxies unavailable: {error}"))?
+                .action()
+                .await
+                .map_err(|error| anyhow!("Action unavailable: {error}"))?;
+            match call(action.do_action(*action_index as i32)).await {
+                Some(Ok(true)) => Ok((*action_name).clone()),
+                Some(Ok(false)) => Err(anyhow!("secondary action returned false")),
+                Some(Err(error)) => Err(anyhow!("secondary action failed: {error}")),
+                None => Err(anyhow!("secondary action timed out")),
+            }
+        },
+        || Err(anyhow!("secondary action timed out for pid {pid}")),
+    )
+}
+
+/// Invoke an indexed scroll target's directional AT-SPI action.
+///
+/// Chromium exposes scrollable web regions as named actions such as
+/// `scrollDown`/`scrollForward`; using that accessibility route avoids the
+/// X11 `Button5` event path that Chromium silently drops in background mode.
+pub fn scroll_element(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+    direction: &str,
+    amount: usize,
+) -> Result<()> {
+    bounded(
+        async {
+            let conn = shared_connection().await?;
+            let visited = collect_visited(conn, pid)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             let proxies = target
                 .acc
                 .proxies()
@@ -1611,20 +2223,15 @@ pub fn scroll_element(pid: u32, idx: usize, direction: &str, amount: usize) -> R
 /// updates its renderer-owned focused control. Sending key events immediately
 /// after the acknowledgement can therefore split one string between the old
 /// and new controls. Wait for the target's Focused state to become observable;
-/// if a toolkit does not publish that state, retain the historical successful
-/// result after a bounded settling interval.
-pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
+/// an acknowledgement without read-back is not sufficient for global input.
+pub fn focus_element(pid: u32, idx: usize, identity: Option<AtspiIdentity>) -> Result<bool> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let target = visited
-                .iter()
-                .filter(|v| is_indexable(v))
-                .nth(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found (total: {})", visited.len()))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             let proxies = target
                 .acc
                 .proxies()
@@ -1660,7 +2267,7 @@ pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
                     }
                 }
             }
-            Ok(true)
+            Ok(false)
         },
         || Err(anyhow!("focus_element timed out for pid {pid}")),
     )
@@ -1911,17 +2518,14 @@ fn select_click_target(
     best_active.or(best_passive).map(|(_, idx)| idx)
 }
 
-pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
+pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &str) -> Result<()> {
     bounded(
         async {
             let conn = shared_connection().await?;
             let visited = collect_visited(conn, pid)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes.get(idx).ok_or_else(|| {
-                anyhow!("element {idx} not found (total: {})", action_nodes.len())
-            })?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
 
             let proxies = target
                 .acc
@@ -1976,7 +2580,11 @@ pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
     )
 }
 
-pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {
+pub fn get_element_bounds(
+    pid: u32,
+    idx: usize,
+    identity: Option<AtspiIdentity>,
+) -> Result<(i32, i32, u32, u32)> {
     bounded(
         async {
             let conn = shared_connection().await?;
@@ -1986,10 +2594,7 @@ pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> 
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
                 .unwrap_or((0, 0));
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes
-                .get(idx)
-                .ok_or_else(|| anyhow!("element {idx} not found"))?;
+            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
             if !target.has_component {
                 return Err(anyhow!("element {idx} exposes no Component interface"));
             }
@@ -2484,33 +3089,229 @@ async fn element_bounds_for_visited(
 }
 
 #[cfg(test)]
+mod frame_correlation_tests {
+    use super::{correlate_frame_to_window, FRAME_MATCH_TOLERANCE_PX};
+    use crate::x11::WindowInfo;
+
+    fn window(x: i32, y: i32, width: u32, height: u32) -> WindowInfo {
+        WindowInfo {
+            xid: 4242,
+            pid: Some(99),
+            app_name: "Google-chrome".to_owned(),
+            title: "Cua - Google Chrome".to_owned(),
+            is_on_screen: true,
+            z_index: Some(3),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The configuration that made the existing-profile route unreachable: one
+    /// browser process publishing three windows.
+    #[test]
+    fn picks_the_frame_matching_the_named_window_among_siblings() {
+        let candidates = [
+            (0usize, (144, 51, 1244, 953)),
+            (1, (438, 80, 1050, 953)),
+            (2, (550, 225, 500, 584)),
+        ];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            Some(1)
+        );
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(550, 225, 500, 584)),
+            Some(2)
+        );
+    }
+
+    /// Server-side decorations shift a frame's reported origin; a small offset
+    /// must still resolve rather than fall back to an application-wide walk.
+    #[test]
+    fn tolerates_decoration_offsets() {
+        let candidates = [(0usize, (440, 108, 1050, 925)), (1, (144, 51, 1244, 953))];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            Some(0)
+        );
+    }
+
+    /// Two windows of the same geometry cannot be told apart this way, and the
+    /// caller needs a refusal rather than a coin flip.
+    #[test]
+    fn refuses_when_two_frames_are_equally_plausible() {
+        let candidates = [(0usize, (438, 80, 1050, 953)), (1, (438, 80, 1050, 953))];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_when_no_frame_is_close_enough() {
+        let candidates = [(0usize, (0, 0, 200, 200))];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_when_the_application_publishes_no_frame_extents() {
+        assert_eq!(
+            correlate_frame_to_window(&[], &window(438, 80, 1050, 953)),
+            None
+        );
+    }
+
+    /// Zero-area extents are what a frame reports before it has been mapped;
+    /// they must never be treated as a match for a real window.
+    #[test]
+    fn ignores_frames_without_usable_extents() {
+        let candidates = [(0usize, (0, 0, 0, 0)), (1, (438, 80, 1050, 953))];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            Some(1)
+        );
+    }
+
+    /// Being the only candidate is not evidence of correspondence. (The walk
+    /// does short-circuit a genuinely single-top-level application before it
+    /// reaches this function — see `resolve_window_frame`.)
+    #[test]
+    fn a_sole_candidate_still_has_to_be_close_enough() {
+        let far_away = i32::try_from(FRAME_MATCH_TOLERANCE_PX).unwrap() + 500;
+        let candidates = [(0usize, (far_away, far_away, 1050, 953))];
+        assert_eq!(
+            correlate_frame_to_window(&candidates, &window(438, 80, 1050, 953)),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod coord_tests {
     use super::parse_gtk_frame_extents;
     use super::{
-        activation_index, combine_wayland_content_offsets, is_activation_action,
-        is_indexable_capabilities, is_passive_role, is_web_process_bus,
-        prefer_authoritative_wayland_origin, rebase_renderer_window_offset, screen_extent_rebase,
-        select_click_target,
+        activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
+        is_activation_action, is_enabled_state, is_indexable_capabilities, is_passive_role,
+        is_web_process_bus, prefer_authoritative_wayland_origin, rebase_renderer_window_offset,
+        screen_extent_rebase, select_click_target, ApplicationSelection,
     };
+    use atspi::{State, StateSet};
+    use std::time::Duration;
+
+    #[test]
+    fn duplicate_pid_prefers_populated_application_after_empty_registration() {
+        let target_pid = 4242;
+        let candidates = [
+            (Some(9000), "other-process", true),
+            (Some(target_pid), "empty-root", false),
+            (Some(target_pid), "live-tree", true),
+        ];
+        let mut selection = ApplicationSelection::new(target_pid);
+        for (pid, app, has_children) in candidates {
+            if selection.matches_pid(pid) {
+                selection.consider_matching(app, has_children);
+            }
+        }
+
+        assert_eq!(selection.into_selected(), Ok(Some("live-tree")));
+    }
+
+    #[test]
+    fn foreign_empty_application_before_target_is_ignored() {
+        let target_pid = 4242;
+        let candidates = [
+            (Some(9000), "foreign-empty", false),
+            (Some(target_pid), "target-live-tree", true),
+        ];
+        let mut selection = ApplicationSelection::new(target_pid);
+
+        for (pid, app, has_children) in candidates {
+            if selection.matches_pid(pid) {
+                selection.consider_matching(app, has_children);
+            }
+        }
+
+        assert_eq!(selection.into_selected(), Ok(Some("target-live-tree")));
+    }
+
+    #[test]
+    fn childless_exact_pid_application_remains_the_fallback() {
+        let mut selection = ApplicationSelection::new(4242);
+        selection.consider_matching("first-empty", false);
+        selection.consider_matching("second-empty", false);
+
+        assert_eq!(selection.into_selected(), Ok(Some("first-empty")));
+    }
+
+    #[test]
+    fn multiple_populated_exact_pid_applications_are_ambiguous() {
+        let mut selection = ApplicationSelection::new(4242);
+        selection.consider_matching("first-live-tree", true);
+        selection.consider_matching("second-live-tree", true);
+
+        assert_eq!(selection.into_selected(), Err(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_absolute_deadline_spans_traversal_and_bounds() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+
+        before_snapshot_deadline(deadline, tokio::time::sleep(Duration::from_millis(60)))
+            .await
+            .expect("traversal should fit the shared budget");
+        before_snapshot_deadline(deadline, tokio::time::sleep(Duration::from_millis(60)))
+            .await
+            .expect_err("bounds must receive only the traversal's remaining budget");
+
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
 
     #[test]
     fn operable_nodes_are_addressable() {
         assert!(is_indexable_capabilities(
+            "entry",
             false,
             true,
             false,
             false,
+            true,
             Some(true)
         ));
-        assert!(is_indexable_capabilities(true, false, false, false, None));
         assert!(is_indexable_capabilities(
+            "button",
+            true,
+            false,
+            false,
+            false,
+            false,
+            Some(true)
+        ));
+        assert!(is_indexable_capabilities(
+            "slider",
             false,
             false,
             true,
             false,
+            true,
             Some(true)
         ));
         assert!(is_indexable_capabilities(
+            "list item",
+            false,
+            false,
+            false,
+            true,
+            true,
+            Some(true)
+        ));
+        assert!(!is_indexable_capabilities(
+            "label",
+            false,
             false,
             false,
             false,
@@ -2518,19 +3319,80 @@ mod coord_tests {
             Some(true)
         ));
         assert!(!is_indexable_capabilities(
-            false,
-            false,
-            false,
-            false,
-            Some(true)
-        ));
-        assert!(!is_indexable_capabilities(
+            "button",
             true,
             false,
             false,
             false,
+            true,
             Some(false)
         ));
+        assert!(!is_indexable_capabilities(
+            "button", true, false, false, false, true, None
+        ));
+        assert!(!is_indexable_capabilities(
+            "label",
+            true,
+            false,
+            false,
+            false,
+            true,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn gtk_state_sets_establish_operability_from_enabled_or_sensitive() {
+        assert!(is_enabled_state(&StateSet::new(State::Enabled)));
+        assert!(is_enabled_state(&StateSet::new(State::Sensitive)));
+        assert!(is_enabled_state(&StateSet::new(
+            State::Enabled | State::Sensitive
+        )));
+        assert!(!is_enabled_state(&StateSet::empty()));
+    }
+
+    #[test]
+    fn enabled_component_backed_buttons_are_pixel_addressable() {
+        for role in ["button", "push button", " Button "] {
+            assert!(is_indexable_capabilities(
+                role,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(true)
+            ));
+        }
+    }
+
+    #[test]
+    fn component_role_fallback_rejects_unverified_or_passive_nodes() {
+        for enabled in [None, Some(false)] {
+            assert!(!is_indexable_capabilities(
+                "button", false, false, false, false, true, enabled
+            ));
+        }
+        assert!(!is_indexable_capabilities(
+            "button",
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(true)
+        ));
+        for role in ["label", "application", "panel", "frame", "window"] {
+            assert!(!is_indexable_capabilities(
+                role,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(true)
+            ));
+        }
     }
 
     #[test]

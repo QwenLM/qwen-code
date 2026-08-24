@@ -208,6 +208,7 @@ describe('GeminiChat', async () => {
       takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
       restorePendingManualPlanExitNotice: vi.fn(),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
+      getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Disable 429 simulation for tests
@@ -1233,6 +1234,69 @@ describe('GeminiChat', async () => {
       expect(userTurn.parts![0]!.functionResponse?.id).toBe(
         'call_dangling_for_send',
       );
+    });
+
+    it('still synthesizes when restore is on and the user sends ordinary text', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_ordinary_send',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const ackStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'ok' }] },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        ackStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'never mind, just continue' },
+        'prompt-ordinary-over-auq',
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      const history = chat.getHistory();
+      const userTurn = history[2]!;
+      expect(userTurn.role).toBe('user');
+      expect(userTurn.parts![0]!.functionResponse?.id).toBe(
+        'call_auq_ordinary_send',
+      );
+      expect(
+        userTurn.parts!.some((p) => p.text === 'never mind, just continue'),
+      ).toBe(true);
     });
 
     it('does NOT synthesize when the user supplies a matching tool_result', async () => {
@@ -12486,6 +12550,31 @@ describe('GeminiChat', async () => {
       expect((fr?.response as { error?: string })?.error).toMatch(
         /interrupted/i,
       );
+    });
+
+    it('preserves selected call ids instead of synthesizing a response', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'ask' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns(undefined, {
+        preserveCallIds: new Set(['call_auq']),
+      });
+
+      expect(result.injected).toEqual([]);
+      expect(chat.getHistory()).toHaveLength(2);
     });
 
     it('hoists synthetic functionResponse to the front of an existing user turn (Race A)', () => {

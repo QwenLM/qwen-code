@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { findLicenseFile } from './generate-notices.js';
+import { collectDependencies, findLicenseFile } from './generate-notices.js';
 
 describe('findLicenseFile', () => {
   let packageDir;
@@ -54,5 +54,37 @@ describe('findLicenseFile', () => {
     const resolved = await findLicenseFile(packageDir);
 
     expect(resolved).toBeUndefined();
+  });
+});
+
+describe('collectDependencies', () => {
+  it('resolves workspace dependencies from the linked package location', () => {
+    const packageLock = {
+      packages: {
+        'packages/companion/node_modules/@qwen-code/core': {
+          link: true,
+          resolved: 'packages/core',
+        },
+        'packages/core': { dependencies: { nested: '1.0.0' } },
+        'packages/core/node_modules/nested': { version: '1.0.0' },
+      },
+    };
+    const dependencies = new Map();
+
+    collectDependencies(
+      '@qwen-code/core',
+      packageLock,
+      dependencies,
+      'packages/companion',
+      new Set(),
+    );
+
+    expect([...dependencies.values()]).toEqual([
+      {
+        name: 'nested',
+        version: '1.0.0',
+        resolvedKey: 'packages/core/node_modules/nested',
+      },
+    ]);
   });
 });

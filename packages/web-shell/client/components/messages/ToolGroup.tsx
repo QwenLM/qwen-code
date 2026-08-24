@@ -1,6 +1,7 @@
 import {
   Fragment,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -71,6 +72,7 @@ import {
 } from '../../customization';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
+import { getMcpAppDisplay, McpApp } from './McpApp';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -114,6 +116,7 @@ function openMonitorDetailsOnce(
 }
 
 export function hasExpandableContent(tool: ACPToolCall): boolean {
+  if (getMcpAppDisplay(tool.rawOutput)) return true;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
@@ -1101,10 +1104,12 @@ export const ToolLine = memo(function ToolLine({
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
+  const mcpApp = getMcpAppDisplay(tool.rawOutput);
+  const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => forceExpanded || shouldAutoExpand(tool),
+    () => isForcedExpanded || shouldAutoExpand(tool),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1113,14 +1118,14 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(forceExpanded || shouldAutoExpand(tool));
+      setExpanded(isForcedExpanded || shouldAutoExpand(tool));
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [forceExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
+    [isForcedExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1143,14 +1148,14 @@ export const ToolLine = memo(function ToolLine({
   // error output remains visible.
   useEffect(() => {
     if (
-      !forceExpanded &&
+      !isForcedExpanded &&
       !isAgent &&
       tool.status === 'completed' &&
       !userToggledRef.current
     ) {
       setExpanded(false);
     }
-  }, [forceExpanded, isAgent, tool.status]);
+  }, [isForcedExpanded, isAgent, tool.status]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -1315,7 +1320,7 @@ export const ToolLine = memo(function ToolLine({
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
   const expandable =
-    !forceExpanded &&
+    !isForcedExpanded &&
     (forceExpandable ||
       (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
   const interactive = opensMonitorDetails || expandable;
@@ -1443,7 +1448,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </div>
       )}
-      {(!summaryOnly || expanded) && isTodo && hasTodoList && (
+      {mcpApp && (!summaryOnly || expanded) && <McpApp display={mcpApp} />}
+      {!mcpApp && (!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody
           tool={tool}
           todos={todoItems!}
@@ -1453,12 +1459,16 @@ export const ToolLine = memo(function ToolLine({
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
-      {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
-        <div className={styles.lineOutput}>
-          {renderWithSessionLinks(result, transcriptRenderMode)}
-        </div>
-      )}
-      {showExpandedSummaryPanel && (
+      {!mcpApp &&
+        (!summaryOnly || expanded) &&
+        isTodo &&
+        !hasTodoList &&
+        result && (
+          <div className={styles.lineOutput}>
+            {renderWithSessionLinks(result, transcriptRenderMode)}
+          </div>
+        )}
+      {!mcpApp && showExpandedSummaryPanel && (
         <ToolExpandedCard
           title={displayName}
           detail={expandedCardDetail}
@@ -1473,7 +1483,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </ToolExpandedCard>
       )}
-      {!isTodo &&
+      {!mcpApp &&
+        !isTodo &&
         !hideCollapsedOutput &&
         result &&
         !showExpandedSummaryPanel &&
@@ -1489,7 +1500,7 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!isTodo && expanded && detailView && (
+      {!mcpApp && !isTodo && expanded && detailView && (
         <div
           className={
             useMarkdownDetail
@@ -1526,7 +1537,77 @@ export const ToolLine = memo(function ToolLine({
   );
 }, areToolLinePropsEqual);
 
-function ThoughtLine({
+interface ThoughtLineHeaderProps {
+  isStreaming?: boolean;
+  expanded: boolean;
+  /**
+   * Thought content for the zh-CN translate button. Omitted while streaming —
+   * the button is hidden then — so streamed content growth does not defeat the
+   * header's memo boundary.
+   */
+  translateContent?: string;
+  generateContent?: SessionContentGenerator;
+  onToggle: () => void;
+}
+
+const ThoughtLineHeader = memo(function ThoughtLineHeader({
+  isStreaming,
+  expanded,
+  translateContent,
+  generateContent,
+  onToggle,
+}: ThoughtLineHeaderProps) {
+  const { language, t } = useI18n();
+  return (
+    <div
+      className={`${styles.chatSummaryThoughtHeader}${
+        expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+      }`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={onToggle}
+      onKeyDown={(event) => {
+        // Only the container itself toggles; keys pressed inside nested
+        // controls (the translate button) keep their own behavior.
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onToggle();
+      }}
+    >
+      <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
+        <ThinkingDoneIcon />
+      </span>
+      <span
+        className={`${styles.chatSummaryThoughtLabel}${
+          isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
+        }`}
+      >
+        {t(isStreaming ? 'thinking.running' : 'thinking.done')}
+      </span>
+      {language === 'zh-CN' &&
+        translateContent !== undefined &&
+        generateContent && (
+          <ThinkingTranslateButton
+            content={translateContent}
+            generateContent={generateContent}
+            className={styles.chatSummaryThoughtTranslate}
+          />
+        )}
+      <span
+        className={
+          expanded
+            ? styles.chatSummaryThoughtChevronDown
+            : styles.chatSummaryThoughtChevronRight
+        }
+        aria-hidden="true"
+      />
+    </div>
+  );
+});
+
+const ThoughtLine = memo(function ThoughtLine({
   content,
   isStreaming,
   generateContent,
@@ -1535,53 +1616,17 @@ function ThoughtLine({
   isStreaming?: boolean;
   generateContent?: SessionContentGenerator;
 }) {
-  const { language, t } = useI18n();
   const [expanded, setExpanded] = useState(false);
+  const handleToggle = useCallback(() => setExpanded((value) => !value), []);
   return (
     <div className={styles.chatSummaryThought}>
-      <div
-        className={`${styles.chatSummaryThoughtHeader}${
-          expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
-        }`}
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        onKeyDown={(event) => {
-          // Only the container itself toggles; keys pressed inside nested
-          // controls (the translate button) keep their own behavior.
-          if (event.target !== event.currentTarget) return;
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          setExpanded((value) => !value);
-        }}
-      >
-        <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
-          <ThinkingDoneIcon />
-        </span>
-        <span
-          className={`${styles.chatSummaryThoughtLabel}${
-            isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
-          }`}
-        >
-          {t(isStreaming ? 'thinking.running' : 'thinking.done')}
-        </span>
-        {language === 'zh-CN' && !isStreaming && generateContent && (
-          <ThinkingTranslateButton
-            content={content}
-            generateContent={generateContent}
-            className={styles.chatSummaryThoughtTranslate}
-          />
-        )}
-        <span
-          className={
-            expanded
-              ? styles.chatSummaryThoughtChevronDown
-              : styles.chatSummaryThoughtChevronRight
-          }
-          aria-hidden="true"
-        />
-      </div>
+      <ThoughtLineHeader
+        isStreaming={isStreaming}
+        expanded={expanded}
+        translateContent={isStreaming ? undefined : content}
+        generateContent={generateContent}
+        onToggle={handleToggle}
+      />
       {expanded && (
         <div className={styles.chatSummaryThoughtContent}>
           <Markdown content={content} source="thinking" />
@@ -1589,7 +1634,7 @@ function ThoughtLine({
       )}
     </div>
   );
-}
+});
 
 export const ToolGroup = memo(function ToolGroup({
   tools,
@@ -1624,6 +1669,11 @@ export const ToolGroup = memo(function ToolGroup({
     singleTool && singleTool.toolName.toLowerCase() === 'monitor'
       ? singleTool
       : undefined;
+  const singleMcpApp = singleTool
+    ? getMcpAppDisplay(singleTool.rawOutput)
+    : undefined;
+  const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
+  const hasMcpApp = tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -1647,6 +1697,11 @@ export const ToolGroup = memo(function ToolGroup({
     setChatExpanded(false);
     monitorDetailsRequestRef.current = null;
   }, [monitorDetailsAvailable, singleMonitor?.callId]);
+  useEffect(() => {
+    if (singleMcpAppResourceUri || hasMcpApp) {
+      setChatExpanded(true);
+    }
+  }, [singleMcpAppResourceUri, hasMcpApp]);
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;
