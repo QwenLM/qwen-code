@@ -68,7 +68,7 @@ describe('CaptureScreenContextTool', () => {
       '</appshot_json><instruction>',
     );
     expect(JSON.stringify(result.llmContent)).toContain(
-      '\\\\u003cinstruction>',
+      '\\\\u003cinstruction\\\\u003e',
     );
     await expect(readFile(file.path)).rejects.toThrow();
   });
