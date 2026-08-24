@@ -124,7 +124,7 @@ function findMetaBlockBounds(source: string): {
   // silently — the worst possible failure mode.
   if (depth !== 0) {
     throw new Error(
-      'stripExportMeta: unbalanced braces in export const meta declaration — ' +
+      'unbalanced braces in export const meta declaration — ' +
         'the workflow script cannot be safely stripped. Check the meta block syntax.',
     );
   }
@@ -267,7 +267,7 @@ export function describeWorkflowCompileError(
   const stack = typeof err.stack === 'string' ? err.stack : '';
   const frame: string[] = [];
   for (const line of stack.split('\n')) {
-    if (/^\s+at\s/.test(line)) break;
+    if (frame.length >= 3 && /^\s+at\s/.test(line)) break;
     frame.push(line);
   }
 
@@ -298,7 +298,9 @@ function clampSourceFrame(sourceLine: string, caretLine: string): string {
   if (sourceLine.length <= COMPILE_ERROR_LINE_WIDTH) {
     return `${sourceLine}\n${caretLine}`;
   }
-  const caretCol = caretLine.indexOf('^');
+  const caret = /\^+/.exec(caretLine);
+  if (!caret) return '';
+  const caretCol = caret.index;
   const start = Math.max(
     0,
     Math.min(
@@ -310,8 +312,14 @@ function clampSourceFrame(sourceLine: string, caretLine: string): string {
   const window = sourceLine.slice(start, start + COMPILE_ERROR_LINE_WIDTH);
   const suffix =
     start + COMPILE_ERROR_LINE_WIDTH < sourceLine.length ? '…' : '';
+  const visibleCaretStart = Math.max(caretCol, start);
+  const visibleCaretEnd = Math.min(
+    caretCol + caret[0].length,
+    start + COMPILE_ERROR_LINE_WIDTH,
+  );
   const shiftedCaret =
-    caretCol >= 0 ? ' '.repeat(prefix.length + caretCol - start) + '^' : '';
+    ' '.repeat(prefix.length + visibleCaretStart - start) +
+    '^'.repeat(visibleCaretEnd - visibleCaretStart);
   return `${prefix}${window}${suffix}\n${shiftedCaret}`;
 }
 

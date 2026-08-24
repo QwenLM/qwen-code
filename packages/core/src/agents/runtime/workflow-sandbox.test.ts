@@ -2765,6 +2765,9 @@ describe('createWorkflowSandbox primitives', () => {
       const rendered = renderFor("await agent('a');\nconst x: string = 1;");
       expect(rendered).toContain('line 2');
       expect(rendered).not.toContain('workflow.js');
+      expect(rendered).toContain(
+        'SyntaxError: Missing initializer in const declaration',
+      );
     });
 
     it('preserves author line numbers after a multiline meta block', () => {
@@ -2801,7 +2804,32 @@ const x: string = 1;`);
       const lines = rendered.split('\n');
       expect(lines[1].length).toBeLessThan(120);
       expect(lines[1]).toContain('…');
-      expect(lines[2].indexOf('^')).toBeLessThanOrEqual(lines[1].length);
+      expect(lines[2]).toContain('^');
+      expect(lines[2].indexOf('^')).toBe(lines[1].indexOf('x: string'));
+    });
+
+    it('preserves a multi-column V8 caret on a long line', () => {
+      const padding = 'y'.repeat(120);
+      const rendered = renderFor(`const pad = '${padding}'; const x = 123abc;`);
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('123abc');
+      expect(lines[2]).toContain('^^^');
+      expect(lines[2].indexOf('^^^')).toBe(lines[1].indexOf('123abc'));
+    });
+
+    it('keeps an author source line that begins with at', () => {
+      const rendered = renderFor('    at work();');
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('    at work();');
+      expect(rendered).toContain('^^^^');
+      expect(rendered).toContain("Unexpected identifier 'work'");
+    });
+
+    it('omits a long source frame when V8 provides no caret', () => {
+      const rendered = renderFor(`const value = ${'a'.repeat(1100)}@;`);
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('SyntaxError: Invalid or unexpected token');
+      expect(rendered).not.toContain('const value');
     });
 
     it('falls back to the plain message when there is no source frame', () => {

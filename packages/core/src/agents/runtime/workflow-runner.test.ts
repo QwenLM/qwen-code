@@ -1035,20 +1035,31 @@ describe('WorkflowRunner', () => {
 
     // A malformed `export const meta` cannot start a run either, and it
     // reaches the same refusal rather than becoming a registered failure.
-    it('refuses a malformed meta literal without leaking internal names', async () => {
-      const { config, registry } = configWithRegistry();
-      const error = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
-        script: 'export const meta = { name: someIdentifier }\nawait x();',
-        args: undefined,
-      }).catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
-      expect((error as Error).message).toContain('invalid meta object literal');
-      expect((error as Error).message).not.toContain('extractAndStripMeta');
-      expect((error as Error).message).not.toContain('has a syntax error');
-      expect(registry.list()).toHaveLength(0);
-    });
+    it.each([
+      [
+        'export const meta = { name: someIdentifier }\nawait x();',
+        'extractAndStripMeta',
+      ],
+      ["export const meta = { name: 'x'", 'stripExportMeta'],
+    ])(
+      'refuses a malformed meta literal without leaking internal names',
+      async (script, internalName) => {
+        const { config, registry } = configWithRegistry();
+        const error = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script,
+          args: undefined,
+        }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
+        expect((error as Error).message).toMatch(
+          /invalid meta object literal|unbalanced braces/,
+        );
+        expect((error as Error).message).not.toContain(internalName);
+        expect((error as Error).message).not.toContain('has a syntax error');
+        expect(registry.list()).toHaveLength(0);
+      },
+    );
 
     // The equivalence that makes the gate trustworthy: the gate and the run
     // compile through one exported function, so a script cannot pass the gate
