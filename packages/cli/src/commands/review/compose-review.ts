@@ -572,12 +572,12 @@ function floorResolvesCritical(
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
  * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
- * with the flat-trend streak at its bar (#9903) — always with the round
- * knowable. Everything else fails OPEN exactly as the posture itself does —
- * an unrecognisable floor, `auto` before round 6 with the streak below its
- * bar, `auto` in the context-unavailable state (the round is unknowable),
- * `--severity-floor suggestion` (posture off): a posting bar in doubt
- * posts. The rounds-2–5
+ * with the flat-trend streak at its bar (#9903) — the `auto` arms only
+ * with the round knowable. Everything else fails OPEN exactly as the
+ * posture itself does — an unrecognisable floor, `auto` before round 6 with
+ * the streak below its bar, `auto` in the context-unavailable state (the
+ * round is unknowable), `--severity-floor suggestion` (posture off): a
+ * posting bar in doubt posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
  *
