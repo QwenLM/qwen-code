@@ -587,6 +587,9 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '`explicit`, `last_used`, `configured`, or `forced-by-comment`',
     );
+    expect(body).not.toContain(
+      'pass --effort only when the user chose a level in THIS invocation',
+    );
     // R15-11: a resumed run must NOT re-take the incremental decision — the
     // previous attempt's `incremental` field is history, so the continuation
     // never enters the `upToDate` stop/cleanup branch that would destroy the

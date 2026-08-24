@@ -1673,6 +1673,26 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     ).toBe(true);
   });
 
+  it('keeps remembered effort when an explicit value is invalid', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'medium\n');
+
+    const got = await verdictFor('6711 --effort bogus\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings).toContain(
+      'No effort level given — reusing medium, the level you typed last time. Type a level like `/review --effort high` to change it.',
+    );
+    expect(got.warnings).toContain(
+      'Invalid --effort value "bogus" discarded; using the last explicitly typed effort.',
+    );
+    expect(fsState.written.get(storedEffort)).toBe('medium\n');
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
+  });
+
   it('lets an explicit effort replace malformed remembered state', async () => {
     const storedEffort = lastReviewEffortPath(
       process.cwd(),
