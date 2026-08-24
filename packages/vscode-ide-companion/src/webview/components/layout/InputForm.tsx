@@ -170,10 +170,13 @@ export const InputForm: FC<InputFormProps> = ({
       style={formHeight > 0 ? { height: `${formHeight}px` } : undefined}
     >
       {showModelSelector && onSelectModel && onCloseModelSelector && (
-        // z-0 keeps ModelSelector's internal z-index (z-[1000]) inside this
-        // stacking context so the dropdown stays painted below the fixed
-        // overlays (PermissionDrawer / AskUserQuestionDialog /
-        // AccountInfoDialog) rendered by App.tsx; App closes the selector
+        // z-30 places this wrapper's stacking context above the local-message
+        // notices (z-20, see App.tsx) so the interactive dropdown rows paint
+        // over any coexisting notice, but still below the fixed overlays
+        // (z-[999]/z-[1000]: PermissionDrawer / AskUserQuestionDialog /
+        // AccountInfoDialog / SessionSelector). It also keeps ModelSelector's
+        // internal z-index (z-[1000]) inside this stacking context so the
+        // dropdown never escapes above those overlays; App closes the selector
         // when an overlay takes over and never opens it underneath one.
         //
         // The anchor is the measured form height, not bottom-full (== this
@@ -185,7 +188,7 @@ export const InputForm: FC<InputFormProps> = ({
         <div
           ref={dropdownRef}
           style={formHeight > 0 ? { bottom: `${formHeight}px` } : undefined}
-          className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto"
+          className="absolute bottom-full left-4 right-4 mb-2 z-30 max-w-[600px] mx-auto"
         >
           <ModelSelector
             visible={showModelSelector}

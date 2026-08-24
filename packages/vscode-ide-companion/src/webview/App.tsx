@@ -1187,9 +1187,14 @@ export const App: React.FC = () => {
         {(localNotices.length > 0 || insightProgress || insightReportPath) && (
           <div
             data-testid="local-message-notices"
-            // Above the 140px composer clearance so the notices sit right
-            // over the input box without covering transcript content.
-            className="absolute bottom-[150px] left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
+            // The InputForm wrapper is now an in-flow sibling, so this
+            // container's bottom edge IS the form's top edge. Anchor the
+            // notices just above that edge so they sit right over the input
+            // box without covering transcript content. z-20 keeps them above
+            // the transcript but below the open model-selector dropdown
+            // (z-30, see InputForm) — matching the pre-PR stacking where the
+            // dropdown painted over the notices.
+            className="absolute bottom-2 left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
           >
             {insightProgress && (
               <div data-testid="insight-progress">
