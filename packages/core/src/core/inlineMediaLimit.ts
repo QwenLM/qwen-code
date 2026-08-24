@@ -7,19 +7,17 @@
 import type { Part } from '@google/genai';
 import { sanitizeMimeForPlaceholder } from '../services/compactionInputSlimming.js';
 
+// Re-exported so existing importers (and the core barrel) keep resolving the
+// audio bridge ceiling from this module, while the definition lives in utils/
+// so the leaf layer can reference it without an upward import.
+export { DEFAULT_MAX_AUDIO_BRIDGE_BYTES } from '../utils/audio-bridge-constants.js';
+
 /**
  * Default ceiling for a single inline media payload (image/audio/blob) sent to
  * the model, measured in decoded bytes. Oversized payloads blow up the request
  * size and token budget, so they are replaced with a text placeholder instead.
  */
 export const DEFAULT_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024;
-
-/**
- * Default ceiling for a single audio payload handed to the voice bridge,
- * measured in decoded bytes. Oversized audio is rejected outright, never
- * placeholder-substituted.
- */
-export const DEFAULT_MAX_AUDIO_BRIDGE_BYTES = 10 * 1024 * 1024;
 
 /**
  * Resolve the inline-media byte ceiling, allowing override via the
