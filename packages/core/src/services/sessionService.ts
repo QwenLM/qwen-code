@@ -2352,12 +2352,6 @@ export class SessionService {
           if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
-          const retained = snapshot.identities.find(
-            (identity) => identity.state === 'archived',
-          )!;
-          const preparedUsage = await this.prepareUsageSalvageBestEffort(
-            retained.filePath,
-          );
           const active = snapshot.identities.find(
             (identity) => identity.state === 'active',
           )!;
@@ -2365,7 +2359,6 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(active.filePath);
-          this.commitUsageSalvageBestEffort(preparedUsage);
           try {
             options.assertCanMutate?.();
             await this.movePrSidecar(
@@ -2500,12 +2493,6 @@ export class SessionService {
           if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
-          const retained = snapshot.identities.find(
-            (identity) => identity.state === 'active',
-          )!;
-          const preparedUsage = await this.prepareUsageSalvageBestEffort(
-            retained.filePath,
-          );
           const archived = snapshot.identities.find(
             (identity) => identity.state === 'archived',
           )!;
@@ -2513,7 +2500,6 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(archived.filePath);
-          this.commitUsageSalvageBestEffort(preparedUsage);
           try {
             options.assertCanMutate?.();
             await this.movePrSidecar(

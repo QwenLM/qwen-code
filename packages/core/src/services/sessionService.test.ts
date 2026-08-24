@@ -2397,11 +2397,25 @@ describe('SessionService', () => {
       });
 
       expect(result.errors).toHaveLength(1);
-      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
-      );
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not persist a final usage snapshot during conflict repair', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        resolveConflicts: true,
+      });
+
+      expect(result).toMatchObject({
+        archived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
   });
 
@@ -2540,11 +2554,25 @@ describe('SessionService', () => {
       });
 
       expect(result.errors).toHaveLength(1);
-      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
-      );
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not persist a final usage snapshot for the retained active copy', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        resolveConflicts: true,
+      });
+
+      expect(result).toMatchObject({
+        unarchived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
 
     it('should recreate active chats directory before moving archived sessions', async () => {
