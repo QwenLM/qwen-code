@@ -208,20 +208,6 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
-  const cloneJsonValue = (value: unknown): unknown => {
-    if (Array.isArray(value)) {
-      return value.map(cloneJsonValue);
-    }
-    if (typeof value !== 'object' || value === null) {
-      return value;
-    }
-    const clone: Record<string, unknown> = {};
-    for (const [key, nestedValue] of Object.entries(value)) {
-      clone[key] = cloneJsonValue(nestedValue);
-    }
-    return clone;
-  };
-
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
       return obj;
@@ -263,16 +249,21 @@ export function relaxSchemaForFunctionCalling(
         key === 'example' ||
         key === 'examples'
       ) {
-        target[key] = cloneJsonValue(value);
+        target[key] = structuredClone(value);
         continue;
       }
-      // `properties` / `$defs` / `definitions` are name->schema MAPS: their
-      // keys are property/definition names, not JSON Schema keywords. A
-      // property literally named `$schema`, `uniqueItems`, or
-      // `additionalProperties` must survive — only the VALUES are schemas to
-      // relax.
+      // These keywords are name->schema/value maps: their keys are names, not
+      // JSON Schema keywords. A map entry literally named `$schema`,
+      // `uniqueItems`, or `additionalProperties` must survive — only the
+      // values are schemas to relax.
       if (
-        (key === 'properties' || key === '$defs' || key === 'definitions') &&
+        (key === 'properties' ||
+          key === 'patternProperties' ||
+          key === '$defs' ||
+          key === 'definitions' ||
+          key === 'dependencies' ||
+          key === 'dependentSchemas' ||
+          key === 'dependentRequired') &&
         typeof value === 'object' &&
         value !== null &&
         !Array.isArray(value)

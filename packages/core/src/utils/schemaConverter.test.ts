@@ -468,6 +468,11 @@ describe('relaxSchemaForFunctionCalling', () => {
             },
           },
         },
+        disabled: {
+          type: 'array',
+          uniqueItems: false,
+          items: { type: 'string' },
+        },
       },
     };
 
@@ -490,8 +495,25 @@ describe('relaxSchemaForFunctionCalling', () => {
             },
           },
         },
+        disabled: {
+          type: 'array',
+          items: { type: 'string' },
+        },
       },
     });
+  });
+
+  it('never treats schema-map keys as schema keywords', () => {
+    const namedUniqueItems = { uniqueItems: { type: 'string' } };
+    const schema = {
+      type: 'object',
+      patternProperties: namedUniqueItems,
+      dependencies: namedUniqueItems,
+      dependentSchemas: namedUniqueItems,
+      dependentRequired: { uniqueItems: ['value'] },
+    };
+
+    expect(relaxSchemaForFunctionCalling(schema)).toEqual(schema);
   });
 
   it('does not treat JSON literal values as nested schemas', () => {
