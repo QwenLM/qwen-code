@@ -2985,6 +2985,9 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'phrase an unrun mutation as a reasoned hypothesis',
+    );
     expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
       'you have no runner',
     );
