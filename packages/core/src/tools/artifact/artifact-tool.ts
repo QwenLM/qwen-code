@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
+import { PUBLISHED_CONTENT_SHA256_METADATA_KEY } from '../../services/session-artifact-persistence.js';
 import type {
   ToolCallConfirmationDetails,
   ToolInfoConfirmationDetails,
@@ -255,6 +257,13 @@ class ArtifactToolInvocation extends BaseToolInvocation<
           managedId,
           mimeType: 'text/html',
           sizeBytes: bytes,
+          metadata: {
+            // Content fingerprint so a republish with a changed body bumps
+            // the stored artifact's updatedAt even at identical byte length.
+            [PUBLISHED_CONTENT_SHA256_METADATA_KEY]: createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
         },
       ],
     };

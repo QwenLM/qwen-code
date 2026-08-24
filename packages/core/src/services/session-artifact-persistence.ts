@@ -11,6 +11,7 @@ export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;

@@ -17,6 +17,7 @@ import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
+  PUBLISHED_CONTENT_SHA256_METADATA_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
@@ -419,6 +420,7 @@ export class SessionArtifactStore {
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
             if (updated.artifact.id !== existing.id) {
+              stampRemovedAt(existing);
               const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
@@ -432,6 +434,7 @@ export class SessionArtifactStore {
               changes.push(removeChange);
               this.artifacts.delete(existing.id);
             } else if (shouldRecordEphemeralUnpin(existing, artifact)) {
+              stampRemovedAt(existing);
               changes.push({
                 action: 'removed',
                 artifactId: existing.id,
@@ -612,10 +615,14 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
+      // Stamp a copy, not the live object: if durable tombstone persistence
+      // fails below, the rollback snapshot must keep the pre-removal state.
+      const removedSnapshot: StoredArtifact = { ...existing };
+      stampRemovedAt(removedSnapshot);
       const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
-        artifact: toPublicArtifact(existing),
+        artifact: toPublicArtifact(removedSnapshot),
         reason: 'explicit',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
@@ -1701,6 +1708,8 @@ export class SessionArtifactStore {
     if (!artifact.workspacePath) {
       return;
     }
+    const previousStatus = artifact.status;
+    const previousSizeBytes = artifact.sizeBytes;
     try {
       const status = await getWorkspaceStatus(
         artifact.workspacePath,
@@ -1713,9 +1722,9 @@ export class SessionArtifactStore {
       );
       const changed = isWorkspaceContentChanged(artifact, status);
       artifact.status = changed ? 'changed' : status.status;
-      if (!changed) {
-        artifact.sizeBytes = status.sizeBytes;
-      }
+      // Report the currently observed size even when the content drifted, so
+      // the public field does not lag behind the file on disk.
+      artifact.sizeBytes = status.sizeBytes;
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
@@ -1733,7 +1742,15 @@ export class SessionArtifactStore {
         artifact.sizeBytes = undefined;
         artifact.lastStatAt = options.now ?? Date.now();
       }
-      return;
+    }
+    // Material changes (content drift or a reachability transition) must move
+    // updatedAt; clients such as the Web Shell preview cache on it. Unchanged
+    // re-stats and same-identity no-op upserts must keep it stable.
+    if (
+      artifact.status !== previousStatus ||
+      artifact.sizeBytes !== previousSizeBytes
+    ) {
+      artifact.updatedAt = new Date().toISOString();
     }
   }
 
@@ -1795,6 +1812,7 @@ export class SessionArtifactStore {
       candidates.splice(candidates.indexOf(artifact), 1);
       sourceCounts[artifact.retentionSource]--;
       removePriorChange(changes, artifact.id);
+      stampRemovedAt(artifact);
       removed.push({
         action: 'removed',
         artifactId: artifact.id,
@@ -2169,7 +2187,8 @@ function mergeMetadata(
   for (const [key, value] of Object.entries(incoming.metadata)) {
     if (
       (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-        key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) &&
+        key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY ||
+        key === PUBLISHED_CONTENT_SHA256_METADATA_KEY) &&
       merged[key] !== value
     ) {
       merged[key] = value;
@@ -2272,6 +2291,15 @@ function removePriorChange(
   if (index >= 0) {
     changes.splice(index, 1);
   }
+}
+
+/**
+ * Removal is a material change: stamp the removed snapshot's updatedAt so
+ * consumers see when the artifact went away, while createdAt keeps the first
+ * registration time.
+ */
+function stampRemovedAt(artifact: StoredArtifact): void {
+  artifact.updatedAt = new Date().toISOString();
 }
 
 function toPublicArtifact(

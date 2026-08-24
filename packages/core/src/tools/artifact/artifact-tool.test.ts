@@ -5,15 +5,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { StandardFileSystemService } from '../../services/fileSystemService.js';
+import { PUBLISHED_CONTENT_SHA256_METADATA_KEY } from '../../services/session-artifact-persistence.js';
 import { ToolErrorType } from '../tool-error.js';
 import { ArtifactTool, type UrlOpener } from './artifact-tool.js';
 import { LocalPublisher } from './local-publisher.js';
-import { MAX_ARTIFACT_BYTES } from './html.js';
+import { MAX_ARTIFACT_BYTES, wrapArtifactHtml } from './html.js';
 
 const signal = new AbortController().signal;
 
@@ -87,6 +89,21 @@ describe('ArtifactTool', () => {
     expect(html).toMatch(/^<!doctype html>/i);
     expect(html).toContain('<title>My Report</title>');
     expect(html).toContain('<h1>Report</h1>');
+  });
+
+  it('records the published content fingerprint for same-length republish detection', async () => {
+    const file = await writeFragment('fingerprint.html', '<h1>Report</h1>');
+    const res = await tool
+      .build({ file_path: file, title: 'My Report' })
+      .execute(signal);
+
+    expect(res.error).toBeUndefined();
+    const expectedSha = createHash('sha256')
+      .update(wrapArtifactHtml('<h1>Report</h1>', 'My Report'))
+      .digest('hex');
+    expect(res.artifacts?.[0]?.metadata).toMatchObject({
+      [PUBLISHED_CONTENT_SHA256_METADATA_KEY]: expectedSha,
+    });
   });
 
   it('redeploys the same source path to the same url', async () => {

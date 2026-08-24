@@ -5345,3 +5345,177 @@ describe('SessionArtifactStore', () => {
     });
   });
 });
+
+describe('SessionArtifactStore updatedAt freshness (issue 9927)', () => {
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifacts-9927-'),
+    );
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('stamps updatedAt when workspace content drifts without a re-register', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's9927-drift',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'report.html'),
+      '<html>hello</html>',
+    );
+    const created = await store.upsertMany(
+      [{ title: 'Report', workspacePath: 'report.html' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const initial = created.changes[0]!.artifact!;
+    expect(initial.updatedAt).toBe(initial.createdAt);
+
+    // Same-length rewrite: sizeBytes alone cannot signal the change.
+    await fs.writeFile(
+      path.join(workspace, 'report.html'),
+      '<html>HELLO</html>',
+    );
+    const future = new Date(Date.now() + 60_000);
+    await fs.utimes(path.join(workspace, 'report.html'), future, future);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const observed = await store.get(artifactId);
+    expect(observed).toMatchObject({ id: artifactId, status: 'changed' });
+    expect(observed?.sizeBytes).toBe(Buffer.byteLength('<html>HELLO</html>'));
+    expect(observed?.createdAt).toBe(initial.createdAt);
+    expect(observed?.updatedAt).not.toBe(initial.createdAt);
+  });
+
+  it('stamps updatedAt when the workspace file disappears', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's9927-missing',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'note.txt'), 'note');
+    const created = await store.upsertMany(
+      [{ title: 'Note', workspacePath: 'note.txt' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const initial = created.changes[0]!.artifact!;
+
+    await fs.rm(path.join(workspace, 'note.txt'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const observed = await store.get(artifactId);
+    expect(observed).toMatchObject({ id: artifactId, status: 'missing' });
+    expect(observed?.createdAt).toBe(initial.createdAt);
+    expect(observed?.updatedAt).not.toBe(initial.createdAt);
+  });
+
+  it('keeps updatedAt stable while unchanged content is re-stated', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's9927-stable',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'stable.txt'), 'stable');
+    const created = await store.upsertMany(
+      [{ title: 'Stable', workspacePath: 'stable.txt' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const initial = created.changes[0]!.artifact!;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const observed = await store.get(artifactId);
+    expect(observed).toMatchObject({
+      id: artifactId,
+      status: 'available',
+      createdAt: initial.createdAt,
+      updatedAt: initial.updatedAt,
+    });
+  });
+
+  it('stamps updatedAt on the removed snapshot', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's9927-remove',
+      workspaceCwd: workspace,
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Link', url: 'https://example.com/a' }],
+      { strict: true },
+    );
+    const snapshot = created.changes[0]!.artifact!;
+    expect(snapshot.updatedAt).toBe(snapshot.createdAt);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    const removed = await store.remove(snapshot.id);
+    expect(removed.changes).toHaveLength(1);
+    expect(removed.changes[0]).toMatchObject({ action: 'removed' });
+    expect(removed.changes[0]!.artifact!.createdAt).toBe(snapshot.createdAt);
+    expect(removed.changes[0]!.artifact!.updatedAt).not.toBe(
+      snapshot.createdAt,
+    );
+  });
+
+  it('stamps updatedAt when republished content changes at the same byte length', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's9927-published',
+      workspaceCwd: workspace,
+    });
+    const bodyA = '<html>body-a</html>';
+    const bodyB = '<html>body-b</html>';
+    expect(Buffer.byteLength(bodyA)).toBe(Buffer.byteLength(bodyB));
+    const input = (body: string) => ({
+      title: 'Page',
+      storage: 'published' as const,
+      managedId: 'managed-page',
+      url: 'https://example.com/page',
+      mimeType: 'text/html',
+      sizeBytes: Buffer.byteLength(body),
+      metadata: {
+        'qwen.published.sha256': createHash('sha256')
+          .update(body)
+          .digest('hex'),
+      },
+    });
+
+    const created = await store.upsertMany([input(bodyA)], {
+      strict: true,
+      trustedPublisher: true,
+    });
+    const initial = created.changes[0]!.artifact!;
+    expect(initial.updatedAt).toBe(initial.createdAt);
+
+    // Same byte length, different content fingerprint.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    const republished = await store.upsertMany([input(bodyB)], {
+      strict: true,
+      trustedPublisher: true,
+    });
+    expect(republished.changes).toHaveLength(1);
+    expect(republished.changes[0]).toMatchObject({ action: 'updated' });
+    expect(republished.changes[0]!.artifact!.createdAt).toBe(initial.createdAt);
+    expect(republished.changes[0]!.artifact!.updatedAt).not.toBe(
+      initial.createdAt,
+    );
+
+    // Identical republish stays a no-op and must not refresh updatedAt.
+    vi.setSystemTime(new Date(Date.now() + 120_000));
+    const noop = await store.upsertMany([input(bodyB)], {
+      strict: true,
+      trustedPublisher: true,
+    });
+    expect(noop.changes).toEqual([]);
+    const listed = await store.list();
+    expect(listed.artifacts[0]?.updatedAt).toBe(
+      republished.changes[0]!.artifact!.updatedAt,
+    );
+  });
+});
