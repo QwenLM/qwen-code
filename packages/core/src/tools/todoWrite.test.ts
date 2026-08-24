@@ -334,9 +334,47 @@ describe('TodoWriteTool', () => {
       );
 
       expect(result.llmContent).toContain('Todo list is unchanged');
-      expect(result.returnDisplay).toBe('Todo list unchanged.');
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'plan-1',
+        todos: unchangedTodos,
+        changes: {
+          created: [],
+          completed: [],
+        },
+      });
       expect(mockAtomicWrite).not.toHaveBeenCalled();
-      expect(mockConfig.setActiveTodoReminder).not.toHaveBeenCalled();
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        expect.stringContaining('Task'),
+      );
+    });
+
+    it('should preserve structured no-op display for an unchanged empty list', async () => {
+      mockFs.readFile.mockResolvedValue(JSON.stringify({ todos: [] }));
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool.build({ todos: [] }).execute(mockAbortSignal),
+      );
+
+      expect(result.llmContent).toContain('Todo list is unchanged');
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        todos: [],
+        changes: {
+          created: [],
+          completed: [],
+        },
+      });
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        undefined,
+      );
     });
 
     it('should not rewrite a repeated terminal snapshot', async () => {
@@ -355,7 +393,11 @@ describe('TodoWriteTool', () => {
         })
         .execute(mockAbortSignal);
 
-      expect(result.returnDisplay).toBe('Todo list unchanged.');
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'finished-plan',
+        todos: [{ id: '1', content: 'Done', status: 'completed' }],
+      });
       expect(mockAtomicWrite).not.toHaveBeenCalled();
     });
 

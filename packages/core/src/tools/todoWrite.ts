@@ -255,6 +255,28 @@ ${systemMessage}
   };
 }
 
+function updateActiveTodoReminder(
+  config: Config,
+  promptId: string | undefined,
+  todos: TodoItem[],
+): void {
+  if (!promptId) return;
+
+  const unfinishedTodos = todos.filter((todo) => todo.status !== 'completed');
+  const serializedTodos = escapeSystemReminderTags(
+    unfinishedTodos
+      .map((todo) => `- [${todo.status}] ${todo.content}`)
+      .join('\n'),
+  );
+  const todoContext = serializedTodos.slice(0, MAX_ACTIVE_TODO_CONTEXT_CHARS);
+  config.setActiveTodoReminder(
+    promptId,
+    unfinishedTodos.length > 0
+      ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
+      : undefined,
+  );
+}
+
 class TodoWriteToolInvocation extends BaseToolInvocation<
   TodoWriteParams,
   ToolResult
@@ -303,13 +325,25 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
 
       if (isDeepStrictEqual(finalTodos, oldTodos)) {
+        const resultPlanId = previousPlan.planId;
+        updateActiveTodoReminder(
+          this.config,
+          promptIdContext.getStore(),
+          finalTodos,
+        );
+
         return {
           llmContent: `Todo list is unchanged.
 
 <system-reminder>
 The todo list already matches the requested state. DO NOT mention this explicitly to the user. Continue on with the tasks at hand if applicable.
 </system-reminder>`,
-          returnDisplay: 'Todo list unchanged.',
+          returnDisplay: {
+            type: 'todo_list' as const,
+            ...(resultPlanId ? { planId: resultPlanId } : {}),
+            todos: finalTodos,
+            changes,
+          },
         };
       }
 
@@ -381,8 +415,7 @@ The todo list already matches the requested state. DO NOT mention this explicitl
       const startsNewPlan =
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
-          (oldTodos.every((todo) => todo.status === 'completed') &&
-            !isDeepStrictEqual(finalTodos, oldTodos)));
+          oldTodos.every((todo) => todo.status === 'completed'));
       const activePlanId =
         finalTodos.length === 0
           ? undefined
@@ -393,27 +426,11 @@ The todo list already matches the requested state. DO NOT mention this explicitl
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, activePlanId, sessionId);
-      const unfinishedTodos = finalTodos.filter(
-        (todo) => todo.status !== 'completed',
+      updateActiveTodoReminder(
+        this.config,
+        promptIdContext.getStore(),
+        finalTodos,
       );
-      const promptId = promptIdContext.getStore();
-      if (promptId) {
-        const serializedTodos = escapeSystemReminderTags(
-          unfinishedTodos
-            .map((todo) => `- [${todo.status}] ${todo.content}`)
-            .join('\n'),
-        );
-        const todoContext = serializedTodos.slice(
-          0,
-          MAX_ACTIVE_TODO_CONTEXT_CHARS,
-        );
-        this.config.setActiveTodoReminder(
-          promptId,
-          unfinishedTodos.length > 0
-            ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
-            : undefined,
-        );
-      }
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
