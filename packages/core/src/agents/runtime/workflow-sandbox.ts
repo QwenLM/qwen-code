@@ -198,6 +198,110 @@ export function extractAndStripMeta(source: string): {
   return { stripped, meta };
 }
 
+/** Filename V8 attributes the compiled workflow body to, in errors and stacks. */
+const WORKFLOW_SCRIPT_FILENAME = 'workflow.js';
+
+/**
+ * Wrap a stripped script body in the async IIFE the vm actually executes.
+ *
+ * `'use strict'` shares its line with the arrow deliberately. The wrapper
+ * already shifts every body line number by one, and putting the directive on
+ * its own line would shift them by two — so the directive costs nothing in
+ * error legibility. Strict mode matters here because the body is
+ * model-authored: in sloppy mode an undeclared assignment silently creates a
+ * property on the sandbox global instead of throwing, which turns a typo into
+ * state that outlives the statement that made it.
+ */
+function wrapWorkflowBody(strippedSource: string): string {
+  return `(async () => {'use strict';\n${strippedSource}\n})()`;
+}
+
+/**
+ * Parse `export const meta`, strip it, and compile the remaining body.
+ *
+ * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
+ * compile through one function rather than two lookalikes. Throws exactly what
+ * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
+ * literal, and V8's `SyntaxError` for a body that does not parse.
+ */
+export function compileWorkflowScript(scriptSource: string): {
+  script: vm.Script;
+  meta: WorkflowMeta | null;
+} {
+  const { stripped, meta } = extractAndStripMeta(scriptSource);
+  const script = new vm.Script(wrapWorkflowBody(stripped), {
+    filename: WORKFLOW_SCRIPT_FILENAME,
+  });
+  return { script, meta };
+}
+
+/** Longest source line rendered in a compile-failure message. */
+const COMPILE_ERROR_LINE_WIDTH = 80;
+
+/**
+ * Turn a compile failure into something a script author can act on.
+ *
+ * V8 already builds the useful part — the offending source line with a caret
+ * under the exact column — and puts it at the head of `error.stack`, ahead of
+ * the host frames. Reuse it rather than reconstructing a caret from column
+ * numbers, then fix the one thing it gets wrong for our purposes: the line
+ * number counts the IIFE wrapper, so `workflow.js:2` is the script's line 1.
+ *
+ * Falls back to the bare message when the stack carries no source frame.
+ */
+export function describeWorkflowCompileError(error: unknown): string {
+  const err = error instanceof Error ? error : new Error(String(error));
+  const stack = typeof err.stack === 'string' ? err.stack : '';
+  const frame: string[] = [];
+  for (const line of stack.split('\n')) {
+    if (/^\s+at\s/.test(line)) break;
+    frame.push(line);
+  }
+
+  const header = frame[0] ?? '';
+  const match = /^.*?:(\d+)$/.exec(header);
+  if (frame.length < 3 || !match) {
+    return err.message;
+  }
+
+  // Undo the wrapper's one-line offset. A body line of 0 would mean the error
+  // is on the wrapper itself, which is ours, not the author's — fall back.
+  const bodyLine = Number(match[1]) - 1;
+  if (bodyLine < 1) return err.message;
+
+  const rendered = clampSourceFrame(frame[1] ?? '', frame[2] ?? '');
+  const tail = frame
+    .slice(3)
+    .filter((l) => l.trim().length > 0)
+    .join('\n');
+  return [`line ${bodyLine}`, rendered, tail].filter(Boolean).join('\n');
+}
+
+/**
+ * Keep a long source line readable without breaking caret alignment: slide a
+ * window over the line and shift the caret by the same amount.
+ */
+function clampSourceFrame(sourceLine: string, caretLine: string): string {
+  if (sourceLine.length <= COMPILE_ERROR_LINE_WIDTH) {
+    return `${sourceLine}\n${caretLine}`;
+  }
+  const caretCol = caretLine.indexOf('^');
+  const start = Math.max(
+    0,
+    Math.min(
+      caretCol - Math.floor(COMPILE_ERROR_LINE_WIDTH / 2),
+      sourceLine.length - COMPILE_ERROR_LINE_WIDTH,
+    ),
+  );
+  const prefix = start > 0 ? '…' : '';
+  const window = sourceLine.slice(start, start + COMPILE_ERROR_LINE_WIDTH);
+  const suffix =
+    start + COMPILE_ERROR_LINE_WIDTH < sourceLine.length ? '…' : '';
+  const shiftedCaret =
+    caretCol >= 0 ? ' '.repeat(prefix.length + caretCol - start) + '^' : '';
+  return `${prefix}${window}${suffix}\n${shiftedCaret}`;
+}
+
 /**
  * Validate the parsed meta value and copy it into a fresh plain object — the
  * parser returns null-prototype objects, and this is where the contract fields
@@ -1735,12 +1839,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // The stripped source is what the vm executes; the meta object is
         // surfaced via `getMeta()` after the run (or after a malformed-meta
         // throw, in which case the caller's catch block sees a clear error).
-        const { stripped, meta } = extractAndStripMeta(scriptSource);
+        //
+        // Compilation goes through the same exported helper the pre-launch
+        // gate calls. Sharing the function is the whole point: a gate that
+        // compiled the script even slightly differently from the run would
+        // wave through something that then fails after the run is registered,
+        // which is the failure the gate exists to prevent.
+        const { script, meta } = compileWorkflowScript(scriptSource);
         extractedMeta = meta;
-        const wrapped = `(async () => {\n${stripped}\n})()`;
-        const script = new vm.Script(wrapped, {
-          filename: 'workflow.js',
-        });
         // 30s sync wall-clock cap inside vm — covers `while(true){}` style
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.

@@ -14,6 +14,7 @@ import {
 } from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
+import { compileWorkflowScript } from './workflow-sandbox.js';
 
 const {
   createProductionDispatchMock,
@@ -961,5 +962,132 @@ describe('WorkflowRunner', () => {
         process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = originalTimeout;
       }
     }
+  });
+
+  // ── Pre-launch compile gate ──────────────────────────────────────────
+  //
+  // `start()` used to mint a runId, open a journal and register the run
+  // before a byte was parsed, so one TypeScript annotation produced a
+  // registered, failed run: a phantom row in `/workflows`, a snapshot on
+  // disk, and a telemetry event, for a workflow that never began.
+  describe('pre-launch compile gate', () => {
+    const TS_ANNOTATION = "const target: string = 'x';\nawait agent(target);";
+
+    it('refuses a script that cannot compile', async () => {
+      const { config } = configWithRegistry();
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: TS_ANNOTATION,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/was not launched/);
+    });
+
+    // The point of the gate is not the message, it is that nothing survives
+    // the refusal. Each of these is a side effect the old ordering produced
+    // for a script that never ran.
+    it('leaves no run, no snapshot, no journal and no telemetry behind', async () => {
+      const { config, registry } = configWithRegistry();
+      logWorkflowRunMock.mockClear();
+      writeWorkflowSnapshotMock.mockClear();
+      writeLineMock.mockClear();
+
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: TS_ANNOTATION,
+          args: undefined,
+        }),
+      ).rejects.toThrow();
+
+      expect(registry.list()).toHaveLength(0);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(logWorkflowRunMock).not.toHaveBeenCalled();
+      expect(writeLineMock).not.toHaveBeenCalled();
+    });
+
+    it('names the offending line and explains the usual cause', async () => {
+      const { config } = configWithRegistry();
+      const error = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `await agent('one');\n${TS_ANNOTATION}`,
+        args: undefined,
+      }).then(
+        () => {
+          throw new Error('expected the script to be refused');
+        },
+        (e: unknown) => e as Error,
+      );
+
+      // Line 2 of the script, not line 3 of the wrapped source the vm sees.
+      expect(error.message).toContain('line 2');
+      expect(error.message).toContain('^');
+      expect(error.message).toContain('plain JavaScript');
+      expect(error.message).toContain('TypeScript syntax');
+    });
+
+    // A malformed `export const meta` cannot start a run either, and it
+    // reaches the same refusal rather than becoming a registered failure.
+    it('refuses a malformed meta literal the same way', async () => {
+      const { config, registry } = configWithRegistry();
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'export const meta = { name: someIdentifier }\nawait x();',
+          args: undefined,
+        }),
+      ).rejects.toThrow();
+      expect(registry.list()).toHaveLength(0);
+    });
+
+    // The equivalence that makes the gate trustworthy: the gate and the run
+    // compile through one exported function, so a script cannot pass the gate
+    // and then fail to compile inside the run. Drive both sides from one
+    // fixture list — if they ever diverge, one of these rows flips.
+    it('accepts exactly what the shared compile step accepts', async () => {
+      const fixtures = [
+        "await agent('plain');",
+        "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
+        '',
+        "const s = 'a: string = 1';\nawait agent(s);", // looks like TS, is a string
+        TS_ANNOTATION,
+        'await agent(',
+        'export const meta = { name: someIdentifier }',
+      ];
+
+      for (const source of fixtures) {
+        let compileThrew = false;
+        try {
+          compileWorkflowScript(source);
+        } catch {
+          compileThrew = true;
+        }
+
+        const { config } = configWithRegistry();
+        const started = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: source,
+          args: undefined,
+          dispatch: async () => 'ok',
+        }).then(
+          (handle) => {
+            void handle.completion.catch(() => undefined);
+            return true;
+          },
+          () => false,
+        );
+
+        expect(
+          started,
+          `fixture disagreed between gate and compile: ${JSON.stringify(source)}`,
+        ).toBe(!compileThrew);
+      }
+    });
   });
 });
