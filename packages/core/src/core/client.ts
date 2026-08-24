@@ -631,7 +631,14 @@ export class GeminiClient {
    * them, so this slot is the latch.
    */
   beginTelemetrySwap(): boolean {
-    if (this.telemetrySwap) return false;
+    if (this.telemetrySwap) {
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          '[TELEMETRY_SWAP_BEGIN] rejected: a swap is already in progress',
+        );
+      }
+      return false;
+    }
     // The hooks call this BEFORE config.startNewSession, so the config
     // session id still names the session the process is on — capture it as
     // the outgoing session now; initializedSessionId may already be stale
@@ -647,7 +654,14 @@ export class GeminiClient {
    * Safe to call with no transaction open (no-op).
    */
   commitTelemetrySwap(): void {
+    const undo = this.telemetrySwap?.undo;
     this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_COMMIT] undo=${undo ? 'dropped' : 'none'} ` +
+          `incoming=${undo?.sessionId ?? 'n/a'}`,
+      );
+    }
   }
 
   /**
@@ -669,6 +683,13 @@ export class GeminiClient {
   abortTelemetrySwap(): boolean {
     const swap = this.telemetrySwap;
     this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ABORT] undo=${swap?.undo ? 'applied' : 'none'} ` +
+          `incoming=${swap?.undo?.sessionId ?? 'n/a'} ` +
+          `outgoing=${swap?.undo?.snapshot.outgoingSessionId ?? 'n/a'}`,
+      );
+    }
     if (!swap?.undo) return false;
     uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
     if (this.initializedSessionId === swap.undo.sessionId) {
@@ -700,13 +721,18 @@ export class GeminiClient {
    */
   private armTelemetrySwapUndo(sessionId: string): void {
     if (!this.telemetrySwap || this.telemetrySwap.undo) return;
+    const outgoing =
+      this.telemetrySwap.outgoingHint ?? this.initializedSessionId;
     this.telemetrySwap.undo = {
       sessionId,
-      snapshot: uiTelemetryService.snapshotForReplay(
-        sessionId,
-        this.telemetrySwap.outgoingHint ?? this.initializedSessionId,
-      ),
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId, outgoing),
     };
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ARM] incoming=${sessionId} ` +
+          `outgoing=${outgoing ?? 'n/a'}`,
+      );
+    }
   }
 
   getHistory(curated: boolean = false): Content[] {
