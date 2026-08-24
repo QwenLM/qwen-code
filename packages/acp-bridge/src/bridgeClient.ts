@@ -660,6 +660,11 @@ export interface BridgeClientSessionEntry {
   sourceId?: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  artifactWorkspaceReady: boolean;
+  prepareArtifactWorkspace?: () => Promise<void>;
+  artifactWorkspacePreparation?: Promise<void>;
+  deferredArtifactBatches: BridgeClientDeferredArtifactBatch[];
+  deferredArtifactInputCount: number;
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
@@ -705,6 +710,12 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
+}
+
+export interface BridgeClientDeferredArtifactBatch {
+  artifacts: SessionArtifactInput[];
+  options?: Parameters<SessionArtifactStore['upsertMany']>[1];
+  turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
 
 interface PreparedSessionUpdateFrames {
@@ -1147,6 +1158,59 @@ export class BridgeClient implements Client {
         {
           trustedPublisher: batch.trustedPublisher,
         },
+        batch.turn,
+      );
+    }
+  }
+
+  async ingestSessionUpdateArtifacts(
+    entry: BridgeClientSessionEntry,
+    updates: SessionUpdate[],
+  ): Promise<void> {
+    for (const update of updates) {
+      const prepared = this.prepareSessionUpdateFrames(
+        { sessionId: entry.sessionId, update },
+        entry,
+      );
+      if (prepared.artifacts.length === 0) continue;
+      await this.upsertAndPublishArtifacts(
+        entry,
+        prepared.artifacts,
+        { trustedPublisher: prepared.trustedPublisher },
+        prepared.turn,
+      );
+    }
+  }
+
+  async ingestSessionUpdateArtifactsReady(
+    entry: BridgeClientSessionEntry,
+    updates: SessionUpdate[],
+  ): Promise<void> {
+    for (const update of updates) {
+      const prepared = this.prepareSessionUpdateFrames(
+        { sessionId: entry.sessionId, update },
+        entry,
+      );
+      if (prepared.artifacts.length === 0) continue;
+      await this.upsertAndPublishArtifactsReady(
+        entry,
+        prepared.artifacts,
+        { trustedPublisher: prepared.trustedPublisher },
+        prepared.turn,
+      );
+    }
+  }
+
+  async drainDeferredSessionArtifacts(
+    entry: BridgeClientSessionEntry,
+  ): Promise<void> {
+    const batches = entry.deferredArtifactBatches.splice(0);
+    entry.deferredArtifactInputCount = 0;
+    for (const batch of batches) {
+      await this.upsertAndPublishArtifactsReady(
+        entry,
+        batch.artifacts,
+        batch.options,
         batch.turn,
       );
     }
@@ -2509,6 +2573,54 @@ export class BridgeClient implements Client {
   }
 
   private async upsertAndPublishArtifacts(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options?: Parameters<SessionArtifactStore['upsertMany']>[1],
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'> = {},
+  ): Promise<void> {
+    if (!entry.artifactWorkspaceReady) {
+      this.deferArtifactBatch(entry, artifacts, options, turn);
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred reason=workspace_not_bound`,
+      );
+      return;
+    }
+    await entry.prepareArtifactWorkspace?.();
+    await this.upsertAndPublishArtifactsReady(entry, artifacts, options, turn);
+  }
+
+  private deferArtifactBatch(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options: Parameters<SessionArtifactStore['upsertMany']>[1] | undefined,
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
+  ): void {
+    if (artifacts.length === 0) return;
+    entry.deferredArtifactBatches.push({ artifacts, options, turn });
+    entry.deferredArtifactInputCount += artifacts.length;
+    const limit = entry.artifacts.inputBatchLimit();
+    let truncated = false;
+    while (entry.deferredArtifactInputCount > limit) {
+      const first = entry.deferredArtifactBatches[0];
+      if (!first) break;
+      const overflow = entry.deferredArtifactInputCount - limit;
+      if (first.artifacts.length <= overflow) {
+        entry.deferredArtifactBatches.shift();
+        entry.deferredArtifactInputCount -= first.artifacts.length;
+      } else {
+        first.artifacts = first.artifacts.slice(overflow);
+        entry.deferredArtifactInputCount -= overflow;
+      }
+      truncated = true;
+    }
+    if (truncated) {
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred_truncated reason=workspace_not_bound`,
+      );
+    }
+  }
+
+  private async upsertAndPublishArtifactsReady(
     entry: BridgeClientSessionEntry,
     artifacts: SessionArtifactInput[],
     options?: Parameters<SessionArtifactStore['upsertMany']>[1],
