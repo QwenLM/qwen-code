@@ -709,14 +709,77 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Resolve who owns the call, assign the PR to them, and post an explicit defer comment that:
 
 1. States you are escalating to the maintainer.
 2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
-3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
+3. @mentions that maintainer.
+
+Resolve the maintainer deterministically — never eyeball it. `$QWEN_MAINTAINER_HANDLE` wins when set; otherwise the same owner map and load/rotation logic as issue assignment picks one accountable owner from the PR's labels. The resolver prints one login or nothing, and nothing means "fall through", never "guess":
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$QWEN_MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+MAINTAINER="${QWEN_MAINTAINER_HANDLE:-}"
+if [ -z "$MAINTAINER" ]; then
+  MAINTAINER=$(node --input-type=module <<'EOF' 2>/dev/null
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { loadPolicy, matchArea, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
+
+const gh = (args) => {
+  const r = spawnSync('gh', args, { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr.trim() || 'gh failed');
+  return r.stdout.trim();
+};
+
+const repo = process.env.REPO;
+const prNumber = process.env.PR_NUMBER;
+const pr = JSON.parse(gh(['pr', 'view', prNumber, '--repo', repo, '--json', 'author,labels']));
+const policy = loadPolicy(readFileSync('.github/issue-owners.json', 'utf8'));
+const area = matchArea(policy, pr);
+if (!area) process.exit(0);
+
+const canWrite = (login) => {
+  try {
+    return ['admin', 'maintain', 'write'].includes(
+      gh(['api', `repos/${repo}/collaborators/${login}/permission`, '--jq', '.permission']),
+    );
+  } catch {
+    return false;
+  }
+};
+const eligible = area.owners.filter(
+  (owner) =>
+    owner.toLowerCase() !== pr.author.login.toLowerCase() && canWrite(owner),
+);
+if (eligible.length === 0) process.exit(0);
+
+// Same load metric as issue assignment: open assigned issues repo-wide.
+const load = new Map(
+  eligible.map((owner) => [
+    owner,
+    Number(gh(['issue', 'list', '--repo', repo, '--state', 'open', '--assignee', owner, '--limit', '100', '--json', 'number', '--jq', 'length'])),
+  ]),
+);
+console.log(pickOwner(eligible, load, Number(prNumber)));
+EOF
+  )
+fi
+if [ -z "$MAINTAINER" ]; then
+  # Last resort: the most recent human reviewer, if any.
+  MAINTAINER=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json latestReviews \
+    --jq '[.latestReviews[].author.login] | last // empty')
+fi
+if [ -n "$MAINTAINER" ]; then
+  # Put the PR in their Assigned filter — a stronger signal than the mention
+  # alone. Best-effort: a failed assign must never block the defer comment.
+  gh pr edit "$PR_NUMBER" --repo "$REPO" --add-assignee "$MAINTAINER" || true
+fi
+```
+
+The heredoc reads `REPO` and `PR_NUMBER` from the environment and resolves its relative import against the repository root, so run it from the workspace root like every other step here. If nothing resolves — no handle set, no area label on the PR, no eligible owner, no human reviewer — post the comment without an @mention rather than guessing a login.
+
+```bash
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @<MAINTAINER> — <reason>. Needs a human call on this one."
 ```
 
 A defer without an explicit comment is invisible — the maintainer won't know they're needed.
