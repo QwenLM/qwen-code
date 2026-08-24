@@ -3559,7 +3559,9 @@ export const useGeminiStream = (
               ? queuedGoal
                 ? {
                     queryToSend: renderGoalContinuationPrompt({
-                      variant: 'guarded-synthetic-turn',
+                      goalId: queuedGoal.permit.goalId,
+                      revision: queuedGoal.permit.revision,
+                      objective: queuedGoal.continuationContext,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
                     shouldProceed: true,

@@ -18156,7 +18156,17 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'Runtime continuation context: check weather',
+                  '<goal_runtime_data>\n{"goalId":"goal-1","revision":1,"objective":"check weather"}\n</goal_runtime_data>',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'contains no new real user input',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'not evidence that the user supplied it',
                 ),
               }),
               expect.objectContaining({
