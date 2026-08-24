@@ -41,6 +41,7 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSkillToggleMutation,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -174,6 +175,7 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
+import { McpAppHostContext } from './mcpAppHostContext';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -477,6 +479,70 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+function availableSessionSkillInfos(
+  skills: readonly string[],
+  commands: readonly {
+    name: string;
+    description: string;
+    argumentHint?: string;
+  }[],
+): SkillInfo[] {
+  const commandsByName = new Map(
+    commands.map((command) => [command.name.toLowerCase(), command]),
+  );
+  return skills
+    .map((name) => {
+      const command = commandsByName.get(name.toLowerCase());
+      return {
+        name,
+        description: command?.description ?? '',
+        ...(command?.argumentHint
+          ? { argumentHint: command.argumentHint }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sessionSkillsReflectToggle(
+  sessionSkills: readonly string[] | undefined,
+  mutationSkills: ReadonlyArray<{ name: string; enabled: boolean }>,
+): boolean {
+  if (sessionSkills === undefined) {
+    return false;
+  }
+  const enabledNames = new Set(sessionSkills.map((name) => name.toLowerCase()));
+  return mutationSkills.every((skill) => {
+    const enabled = enabledNames.has(skill.name.toLowerCase());
+    return skill.enabled === enabled;
+  });
+}
+
+function skillMutationsForWorkspace(
+  lastSkillMutation: DaemonSkillToggleMutation | undefined,
+  skillMutationsByCwd: Record<string, DaemonSkillToggleMutation[]> | undefined,
+  workspaceCwd?: string,
+): readonly DaemonSkillToggleMutation[] {
+  if (skillMutationsByCwd) {
+    return workspaceCwd ? (skillMutationsByCwd[workspaceCwd] ?? []) : [];
+  }
+  return lastSkillMutation ? [lastSkillMutation] : [];
+}
+
+function mergeSkillToggles(
+  current: ReadonlyArray<{ name: string; enabled: boolean }>,
+  incoming: ReadonlyArray<{ name: string; enabled: boolean }>,
+): Array<{ name: string; enabled: boolean }> {
+  const byName = new Map(
+    current.map((skill) => [skill.name.toLowerCase(), skill] as const),
+  );
+  for (const skill of incoming) {
+    byName.set(skill.name.toLowerCase(), skill);
+  }
+  return [...byName.values()];
+}
+
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
@@ -4592,9 +4658,21 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const [loadedSkillsFallback, setLoadedSkillsFallback] = useState<{
+    sessionId: string;
+    workspaceCwd: string | undefined;
+  }>();
+  const connectionSkillSnapshotRef = useRef({
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  });
+  connectionSkillSnapshotRef.current = {
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  };
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string) => {
+    async (workspaceCwd?: string, notifyOnError = false) => {
       const request = ++loadedSkillsRequestRef.current;
       try {
         const status =
@@ -4606,16 +4684,137 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-      } catch {
-        return;
+        return true;
+      } catch (error) {
+        if (notifyOnError) {
+          pushToast(
+            'error',
+            formatError(error, 'Failed to refresh composer skills'),
+          );
+        }
+        return false;
       }
     },
-    [workspace.client, workspaceActions],
+    [pushToast, workspace.client, workspaceActions],
   );
   useEffect(() => {
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+  const handledSkillMutationKeysRef = useRef(new Set<string>());
+  const pendingSkillTogglesByContextRef = useRef(
+    new Map<string, Array<{ name: string; enabled: boolean }>>(),
+  );
+  useEffect(() => {
+    if (!connected) {
+      handledSkillMutationKeysRef.current.clear();
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    const contextKey = `${workspaceCwd ?? ''}\n${sessionId ?? ''}`;
+    const mutations = skillMutationsForWorkspace(
+      workspaceEventSignals?.lastSkillMutation,
+      workspaceEventSignals?.skillMutationsByCwd,
+      workspaceCwd,
+    );
+    const mutationKeys = mutations.map(
+      (mutation) => `${contextKey}\n${mutation.id}`,
+    );
+    const unhandled = mutations.filter(
+      (_, index) =>
+        !handledSkillMutationKeysRef.current.has(mutationKeys[index]!),
+    );
+    if (unhandled.length === 0) return;
+    const markHandled = () => {
+      for (const mutationKey of mutationKeys) {
+        handledSkillMutationKeysRef.current.add(mutationKey);
+      }
+    };
+    const priorPending =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    const pendingToggles = mergeSkillToggles(
+      priorPending,
+      unhandled.flatMap((mutation) => mutation.skills),
+    );
+    const sessionSkills = connectionSkillSnapshotRef.current.skills;
+    if (
+      sessionId &&
+      sessionSkills !== undefined &&
+      priorPending.length === 0 &&
+      unhandled.every(
+        (mutation) =>
+          mutation.activation === 'applied' &&
+          mutation.sessionsFailed === 0 &&
+          mutation.sessionsRefreshed > 0,
+      )
+    ) {
+      markHandled();
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
+    let cancelled = false;
+    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded) return;
+      markHandled();
+      if (!sessionId) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        return;
+      }
+      const currentSnapshot = connectionSkillSnapshotRef.current;
+      if (
+        currentSnapshot.sessionId === sessionId &&
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+      ) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      setLoadedSkillsFallback({ sessionId, workspaceCwd });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connected,
+    connection.sessionId,
+    connection.workspaceCwd,
+    reloadLoadedSkills,
+    workspaceEventSignals?.lastSkillMutation,
+    workspaceEventSignals?.skillMutationsByCwd,
+  ]);
+  useEffect(() => {
+    if (!loadedSkillsFallback) return;
+    if (
+      connection.sessionId !== loadedSkillsFallback.sessionId ||
+      connection.workspaceCwd !== loadedSkillsFallback.workspaceCwd
+    ) {
+      const previousContextKey = `${loadedSkillsFallback.workspaceCwd ?? ''}\n${loadedSkillsFallback.sessionId}`;
+      for (const mutationKey of handledSkillMutationKeysRef.current) {
+        if (mutationKey.startsWith(`${previousContextKey}\n`)) {
+          handledSkillMutationKeysRef.current.delete(mutationKey);
+        }
+      }
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    const contextKey = `${connection.workspaceCwd ?? ''}\n${connection.sessionId ?? ''}`;
+    const pendingToggles =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    if (
+      pendingToggles.length > 0 &&
+      sessionSkillsReflectToggle(connection.skills, pendingToggles)
+    ) {
+      pendingSkillTogglesByContextRef.current.delete(contextKey);
+      setLoadedSkillsFallback(undefined);
+    }
+  }, [
+    connection.sessionId,
+    connection.skills,
+    connection.workspaceCwd,
+    loadedSkillsFallback,
+  ]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -6004,6 +6203,16 @@ export function App({
       })),
     [connection.models],
   );
+  const hasAuthoritativeReasoningContext = Boolean(
+    connection.sessionId &&
+      connection.context?.sessionId === connection.sessionId,
+  );
+  const displayedReasoning = hasAuthoritativeReasoningContext
+    ? connection.reasoning
+    : !connection.sessionId && !connection.context
+      ? connection.models?.find((model) => model.id === currentModel)
+          ?.reasoningPreview
+      : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
@@ -10890,18 +11099,39 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  const useWorkspaceSkillSnapshot =
+    loadedSkillsReady &&
+    (!connection.sessionId ||
+      connection.skills === undefined ||
+      (loadedSkillsFallback?.sessionId === connection.sessionId &&
+        loadedSkillsFallback.workspaceCwd === connection.workspaceCwd));
+  const composerSkills = useMemo(
+    () =>
+      useWorkspaceSkillSnapshot
+        ? loadedSkills
+        : availableSessionSkillInfos(
+            connection.skills ?? [],
+            connection.commands ?? [],
+          ),
+    [
+      connection.commands,
+      connection.skills,
+      loadedSkills,
+      useWorkspaceSkillSnapshot,
+    ],
+  );
   const commands = useMemo(() => {
     const previousSkillNames = new Set(
       (connection.skills ?? []).map((skill) => skill.toLowerCase()),
     );
-    const retainedCommands = loadedSkillsReady
+    const retainedCommands = useWorkspaceSkillSnapshot
       ? (connection.commands ?? []).filter(
           (command) =>
             command.source !== 'skill' &&
             !previousSkillNames.has(command.name.toLowerCase()),
         )
       : (connection.commands ?? []);
-    const refreshedSkillCommands = loadedSkillsReady
+    const refreshedSkillCommands = useWorkspaceSkillSnapshot
       ? loadedSkills.map((skill) => ({
           name: skill.name,
           description: skill.description,
@@ -10935,9 +11165,9 @@ export function App({
     connection.skills,
     hiddenCommands,
     loadedSkills,
-    loadedSkillsReady,
     sideTasksAvailable,
     t,
+    useWorkspaceSkillSnapshot,
   ]);
 
   const welcomeHeaderProps = useMemo(
@@ -11279,8 +11509,9 @@ export function App({
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        {/* prettier-ignore */}
-        <WebShellPortalRootContext.Provider value={portalRoot}>
+        <McpAppHostContext.Provider value={workspace.baseUrl}>
+          {/* prettier-ignore */}
+          <WebShellPortalRootContext.Provider value={portalRoot}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -12835,7 +13066,7 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
-                          skills={loadedSkills}
+                          skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
@@ -12885,8 +13116,12 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          reasoning={connection.reasoning}
-                          onSelectReasoningEffort={handleReasoningEffort}
+                          reasoning={displayedReasoning}
+                          onSelectReasoningEffort={
+                            hasAuthoritativeReasoningContext
+                              ? handleReasoningEffort
+                              : undefined
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
@@ -12976,7 +13211,7 @@ export function App({
                                   label: getModelDisplayName(m.label || m.id),
                                   contextWindow: m.contextWindow,
                                 }))}
-                              skills={loadedSkills}
+                              skills={composerSkills}
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
@@ -13004,7 +13239,7 @@ export function App({
                                 label: getModelDisplayName(m.label || m.id),
                                 contextWindow: m.contextWindow,
                               }))}
-                            skills={loadedSkills}
+                            skills={composerSkills}
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
                           />
@@ -13117,10 +13352,12 @@ export function App({
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      variant="drawer"
-                    />
+                    <CompactModeContext.Provider value={compactMode}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        variant="drawer"
+                      />
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
@@ -13185,12 +13422,14 @@ export function App({
                     />
                   )}
                   <WebShellCustomizationProvider value={customization}>
-                    <div className={styles.artifactPanelClip}>
-                      <ArtifactPanel
-                        {...artifactPanelSharedProps}
-                        panelWidth={artifactPanelWidth}
-                      />
-                    </div>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <div className={styles.artifactPanelClip}>
+                        <ArtifactPanel
+                          {...artifactPanelSharedProps}
+                          panelWidth={artifactPanelWidth}
+                        />
+                      </div>
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
@@ -13198,6 +13437,7 @@ export function App({
           </div>
         </div>
         </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );
