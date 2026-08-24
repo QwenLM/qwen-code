@@ -97,4 +97,71 @@ describe('SessionAttachmentLifecycle', () => {
     expect(lifecycle.isManuallyCleared).toBe(false);
     expect(lifecycle.isCleanupDetachPreserved(session)).toBe(false);
   });
+
+  it('releases the cleanup-detach exemption when a pending load is rejected', async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const session = {
+      sessionId: 'session-a',
+    } as DaemonSessionClient;
+    const pending = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    lifecycle.preserveCleanupDetach(session);
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(true);
+
+    expect(
+      lifecycle.rejectPendingLoad(
+        lifecycle.pendingLoad!,
+        new Error('load failed'),
+      ),
+    ).toBe(true);
+
+    await expect(pending).rejects.toThrow('load failed');
+    // A failed load must not keep the session exempted: the next
+    // effect-cleanup pass has to perform the prompt-state reset/detach.
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(false);
+  });
+
+  it('releases the cleanup-detach exemption when a pending load is cancelled', async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const session = {
+      sessionId: 'session-a',
+    } as DaemonSessionClient;
+    const pending = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'resume',
+      onTimeout: () => new Error('timed out'),
+    });
+    lifecycle.preserveCleanupDetach(session);
+
+    expect(lifecycle.cancelPendingLoad(new Error('cancelled'))).toBe(true);
+
+    await expect(pending).rejects.toThrow('cancelled');
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(false);
+  });
+
+  it("keeps another session's exemption when rejecting a load", async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const otherSession = {
+      sessionId: 'session-b',
+    } as DaemonSessionClient;
+    const pending = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    lifecycle.preserveCleanupDetach(otherSession);
+
+    expect(
+      lifecycle.rejectPendingLoad(
+        lifecycle.pendingLoad!,
+        new Error('load failed'),
+      ),
+    ).toBe(true);
+
+    await expect(pending).rejects.toThrow('load failed');
+    expect(lifecycle.isCleanupDetachPreserved(otherSession)).toBe(true);
+  });
 });
