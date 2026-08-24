@@ -262,6 +262,12 @@ describe('assign-pr-owner: workflow invariants', () => {
     assert.match(checkout.with.ref, /pull_request\.base\.sha/);
     assert.equal(checkout.with['persist-credentials'], false);
     assert.match(checkout.with['sparse-checkout'], /issue-owners\.json/);
+    // The run step's guard skips when this entry is dropped, so pin the
+    // membership — otherwise routing could be silently disabled forever.
+    assert.match(
+      checkout.with['sparse-checkout'],
+      /^\.github\/scripts\/assign-pr-owner\.mjs$/m,
+    );
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
