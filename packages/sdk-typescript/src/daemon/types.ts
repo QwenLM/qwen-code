@@ -1914,6 +1914,7 @@ export interface DaemonWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface DaemonWorkspaceProviderStatus extends DaemonStatusCell {
@@ -3753,6 +3754,7 @@ export interface MCPServerConfigShape {
   readonly tcp?: string;
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
+  readonly versionNegotiation?: 'auto' | 'legacy';
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;
