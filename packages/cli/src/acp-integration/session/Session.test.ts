@@ -403,6 +403,41 @@ function createOverLimitUsageSendStream() {
     .mockResolvedValueOnce(createEmptyStream());
 }
 
+/**
+ * Installs the shared vision-override mock surface for the #9529
+ * override-route tests: the 100-token session limit, the vision/primary
+ * route identity discriminator, the modality and vision-bridge selectors,
+ * and a base LLM client whose `resolveForModel` resolves to the vision
+ * agent. Returns the `resolveForModel` mock so a test can swap in a
+ * rejecting one (the fail-closed path) or assert on its calls.
+ */
+function setupVisionRouteOverrideMocks(
+  mockConfig: Config,
+  resolveForModel?: ReturnType<typeof vi.fn>,
+): ReturnType<typeof vi.fn> {
+  const resolver =
+    resolveForModel ??
+    vi.fn().mockResolvedValue({
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+      model: 'vision-agent',
+    });
+  mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+  mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+    model === 'vision-agent' ? 'route-vision' : 'route-primary',
+  );
+  mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+  mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+    id: 'vision-agent',
+    baseUrl: 'https://vision.example.com/v1',
+    agentCapable: true,
+  });
+  mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+    resolveForModel: resolver,
+  });
+  return resolver;
+}
+
 /** Builds provider preparation metadata that arrives before complete arguments. */
 function createPreparationResponse(
   callId: string,
@@ -12131,24 +12166,7 @@ describe('Session', () => {
       });
 
       it('does not drop a runtime-scoped override using the active route count (#9529)', async () => {
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
-          model === 'vision-agent' ? 'route-vision' : 'route-primary',
-        );
-        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
-        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
-          id: 'vision-agent',
-          baseUrl: 'https://vision.example.com/v1',
-          agentCapable: true,
-        });
-        const resolveForModel = vi.fn().mockResolvedValue({
-          contentGenerator: {},
-          contentGeneratorConfig: { model: 'vision-agent' },
-          model: 'vision-agent',
-        });
-        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
-          resolveForModel,
-        });
+        const resolveForModel = setupVisionRouteOverrideMocks(mockConfig);
 
         mockGeminiClient.tryCompressChat
           .mockResolvedValueOnce({
@@ -12186,21 +12204,10 @@ describe('Session', () => {
       });
 
       it('fails closed when runtime-scoped route resolution rejects (#9529)', async () => {
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
-          model === 'vision-agent' ? 'route-vision' : 'route-primary',
+        setupVisionRouteOverrideMocks(
+          mockConfig,
+          vi.fn().mockRejectedValue(new Error('runtime unavailable')),
         );
-        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
-        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
-          id: 'vision-agent',
-          baseUrl: 'https://vision.example.com/v1',
-          agentCapable: true,
-        });
-        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
-          resolveForModel: vi
-            .fn()
-            .mockRejectedValue(new Error('runtime unavailable')),
-        });
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValue(createEmptyStream());
@@ -12219,27 +12226,10 @@ describe('Session', () => {
       });
 
       it('records an override send usage under the override route so the next same-override send trips the gate (#9529)', async () => {
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
-          model === 'vision-agent' ? 'route-vision' : 'route-primary',
-        );
         // Full-turn vision selector: an image turn is sent under the \0 exact
         // route override — a different route than the active one, driven
         // through fullTurnModelOverride, which Session.prompt consumes.
-        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
-        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
-          id: 'vision-agent',
-          baseUrl: 'https://vision.example.com/v1',
-          agentCapable: true,
-        });
-        const resolveForModel = vi.fn().mockResolvedValue({
-          contentGenerator: {},
-          contentGeneratorConfig: { model: 'vision-agent' },
-          model: 'vision-agent',
-        });
-        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
-          resolveForModel,
-        });
+        setupVisionRouteOverrideMocks(mockConfig);
 
         const visionPrompt: PromptRequest = {
           sessionId: 'test-session-id',
@@ -12285,24 +12275,7 @@ describe('Session', () => {
       });
 
       it('records a Stop-hook continuation usage under the continuation request route so the next same-route send trips the gate (#9529)', async () => {
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
-          model === 'vision-agent' ? 'route-vision' : 'route-primary',
-        );
-        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
-        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
-          id: 'vision-agent',
-          baseUrl: 'https://vision.example.com/v1',
-          agentCapable: true,
-        });
-        const resolveForModel = vi.fn().mockResolvedValue({
-          contentGenerator: {},
-          contentGeneratorConfig: { model: 'vision-agent' },
-          model: 'vision-agent',
-        });
-        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
-          resolveForModel,
-        });
+        setupVisionRouteOverrideMocks(mockConfig);
         // The Stop hook blocks the first end-turn so the over-limit usage
         // arrives on the continuation send inside #runStopContinuation; the
         // second hook call lets the turn finish.
