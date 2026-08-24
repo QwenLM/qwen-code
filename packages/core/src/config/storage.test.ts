@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as net from 'node:net';
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
@@ -931,33 +931,24 @@ describe('Storage – ensureAuditFallbackDir', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'refuses a landing holding a special file such as a socket',
-    async () => {
+    'refuses a landing holding a special file such as a FIFO',
+    () => {
       // A FIFO/socket/device child answers false to every typing predicate;
       // opening it for the report would block or stream content to whoever
-      // holds the other end, so it must be refused like a symlink.
-      // Unix socket paths cap near 108 bytes, so a short QWEN_HOME keeps the
-      // landing path short enough to bind.
-      const shortHome = actualFs.mkdtempSync(path.join(os.tmpdir(), 'qh'));
-      process.env['QWEN_HOME'] = shortHome;
+      // holds the other end, so it must be refused like a symlink. A FIFO
+      // plants the identical shape with no sockaddr length limit — a socket
+      // under the 64-char hash leaf exceeds AF_UNIX's sun_path cap, so bind
+      // would truncate the path (Linux) or fail outright (macOS).
       const leaf = Storage.ensureAuditFallbackDir('/with-special-file');
-      const socketPath = path.join(leaf, '2026-01-01-000000-mod.md');
-      const server = net.createServer();
-      try {
-        await new Promise<void>((resolve, reject) => {
-          server.once('error', reject);
-          server.listen(socketPath, () => resolve());
-        });
-        expect(() =>
-          Storage.ensureAuditFallbackDir('/with-special-file'),
-        ).toThrow(/contains a special file/);
-        expect(() =>
-          Storage.ensureAuditFallbackDir('/with-special-file'),
-        ).toThrow(FatalConfigError);
-      } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-        actualFs.rmSync(shortHome, { recursive: true, force: true });
-      }
+      const fifoPath = path.join(leaf, '2026-01-01-000000-mod.md');
+      const result = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
+      expect(result.status).toBe(0);
+      expect(() =>
+        Storage.ensureAuditFallbackDir('/with-special-file'),
+      ).toThrow(/contains a special file/);
+      expect(() =>
+        Storage.ensureAuditFallbackDir('/with-special-file'),
+      ).toThrow(FatalConfigError);
     },
   );
 
@@ -1195,6 +1186,40 @@ describe('Storage – ensureAuditFallbackDir', () => {
         expect(actualFs.lstatSync(leaf).isSymbolicLink()).toBe(true);
       } finally {
         actualFs.rmSync(decoy, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink child planted after the content check snapshot',
+    () => {
+      // The content check's readdir snapshot runs BEFORE the pre-return
+      // re-validation; a child planted in that window passes the leaf-only
+      // re-adoption lstats, so the re-validation must re-run the content
+      // check to refuse it.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-child');
+      const escape = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-race-'),
+      );
+      const audits = path.join(home, 'audits');
+      let adoptionCalls = 0;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (String(args[0]) === audits) {
+            adoptionCalls += 1;
+            if (adoptionCalls === 2) {
+              actualFs.symlinkSync(escape, path.join(leaf, 'pwn'));
+            }
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-child')).toThrow(
+          /contains a symlink/,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
       }
     },
   );

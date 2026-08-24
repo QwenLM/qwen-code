@@ -407,11 +407,15 @@ export class Storage {
     // Every check above ran BEFORE the component it guards existed, so a
     // same-UID swap landing in a window between checks passes the check that
     // already ran. Re-validate with everything in place: re-adoption
-    // lstat-refuses a swapped `audits` or leaf, and the containment re-check
+    // lstat-refuses a swapped `audits` or leaf, the content re-check refuses
+    // a child planted after the first snapshot, and the containment re-check
     // catches a swapped ancestor the lstats cannot see — failing closed when
-    // the swap makes resolution itself impossible.
+    // the swap makes resolution itself impossible. The re-walk narrows the
+    // race but cannot close the tail of a path-returning API: the artifact
+    // writes must themselves stay contained in the returned root.
     Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
     Storage.adoptDirectory(dir, 'the fallback landing');
+    Storage.assertAuditLandingIsClean(dir);
     Storage.assertAuditLandingIsOutsideRepo(dir, resolved, true);
     return dir;
   }
