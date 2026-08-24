@@ -29,6 +29,10 @@ const retryStep =
   )?.[0] ?? '';
 const failureIssueJob =
   workflow.match(/file-failure-issue:[\s\S]*$/)?.[0] ?? '';
+const buildJob =
+  workflow.match(
+    /build-and-push-to-ghcr:[\s\S]*?(?=\n[ ]{2}# One issue per version)/,
+  )?.[0] ?? '';
 const failureIssueScript = readFileSync(
   '.github/scripts/image-build-failure-issue.sh',
   'utf8',
@@ -89,9 +93,31 @@ describe('build-and-publish-image workflow', () => {
     expect(workflow).toContain('PUSH_IMAGE: |-');
   });
 
-  it('files a failure issue for tag pushes and publishing dispatches', () => {
+  it('gates the failure-issue job on the exported publish decision', () => {
+    // The publish predicate lives only in PUSH_IMAGE. Job-level `if:` cannot
+    // read the env context, so the decision reaches the reporting job through
+    // a build-job output; restating the predicate in the gate would let the
+    // two drift apart (a widened PUSH_IMAGE whose failed run files no issue,
+    // or a narrowed one filing bogus issues).
     expect(failureIssueJob).toContain(
-      "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')",
+      "needs.build-and-push-to-ghcr.outputs.push_image == 'true'",
+    );
+    expect(failureIssueJob).not.toContain('startsWith(github.ref,');
+    expect(failureIssueJob).not.toContain('github.event.inputs.publish');
+  });
+
+  it('exports the publish decision before any step that can fail', () => {
+    expect(buildJob).toContain(
+      "push_image: '${{ steps.publish-decision.outputs.push_image }}'",
+    );
+    expect(buildJob).toContain("id: 'publish-decision'");
+    // The gate output must exist even when checkout or a build step fails,
+    // so the exporting step runs first and reads the job-level PUSH_IMAGE.
+    expect(buildJob).toContain(
+      'echo "push_image=${PUSH_IMAGE}" >> "$GITHUB_OUTPUT"',
+    );
+    expect(buildJob.indexOf("'Export the publish decision'")).toBeLessThan(
+      buildJob.indexOf("'Checkout repository'"),
     );
   });
 

@@ -25,6 +25,12 @@ jobs:
     permissions:
       contents: 'read'
       packages: 'write'
+    outputs:
+      # Job-level `if:` cannot read the env context, so PUSH_IMAGE leaves the
+      # build job through this output and file-failure-issue gates on it
+      # instead of restating the publish predicate (which would drift apart
+      # from PUSH_IMAGE the next time the predicate changes).
+      push_image: '${{ steps.publish-decision.outputs.push_image }}'
     env:
       # Whether this run publishes. Defined once at the job level so the
       # login gate and both build steps cannot drift apart.
@@ -32,6 +38,13 @@ jobs:
         ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
 
     steps:
+      # First on purpose: this output gates file-failure-issue, and it must
+      # exist even when every later step fails — a checkout or login failure
+      # on a publishing run is exactly a run the reporting job must cover.
+      - name: 'Export the publish decision'
+        id: 'publish-decision'
+        run: 'echo "push_image=${PUSH_IMAGE}" >> "$GITHUB_OUTPUT"'
+
       - name: 'Checkout repository'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
@@ -151,7 +164,7 @@ jobs:
   file-failure-issue:
     needs: ['build-and-push-to-ghcr']
     if: |-
-      ${{ failure() && github.repository == 'QwenLM/qwen-code' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')) }}
+      ${{ failure() && github.repository == 'QwenLM/qwen-code' && needs.build-and-push-to-ghcr.outputs.push_image == 'true' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
