@@ -24,7 +24,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import {
   getAllGeminiMdFilenames,
   LOCAL_CONTEXT_FILENAME,
-} from '../memory/const.js';
+} from '../utils/memory-constants.js';
 import type { PermissionDeniedReason } from '../hooks/types.js';
 export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';

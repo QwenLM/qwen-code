@@ -20,6 +20,7 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -31,6 +32,7 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -497,7 +499,9 @@ function preserveFsErrorOverAcp(err: unknown): never {
  * Voter-cancel, timeout, and session-closed all project to the same
  * `{outcome: 'cancelled'}` shape — the ACP wire frame doesn't
  * distinguish them. The audit log carries `decisionReason.type`
- * for forensic discrimination.
+ * for forensic discrimination. The cancel reason also rides in
+ * response `_meta` so the child can tell an unattended timeout
+ * apart from a deliberate user cancel.
  */
 function resolutionToAcpResponse(
   resolution: PermissionResolution,
@@ -508,7 +512,12 @@ function resolutionToAcpResponse(
       ...(resolution.metadata ?? {}),
     };
   }
-  return { outcome: { outcome: 'cancelled' } };
+  return {
+    outcome: { outcome: 'cancelled' },
+    _meta: {
+      [DAEMON_PERMISSION_CANCEL_REASON_META_KEY]: resolution.reason,
+    },
+  };
 }
 
 /**
@@ -531,17 +540,12 @@ const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
 
 // Known approval-mode ids accepted on the in-session `current_mode_update`
-// demux path. Mirrors the `modeMap` keys in `Session.setMode` (CLI); an id
-// outside this set is dropped before it fans out to SSE clients / the SDK
-// reducer. Keep the two in lockstep. Exported so the bridge's reconcile and
+// demux path. An id outside this set is dropped before it fans out to SSE
+// clients / the SDK reducer. Exported so the bridge's reconcile and
 // snapshot-seed paths apply the same enum backstop to agent-supplied mode ids.
-export const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
+export const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set(
+  APPROVAL_MODES,
+);
 
 /**
  * Human-readable label for a `fs.Stats` object's kind, used in the
@@ -717,10 +721,8 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<PermissionMediator, 'request'>,
     /**
-     * Bd1yh: wall-clock ms before `requestPermission` resolves as
-     * cancelled if no client vote arrives. 0 = disabled. Prevents
-     * the per-session FIFO `promptQueue` from poisoning forever
-     * when no SSE subscriber is connected. Forwarded directly to
+     * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
+     * if no client vote arrives. 0 = disabled. Forwarded directly to
      * `mediator.request`; the mediator owns the timer.
      */
     private readonly permissionTimeoutMs: number,
@@ -2352,6 +2354,13 @@ export class BridgeClient implements Client {
   ): Promise<void> {
     try {
       const result = await entry.artifacts.upsertMany(artifacts, options);
+      for (const warning of result.warnings ?? []) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=warning reason=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
       this.publishArtifactChanges(entry, result.changes, turn);
     } catch (error) {
       writeStderrLine(
