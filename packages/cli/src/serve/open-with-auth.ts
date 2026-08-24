@@ -14,7 +14,9 @@ import { resolveWebShellDir } from './web-shell-resolver.js';
 type OpenWithAuthOptions = Pick<
   ServeOptions,
   'hostname' | 'serveWebShell' | 'token'
->;
+> & {
+  requireWebShell?: boolean;
+};
 
 export function applyOpenWithAuth(options: OpenWithAuthOptions): void {
   if (!isLoopbackBind(options.hostname)) {
@@ -26,6 +28,7 @@ export function applyOpenWithAuth(options: OpenWithAuthOptions): void {
   if (!resolveWebShellDir()) {
     throw new Error('--open-with-auth requires built Web Shell assets.');
   }
+  options.requireWebShell = true;
 
   const configuredToken = resolveServeToken(options.token);
   if (configuredToken) {

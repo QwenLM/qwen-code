@@ -409,6 +409,7 @@ const WORKSPACE_SETTING_SCOPE =
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
   workspace?: string | string[];
+  requireWebShell?: boolean;
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
@@ -3117,6 +3118,9 @@ async function runQwenServeImpl(
   // with a breadcrumb rather than failing the boot.
   const webShellDir =
     opts.serveWebShell === false ? undefined : resolveWebShellDir();
+  if (optsIn.requireWebShell && !webShellDir) {
+    throw new Error('--open-with-auth requires built Web Shell assets.');
+  }
   if (opts.serveWebShell !== false) {
     if (!webShellDir) {
       writeStderrLine(
