@@ -578,6 +578,7 @@ export interface QwenMcpServerConfig {
   url?: string
   headers?: Record<string, string>
   timeout?: number
+  versionNegotiation?: 'auto' | 'legacy'
   trust?: boolean
   description?: string
   includeTools?: string[]
