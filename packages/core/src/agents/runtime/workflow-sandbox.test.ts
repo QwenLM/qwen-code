@@ -2781,8 +2781,31 @@ const x: string = 1;`);
       expect(rendered).toContain('const x: string = 1;');
     });
 
+    it.each([
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+    ])(
+      'preserves author line numbers after a meta block with %s separators',
+      (_name, separator) => {
+        const rendered = renderFor(
+          [
+            'export const meta = {',
+            "  name: 'n',",
+            "  description: 'd',",
+            '}',
+            'const x: string = 1;',
+          ].join(separator),
+        );
+        expect(rendered.split('\n')[0]).toBe('line 5');
+        expect(rendered).toContain('const x: string = 1;');
+      },
+    );
+
     it('does not attribute a closing-wrapper error to the author', () => {
       const rendered = renderFor('await agent(');
+      expect(rendered).toContain('unmatched or incomplete syntax');
+      expect(rendered).toContain('braces');
+      expect(rendered).not.toContain("Unexpected token '}'");
       expect(rendered).not.toContain('line 2');
       expect(rendered).not.toContain('})()');
     });

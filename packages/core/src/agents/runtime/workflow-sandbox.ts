@@ -277,10 +277,16 @@ export function describeWorkflowCompileError(
     return err.message;
   }
 
-  // Undo the wrapper's one-line offset. A line outside the author's source is
-  // on the wrapper itself, which is ours, not the author's — fall back.
+  // Undo the wrapper's one-line offset. A later line is on the closing wrapper,
+  // so describe the author's incomplete ending instead of naming our token.
   const bodyLine = Number(match[1]) - 1;
-  if (bodyLine < 1 || bodyLine > authorLineCount) return err.message;
+  if (bodyLine < 1) return err.message;
+  if (bodyLine > authorLineCount) {
+    return (
+      'The script ends with unmatched or incomplete syntax. Check ' +
+      'parentheses, brackets, braces, quotes, and template literals near the end.'
+    );
+  }
 
   const rendered = clampSourceFrame(frame[1] ?? '', frame[2] ?? '');
   const tail = frame

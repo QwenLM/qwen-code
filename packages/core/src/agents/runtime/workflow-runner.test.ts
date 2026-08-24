@@ -1033,6 +1033,27 @@ describe('WorkflowRunner', () => {
       expect(error.message).toContain('TypeScript syntax');
     });
 
+    it.each([
+      ['CRLF', '\r\n'],
+      ['U+2028', '\u2028'],
+      ['lone CR', '\r'],
+    ])(
+      'attributes the author line with %s separators',
+      async (_name, separator) => {
+        const { config } = configWithRegistry();
+        const error = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: `await agent('one');${separator}const x: string = 1;`,
+          args: undefined,
+        }).catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
+        expect((error as Error).message).toContain('line 2');
+        expect((error as Error).message).toContain('const x: string = 1;');
+      },
+    );
+
     // A malformed `export const meta` cannot start a run either, and it
     // reaches the same refusal rather than becoming a registered failure.
     it.each([
