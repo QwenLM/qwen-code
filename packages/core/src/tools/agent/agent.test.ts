@@ -4694,6 +4694,7 @@ describe('AgentTool', () => {
       // so resolveModelId returns the parent's current model.
       expect(stubRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'parent-model',
+        null,
       );
       expect(stubRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5840,6 +5841,7 @@ describe('AgentTool', () => {
       );
       expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'mapped-model',
+        null,
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'mapped-model' }),
@@ -6514,10 +6516,12 @@ describe('AgentTool', () => {
       // Per-model cap: resolved model ID must flow through to the registry.
       expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'parent-model',
+        null,
       );
       expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalledWith(
         undefined,
         'parent-model',
+        null,
       );
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();

@@ -644,7 +644,7 @@
       "default": ""
     },
     "imageModel": {
-      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected route must set supportsImageGeneration: true (or legacy imageOnly: true) in modelProviders.",
       "type": "string",
       "default": ""
     },
@@ -1344,6 +1344,11 @@
           "type": "boolean",
           "default": true
         },
+        "workflowsEnabled": {
+          "description": "Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the \"workflow\" keyword from steering a turn, see Disable Workflow Keyword Trigger.",
+          "type": "boolean",
+          "default": false
+        },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
@@ -1663,7 +1668,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1672,6 +1678,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1766,7 +1780,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1775,6 +1790,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1869,7 +1892,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1878,6 +1902,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1972,7 +2004,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1981,6 +2014,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2075,7 +2116,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2084,6 +2126,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2178,7 +2228,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2187,6 +2238,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2281,7 +2340,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2290,6 +2350,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2384,7 +2452,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2393,6 +2462,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2487,7 +2564,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2496,6 +2574,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2590,7 +2676,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2599,6 +2686,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2693,7 +2788,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2702,6 +2798,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2796,7 +2900,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2805,6 +2910,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2899,7 +3012,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2908,6 +3022,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -3002,7 +3124,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -3011,6 +3134,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -3105,7 +3236,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -3114,6 +3246,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -3208,7 +3348,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -3217,6 +3358,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -3311,7 +3460,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -3320,6 +3470,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {

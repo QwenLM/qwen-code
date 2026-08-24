@@ -61,7 +61,14 @@ findings), and `--comment` on an Aone target refuses cleanly.
   on `pr-context` success, so it is SKIPPED on Aone too — `issue-context`
   works standalone for the workitem evidence but is not wired to Agent 0.
 - `comment-status.ts` anchor-status and `presubmit.ts` CI checks: skip for
-  Aone v1 (the skill already handles their absence).
+  Aone v1 (the skill already handles their absence). **Landed (2026-08-21):**
+  both subcommands are a1-backed, reusing the same pure classification cores
+  the GitHub path pins — see the Phase 3 note in
+  `2026-08-13-review-platform-provider-abstraction.md` for the shape mapping
+  (parentNoteId threading, `closed` → resolved, `outdated` → stale, no
+  commit anchors, drift with no compare API). Of the flows deferred in
+  this section, only `pr-context` remains unbacked (the
+  context-unavailable cap stays until it lands).
 
 _Update (2026-08-21, #9619): `test-plan` is no longer unbacked — its body
 fetch routes through the platform reader (the MR description on Aone, already
@@ -109,8 +116,17 @@ semantics (head-drift refusal, partial-post reporting, host binding).
 1. **Scope**: ship the minimal slice (reader + detection + fetch-pr;
    pr-context/comment-status/presubmit degrade), or also make `pr-context`
    render Aone comments (bigger lift)? Recommendation: minimal slice.
+   _Resolved: minimal slice shipped; comment-status/presubmit backing
+   landed 2026-08-21; pr-context rendering remains open._
 2. Aone comment threading (`closed`, `outdated`) vs GitHub's
    `in_reply_to_id`/`line` model — only matters if `comment-status` joins.
+   _Resolved with the 2026-08-21 backing: `parentNoteId` → `in_reply_to_id`,
+   `outdated` → GitHub's null-line (stale), `closed` → the resolved bucket._
+   The ANCHOR half of this (how `--line` lands, what `side`/`outdated`
+   read back) is RESOLVED by the 2026-08-21 probe — see
+   `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`: new-side
+   only, zero server validation, `outdated` ≈ line-beyond-EOF, and
+   file-level comments drop their path.
 3. build/test (Agent 7) on a Bazel monorepo needs a repo-config escape hatch
    (already flagged out of scope in the parent doc); confirm it degrades
    cleanly rather than attempting a full `bazel build`.
