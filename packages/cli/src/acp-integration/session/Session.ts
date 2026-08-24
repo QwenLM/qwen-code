@@ -5136,9 +5136,9 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
-                let requestRouteKey = this.config.getModelRouteIdentity(
-                  this.config.getModel(),
-                );
+                let requestRouteKey =
+                  this.config.getModelRouteIdentity?.(this.config.getModel()) ??
+                  '';
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -5903,9 +5903,8 @@ export class Session implements SessionContext {
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
-      let requestRouteKey = this.config.getModelRouteIdentity(
-        this.config.getModel(),
-      );
+      let requestRouteKey =
+        this.config.getModelRouteIdentity?.(this.config.getModel()) ?? '';
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
