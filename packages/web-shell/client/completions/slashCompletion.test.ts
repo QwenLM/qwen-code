@@ -104,6 +104,32 @@ describe('getSlashCommandCompletionResult', () => {
     ]);
   });
 
+  it('keeps skill commands out of the top-level slash panel', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'skills',
+        description: 'Open the skills panel',
+        source: 'builtin-command',
+      },
+      {
+        name: 'review',
+        description: 'Review current code',
+        displayCategory: 'skill',
+      },
+    ];
+
+    expect(
+      getSlashCommandCompletionResult(
+        '/',
+        1,
+        commands,
+        [],
+        'en',
+        getTranslator('en'),
+      )?.items.map((item) => item.label),
+    ).toEqual(['/skills']);
+  });
+
   it('returns explicit subcommands after accepting a parent command', () => {
     const commands: CommandInfo[] = [
       {
@@ -411,7 +437,7 @@ describe('slashCompletionSource', () => {
     ]);
   });
 
-  it('orders slash commands by custom, skill, then system categories', () => {
+  it('omits skill commands from the legacy slash completion source', () => {
     const commands: CommandInfo[] = [
       {
         name: 'clear',
@@ -440,7 +466,6 @@ describe('slashCompletionSource', () => {
 
     expect(result?.options.map((option) => option.label)).toEqual([
       '/demo:ping',
-      '/batch',
       '/clear',
     ]);
     expect(
@@ -451,7 +476,6 @@ describe('slashCompletionSource', () => {
       }),
     ).toEqual([
       { name: 'Custom commands', rank: 0 },
-      { name: 'Skill commands', rank: 1 },
       { name: 'System commands', rank: 2 },
     ]);
   });
@@ -489,7 +513,7 @@ describe('slashCompletionSource', () => {
           typeof option.section === 'string' ? undefined : option.section;
         return section?.name;
       }),
-    ).toEqual(['自定义', 'Skill', '系统']);
+    ).toEqual(['自定义', '系统']);
   });
 
   it('only includes sections for categories with matching commands', () => {
@@ -560,7 +584,6 @@ describe('slashCompletionSource', () => {
     expect(result?.options.map((option) => option.label)).toEqual([
       '/clear',
       '/demo:ping',
-      '/batch',
     ]);
     expect(
       result?.options.map((option) => {
@@ -571,7 +594,6 @@ describe('slashCompletionSource', () => {
     ).toEqual([
       { name: 'System commands', rank: 0 },
       { name: 'Custom commands', rank: 1 },
-      { name: 'Skill commands', rank: 2 },
     ]);
   });
 

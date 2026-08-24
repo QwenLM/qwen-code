@@ -357,6 +357,7 @@ function useCommandSuggestions(
       commandPathParts,
       partial,
       currentLevel,
+      exactMatchAsParent,
     } = parserResult;
 
     if (isArgumentCompletion) {
@@ -410,14 +411,18 @@ function useCommandSuggestions(
     }
 
     const commandsToSearch = currentLevel || [];
-    if (commandsToSearch.length > 0) {
+    const topLevelCommands =
+      commandPathParts.length === 0 && !exactMatchAsParent
+        ? commandsToSearch.filter((cmd) => cmd.kind !== CommandKind.SKILL)
+        : commandsToSearch;
+    if (topLevelCommands.length > 0) {
       const performFuzzySearch = async () => {
         if (signal.aborted) return;
         let rankedSuggestions: RankedCommandMatch[] = [];
 
         if (partial === '') {
           // If no partial query, recently used commands should be the most prominent.
-          rankedSuggestions = commandsToSearch
+          rankedSuggestions = topLevelCommands
             .flatMap((cmd, index) => {
               if (!cmd.description || cmd.hidden) {
                 return [];
@@ -442,13 +447,13 @@ function useCommandSuggestions(
             });
         } else {
           // Use fuzzy search for non-empty partial queries with fallback
-          const fzfInstance = getFzfForCommands(commandsToSearch);
+          const fzfInstance = getFzfForCommands(topLevelCommands);
           if (fzfInstance) {
             try {
               const fzfResults = await fzfInstance.fzf.find(partial);
               if (signal.aborted) return;
               const commandOrder = new Map<SlashCommand, number>();
-              commandsToSearch.forEach((cmd, index) => {
+              topLevelCommands.forEach((cmd, index) => {
                 commandOrder.set(cmd, index);
               });
               const rankedMatches = new Map<SlashCommand, RankedCommandMatch>();
@@ -483,13 +488,13 @@ function useCommandSuggestions(
               );
               // Fallback to prefix-based filtering
               rankedSuggestions = getPrefixSuggestions(
-                commandsToSearch,
+                topLevelCommands,
                 partial,
               );
             }
           } else {
             // Fallback to prefix-based filtering when fzf instance creation fails
-            rankedSuggestions = getPrefixSuggestions(commandsToSearch, partial);
+            rankedSuggestions = getPrefixSuggestions(topLevelCommands, partial);
           }
         }
 

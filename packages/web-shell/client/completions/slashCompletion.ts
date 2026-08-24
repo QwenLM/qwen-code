@@ -12,6 +12,7 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   getCategoryRank,
   getCommandDisplayCategory,
+  isSkillCommand,
   type CommandDisplayCategory,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
@@ -488,11 +489,14 @@ export function getSlashCommandCompletionResult(
   // Non-empty query: fuzzy-rank by relevance (best match first), matching the
   // TUI, so partial or abbreviated input surfaces the command the user means.
   const isBrowsing = prefix.length === 0;
+  const topLevelCommands = commands.filter(
+    (command) => !isSkillCommand(command),
+  );
   const filteredCommands = isBrowsing
-    ? [...commands].sort((a, b) =>
+    ? [...topLevelCommands].sort((a, b) =>
         compareSlashCommands(a, b, '', categoryOrder),
       )
-    : fuzzyRankCommands(commands, prefix);
+    : fuzzyRankCommands(topLevelCommands, prefix);
 
   const items = filteredCommands
     .slice(0, COMPLETION_ITEM_LIMIT)
@@ -630,7 +634,10 @@ export function slashCompletionSource(
     const commands = getCommands();
     const categoryOrder = getCategoryOrder() ?? DEFAULT_COMMAND_CATEGORY_ORDER;
     const lp = prefix.toLowerCase();
-    const filteredCommands = commands
+    const topLevelCommands = commands.filter(
+      (command) => !isSkillCommand(command),
+    );
+    const filteredCommands = topLevelCommands
       .filter((c) => {
         if (!prefix) return true;
         return c.name.toLowerCase().includes(lp);

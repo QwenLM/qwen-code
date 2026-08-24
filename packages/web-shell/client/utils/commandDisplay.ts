@@ -20,6 +20,10 @@ export function getCommandDisplayCategory(
   return 'custom';
 }
 
+export function isSkillCommand(command: CommandInfo): boolean {
+  return getCommandDisplayCategory(command) === 'skill';
+}
+
 export function compareCommandsByCategory(
   a: CommandInfo,
   b: CommandInfo,

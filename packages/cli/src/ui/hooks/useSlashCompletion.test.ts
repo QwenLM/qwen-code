@@ -226,6 +226,40 @@ describe('useSlashCompletion', () => {
       );
     });
 
+    it('should keep skills out of top-level suggestions', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'help',
+          description: 'Show help',
+        }),
+        createTestCommand({
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+        }),
+        createTestCommand({
+          name: 'skills',
+          description: 'Open the skills panel',
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toEqual([
+          'help',
+          'skills',
+        ]);
+      });
+    });
+
     it('should filter commands based on partial input', async () => {
       const slashCommands = [
         createTestCommand({ name: 'memory', description: 'Manage memory' }),
