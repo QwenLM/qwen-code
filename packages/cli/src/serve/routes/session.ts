@@ -14,6 +14,7 @@ import {
   GitWorktreeService,
   SessionOrganizationError,
   SessionStorageEntryError,
+  SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
@@ -1159,6 +1160,9 @@ export function registerSessionRoutes(
         return error.reason !== 'foreign_project';
       }
       if (error instanceof SessionTranscriptIdentityUnavailableError) {
+        return true;
+      }
+      if (error instanceof SessionTranscriptChangedError) {
         return true;
       }
       if (

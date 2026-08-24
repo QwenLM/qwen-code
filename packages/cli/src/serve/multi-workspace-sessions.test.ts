@@ -12,6 +12,7 @@ import request from 'supertest';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
+  SessionTranscriptChangedError,
   Storage,
   createDebugLogger,
   readSessionPrs,
@@ -2292,11 +2293,33 @@ describe('multi-workspace session dispatch', () => {
   );
 
   it.each([
-    ['qualified', '/workspaces/secondary-id/sessions/archive'],
-    ['owner-routed', '/sessions/archive'],
+    [
+      'filesystem',
+      'qualified',
+      '/workspaces/secondary-id/sessions/archive',
+      () => Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    ],
+    [
+      'filesystem',
+      'owner-routed',
+      '/sessions/archive',
+      () => Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    ],
+    [
+      'transcript-change',
+      'qualified',
+      '/workspaces/secondary-id/sessions/archive',
+      () => new SessionTranscriptChangedError(),
+    ],
+    [
+      'transcript-change',
+      'owner-routed',
+      '/sessions/archive',
+      () => new SessionTranscriptChangedError(),
+    ],
   ])(
-    'keeps filesystem classifier failures scoped to their %s batch item',
-    async (_kind, route) => {
+    'keeps %s classifier failures scoped to their %s batch item',
+    async (_failureKind, _routeKind, route, createError) => {
       await withRuntimeDir(async () => {
         const healthyId = '550e8400-e29b-41d4-a716-446655440217';
         const invalidId = '550e8400-e29b-41d4-a716-446655440218';
@@ -2319,9 +2342,7 @@ describe('multi-workspace session dispatch', () => {
               this.getProjectRoot() === SECONDARY_CWD &&
               sessionId === invalidId
             ) {
-              throw Object.assign(new Error('permission denied'), {
-                code: 'EACCES',
-              });
+              throw createError();
             }
             return originalClassifier.call(this, sessionId);
           });

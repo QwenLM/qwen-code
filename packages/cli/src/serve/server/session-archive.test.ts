@@ -1631,6 +1631,42 @@ describe('deleteDaemonSessions', () => {
     expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
+  it('returns true when task maintenance fails after orphan deletion', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440086';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+    const cronFile = getCronFilePath(workspaceDir);
+    fs.rmSync(cronFile);
+    fs.mkdirSync(cronFile);
+    const markSessionCatalogChanged = vi.fn();
+
+    await expect(
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: new SessionService(workspaceDir),
+        bridge: {
+          killSession: vi.fn().mockResolvedValue(true),
+          markSessionCatalogChanged,
+        },
+        coordinator: new SessionArchiveCoordinator(),
+      }),
+    ).resolves.toBe(true);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
   it('deletes the transcript when killSession throws SessionNotFoundError', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440084';
     writeSessionFile(workspaceDir, sessionId, 'active');

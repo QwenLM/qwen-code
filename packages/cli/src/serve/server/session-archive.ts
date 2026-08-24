@@ -609,9 +609,6 @@ export async function deleteDaemonSessionIfOrphan(params: {
   // catalog revision through the lifecycle choke point; this conservative
   // extra mark covers the never-live orphan case and is protocol-permitted.
   bridge.markSessionCatalogChanged();
-  if (result.maintenanceError !== undefined) {
-    throw result.maintenanceError;
-  }
   return true;
 }
 
