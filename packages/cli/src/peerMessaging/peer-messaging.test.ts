@@ -9,7 +9,8 @@
  * of the gate and lands in the submit function, wrapped and attributed.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -23,6 +24,28 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MAX_ACCEPTED_BACKLOG, PeerMessaging } from './peer-messaging.js';
 
+// Holds the inbox's post-listen socket chmod, keeping startPeerInbox
+// pending while the socket already accepts connections.
+const chmodControl = vi.hoisted(() => ({
+  holdSocketChmod: false,
+  calls: 0,
+  release: null as (() => void) | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    chmod: async (...args: Parameters<typeof actual.chmod>) => {
+      chmodControl.calls += 1;
+      if (chmodControl.holdSocketChmod && chmodControl.calls === 2) {
+        await new Promise<void>((r) => (chmodControl.release = r));
+      }
+      return actual.chmod(...args);
+    },
+  };
+});
+
 const isWindows = process.platform === 'win32';
 
 let tmpDir: string;
@@ -34,6 +57,9 @@ let receipts: PeerFrame[];
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
+  chmodControl.holdSocketChmod = false;
+  chmodControl.calls = 0;
+  chmodControl.release = null;
 });
 
 afterEach(async () => {
@@ -127,6 +153,39 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(m.decide(msgId, 'approve')).toBe('done');
     expect(submitted).toHaveLength(1);
     expect(m.getHeld()).toHaveLength(0);
+  });
+
+  it('admits a frame that lands while startup is still settling', async () => {
+    chmodControl.holdSocketChmod = true;
+    const socketPath = path.join(tmpDir, 'socks', 'self.sock');
+    const startPromise = PeerMessaging.start({
+      socketPath,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+    });
+
+    await vi.waitFor(() => {
+      expect(fsSync.existsSync(socketPath)).toBe(true);
+    });
+    await sendPeerFrame(
+      socketPath,
+      buildUserFrame({ content: 'early frame', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    chmodControl.release?.();
+    const started = await startPromise;
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain('early frame');
   });
 
   it('buffers a message that arrives before the queue is wired', async () => {

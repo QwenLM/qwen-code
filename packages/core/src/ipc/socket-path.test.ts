@@ -39,19 +39,33 @@ describe.skipIf(isWindows)('resolvePeerSocketPath', () => {
     );
   });
 
-  it('falls back to the system temp dir', () => {
-    expect(resolvePeerSocketPath(4242)).toBe(
-      `${os.tmpdir()}/qwen-socks/4242.sock`.replace(/\/+/g, '/'),
-    );
+  it('falls back to an unpredictable per-session temp-dir path', () => {
+    // A shared temp dir needs a random name: a fixed or uid-derived one
+    // is a cross-user lockout or a pre-creatable DoS target.
+    const tmpPrefix = `${os.tmpdir()}/`.replace(/\/+/g, '/');
+    const first = resolvePeerSocketPath(4242).replace(/\/+/g, '/');
+    const second = resolvePeerSocketPath(4242).replace(/\/+/g, '/');
+    for (const resolved of [first, second]) {
+      expect(resolved.startsWith(tmpPrefix)).toBe(true);
+      expect(resolved).toMatch(/\/qwen-socks-[0-9a-f]{16}\/4242\.sock$/);
+    }
+    expect(first).not.toBe(second);
   });
 
   it('falls back to a short /tmp path when the preferred one cannot be bound', () => {
     process.env['XDG_RUNTIME_DIR'] = `/run/${'d'.repeat(120)}`;
-    const resolved = resolvePeerSocketPath(4242);
-    expect(resolved).toMatch(/^\/tmp\/qwen-socks-\d+\/4242\.sock$/);
-    expect(Buffer.byteLength(resolved)).toBeLessThanOrEqual(
-      MAX_SOCKET_PATH_BYTES,
-    );
+    const originalTmpdir = process.env['TMPDIR'];
+    process.env['TMPDIR'] = `/${'t'.repeat(110)}`;
+    try {
+      const resolved = resolvePeerSocketPath(4242);
+      expect(resolved).toMatch(/^\/tmp\/qwen-socks-[0-9a-f]{16}\/4242\.sock$/);
+      expect(Buffer.byteLength(resolved)).toBeLessThanOrEqual(
+        MAX_SOCKET_PATH_BYTES,
+      );
+    } finally {
+      if (originalTmpdir === undefined) delete process.env['TMPDIR'];
+      else process.env['TMPDIR'] = originalTmpdir;
+    }
   });
 
   it('keeps a path that is exactly at the limit', () => {

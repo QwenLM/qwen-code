@@ -71,6 +71,16 @@ export type HoldCause =
 export const MAX_HELD_MESSAGES = 50;
 
 /**
+ * Cap on settled-id memory.
+ *
+ * Tombstones only have to outlive a sender's retry window; a map that
+ * grew with every id the session ever saw would be the same leak the
+ * hold buffer's ceiling exists to prevent. Oldest is pruned first,
+ * mirroring the hold buffer.
+ */
+export const MAX_SETTLED_IDS = 512;
+
+/**
  * True when a human prompt still inspects each action this session takes.
  *
  * YOLO reviews nothing. AUTO_EDIT approves edit-shaped confirmations
@@ -135,6 +145,17 @@ export interface InboundGateOptions {
  */
 export class InboundGate {
   private readonly held: HeldMessage[] = [];
+  /**
+   * Canonicalized ids this gate already settled, with their verdict.
+   * A re-sent id repeats its verdict instead of re-entering the gate:
+   * the duplicate guard over `held` alone would let a peer slip a
+   * different body behind an id the user already decided — or saw
+   * evicted — and have it decided again.
+   */
+  private readonly settled = new Map<
+    string,
+    'delivered' | 'denied' | 'expired'
+  >();
   private shuttingDown = false;
 
   constructor(private readonly options: InboundGateOptions) {}
@@ -212,6 +233,18 @@ export class InboundGate {
 
   /** Run a freshly-arrived message through the gate. */
   admit(frame: PeerUserFrame): GateDecision {
+    // An id that is already settled has a final answer: repeat its
+    // receipt and stop. This is what keeps a re-send from re-parking a
+    // swapped body under a handle the user already reviewed.
+    const settled = this.settled.get(canonicalizeMsgId(frame.msgId));
+    if (settled !== undefined) {
+      debugLogger.debug(
+        `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
+      );
+      this.report(frame, settled);
+      return 'refused';
+    }
+
     // An id that is already parked has an answer. A second frame under
     // the same id is the sender retrying, or a peer slipping a different
     // body behind an id the user has already been shown — and two entries
@@ -255,6 +288,11 @@ export class InboundGate {
 
     if (policy === 'accept') {
       const ok = this.tryDeliver(frame);
+      if (ok) {
+        this.recordSettled(frame.msgId, 'delivered');
+      }
+      // A failed delivery is transient (the input queue is full); the id
+      // is deliberately not settled, so an honest sender retry can land.
       this.report(frame, ok ? 'delivered' : 'expired');
       return ok ? 'accept' : 'refused';
     }
@@ -263,6 +301,7 @@ export class InboundGate {
       const evicted = this.held.shift();
       if (evicted) {
         debugLogger.debug(`hold buffer full; expiring ${evicted.frame.msgId}`);
+        this.recordSettled(evicted.frame.msgId, 'expired');
         this.report(evicted.frame, 'expired');
       }
     }
@@ -305,8 +344,10 @@ export class InboundGate {
         this.notifyHeldChange();
         return 'failed';
       }
+      this.recordSettled(entry.frame.msgId, 'delivered');
       this.report(entry.frame, 'delivered');
     } else {
+      this.recordSettled(entry.frame.msgId, 'denied');
       this.report(entry.frame, 'denied');
     }
     this.notifyHeldChange();
@@ -337,6 +378,7 @@ export class InboundGate {
         release.push(entry);
       } else if (policy === 'refuse') {
         dropped += 1;
+        this.recordSettled(entry.frame.msgId, 'denied');
         this.report(entry.frame, 'denied');
       } else {
         const cause = decision.policy === 'hold' ? decision.cause : entry.cause;
@@ -348,6 +390,7 @@ export class InboundGate {
     for (const entry of release) {
       if (this.tryDeliver(entry.frame)) {
         released += 1;
+        this.recordSettled(entry.frame.msgId, 'delivered');
         this.report(entry.frame, 'delivered');
       } else {
         // A failed delivery must not drop a message the user can still
@@ -386,6 +429,23 @@ export class InboundGate {
       this.report(entry.frame, 'expired');
     }
     this.notifyHeldChange();
+  }
+
+  /** Remember a settled id, pruning the oldest beyond the cap. */
+  private recordSettled(
+    msgId: string,
+    verdict: 'delivered' | 'denied' | 'expired',
+  ): void {
+    const key = canonicalizeMsgId(msgId);
+    // Delete-then-set refreshes recency: Map iterates in insertion
+    // order, and the prune below drops the oldest.
+    this.settled.delete(key);
+    this.settled.set(key, verdict);
+    while (this.settled.size > MAX_SETTLED_IDS) {
+      const oldest = this.settled.keys().next().value;
+      if (oldest === undefined) break;
+      this.settled.delete(oldest);
+    }
   }
 
   /**

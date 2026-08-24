@@ -480,18 +480,30 @@ export function useQueuedSubmissionDrain({
       // the text is peer-authored, so submit them on the Teammate send
       // type, whose early return exists for exactly this hazard. That
       // path suppresses the user bubble, so render the one-line
-      // projection in its place.
-      addHistoryItem(
-        { type: MessageType.NOTIFICATION, text: submission.displayText },
-        Date.now(),
-      );
+      // projection in its place — once: a failed admission restores the
+      // entry and retries, and re-rendering would stack an identical
+      // notification per retry while the model receives one message.
+      if (!submission.displayed) {
+        addHistoryItem(
+          { type: MessageType.NOTIFICATION, text: submission.displayText },
+          Date.now(),
+        );
+      }
       request = submitQuery(
         submission.modelText,
         SendMessageType.Teammate,
         undefined,
         {
+          // Every other Teammate submitter passes the projection: the
+          // record stores it, and /resume falls back to the raw parts
+          // (the full envelope) without it.
+          notificationDisplayText: submission.displayText,
           onAdmissionFailed: () => {
-            restorePeerMessage(submission.modelText, submission.displayText);
+            restorePeerMessage(
+              submission.modelText,
+              submission.displayText,
+              true,
+            );
             markAdmissionFailed();
           },
         },

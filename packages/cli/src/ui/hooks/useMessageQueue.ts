@@ -33,6 +33,11 @@ export interface QueuedPeerSubmission {
   kind: 'peer';
   modelText: string;
   displayText: string;
+  /**
+   * The drain already rendered this entry's notification; set when a
+   * failed admission restores it so the retry does not re-render it.
+   */
+  displayed?: boolean;
 }
 
 export type QueuedSubmission =
@@ -72,7 +77,11 @@ export interface UseMessageQueueReturn {
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
   ) => void;
-  restorePeerMessage: (message: string, displayText: string) => void;
+  restorePeerMessage: (
+    message: string,
+    displayText: string,
+    displayed?: boolean,
+  ) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -87,6 +96,8 @@ interface QueuedMessage {
    * so it must not run through `@path`/slash/shell handling.
    */
   peer?: boolean;
+  /** Peer-only: its notification was already rendered before a restore. */
+  displayed?: boolean;
 }
 
 export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
@@ -254,6 +265,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           kind: 'peer',
           modelText: head.text,
           displayText: head.submittedPrompt ?? head.text,
+          ...(head.displayed ? { displayed: true } : {}),
         };
       }
 
@@ -294,10 +306,17 @@ export function useMessageQueue(): UseMessageQueueReturn {
     (onRemoved?: (turnKeys: string[]) => void): QueuedUserSubmission | null => {
       const current = queueRef.current;
       if (current.length === 0) return null;
-      queueRef.current = [];
-      setQueuedMessages([]);
-      onRemoved?.(current.map(({ key }) => key));
-      return aggregateUserMessages(current);
+      // Peer entries stay queued: this pop restores user text into the
+      // editable buffer, and a peer-authored envelope re-submitted from
+      // there would run through UserQuery preprocessing (`@path`/slash/
+      // shell) with its attribution lost. They drain on their own path
+      // once the session is idle again.
+      const popped = current.filter(({ peer }) => !peer);
+      if (popped.length === 0) return null;
+      queueRef.current = current.filter(({ peer }) => Boolean(peer));
+      setQueuedMessages(queueRef.current);
+      onRemoved?.(popped.map(({ key }) => key));
+      return aggregateUserMessages(popped);
     },
     [],
   );
@@ -323,7 +342,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const restorePeerMessage = useCallback(
-    (message: string, displayText: string) => {
+    (message: string, displayText: string, displayed = false) => {
       const text = message.trim();
       if (!text) return;
       queueRef.current = [
@@ -333,6 +352,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           deferUntilIdle: true,
           submittedPrompt: displayText,
           peer: true,
+          ...(displayed ? { displayed: true } : {}),
         },
         ...queueRef.current,
       ];

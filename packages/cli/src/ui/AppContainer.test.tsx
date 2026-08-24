@@ -1840,6 +1840,8 @@ describe('AppContainer State Management', () => {
           undefined,
           expect.objectContaining({
             onAdmissionFailed: expect.any(Function),
+            // Without the projection, /resume renders the raw envelope.
+            notificationDisplayText: displayText,
           }),
         );
       });
@@ -1895,8 +1897,79 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => {
-        expect(restorePeerMessage).toHaveBeenCalledWith(modelText, displayText);
+        expect(restorePeerMessage).toHaveBeenCalledWith(
+          modelText,
+          displayText,
+          true,
+        );
       });
+    });
+
+    it('renders the peer notification once across failed-admission retries', async () => {
+      const goalRuntime = {
+        getSnapshot: () => ({ goal: { status: 'paused' } }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      let pops = 0;
+      const popNextSubmission = vi.fn(() => {
+        pops += 1;
+        if (pops > 2) return null;
+        return {
+          kind: 'peer' as const,
+          modelText,
+          displayText,
+          ...(pops === 2 ? { displayed: true } : {}),
+        };
+      });
+      const addHistoryItem = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 1,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem,
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(1));
+      expect(addHistoryItem).toHaveBeenCalledTimes(1);
+
+      // Let the first drain's finally clear its in-flight flag before the
+      // retry render, the way the settlement tick does in production.
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+      // The restore bumps the pending count, releasing the retry guard.
+      rerender({ pendingSubmissionCount: 2, submissionSettledRevision: 1 });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+      expect(addHistoryItem).toHaveBeenCalledTimes(1);
     });
 
     it('drains after preprocessing settlement releases the shared lock', async () => {

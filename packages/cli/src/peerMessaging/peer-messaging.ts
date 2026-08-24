@@ -71,6 +71,7 @@ export class PeerMessaging {
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
+  private listedHeldIds: readonly string[] | null = null;
   private closed = false;
 
   // Options are consumed by `start`, which wires them into the gate and the
@@ -103,6 +104,12 @@ export class PeerMessaging {
       onHeldChange: (held) => messaging.emitHeldChange(held),
     });
 
+    // Wire the gate before the socket binds: startPeerInbox resolves only
+    // after its post-listen chmod, and frames arriving in that window are
+    // already dispatched. A frame that reaches a null gate is dropped
+    // without a receipt, and the sender has no way to tell.
+    messaging.gate = gate;
+
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
@@ -112,7 +119,6 @@ export class PeerMessaging {
     if (!inbox) return null;
 
     messaging.inbox = inbox;
-    messaging.gate = gate;
     messaging.updateSessionRegistryIpcPath =
       options.updateSessionRegistryIpcPath;
 
@@ -145,6 +151,29 @@ export class PeerMessaging {
 
   getHeld(): readonly HeldMessage[] {
     return this.gate?.getHeld() ?? [];
+  }
+
+  /**
+   * Remember the held ids the `/peers` listing just showed the user.
+   *
+   * Accept/deny decisions are bound to this snapshot: the held set moves
+   * between listing and decision (arrivals, evictions, releases), and a
+   * handle that uniquely named the message the user reviewed must not
+   * resolve to a different one by decide time.
+   */
+  recordHeldListing(ids: readonly string[]): void {
+    this.listedHeldIds = [...ids];
+  }
+
+  /** True when the held set no longer matches the last recorded listing. */
+  heldSetChangedSinceListing(): boolean {
+    const listed = this.listedHeldIds;
+    if (listed === null) return true;
+    const held = this.getHeld();
+    return (
+      held.length !== listed.length ||
+      held.some((entry, index) => entry.frame.msgId !== listed[index])
+    );
   }
 
   decide(

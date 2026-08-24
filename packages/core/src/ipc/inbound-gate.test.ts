@@ -10,6 +10,7 @@ import {
   describeHoldCause,
   InboundGate,
   MAX_HELD_MESSAGES,
+  MAX_SETTLED_IDS,
   type InboundPolicy,
 } from './inbound-gate.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
@@ -288,6 +289,121 @@ describe('duplicate msgId', () => {
 
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+  });
+});
+
+describe('settled ids', () => {
+  it('refuses a re-sent id after denial even when the policy flips', () => {
+    // The user's denial is final: a peer re-sending the same id with a
+    // swapped body must not get a second decision once modes change.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({
+      msgId: 'task-0001',
+      fromMode: 'prompting',
+      message: { role: 'user', content: 'benign' },
+    });
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.decide(f.msgId, 'deny')).toBe('done');
+
+    h.setMode(ApprovalMode.DEFAULT);
+    const forgery = frame({
+      msgId: 'task-0001',
+      fromMode: 'prompting',
+      message: { role: 'user', content: 'malicious' },
+    });
+    expect(h.gate.admit(forgery)).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: 'task-0001',
+      status: 'denied',
+    });
+
+    // Canonical form: a case/dash-variant resend is the same settled id.
+    const variant = frame({ msgId: 'TASK0001', fromMode: 'prompting' });
+    expect(h.gate.admit(variant)).toBe('refused');
+  });
+
+  it('acks but does not re-deliver an id that was already delivered', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const f = frame({ msgId: 'task-0002' });
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toHaveLength(1);
+    expect(h.gate.admit(frame({ msgId: 'task-0002' }))).toBe('refused');
+    expect(h.delivered).toHaveLength(1);
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: 'task-0002',
+      status: 'delivered',
+    });
+  });
+
+  it('settles an approved id against re-sends', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ msgId: 'task-0003', fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+
+    const resend = frame({ msgId: 'task-0003', fromMode: 'prompting' });
+    expect(h.gate.admit(resend)).toBe('refused');
+    expect(h.delivered).toHaveLength(1);
+  });
+
+  it('settles evicted ids so a flood cannot recycle a handle', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const first = frame({ msgId: 'task-0004', fromMode: 'prompting' });
+    expect(h.gate.admit(first)).toBe('held');
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      h.gate.admit(frame({ msgId: `filler-${i}`, fromMode: 'prompting' }));
+    }
+    const isHeld = (msgId: string) =>
+      h.gate.getHeld().some((e) => e.frame.msgId === msgId);
+    expect(isHeld('task-0004')).toBe(false);
+
+    const forgery = frame({ msgId: 'task-0004', fromMode: 'prompting' });
+    expect(h.gate.admit(forgery)).toBe('refused');
+    expect(isHeld('task-0004')).toBe(false);
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: 'task-0004',
+      status: 'expired',
+    });
+  });
+
+  it('settles ids that reevaluate dropped, across a later policy flip', () => {
+    const h = harness({ mode: ApprovalMode.YOLO, policy: 'hold' });
+    expect(h.gate.admit(frame({ msgId: 'task-0005' }))).toBe('held');
+    h.setPolicy('refuse');
+    expect(h.gate.reevaluate('setting-changed')).toBe(0);
+
+    h.setPolicy('accept');
+    expect(h.gate.admit(frame({ msgId: 'task-0005' }))).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it('lets an honest retry land after a transient delivery failure', () => {
+    // A failed delivery is not a verdict; the retry must still land.
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    h.failDelivery();
+    const f = frame({ msgId: 'task-0007' });
+    expect(h.gate.admit(f)).toBe('refused');
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: 'task-0007',
+      status: 'expired',
+    });
+
+    h.recoverDelivery();
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toHaveLength(1);
+  });
+
+  it('prunes the oldest settled ids beyond the cap', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const ids = Array.from({ length: MAX_SETTLED_IDS + 1 }, (_, i) => `s-${i}`);
+    for (const msgId of ids) {
+      expect(h.gate.admit(frame({ msgId }))).toBe('accept');
+    }
+    // The oldest fell out of memory; the newest repeats its verdict.
+    expect(h.gate.admit(frame({ msgId: ids[0] }))).toBe('accept');
+    expect(h.gate.admit(frame({ msgId: ids[ids.length - 1] }))).toBe('refused');
   });
 });
 
