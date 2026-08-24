@@ -17,7 +17,7 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
-import type { PartListUnion } from '@google/genai';
+import type { FunctionDeclaration, PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
@@ -48,8 +48,28 @@ import {
   normalizeParts,
   splitImageParts,
 } from '../services/visionBridge/image-part-utils.js';
+import { isOmniDeliveryActive } from '../omni/delivery-gate.js';
 
 const debugLogger = createDebugLogger('READ_FILE_CACHE');
+
+/**
+ * Media formats the omni content sniffer recognizes (recognition.ts).
+ * Naming a format it rejects would advertise a file that silently falls
+ * back to the inline path and its 10MB hard cap.
+ */
+const OMNI_VIDEO_FORMATS = 'video (MP4, MOV, WebM, MKV, AVI)';
+const OMNI_AUDIO_FORMATS = 'audio (WAV, MP3, M4A, FLAC, OGG)';
+
+function omniMediaDescriptionSuffix(config: Config): string {
+  if (!isOmniDeliveryActive(config)) return '';
+  const modalities = config.getContentGeneratorConfig?.()?.modalities ?? {};
+  const kinds = [
+    ...(modalities.video ? [OMNI_VIDEO_FORMATS] : []),
+    ...(modalities.audio ? [OMNI_AUDIO_FORMATS] : []),
+  ];
+  if (kinds.length === 0) return '';
+  return ` Also handles ${kinds.join(' and ')} up to 1 GiB per file: the media itself is delivered to the model, so read it with this tool to perceive it directly rather than transcoding, sampling frames or transcribing it with shell commands.`;
+}
 
 /**
  * Parameters for the ReadFile tool
@@ -534,6 +554,19 @@ export class ReadFileTool extends BaseDeclarativeTool<
   // batch budget instead.
   override get maxOutputChars(): number {
     return Number.POSITIVE_INFINITY;
+  }
+
+  // The base description is a static constructor argument, but whether
+  // audio/video reach the model is per-session config. Omitting them is not
+  // a missing hint but a false enumeration: a model reading "Handles text,
+  // images, PDF" concludes read_file cannot take an mp4 and transcodes with
+  // shell tools instead.
+  override get schema(): FunctionDeclaration {
+    const base = super.schema;
+    const suffix = omniMediaDescriptionSuffix(this.config);
+    return suffix
+      ? { ...base, description: `${base.description}${suffix}` }
+      : base;
   }
 
   constructor(private config: Config) {
