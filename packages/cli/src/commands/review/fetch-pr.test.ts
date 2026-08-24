@@ -1448,6 +1448,10 @@ describe('fetch-pr report assembly', () => {
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
+    const narrowedSrcDiffLines = buildDiffPlan(NARROWED).srcDiffLines;
+    const fullSrcDiffLines = buildDiffPlan(FULL_DIFF).srcDiffLines;
+    expect(fullSrcDiffLines).toBeGreaterThan(narrowedSrcDiffLines);
+    expect(report.fullSrcDiffLines).toBe(fullSrcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
