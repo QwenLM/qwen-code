@@ -151,7 +151,7 @@ function canWrite(repository, login) {
   }
 }
 
-function openIssueCount(repository, login) {
+export function openIssueCount(repository, login) {
   return Number(
     gh([
       'issue',
