@@ -1827,16 +1827,15 @@ export class DaemonClient {
     opts: { offset?: number; maxBytes?: number } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFileBytes> {
-    const url = new URL(`${this.baseUrl}/file/bytes`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.offset !== undefined) {
-      url.searchParams.set('offset', String(opts.offset));
+      query.set('offset', String(opts.offset));
     }
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file/bytes?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file/bytes');
