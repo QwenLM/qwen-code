@@ -30,6 +30,7 @@ vi.mock('node:fs', async (importOriginal) => {
       appendFile: vi.fn().mockResolvedValue(undefined),
       unlink: vi.fn().mockResolvedValue(undefined),
       symlink: vi.fn().mockResolvedValue(undefined),
+      readlink: vi.fn().mockResolvedValue(''),
       copyFile: vi.fn().mockResolvedValue(undefined),
     },
   };
@@ -57,6 +58,13 @@ describe('debugLogger', () => {
     await vi.runAllTimersAsync();
     resetDebugLoggingState();
     vi.clearAllMocks();
+    vi.mocked(fs.readlink).mockImplementation(async () => {
+      const target = vi.mocked(fs.symlink).mock.calls.at(-1)?.[0];
+      if (typeof target !== 'string') {
+        throw new Error('symlink target unavailable');
+      }
+      return target;
+    });
     vi.mocked(getTraceContext).mockReturnValue(null);
   });
 
@@ -459,12 +467,36 @@ describe('debugLogger', () => {
     it('does not fall back to copy when symlink fails', async () => {
       resetDebugLoggingState();
       vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
+      vi.mocked(fs.readlink).mockRejectedValueOnce(new Error('ENOENT'));
 
       setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
       expect(fs.copyFile).not.toHaveBeenCalled();
+    });
+
+    it('retries the latest alias after a failed update', async () => {
+      resetDebugLoggingState();
+      vi.mocked(fs.symlink)
+        .mockRejectedValueOnce(new Error('EPERM'))
+        .mockResolvedValue(undefined);
+      vi.mocked(fs.readlink)
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockResolvedValue('92ec0176-d354-4147-848b-5cd2d80609c4.txt');
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledOnce();
+
+      createDebugLogger().info('retry alias update');
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(fs.symlink).toHaveBeenLastCalledWith(
+        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
+        expectedLatestPath,
+      );
     });
 
     it('does not create symlink when debug logging is disabled', async () => {

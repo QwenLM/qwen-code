@@ -434,6 +434,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -3579,55 +3580,57 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
-    const cwd = this.config.getTargetDir();
-    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
-      loadCliConfig(
-        settings.merged,
-        {
-          ...this.argv,
-          sessionId: 'workspace-mcp-discovery',
-          resume: undefined,
-          continue: false,
-          chatRecording: false,
-        },
-        cwd,
-        undefined,
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-      ),
-    );
-    config.setMcpTransportPool(this.mcpPool);
-    try {
-      await config.initialize({
-        skipGeminiInitialization: true,
-        skipFileCheckpointing: true,
-        skipHooks: true,
-        skipSkillManager: true,
-        skipMcpDiscovery: true,
-        lenientToolWarmup: true,
-      });
-      const manager = config.getToolRegistry()?.getMcpClientManager();
-      if (!manager) {
-        throw new Error('MCP client manager is unavailable');
-      }
-      await manager.discoverAllMcpToolsIncremental(config);
-      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
-        throw new Error(
-          'MCP discovery did not start. The workspace may not be trusted.',
-        );
-      }
-      this.workspaceMcpDiscoveryConfig = config;
-    } catch (error) {
+    return sessionIdContext.run('workspace-mcp-discovery', async () => {
+      const cwd = this.config.getTargetDir();
+      const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+        loadCliConfig(
+          settings.merged,
+          {
+            ...this.argv,
+            sessionId: 'workspace-mcp-discovery',
+            resume: undefined,
+            continue: false,
+            chatRecording: false,
+          },
+          cwd,
+          undefined,
+          {
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
+          buildDisabledSkillNamesProvider(settings),
+        ),
+      );
+      config.setMcpTransportPool(this.mcpPool);
       try {
-        await config.getToolRegistry()?.stop();
-      } catch {
-        // Preserve the initialization failure that made this config unusable.
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipFileCheckpointing: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipMcpDiscovery: true,
+          lenientToolWarmup: true,
+        });
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw new Error('MCP client manager is unavailable');
+        }
+        await manager.discoverAllMcpToolsIncremental(config);
+        if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+          throw new Error(
+            'MCP discovery did not start. The workspace may not be trusted.',
+          );
+        }
+        this.workspaceMcpDiscoveryConfig = config;
+      } catch (error) {
+        try {
+          await config.getToolRegistry()?.stop();
+        } catch {
+          // Preserve the initialization failure that made this config unusable.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
@@ -7621,9 +7624,15 @@ class QwenAgent implements Agent {
         typeof sessionId === 'string' && sessionId.length > 0
           ? this.sessions.get(sessionId)
           : undefined;
-      if (session && this.isSessionScopedExtMethod(method)) {
-        return await this.runInSessionContext(session, () =>
-          this.extMethodInternal(method, normalizedParams),
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.isSessionScopedExtMethod(method) &&
+        (session !== undefined || SESSION_ID_RE.test(sessionId))
+      ) {
+        return await sessionIdContext.run(
+          session?.getConfig().getSessionId() ?? sessionId,
+          () => this.extMethodInternal(method, normalizedParams),
         );
       }
 
@@ -7646,8 +7655,6 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
-
     switch (method) {
       case PROMPT_CANCEL_METHOD: {
         const sessionId = params['sessionId'];
@@ -11762,25 +11769,38 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
+    // Transcript replay is the only recording-disabled Config and must remain
+    // id-less; it borrows the validated target session context from extMethod.
+    const preserveIdlessSession =
+      sessionId === undefined && chatRecording === false;
+    const inheritedSessionId = preserveIdlessSession
+      ? sessionIdContext.getStore()
+      : undefined;
+    const effectiveSessionId =
+      sessionId ?? (preserveIdlessSession ? undefined : randomUUID());
+    const debugSessionId =
+      effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
       this.assertManagedSessionAdmission();
-      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
-        await this.retryPendingConfigCleanup(
-          Storage.getRuntimeBaseDir(),
-          sessionId,
-        );
-        return this.newSessionConfigInRuntimeContext(
-          cwd,
-          mcpServers,
-          settings,
-          sessionSource,
-          sessionId,
-          resume,
-          initializeOptions,
-          chatRecording,
-          restoreOptions,
-        );
-      });
+      return await sessionIdContext.run(debugSessionId, () =>
+        this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+          await this.retryPendingConfigCleanup(
+            Storage.getRuntimeBaseDir(),
+            effectiveSessionId,
+          );
+          return this.newSessionConfigInRuntimeContext(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            effectiveSessionId,
+            resume,
+            initializeOptions,
+            chatRecording,
+            restoreOptions,
+          );
+        }),
+      );
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
@@ -12016,23 +12036,25 @@ class QwenAgent implements Agent {
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
-      const sid = wiredSessionId;
+      const acpSessionId = wiredSessionId;
       config.setMcpBudgetEventCallback((event) => {
-        // Fire-and-forget. `.catch` suppresses unhandled rejections
-        // and logs at debug level for operator visibility.
-        void this.connection
-          .extNotification('qwen/notify/session/mcp-budget-event', {
-            v: 1,
-            sessionId: sid,
-            ...event,
-          })
-          .catch((err: unknown) => {
-            debugLogger.debug(
-              `MCP budget extNotification dropped ` +
-                `(session=${sid}, kind=${event.kind}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+        sessionIdContext.run(config.getSessionId(), () => {
+          // Fire-and-forget. `.catch` suppresses unhandled rejections
+          // and logs at debug level for operator visibility.
+          void this.connection
+            .extNotification('qwen/notify/session/mcp-budget-event', {
+              v: 1,
+              sessionId: acpSessionId,
+              ...event,
+            })
+            .catch((err: unknown) => {
+              debugLogger.debug(
+                `MCP budget extNotification dropped ` +
+                  `(session=${acpSessionId}, kind=${event.kind}): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        });
       });
     }
     try {

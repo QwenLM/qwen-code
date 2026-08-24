@@ -35,6 +35,7 @@ let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 let lastAliasedKey: string | null = null;
+let aliasGeneration = 0;
 let aliasChain: Promise<void> = Promise.resolve();
 const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
@@ -164,6 +165,7 @@ export function resetDebugLoggingState(): void {
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
   lastAliasedKey = null;
+  aliasGeneration += 1;
   aliasChain = Promise.resolve();
 }
 
@@ -171,15 +173,20 @@ const DEBUG_LATEST_ALIAS = 'latest';
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function doUpdateLatestDebugLogAlias(sessionId: string): Promise<void> {
+async function doUpdateLatestDebugLogAlias(
+  sessionId: string,
+): Promise<boolean> {
   const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
   const targetPath = Storage.getDebugLogPath(sessionId);
 
-  return ensureDebugDirExists()
-    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
-    .catch(() => {
-      // Best-effort; don't degrade overall logging
-    });
+  await ensureDebugDirExists();
+  await updateSymlink(aliasPath, targetPath, { fallbackCopy: false });
+  try {
+    const actualTarget = await fs.readlink(aliasPath);
+    return actualTarget === path.relative(path.dirname(aliasPath), targetPath);
+  } catch {
+    return false;
+  }
 }
 
 function updateLatestDebugLogAlias(sessionId: string): void {
@@ -197,17 +204,30 @@ function updateLatestDebugLogAlias(sessionId: string): void {
     return;
   }
   lastAliasedKey = key;
+  const generation = ++aliasGeneration;
 
   // Serialize alias updates so interleaved writes from different sessions
   // don't race unlink/symlink into an inconsistent state.
-  aliasChain = aliasChain.then(() => doUpdateLatestDebugLogAlias(sessionId));
+  aliasChain = aliasChain
+    .then(async () => {
+      const updated = await doUpdateLatestDebugLogAlias(sessionId);
+      if (!updated && aliasGeneration === generation) {
+        lastAliasedKey = null;
+      }
+    })
+    .catch(() => {
+      if (aliasGeneration === generation) {
+        lastAliasedKey = null;
+      }
+      // Best-effort; don't degrade overall logging
+    });
 }
 
 /**
  * Sets the process-wide debug log session used by createDebugLogger().
  *
- * This is the default session used when there is no async-local session bound
- * via runWithDebugLogSession().
+ * This is the fallback used when neither runWithDebugLogSession() nor
+ * sessionIdContext has bound an async-local session.
  */
 export function setDebugLogSession(
   session: DebugLogSession | null | undefined,
@@ -221,8 +241,8 @@ export function setDebugLogSession(
 /**
  * Runs a function with a session bound to the current async context.
  *
- * This is optional; createDebugLogger() falls back to the process-wide session
- * set via setDebugLogSession().
+ * This overrides both sessionIdContext and the process-wide session set via
+ * setDebugLogSession().
  */
 export function runWithDebugLogSession<T>(
   session: DebugLogSession,
