@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
+  containerPathFor,
   hasRootlessMarker,
   readInfoDocument,
   runtimeIsRootless,
@@ -264,6 +265,109 @@ describe('sandboxVerdict', () => {
     const got = sandboxVerdict('off', {}, () => null);
     expect(got.kind).toBe('direct');
     expect(got.kind === 'direct' && got.disclose).toContain('ran as you');
+  });
+});
+
+describe('the decisions this module exists to make', () => {
+  // Four cells the surrounding suite reached only by accident of the machine
+  // it ran on. Each is a pure function with its ambient dependency already
+  // injectable, so pinning them costs nothing and leaves no mutant alive on
+  // the properties this feature is sold on.
+
+  it('lets the environment tighten the policy and never loosen it', () => {
+    // "A repository cannot switch off the containment that exists to contain
+    // it" is the whole claim. It rests on two halves, and both are asserted
+    // here rather than described: strictest-wins in BOTH directions, and a
+    // value the loader wrote from a file counting for nothing.
+    expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'required' }, {})).toBe(
+      'required',
+    );
+    // env stricter than settings → env
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'required' }, { sandbox: 'auto' }),
+    ).toBe('required');
+    // settings stricter than env → settings. The direction that matters: an
+    // operator's opt-in cannot be undone by an environment variable.
+    expect(
+      sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'off' }, { sandbox: 'required' }),
+    ).toBe('required');
+    // ...and a FILE-SOURCED env value is not read at all, so a repository
+    // shipping `QWEN_REVIEW_SANDBOX` in its own `.env` cannot even tighten,
+    // let alone loosen.
+    expect(
+      sandboxPolicy(
+        { QWEN_REVIEW_SANDBOX: 'off' },
+        { sandbox: 'required' },
+        () => true,
+      ),
+    ).toBe('required');
+    expect(
+      sandboxPolicy(
+        { QWEN_REVIEW_SANDBOX: 'required' },
+        { sandbox: 'off' },
+        () => true,
+      ),
+    ).toBe('off');
+  });
+
+  it('falls back to running directly under `auto` when nothing answers', () => {
+    // The cell that makes `auto` usable on a machine without a runtime — and
+    // the one a mutant turning it into a refusal would sail through, because
+    // every other test either has a runtime or is not `auto`.
+    const verdict = sandboxVerdict('auto', {}, () => null);
+    expect(verdict.kind).toBe('direct');
+    // `required` with the same absent runtime is the opposite answer, so this
+    // is about the policy and not about the probe.
+    expect(sandboxVerdict('required', {}, () => null).kind).toBe('refused');
+  });
+
+  it('passes the phase when `required` is actually satisfiable', () => {
+    // Every other assertion about this gate is a refusal. Without the pass
+    // path, a mutant refusing unconditionally under `required` — which would
+    // make the feature refuse every review on a perfectly good host — leaves
+    // the suite green.
+    const verdict = { kind: 'container', runtime: 'docker' } as const;
+    expect(
+      refuseUnsandboxedPhase(
+        join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'),
+        verdict,
+        () => join(sep, 'repo', '.qwen', 'tmp'),
+        'required',
+      ),
+    ).toBeNull();
+    // ...and the same satisfiable verdict against a root that cannot be
+    // mounted still refuses, so the null above is the pass and not a hole.
+    expect(
+      refuseUnsandboxedPhase(
+        join(sep, 'elsewhere', 'review-pr-9'),
+        verdict,
+        () => null,
+        'required',
+      ),
+    ).toContain('cannot be mounted');
+  });
+
+  it('spells the workdir canonically, and survives a tree not built yet', () => {
+    // This feeds `--workdir` at both spawn sites: a lexical spelling names a
+    // directory the container does not have, and every command fails before
+    // it starts.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-workdir-')));
+    const real = join(root, 'review-pr-9');
+    mkdirSync(real);
+    expect(containerPathFor(real)).toBe(realpathSync(real));
+
+    // A path reached through a link resolves to the canonical spelling the
+    // mount actually carries.
+    const link = join(root, 'link-to-tree');
+    symlinkSync(real, link);
+    expect(containerPathFor(link)).toBe(realpathSync(real));
+
+    // The probe tree is NAMED before it is created; its parent exists, and
+    // the fallback canonicalises that and re-attaches the leaf.
+    const unborn = join(link, 'not-created-yet');
+    expect(containerPathFor(unborn)).toBe(
+      join(realpathSync(real), 'not-created-yet'),
+    );
   });
 });
 
