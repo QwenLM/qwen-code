@@ -42,7 +42,7 @@ import { sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import type { ReviewEffort } from './parse-args.js';
+import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -1886,15 +1886,7 @@ export const fetchPrCommand: CommandModule = {
         describe:
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'The review effort. `medium` (balanced) drops the adversarial ' +
-          'personas from the required roster; recorded in the plan so ' +
-          'check-coverage, agent-prompt --roster and compose-review all read ' +
-          'one value. Omit for the full (high) roster.',
-      })
+      .option('effort', EFFORT_OPTION)
       .option('since', {
         type: 'string',
         describe:
