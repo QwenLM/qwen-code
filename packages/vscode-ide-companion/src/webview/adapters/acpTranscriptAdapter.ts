@@ -36,6 +36,16 @@ export interface CachedTranscriptMessage {
 }
 
 /**
+ * Anti-merge marker the shared transcript reducer honors: `canMergeTextDelta`
+ * refuses to fold a chunk carrying it into the active block. Cached history
+ * rows are discrete messages, but `readJsonlMessages` reconstructs runs of
+ * consecutive same-role rows per turn (Tool Result / telemetry / Plan rows);
+ * seeded as bare chunks they would merge into one plain-concatenated block,
+ * unlike live replays where each row arrives stamped.
+ */
+const CACHED_ROW_META = { qwenDiscreteMessage: true } as const;
+
+/**
  * Convert one cached ChatMessage-shaped history row into the ACP
  * session/update notification the shared reducer already understands.
  * Returns `null` for rows without renderable text so offline restores and
@@ -56,17 +66,29 @@ export function cachedMessageToNotification(
     case 'user':
       return {
         sessionId,
-        update: { sessionUpdate: 'user_message_chunk', content },
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
       };
     case 'assistant':
       return {
         sessionId,
-        update: { sessionUpdate: 'agent_message_chunk', content },
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
       };
     case 'thinking':
       return {
         sessionId,
-        update: { sessionUpdate: 'agent_thought_chunk', content },
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
       };
     default:
       return null;
