@@ -1947,7 +1947,10 @@ export class DingtalkChannel extends ChannelBase {
           this.interactionPresenter?.terminalizeRun(event.runId, 'completed');
         }
         this.cardRuns.delete(event.runId);
-        this.cardRunMessages.delete(event.runId);
+        // R22-24: the correlation must outlive the terminal event — card
+        // creation in flight settles only after it, and the settled-surface
+        // record the apology gate reads lands at settle time. Retention
+        // stays bounded by the 1000-entry cap and the per-run overwrite.
         if (this.cardRunBySession.get(event.sessionId) === event.runId) {
           this.cardRunBySession.delete(event.sessionId);
         }
@@ -2124,9 +2127,27 @@ export class DingtalkChannel extends ChannelBase {
         'Sorry, something went wrong processing your message.',
       ).catch(() => {});
     };
-    const close = this.boundaryClosesInFlight.get(sessionId);
-    if (close) void close.then(surface, surface);
-    else surface();
+    // R21-1: a streamed block queued but not yet dispatched settles only
+    // when its predecessor does — after this sweep captured the chain —
+    // and tracks itself synchronously at dispatch. Re-drain until the
+    // chain stops growing, so a queued send is consumed by the turn that
+    // queued it instead of recording under whichever turn token is
+    // current when the serialized chain happens to dispatch it.
+    const drainThenSurface = async (): Promise<void> => {
+      for (;;) {
+        const close = this.boundaryClosesInFlight.get(sessionId);
+        if (!close) break;
+        await close;
+        // A queued send tracks itself in the settled chain's microtask
+        // wake; yield a macrotask so that dispatch is visible before the
+        // chain is rated quiescent.
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      }
+      surface();
+    };
+    void drainThenSurface();
   }
 
   /**
@@ -2285,6 +2306,20 @@ export class DingtalkChannel extends ChannelBase {
       // session dies.
       this.deleteSegmentDeliveryText(sessionId, segment.segmentId);
       const prepared = await this.prepareOutgoingContent(text);
+      // R22-48: mirror the R7-3 gate `closeSegmentWithFiles` applies — the
+      // run can terminalize as cancelled or failed while the prepare was in
+      // flight, and the `deliveryStarted` guard `sendReplyFiles` updates
+      // cannot stop a delivery the turn never gets to consult: without the
+      // gate the file POSTs after the terminal cancel card.
+      if (!this.interactionPresenter.acceptsLateDelivery(segment.runId)) {
+        await this.interactionPresenter.closeOutput(
+          segment.segmentId,
+          '',
+          'completed',
+          segment,
+        );
+        return;
+      }
       // R2-5: deliver BEFORE the card finalizes. `closeOutput` bakes
       // `prepared.text` — receipts included — into a card `finalize` can no
       // longer amend, so a delivery failure landing after it left a
@@ -2417,6 +2452,10 @@ export class DingtalkChannel extends ChannelBase {
     turn: object | undefined,
   ): void {
     if (turn === undefined) return;
+    // R22-5: session death removed the maps a consumer reads; re-adding an
+    // entry after it — an in-flight close finalizing after the death
+    // cleanup — would pin it until shutdown, never surfaced, never logged.
+    if (!this.boundaryFailureTurns.has(sessionId)) return;
     const entry = { error, turn };
     const queue = this.pendingBoundaryFailures.get(sessionId);
     if (queue) {

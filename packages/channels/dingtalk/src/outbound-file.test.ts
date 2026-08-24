@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -33,6 +33,13 @@ import { findImageMarkers } from './outbound-image.js';
 const openSyncWindow = vi.hoisted(() => ({
   swap: undefined as (() => void) | undefined,
 }));
+// R22-25: the EARLIER swap-injection point — a directory component replaced
+// between the containment check and the pre-open `statSync` is invisible to
+// every path-side comparison after it; the test swaps the tree the moment
+// the first `statSync` runs, which is inside that window.
+const statSyncWindow = vi.hoisted(() => ({
+  swap: undefined as (() => void) | undefined,
+}));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -44,6 +51,12 @@ vi.mock('node:fs', async (importOriginal) => {
       swap?.();
       return actual.openSync(...args);
     }) as typeof actual.openSync,
+    statSync: ((...args: Parameters<typeof actual.statSync>) => {
+      const swap = statSyncWindow.swap;
+      statSyncWindow.swap = undefined;
+      swap?.();
+      return actual.statSync(...args);
+    }) as typeof actual.statSync,
   };
 });
 
@@ -294,6 +307,41 @@ describe('readValidatedFile', () => {
       readValidatedFile(join(insideDir, 'report.txt'), { workspaceDir }),
     ).toThrow('path changed during validation');
   });
+
+  it.runIf(process.platform === 'linux')(
+    'rejects a directory component swapped before the pre-open stat',
+    () => {
+      // R22-25: a NON-FINAL component swapped between the containment
+      // check and the pre-open stat is invisible to every path-side
+      // comparison — the open and both stats resolve through the swapped
+      // tree and agree. Only the descriptor itself, re-resolved through
+      // /proc/self/fd and containment-checked, sees the escape. The
+      // outside tree lives OUTSIDE os.tmpdir() — a target under the temp
+      // directory is contained by construction and would not trip the
+      // check this pins.
+      const root = makeTempDir('dingtalk-toctou-stat-');
+      const workspaceDir = join(root, 'workspace');
+      const insideDir = join(workspaceDir, 'inside');
+      const outsideDir = join(
+        process.cwd(),
+        `.dingtalk-toctou-outside-${Date.now()}`,
+        'outside',
+      );
+      testDirs.push(dirname(outsideDir));
+      mkdirSync(insideDir, { recursive: true });
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(join(insideDir, 'report.txt'), 'inside-content');
+      writeFileSync(join(outsideDir, 'report.txt'), 'SECRET-CONTENT');
+      statSyncWindow.swap = () => {
+        renameSync(insideDir, join(root, 'inside-moved'));
+        symlinkSync(outsideDir, insideDir);
+      };
+
+      expect(() =>
+        readValidatedFile(join(insideDir, 'report.txt'), { workspaceDir }),
+      ).toThrow('outside allowed directories');
+    },
+  );
 
   it('does not expose an unavailable allowed directory in the error', () => {
     const workspace = makeTempDir('dingtalk-file-workspace-');

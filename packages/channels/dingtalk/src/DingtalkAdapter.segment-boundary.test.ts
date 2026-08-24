@@ -1402,6 +1402,78 @@ describe('round-21 streamed-block settlement after turn end', () => {
     }
   });
 
+  it('attributes a queued undispatched streamed block to its own turn (R21-1)', async () => {
+    // R21-1: `stop()` drops the streamer's BUFFER at the turn's end, but a
+    // block already emitted and queued behind an in-flight send still rides
+    // the serialized chain — it dispatches only when its predecessor
+    // settles, after the turn-end sweep captured the chain. Pre-fix the
+    // sweep surfaced before that dispatch, so the queued send's failure
+    // recorded into a queue no consumer ever drained again: no log, no
+    // apology, the entry retained until session death. The sweep now
+    // re-drains until the chain stops growing.
+    const dir = mkdtempSync(join(tmpdir(), 'dingtalk-r211-'));
+    try {
+      const bridge = createBridge() as EventEmitter & ChannelAgentBridge;
+      const channel = createChannel(bridge, {
+        cwd: dir,
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 1, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        SESSION_WEBHOOK_CHAT_ID,
+        'https://oapi.dingtalk.com/robot/send?access_token=token',
+      );
+      const postBodies: Array<Record<string, unknown>> = [];
+      // Block one's POST hangs in the gate and then SUCCEEDS; block two
+      // (queued behind it) fails once it dispatches.
+      const { releaseFirstMarkdown } = stubGatedWebhookFetch(
+        postBodies,
+        0,
+        310000,
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installPresenter(channel, 'streamed');
+
+      // The paragraph boundaries emit both blocks mid-turn; the bridge
+      // error ends the turn while block one's POST hangs in the gate and
+      // block two sits queued behind it.
+      (bridge as unknown as { prompt: unknown }).prompt = async (
+        sessionId: string,
+      ) => {
+        bridge.emit('textChunk', sessionId, 'block one\n\n');
+        bridge.emit('textChunk', sessionId, 'block two\n\n');
+        throw new Error('bridge crashed');
+      };
+
+      await expect(
+        channel.handleInbound(envelopeWith('msg-r211')),
+      ).rejects.toThrow(/bridge crashed/);
+
+      // The sweep already ran; the queued block has not dispatched yet.
+      expect(stderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('boundary failure after turn end'),
+      );
+      releaseFirstMarkdown();
+
+      // Block one succeeds; block two dispatches and fails — its own
+      // turn's re-drained sweep surfaces the failure.
+      await vi.waitFor(() =>
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'boundary failure after turn end: DingTalk sendMessage failed: API code 310000',
+          ),
+        ),
+      );
+      await vi.waitFor(() => expect(apologiesIn(postBodies)).toHaveLength(1));
+      expect(pendingBoundaryFailuresMap(channel).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('attributes a late-settling streamed-block failure to its own turn (R21-3)', async () => {
     // R21-3 attribution arm: pre-fix the record read the turn token at
     // RECORD time, so once the next turn had started, the late failure was

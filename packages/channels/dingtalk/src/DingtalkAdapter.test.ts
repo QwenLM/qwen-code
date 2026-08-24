@@ -1899,9 +1899,15 @@ describe('DingtalkChannel status cards', () => {
     const closeOutput = vi.fn().mockResolvedValue(true);
     (
       channel as unknown as {
-        interactionPresenter: { closeOutput: typeof closeOutput };
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          acceptsLateDelivery: (runId: string) => boolean;
+        };
       }
-    ).interactionPresenter = { closeOutput };
+    ).interactionPresenter = {
+      closeOutput,
+      acceptsLateDelivery: () => true,
+    };
     const segment = {
       channelName: 'dingtalk',
       sessionId: 'session-1',
@@ -5021,9 +5027,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       (
         channel as unknown as {
-          interactionPresenter: { closeOutput: typeof closeOutput };
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: (runId: string) => boolean;
+          };
         }
-      ).interactionPresenter = { closeOutput };
+      ).interactionPresenter = {
+        closeOutput,
+        acceptsLateDelivery: () => true,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5084,9 +5096,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       (
         channel as unknown as {
-          interactionPresenter: { closeOutput: typeof closeOutput };
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: (runId: string) => boolean;
+          };
         }
-      ).interactionPresenter = { closeOutput };
+      ).interactionPresenter = {
+        closeOutput,
+        acceptsLateDelivery: () => true,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5155,9 +5173,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       const closeOutput = vi.fn().mockResolvedValue(true);
       (
         channel as unknown as {
-          interactionPresenter: { closeOutput: typeof closeOutput };
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: (runId: string) => boolean;
+          };
         }
-      ).interactionPresenter = { closeOutput };
+      ).interactionPresenter = {
+        closeOutput,
+        acceptsLateDelivery: () => true,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5211,9 +5235,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       const closeOutput = vi.fn().mockResolvedValue(true);
       (
         channel as unknown as {
-          interactionPresenter: { closeOutput: typeof closeOutput };
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: (runId: string) => boolean;
+          };
         }
-      ).interactionPresenter = { closeOutput };
+      ).interactionPresenter = {
+        closeOutput,
+        acceptsLateDelivery: () => true,
+      };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5933,6 +5963,171 @@ describe('DingtalkChannel outbound file delivery', () => {
       ),
     );
     expect(apologyPosts).toHaveLength(1);
+  });
+
+  it('sets the settled-surface credit when creation settles after terminal (R22-24)', async () => {
+    // R22-24: the terminal lifecycle deleted the run→message correlation
+    // synchronously at terminalization, before an in-flight card creation
+    // settled — `onSurfaceSettled` then early-returned on the missing
+    // correlation, `cardSurfaceInboundMessages` never recorded the failure
+    // card's surface, and the apology gate sent the generic apology
+    // alongside the card rendering the failure state. The correlation must
+    // outlive the terminal event.
+    const channel = createChannel();
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    const creation = deferredPromise<void>();
+    cardClient.createAndDeliver = vi.fn().mockReturnValue(creation.promise);
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<
+          string,
+          { ownerId: string; target: { chatId: string; isGroup: boolean } }
+        >;
+      }
+    ).inboundCardOwners.set('msg-cid123', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid123', isGroup: true },
+    });
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'started',
+    });
+    await vi.waitFor(() => {
+      expect(cardClient.createAndDeliver).toHaveBeenCalled();
+    });
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'failed',
+      error: 'boom',
+    });
+
+    // Only now does the creation settle — the credit lands despite the
+    // run having terminalized first.
+    creation.resolve();
+    await vi.waitFor(() => {
+      expect(
+        (
+          channel as unknown as {
+            cardSurfaceInboundMessages: Map<string, true>;
+          }
+        ).cardSurfaceInboundMessages.has('msg-cid123'),
+      ).toBe(true);
+    });
+  });
+
+  it('clears a stale credit when a late creation fails after terminal (R22-24)', async () => {
+    // R22-24 mirror: a ready=FALSE settle arriving after the terminal
+    // event must clear a credit an earlier surface set — otherwise the
+    // apology gate keeps suppressing feedback for a message whose only
+    // card surface is gone.
+    const channel = createChannel();
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    const creation = deferredPromise<void>();
+    cardClient.createAndDeliver = vi.fn().mockReturnValue(creation.promise);
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<
+          string,
+          { ownerId: string; target: { chatId: string; isGroup: boolean } }
+        >;
+      }
+    ).inboundCardOwners.set('msg-cid123', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid123', isGroup: true },
+    });
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'started',
+    });
+    await vi.waitFor(() => {
+      expect(cardClient.createAndDeliver).toHaveBeenCalled();
+    });
+    // An earlier surface of the same message already holds a credit.
+    seedCardSurface(channel, 'msg-cid123');
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'failed',
+      error: 'boom',
+    });
+
+    creation.reject(new Error('card unavailable'));
+    await vi.waitFor(() => {
+      expect(
+        (
+          channel as unknown as {
+            cardSurfaceInboundMessages: Map<string, true>;
+          }
+        ).cardSurfaceInboundMessages.has('msg-cid123'),
+      ).toBe(false);
+    });
   });
 
   it('restores the apology for a delivery failure without status cards', async () => {
@@ -6900,7 +7095,9 @@ describe('DingtalkChannel outbound file delivery', () => {
   it('does not fall back when a final delivery outlives terminalization', async () => {
     // R9-1 sibling: `onResponseComplete`'s fallback tail had no liveness
     // gate at all — a cancel or failure landing during the delivery let the
-    // baked receipts POST after the terminal card.
+    // baked receipts POST after the terminal card. R22-48: the file
+    // delivery itself now shares the R7-3 gate, so a terminalized run
+    // keeps its upload but never POSTs the file after the terminal card.
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
@@ -6937,8 +7134,107 @@ describe('DingtalkChannel outbound file delivery', () => {
         segment,
       );
 
-      expect(fileCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(0);
       expect(markdownCalls()).toHaveLength(0);
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'completed',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not re-add a boundary failure recorded after the session died (R22-5)', async () => {
+    // R22-5: session death removes the boundary-failure maps BEFORE an
+    // in-flight close finalizes. The close then recorded its failure into
+    // a fresh queue entry tagged with the dispatch-time turn — a consumer
+    // never comes for a dead session, so the entry pinned its error until
+    // shutdown. The record must stop at a session the death cleanup
+    // already swept.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      // The file POST hangs until released, then fails; the corrective
+      // notice fails too, so the close records a delivery error.
+      let releaseFilePost!: () => void;
+      const fileGate = new Promise<void>((resolve) => {
+        releaseFilePost = resolve;
+      });
+      const { fileCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          fileGate.then(
+            () =>
+              new Response(JSON.stringify({ errcode: 310000 }), {
+                status: 200,
+              }),
+          ),
+        markdownHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            acceptsLateDelivery: (runId: string) => boolean;
+            terminalSettled: (runId: string) => Promise<void>;
+            terminalCardRetained: (runId: string, segmentId: string) => boolean;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        acceptsLateDelivery: () => true,
+        terminalSettled: () => Promise.resolve(),
+        terminalCardRetained: () => false,
+      };
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'msg-1');
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      const close = getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+      await vi.waitFor(() => expect(fileCalls()).toHaveLength(1));
+
+      // Death sweeps the session while the close is still in flight.
+      (
+        channel as unknown as { onSessionDied(sessionId: string): void }
+      ).onSessionDied('session-1');
+      releaseFilePost();
+      await close;
+
+      expect(
+        (
+          channel as unknown as {
+            pendingBoundaryFailures: Map<string, unknown>;
+          }
+        ).pendingBoundaryFailures.size,
+      ).toBe(0);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }

@@ -842,6 +842,38 @@ describe('R16 round-16 Critical regressions', () => {
   });
 });
 
+describe('R22-4 round-22 Critical regressions', () => {
+  // R22-4: the stripper's per-bracket residue/visibility probes were each
+  // linear in the REMAINING text — quadratic at CONTENT_LIMIT on a run of
+  // marker-shaped unclosed brackets (round-22 probe: 8,800 brackets → ~9 s
+  // synchronous CPU) — and the guard re-sliced the whole retained window
+  // per bracket on a single-line bracket run (~5.3 s at 80k). The residue
+  // walk now shares one tail walk across every bracket starting inside it,
+  // the stripper skips brackets an accepted span already subsumes, and the
+  // guard's completeness/visibility/balance probes are index-bounded.
+  it('strips a run of marker-shaped unclosed brackets in bounded time', () => {
+    const text = '[FILE: [\n'.repeat(8800);
+    // R14-2 convention: assert CPU, not wall time — wall-clock budgets
+    // flake under parallel full-suite load on shared CI hardware. 800 ms
+    // stays an order of magnitude under the measured pre-fix cost.
+    const startedCpu = process.cpuUsage();
+    const stripped = stripPartialOutboundMediaMarker(text, 'FILE', '');
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
+    expect(stripped).toBe('\n'.repeat(8800));
+  });
+
+  it('truncates a single-line run of marker-shaped brackets in bounded time', () => {
+    const text = '[FILE: [x '.repeat(4000) + 'z'.repeat(40000) + 'y]';
+    const startedCpu = process.cpuUsage();
+    const truncated = truncateOutboundMediaText(text, 20000, TRUNCATION_MARKER);
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
+    expect(truncated.length).toBeLessThanOrEqual(20000);
+    expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+  });
+});
+
 describe('R19-x round-19 Critical regressions (R6-3 closure)', () => {
   // (A) The walker follows marked v15's real token shapes.
   it('masks code inside list items and table cells', () => {

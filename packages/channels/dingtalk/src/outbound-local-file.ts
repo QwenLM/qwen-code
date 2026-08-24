@@ -63,14 +63,16 @@ export function readValidatedLocalFile(
     throw new Error(`${label} path outside allowed directories`);
   }
 
-  // R7-2: identity of the validated path BEFORE the open. The kernel follows
-  // a DIRECTORY component swapped between the containment check and the open
-  // — both the open and the post-open `statSync(realPath)` resolve through
-  // the swapped path and agree, so the descriptor check alone cannot see it.
-  // Comparing this pre-open resolution against the opened descriptor catches
-  // a swap landing in that window; only the stat-to-open gap remains, and
-  // closing even that needs openat(2)-style traversal node's sync fs API
-  // does not expose.
+  // R7-2: identity of the validated path BEFORE the open. Comparing this
+  // pre-open resolution against the opened descriptor catches a FINAL-
+  // component swap landing in the stat-to-open window.
+  // R22-25: a NON-FINAL directory component swapped between the containment
+  // check and this pre-open stat is invisible to every path-side comparison
+  // below — the open and both stats resolve through the swapped tree and
+  // agree. On Linux the opened descriptor is re-resolved through
+  // /proc/self/fd and containment-checked directly, which verifies the
+  // descriptor's true target regardless of any path-side swap; on other
+  // platforms that window remains.
   let preOpen: Stats;
   try {
     preOpen = statSync(realPath);
@@ -95,6 +97,22 @@ export function readValidatedLocalFile(
     const stats = fstatSync(descriptor);
     if (!stats.isFile()) {
       throw new Error('Not a regular file');
+    }
+    // R22-25: the descriptor's own resolution, not the path's — a directory
+    // component swapped before the pre-open stat made every path-side check
+    // below resolve through the swapped tree and agree with each other.
+    if (process.platform === 'linux') {
+      let fdPath: string;
+      try {
+        fdPath = realpathSync(`/proc/self/fd/${descriptor}`);
+      } catch {
+        throw new Error(`${label} path changed during validation`);
+      }
+      if (
+        !allowedDirectories.some((directory) => isInside(fdPath, directory))
+      ) {
+        throw new Error(`${label} path outside allowed directories`);
+      }
     }
     // The descriptor is what the validated path pointed at, not merely what
     // that path resolves to now.

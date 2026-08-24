@@ -7,8 +7,6 @@ export interface OutboundMediaMarker {
 }
 
 const MEDIA_MARKER_PREFIXES = ['IMAGE:', 'FILE:'];
-const MARKER_NAME_GROUP = `(?:${MEDIA_MARKER_PREFIXES.join('|')})`;
-
 /**
  * Whether the `[` at `open` opens a marker: its full name follows directly,
  * or after spaces, on the SAME line. A bare name prefix (`[i`, `[im`) is
@@ -81,28 +79,6 @@ function markerPathStart(text: string, start: number, lineEnd: number): number {
 }
 
 /**
- * A well-formed marker as the finder's delivery grammar accepts it: full
- * name immediately after the `[` (no leading space), a bracket-free
- * same-line path, closed by the first `]`.
- */
-const COMPLETED_MARKER_PATTERN = new RegExp(
-  `^\\[${MARKER_NAME_GROUP}[^\\S\\r\\n]*[^\\[\\]\\r\\n]+\\]$`,
-  'iu',
-);
-
-/**
- * Step the backward `[` walk one bracket to the left.
- *
- * `String.prototype.lastIndexOf` clamps a negative `fromIndex` to 0, so the
- * naive `lastIndexOf('[', open - 1)` returns 0 forever once `open` reaches a
- * `[` at index 0 — a synchronous infinite loop on any text starting with `[`
- * (`[OK] done`, the adapter's own `[File delivery failed: …]` notice).
- */
-function previousOpen(text: string, open: number): number {
-  return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
-}
-
-/**
  * The visibility of a marker span relative to the code mask: `visible` when
  * the whole span is outside code, `quoted` when it is entirely inside code,
  * `mixed` when part of it is masked and part is not.
@@ -152,6 +128,12 @@ function nextLineStart(text: string, eol: number): number {
   return text[eol] === '\r' && text[eol + 1] === '\n' ? eol + 2 : eol + 1;
 }
 
+interface ResidueContinuationMemo {
+  exact: Map<number, Map<number, number>>;
+  noCloseMinDepth: Map<number, number>;
+  noCloseAnyDepth: Set<number>;
+}
+
 /**
  * The balance-aware continuation of an unclosed marker's residue over the
  * lines AFTER the marker's own line, starting at `pos` with the bracket
@@ -172,15 +154,36 @@ function nextLineStart(text: string, eol: number): number {
  * - any other bracket stops the walk at the bracket-free PREFIX before it —
  *   a bracketed path line keeps its bracketed prose but loses the bracket-less
  *   path fragment at its head.
+ *
+ * R22-4: a run of marker-shaped brackets used to re-walk the same tail once
+ * per bracket — quadratic at CONTENT_LIMIT. The walk's outcome is fully
+ * determined by the (line, depth) state it enters a line with, so every
+ * state the walk visits shares the outcome: one walk caches the whole tail
+ * for every later bracket starting inside it. Never-closing is monotone in
+ * depth — a depth that reaches end-of-text without balancing leaves every
+ * larger depth unbalanced too — which the no-close cache uses to answer
+ * deeper repeats without walking at all.
  */
 function residueContinuationEnd(
   text: string,
   pos: number,
   depth: number,
+  memo?: ResidueContinuationMemo,
 ): number {
+  if (memo) {
+    if (memo.noCloseAnyDepth.has(pos)) return -1;
+    const exact = memo.exact.get(pos)?.get(depth);
+    if (exact !== undefined) return exact;
+    const noClose = memo.noCloseMinDepth.get(pos);
+    if (noClose !== undefined && depth >= noClose) return -1;
+  }
+  const trajectory: Array<{ line: number; depth: number }> = [];
   let lineStart = pos;
   let openDepth = depth;
+  let result = -1;
+  let sawClose = false;
   while (lineStart < text.length && openDepth > 0) {
+    trajectory.push({ line: lineStart, depth: openDepth });
     const eol = lineEndAt(text, lineStart);
     const lineEnd = eol === -1 ? text.length : eol;
     let d = openDepth;
@@ -192,6 +195,7 @@ function residueContinuationEnd(
         if (firstOpen === -1) firstOpen = i;
         d++;
       } else if (char === ']') {
+        sawClose = true;
         d--;
         if (d === 0) {
           closedAt = i;
@@ -199,7 +203,10 @@ function residueContinuationEnd(
         }
       }
     }
-    if (closedAt !== -1) return closedAt + 1;
+    if (closedAt !== -1) {
+      result = closedAt + 1;
+      break;
+    }
     if (firstOpen === -1) {
       if (blankRange(text, lineStart, lineEnd)) {
         lineStart = nextLineStart(
@@ -209,14 +216,46 @@ function residueContinuationEnd(
         if (lineEnd === text.length) break;
         continue;
       }
-      return lineEnd;
+      result = lineEnd;
+      break;
     }
-    if (firstOpen > lineStart) return firstOpen;
+    if (firstOpen > lineStart) {
+      result = firstOpen;
+      break;
+    }
     openDepth = d;
     if (lineEnd === text.length) break;
     lineStart = nextLineStart(text, eol);
   }
-  return -1;
+  if (memo) {
+    // A walk that reached end-of-text without ever scanning a `]` can
+    // never close for ANY entry depth — line classification (prose stop,
+    // blank continuation, bracket-leading continuation) is itself
+    // depth-independent — so every line it visited answers deeper repeats
+    // without walking at all.
+    if (result === -1 && !sawClose) {
+      for (const state of trajectory) {
+        memo.noCloseAnyDepth.add(state.line);
+      }
+    } else {
+      for (const state of trajectory) {
+        if (result === -1) {
+          const known = memo.noCloseMinDepth.get(state.line);
+          if (known === undefined || state.depth < known) {
+            memo.noCloseMinDepth.set(state.line, state.depth);
+          }
+        } else {
+          let atPos = memo.exact.get(state.line);
+          if (!atPos) {
+            atPos = new Map();
+            memo.exact.set(state.line, atPos);
+          }
+          if (!atPos.has(state.depth)) atPos.set(state.depth, result);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -235,7 +274,11 @@ function residueContinuationEnd(
  * `rest` copy plus its searches and slices ran per bracket and made the
  * fixed-point sweep quadratic at CONTENT_LIMIT.
  */
-function partialMarkerResidueEnd(text: string, open: number): number {
+function partialMarkerResidueEnd(
+  text: string,
+  open: number,
+  memo?: ResidueContinuationMemo,
+): number {
   const base = open + 1;
   const eolAbs = lineEndAt(text, base);
   if (eolAbs === -1) return text.length;
@@ -270,6 +313,7 @@ function partialMarkerResidueEnd(text: string, open: number): number {
         text,
         nextLineStart(text, eolAbs),
         depth,
+        memo,
       );
       if (end !== -1) return end;
     }
@@ -286,23 +330,47 @@ function blankRange(text: string, start: number, end: number): boolean {
   return true;
 }
 
+interface BalancedEndMemo {
+  byOpen: Map<number, number>;
+  lines: Set<number>;
+}
+
 /**
  * The bracket-balanced end of the span opening at `open`, confined to the
  * span's line. An unbalanced span falls back to end-of-line.
+ *
+ * R22-4: memoized per line — one pairing pass answers every bracket on the
+ * line instead of re-walking it per bracket, and the unbalanced fallback is
+ * the allocation-free {@link lineEndAt} instead of a remainder copy and
+ * search.
  */
-function balancedMarkerEnd(text: string, open: number): number {
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    const char = text[i];
-    if (char === '\n' || char === '\r') break;
-    if (char === '[') depth++;
-    else if (char === ']') {
-      depth--;
-      if (depth === 0) return i + 1;
+function balancedMarkerEnd(
+  text: string,
+  open: number,
+  memo: BalancedEndMemo,
+): number {
+  const cached = memo.byOpen.get(open);
+  if (cached !== undefined) return cached;
+  const lineEnd = lineEndAt(text, open);
+  const end = lineEnd === -1 ? text.length : lineEnd;
+  const prevBreak = Math.max(
+    text.lastIndexOf('\n', open - 1),
+    text.lastIndexOf('\r', open - 1),
+  );
+  const lineStart = prevBreak + 1;
+  if (!memo.lines.has(lineStart)) {
+    memo.lines.add(lineStart);
+    const stack: number[] = [];
+    for (let i = lineStart; i < end; i++) {
+      const char = text[i];
+      if (char === '[') stack.push(i);
+      else if (char === ']' && stack.length > 0) {
+        memo.byOpen.set(stack.pop()!, i + 1);
+      }
     }
+    for (const unclosed of stack) memo.byOpen.set(unclosed, end);
   }
-  const eol = text.slice(open).search(/[\r\n]/u);
-  return eol === -1 ? text.length : open + eol;
+  return memo.byOpen.get(open)!;
 }
 
 /**
@@ -398,6 +466,23 @@ function markerSafeTruncationStart(
   // and walk the survivors; a genuine prose bracket contributes nothing and
   // the walk simply passes it, so the bare-`[` collapse the old
   // `return start` guarded against cannot reappear.
+  //
+  // R22-4: the completed-marker test used to slice the ENTIRE retained
+  // window per bracket and re-walk it for visibility and balance — the
+  // guard's quadratic factor on a single-line bracket run. The visibility
+  // verdict now accumulates across the nested spans (each character visited
+  // once), the interior-bracket check is one `indexOf`, the balanced extent
+  // shares one pairing pass per line, and the walk stops once `advanced`
+  // reaches end-of-text.
+  let visLeft = close + 1;
+  let sawVisible = false;
+  let sawMasked = false;
+  const balancedMemo: BalancedEndMemo = { byOpen: new Map(), lines: new Set() };
+  const continuationMemo: ResidueContinuationMemo = {
+    exact: new Map(),
+    noCloseMinDepth: new Map(),
+    noCloseAnyDepth: new Set(),
+  };
   let advanced = start;
   while (unclosed.length > 0) {
     const open = unclosed.pop()!;
@@ -410,7 +495,11 @@ function markerSafeTruncationStart(
       // tail. The residue can stop at the marker's own line, which precedes
       // a cut already past it; `advanced` never moves backwards, keeping the
       // `<= limit` guarantee.
-      advanced = Math.max(advanced, partialMarkerResidueEnd(text, open));
+      advanced = Math.max(
+        advanced,
+        partialMarkerResidueEnd(text, open, continuationMemo),
+      );
+      if (advanced >= text.length) break;
       continue;
     }
     if (close === -1 || cutToCloseCrossesLine) {
@@ -431,9 +520,25 @@ function markerSafeTruncationStart(
       // including a path line on the next line — so a cross-line marker
       // never deposits a bare path at the head of the retained tail.
       if (!opensMediaMarker(text, open)) continue;
-      advanced = Math.max(advanced, partialMarkerResidueEnd(text, open));
+      advanced = Math.max(
+        advanced,
+        partialMarkerResidueEnd(text, open, continuationMemo),
+      );
+      if (advanced >= text.length) break;
       continue;
     }
+    // R22-4: extend the shared visibility window leftward to this span —
+    // popped brackets nest around the same close, so the union of their
+    // spans is scanned once, not once per bracket.
+    for (let i = open; i < visLeft; i++) {
+      const char = text[i]!;
+      if (/[^\S\r\n]/u.test(char)) continue;
+      if (maskedText[i] === char) sawVisible = true;
+      else sawMasked = true;
+    }
+    visLeft = open;
+    const visibility =
+      sawVisible && sawMasked ? 'mixed' : sawMasked ? 'quoted' : 'visible';
     // R1-11: only skip when the span really completes a marker. A prose
     // bracket like `[IMAGE [FILE: /p]` prefix-matches too, and jumping to
     // the next `]` swallowed an intact marker that was fully inside the
@@ -441,20 +546,34 @@ function markerSafeTruncationStart(
     // opening completes for this purpose even though the finder never
     // delivers it: keeping the raw cut can leave ` FILE: /abs/path]` — no
     // leading bracket for any sanitizer to recognise.
-    const completed = `[${text.slice(open + 1, close)}]`;
-    const visibility = markerVisibility(text, maskedText, open, close);
-    if (visibility !== 'mixed' && COMPLETED_MARKER_PATTERN.test(completed)) {
+    //
+    // R22-4: completeness without the retained-window slice. The span is
+    // newline-free by shape (`same-line-*`) and the cut-to-close probe; a
+    // bracket inside it fails the delivery grammar's path class, and a
+    // `]` between `open` and the cut would either have popped `open` out
+    // of the unclosed stack or implies an interior `[` the same probe
+    // sees. What remains of the pattern is the immediate name (the same
+    // `iu` verdict as before) and at least one path character after it.
+    const nextOpen = text.indexOf('[', open + 1);
+    let completed = false;
+    if ((nextOpen === -1 || nextOpen >= close) && visibility !== 'mixed') {
+      const nameMatch = /^\[(?:IMAGE:|FILE:)/iu.exec(
+        `[${text.slice(open + 1, Math.min(open + 8, close))}`,
+      );
+      completed =
+        nameMatch !== null && close - (open + nameMatch[0].length) >= 1;
+    }
+    if (completed) {
       advanced = Math.max(advanced, close + 1);
       continue;
     }
     // R2-12: a bracketed path (`[FILE: /etc/passwd [b] c]`) fails the
-    // strict completed regex above, yet it still genuinely opens a
-    // marker — and a MIXED-visibility span is residue to every layer even
-    // when the raw regex rates it complete. Returning the raw cut here
-    // dropped the opening bracket and retained a bracket-less
-    // `FILE: /abs/path …` fragment that no downstream sanitizer
-    // recognises. A span that is not marker-shaped keeps the walk moving
-    // left instead (R4-6).
+    // completed test above, yet it still genuinely opens a marker — and a
+    // MIXED-visibility span is residue to every layer even when the raw
+    // regex rated it complete. Returning the raw cut here dropped the
+    // opening bracket and retained a bracket-less `FILE: /abs/path …`
+    // fragment that no downstream sanitizer recognises. A span that is not
+    // marker-shaped keeps the walk moving left instead (R4-6).
     if (!opensMediaMarker(text, open)) continue;
     // R3-8: advance past the span's balanced bracket extent so the
     // content after a bracketed marker survives. R4-4 — unless the
@@ -465,16 +584,22 @@ function markerSafeTruncationStart(
     // removes. A dangling `]` there is the tell — with one, advance
     // exactly as far as the stripper strips (R2-7); without one, the
     // tail is bracket-free prose the stripper also keeps.
-    const balanced = balancedMarkerEnd(text, open);
-    const restAfter = text.slice(balanced);
-    const lineBreak = restAfter.search(/[\r\n]/u);
-    const sameLineTail =
-      lineBreak === -1 ? restAfter : restAfter.slice(0, lineBreak);
-    if (sameLineTail.includes(']')) {
-      advanced = Math.max(advanced, partialMarkerResidueEnd(text, open));
+    const balanced = balancedMarkerEnd(text, open, balancedMemo);
+    const sameLineEnd = lineEndAt(text, balanced);
+    const danglingClose = text.indexOf(']', balanced);
+    if (
+      danglingClose !== -1 &&
+      (sameLineEnd === -1 || danglingClose < sameLineEnd)
+    ) {
+      advanced = Math.max(
+        advanced,
+        partialMarkerResidueEnd(text, open, continuationMemo),
+      );
+      if (advanced >= text.length) break;
       continue;
     }
     advanced = Math.max(advanced, balanced);
+    if (advanced >= text.length) break;
   }
   return advanced;
 }
@@ -760,7 +885,13 @@ export function stripPartialOutboundMediaMarker(
   // fully-visible complete marker (`visible`) keeps its leave-alone behaviour.
   const maskedText = maskCode(text);
   const spans: Array<{ start: number; end: number }> = [];
-  let open = text.lastIndexOf('[');
+  const continuationMemo: ResidueContinuationMemo = {
+    exact: new Map(),
+    noCloseMinDepth: new Map(),
+    noCloseAnyDepth: new Set(),
+  };
+  let open = text.indexOf('[');
+  let skipUntil = -1;
   while (open !== -1) {
     // R3-9: residue opens only with the FULL marker name. Bare name prefixes
     // (`[i`, `[im`) are prose — substituting them minted `[Image pending]`
@@ -770,44 +901,55 @@ export function stripPartialOutboundMediaMarker(
     // Strip it as residue; a well-formed marker with an immediate opening
     // keeps the pinned leave-alone behaviour. R3-11: the shape decision reads
     // only the name region of the ORIGINAL text — the per-bracket whole-line
-    // copy, uppercase, and re-scan this replaces were the sweep's quadratic
+    // copy, uppercase, and re-scan this replaced were the sweep's quadratic
     // factor at CONTENT_LIMIT.
-    const shape = markerOpeningShape(text, open, prefix);
-    if (shape !== undefined) {
-      // R1-5: confine the candidate to its OWN line instead of breaking the
-      // walk at the first newline. Breaking meant only a marker on the final
-      // line could ever be stripped, so an abandoned `[FILE: /abs/path`
-      // followed by more output survived every sanitizer — contradicting this
-      // function's own documented intent and leaking the path onto the card.
-      const rest = text.slice(open + 1);
-      const eol = rest.search(/[\r\n]/u);
-      const candidate = eol === -1 ? rest : rest.slice(0, eol);
-      const closeIdx = candidate.indexOf(']');
-      const visibility =
-        closeIdx === -1
-          ? 'mixed'
-          : markerVisibility(text, maskedText, open, open + 1 + closeIdx);
-      const complete =
-        shape === 'immediate' &&
-        closeIdx !== -1 &&
-        visibility !== 'mixed' &&
-        completedPattern.test(candidate.slice(0, closeIdx + 1));
-      if (!complete) {
-        // R1-4: a marker whose close sits on a LATER line is matched by no
-        // layer — the same-line grammar misses it and the finder never sees
-        // it — so it shipped as literal text with the absolute path. R3-1:
-        // the same holds for a same-line `]` that does not complete the
-        // marker (a bracketed path) — after the replace pass every
-        // well-formed marker is gone, so such an opening is ill-formed
-        // residue regardless of inner brackets; prose brackets like `[note]`
-        // never prefix-match a marker name.
-        spans.push({
-          start: open,
-          end: partialMarkerResidueEnd(text, open),
-        });
+    //
+    // R22-4: the walk runs LEFT-TO-RIGHT and skips every bracket inside an
+    // already-accepted residue span. An inner marker-shaped opening's residue
+    // never runs past the span that subsumes it — it is on the same line, and
+    // its continuation starts from the same next line with no MORE bracket
+    // obligation — so the merged result is unchanged while a run of
+    // marker-shaped brackets costs one residue walk instead of one per
+    // bracket (the per-bracket residue/visibility probes over the REMAINING
+    // text were the sweep's quadratic factor at CONTENT_LIMIT).
+    if (open >= skipUntil) {
+      const shape = markerOpeningShape(text, open, prefix);
+      if (shape !== undefined) {
+        // R1-5: confine the candidate to its OWN line instead of breaking the
+        // walk at the first newline. Breaking meant only a marker on the final
+        // line could ever be stripped, so an abandoned `[FILE: /abs/path`
+        // followed by more output survived every sanitizer — contradicting
+        // this function's own documented intent and leaking the path onto the
+        // card. R22-4: index walks over the ORIGINAL text — the per-bracket
+        // copy of the remaining text was quadratic on a marker-shaped run.
+        const eolAbs = lineEndAt(text, open + 1);
+        const closeAbs = text.indexOf(']', open + 1);
+        const closeOnLine =
+          closeAbs !== -1 && (eolAbs === -1 || closeAbs < eolAbs);
+        const visibility = closeOnLine
+          ? markerVisibility(text, maskedText, open, closeAbs)
+          : 'mixed';
+        const complete =
+          shape === 'immediate' &&
+          closeOnLine &&
+          visibility !== 'mixed' &&
+          completedPattern.test(text.slice(open + 1, closeAbs + 1));
+        if (!complete) {
+          // R1-4: a marker whose close sits on a LATER line is matched by no
+          // layer — the same-line grammar misses it and the finder never sees
+          // it — so it shipped as literal text with the absolute path. R3-1:
+          // the same holds for a same-line `]` that does not complete the
+          // marker (a bracketed path) — after the replace pass every
+          // well-formed marker is gone, so such an opening is ill-formed
+          // residue regardless of inner brackets; prose brackets like `[note]`
+          // never prefix-match a marker name.
+          const end = partialMarkerResidueEnd(text, open, continuationMemo);
+          spans.push({ start: open, end });
+          skipUntil = end;
+        }
       }
     }
-    open = previousOpen(text, open);
+    open = text.indexOf('[', open + 1);
   }
   if (spans.length === 0) return text;
   // Strip EVERY unclosed marker, not just the earliest one found walking
