@@ -2153,48 +2153,53 @@ describe('DiscoveredMCPTool', () => {
       expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
-    it('routes "Session not found" to the reconnect path even while the status is still CONNECTED (issue #9944)', async () => {
-      // Servers that keep no GET SSE stream never flip the client status to
-      // DISCONNECTED when the session dies; the stale `-32001` code would
-      // then be misread as an execution timeout and the reconnect path would
-      // never run. The session-error carve-out must win.
-      const sessionNotFoundError = Object.assign(
-        new Error(
-          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"},"id":null}',
-        ),
-        { code: -32001 },
-      );
-      const initialClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce(sessionNotFoundError),
-      };
-      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
-      const ensureTool = vi.fn();
-      const mockConfig = {
-        isTrustedFolder: () => true,
-        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
-      };
-      const tool = new DiscoveredMCPTool(
-        mockCallableToolInstance,
-        serverName,
-        serverToolName,
-        baseDescription,
-        inputSchema,
-        true,
-        undefined,
-        mockConfig as any,
-        initialClient,
-        undefined,
-        undefined,
-        undefined, // no annotations → no replay, but repair must still run
-      );
+    it.each(['Session not found', 'Session terminated', 'Session expired'])(
+      'routes "%s" to the reconnect path even while the status is still CONNECTED (issue #9944)',
+      async (sessionMessage) => {
+        // Servers that keep no GET SSE stream never flip the client status
+        // to DISCONNECTED when the session dies; the stale `-32001` code
+        // would then be misread as an execution timeout and the reconnect
+        // path would never run. The session-error carve-out must win for
+        // every dead-session phrasing a server may use — not just
+        // "Session not found" — so all three variants exercise it.
+        const sessionError = Object.assign(
+          new Error(
+            `Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"${sessionMessage}"},"id":null}`,
+          ),
+          { code: -32001 },
+        );
+        const initialClient: McpDirectClient = {
+          callTool: vi.fn().mockRejectedValueOnce(sessionError),
+        };
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const ensureTool = vi.fn();
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        };
+        const tool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          mockConfig as any,
+          initialClient,
+          undefined,
+          undefined,
+          undefined, // no annotations → no replay, but repair must still run
+        );
 
-      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
-      await expect(
-        tool.build({ param: 'test' }).execute(new AbortController().signal),
-      ).rejects.toThrow(unsafeReplayErrorMessage);
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await expect(
+          tool.build({ param: 'test' }).execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
 
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
-    });
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      },
+    );
 
     it('should not retry on non-connection errors', async () => {
       const params = { param: 'test' };

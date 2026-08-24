@@ -105,14 +105,20 @@ function isExecutionTimeoutFailure(
   // user cancellation against the timeout SLI, so the abort side wins.
   if (signal.aborted) return false;
   if (!isMcpRequestTimeout(error)) return false;
-  // `-32001` doubles as the server's "Session not found" response code when
-  // it no longer recognizes our `mcp-session-id` (typical right after an
-  // HTTP server restart). That is a dead connection `handleReconnectOnError`
-  // can repair, not an execution timeout — without this carve-out the error
-  // would be reported as a timeout whenever the client-side status has not
-  // flipped to DISCONNECTED yet (e.g. servers that keep no GET SSE stream),
-  // and the reconnect path would never run (issue #9944).
-  if (/session not found/i.test(getErrorMessage(error))) return false;
+  // `-32001` doubles as the server's dead-session response code when it no
+  // longer recognizes our `mcp-session-id` (typical right after an HTTP
+  // server restart) — servers phrase that as "Session not found",
+  // "Session terminated", or "Session expired". That is a dead connection
+  // `handleReconnectOnError` can repair, not an execution timeout — without
+  // this carve-out the error would be reported as a timeout whenever the
+  // client-side status has not flipped to DISCONNECTED yet (e.g. servers
+  // that keep no GET SSE stream), and the reconnect path would never run
+  // (issue #9944). Must match the same variants as
+  // `MCP_CONNECTION_ERROR_PATTERNS` above; a narrower regex here would
+  // misroute the uncovered variants to EXECUTION_TIMEOUT.
+  if (/session (not found|terminated|expired)/i.test(getErrorMessage(error))) {
+    return false;
+  }
   const statuses = getAllMCPServerStatuses();
   return !(
     statuses.has(serverName) &&
