@@ -411,6 +411,16 @@ describe('git extension helpers', () => {
         '--depth',
         '1',
       ]);
+      expect(simpleGit).toHaveBeenLastCalledWith(
+        '/dest',
+        expect.objectContaining({
+          unsafe: {
+            allowUnsafeConfigPaths: true,
+            allowUnsafeProtocolOverride: true,
+            allowUnsafeConfigEnvCount: true,
+          },
+        }),
+      );
       expect(mockGit.env).toHaveBeenCalledWith(
         expect.objectContaining({
           GIT_CONFIG_COUNT: '1',
@@ -449,6 +459,16 @@ describe('git extension helpers', () => {
         source,
         './',
         expect.any(Array),
+      );
+      expect(simpleGit).toHaveBeenLastCalledWith(
+        '/dest',
+        expect.objectContaining({
+          unsafe: {
+            allowUnsafeConfigPaths: true,
+            allowUnsafeProtocolOverride: true,
+            allowUnsafeConfigEnvCount: true,
+          },
+        }),
       );
       expect(mockGit.env).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1503,6 +1523,16 @@ describe('git extension helpers', () => {
 
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
         expect(mockGit.listRemote).toHaveBeenCalledWith([source, 'HEAD']);
+        expect(simpleGit).toHaveBeenLastCalledWith(
+          extensionPath,
+          expect.objectContaining({
+            unsafe: {
+              allowUnsafeConfigPaths: true,
+              allowUnsafeProtocolOverride: true,
+              allowUnsafeConfigEnvCount: true,
+            },
+          }),
+        );
         expect(mockGit.env).toHaveBeenLastCalledWith(
           expect.objectContaining({
             GIT_CONFIG_KEY_0: `http.${source}.extraHeader`,
