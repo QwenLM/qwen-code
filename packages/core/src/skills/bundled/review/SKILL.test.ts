@@ -37,6 +37,26 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('routes the scope-emptied stop to superseded findings, never standing blockers', () => {
+    // `scope-emptied` fires only when the anchored bytes were DELETED or
+    // DISCARDED, so the capture's own date computes `blockersStand: false`
+    // while the old bullet rendered the cached Criticals as still-standing
+    // blockers — the verdict contradicted the gate it reads from, every
+    // round, until HEAD or model changed. The rule this pins: those
+    // findings are SUPERSEDED (bytes gone), never still-standing blockers.
+    const body = skillBody();
+    expect(body).toContain('nothingToReview: { reason: "scope-emptied" }');
+    expect(body).toContain('SUPERSEDED');
+    expect(body).toContain(
+      'Never render these findings as still-standing blockers',
+    );
+    // The old routing, which sent the branch down the verbatim-standing
+    // path, must not survive anywhere in the skill.
+    expect(body).not.toContain(
+      "Render the cache's still-open findings exactly as the two branches above do",
+    );
+  });
+
   it('anchors every SKILL.md incident pointer at a DESIGN.md heading', () => {
     const body = skillBody();
     const pointers = incidentPointers(body);
@@ -974,21 +994,33 @@ describe('bundled review skill', () => {
     expect(body).toContain('**Do not pass `--target` for a file review');
     expect(body).toContain('derives it from `--file`');
   });
-  it('pins the local stop bullet for the tree-moved capture shape', () => {
+  it('pins the local stop bullet for the field-less capture shapes', () => {
     // The stop bullets are the orchestrator's branch table for the shapes a
     // local capture can produce, and the shapes WITHOUT a field are the ones
-    // a revert is most likely to drop. The tree-moved shape — `chunks: []`,
-    // empty `skippedFiles`, no `nothingToReview` — has no machine-readable
-    // signal by construction (a moved tree is not decided, so the capture
-    // withholds the field); without this bullet the round falls through the
-    // unchanged no-diff rule and reports nothing-to-review, which is exactly
-    // what the capture's own warning sentence forbids.
+    // a revert is most likely to drop. Both — the tree-moved shape and the
+    // dropped-out-path shape (a hidden divergence git cannot see) — share one
+    // machine-readable signature: `chunks: []`, empty `skippedFiles`, no
+    // `nothingToReview`, by construction (neither is decided, so the
+    // capture withholds the field); without this bullet the round falls
+    // through the unchanged no-diff rule and reports nothing-to-review,
+    // which is exactly what the capture's own warning sentences forbid.
     const body = skillBody();
     expect(body).toContain('the tree MOVED while the capture was hashing it');
     expect(body).toContain('re-run `capture-local` once');
     expect(body).toContain(
       'WARNING: 0 chunks, but the working tree changed while the capture was being hashed',
     );
+    // The round-12 shape: a cached path still on disk and diverging from
+    // HEAD refuses the anchor AND withholds the clean-tree stop, so the
+    // same branch table must route it — named apart from the moved tree,
+    // with its own warning sentence and its own user guidance.
+    expect(body).toContain(
+      'a cached path DROPPED OUT of the capture while still on disk',
+    );
+    expect(body).toContain(
+      'WARNING: 0 chunks, but a cached path dropped out of this capture while still on disk and diverges from HEAD',
+    );
+    expect(body).toContain('diverges from HEAD invisibly to git');
   });
   it('keys the local cache write to the marker\u2019s withholding conditions', () => {
     // R8-2: the local fail-closed LIST was "completed" three times and a
