@@ -64,7 +64,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - URL 优先取 gh 映射；gh 不可用时由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host，仅约定号）；解析不到号的会话原样跳过。
 - 已知副作用：曾 checkout/review 他人 PR 分支的会话也会被绑定（多 PR 列表可容纳，搜索语义上属于"相关会话"）。
 - 已绑定同一 number 的会话跳过（不刷新 createdAt），重复调用幂等；写入复用 `upsertSessionPr`。
-- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`；untrusted workspace 跳过。
+- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved`，并以 `ghAvailable` 标记 gh 查询是否成功（`false` 表示分支映射本轮被跳过，`bound: 0` 是降级结果而非真空）；untrusted workspace 跳过。
 
 ### 合入状态快照 + 定时刷新
 

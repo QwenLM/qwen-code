@@ -15799,6 +15799,53 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('degrades a live-only row to bind-time prs when its sidecar is unreadable', async () => {
+      // readSessionPrs rethrows non-ENOENT I/O errors (EISDIR here); the
+      // live-only enrichment must swallow them and render the bridge's
+      // bind-time prs instead of failing the whole listing request.
+      const id = '550e8400-e29b-41d4-a716-44665544b009';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { recursive: true, force: true });
+      await fsp.mkdir(sidecarPath, { recursive: true });
+      try {
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'open',
+          },
+        ]);
+      } finally {
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+      }
+    });
+
     it('reads the live-only PR sidecar from an explicit runtime base dir', async () => {
       // The route passes `{ runtimeBaseDir: runtime.sessionRuntimeBaseDir }`;
       // for a managed runtime with a distinct pinned base dir the read must

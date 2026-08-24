@@ -377,7 +377,12 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ scanned: 1, bound: 1, unresolved: 0 });
+    expect(result).toMatchObject({
+      scanned: 1,
+      bound: 1,
+      unresolved: 0,
+      ghAvailable: true,
+    });
     // The fetch options are load-bearing: state 'all' makes merged heads
     // bindable, and slim avoids the GraphQL timeouts on large queries.
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
@@ -467,6 +472,13 @@ describe('backfillWorkspaceSessionPrs', () => {
         const result = await backfillWorkspaceSessionPrs(runtime);
 
         expect(result).toMatchObject({ bound: 0, unresolved: 3 });
+        // An unresolved convention number must not reach a write: a url-less
+        // entry fails isValidSessionPr and would void the whole sidecar.
+        expect(
+          await readSessionPrs(
+            sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+          ),
+        ).toBeNull();
         const spawns = (await fsp.readFile(spawnLog, 'utf8'))
           .trim()
           .split('\n');
@@ -491,7 +503,13 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ bound: 1, unresolved: 0 });
+    // A failed gh fetch degrades to the git-remote fallback — the result
+    // must say so, or a degraded run is indistinguishable from an empty one.
+    expect(result).toMatchObject({
+      bound: 1,
+      unresolved: 0,
+      ghAvailable: false,
+    });
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
     );
@@ -748,6 +766,71 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
     expect(prs?.map((entry) => entry.number)).toEqual([250]);
   });
+
+  it('scans every page of the session listing', async () => {
+    // Backfill pages through listSessions 1000 at a time; a workspace with
+    // more sessions than one page must still be scanned and bound in full —
+    // a cursor that stops advancing silently backfills only the first page.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const total = 1001;
+    const baseSeconds = Math.floor(Date.now() / 1000) - total - 10;
+    for (let chunk = 0; chunk < total; chunk += 100) {
+      const batch: Array<Promise<unknown>> = [];
+      for (let i = chunk; i < Math.min(chunk + 100, total); i++) {
+        const sessionId = `00000000-0000-4000-8000-${i
+          .toString(16)
+          .padStart(12, '0')}`;
+        const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+        batch.push(
+          fsp
+            .writeFile(
+              filePath,
+              `${JSON.stringify({
+                uuid: `${sessionId}-user-1`,
+                parentUuid: null,
+                sessionId,
+                timestamp: '2026-08-01T00:00:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'hello' }] },
+                cwd: workspaceCwd,
+              })}\n`,
+              'utf8',
+            )
+            // Distinct mtimes: the listing pages by mtime cursor, and ties
+            // can skip entries at the page boundary.
+            .then(() => fsp.utimes(filePath, baseSeconds + i, baseSeconds + i)),
+        );
+      }
+      await Promise.all(batch);
+    }
+    // The only convention binding sits on the oldest session — page 2 of
+    // the 1000-entry cursor.
+    await seedWorktreeSidecar(
+      '00000000-0000-4000-8000-000000000000',
+      'pr-9',
+      'worktree-pr-9',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9, 'worktree-pr-9')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1001, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(
+          '00000000-0000-4000-8000-000000000000',
+          'active',
+        ),
+      ),
+    ).not.toBeNull();
+  }, 30000);
 
   it('never binds a session through the repository default branch', async () => {
     // Fork PRs opened from the fork's default branch carry that bare name
@@ -1528,6 +1611,53 @@ describe('registerSessionPrBackfillRoutes', () => {
       },
     };
   }
+
+  it('isolates a failing workspace and still backfills the rest', async () => {
+    const seeded = await seedTrustedBackfillWorkspace();
+    // A regular file where a workspace cwd belongs makes the session
+    // listing's readdir throw ENOTDIR (a non-ENOENT error listSessions
+    // rethrows); the route must isolate that workspace's failure instead
+    // of failing the whole request.
+    const brokenParent = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-broken-'),
+    );
+    const brokenCwd = path.join(brokenParent, 'workspace-file');
+    await fsp.writeFile(brokenCwd, 'not a directory', 'utf8');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([
+        runtime('broken', brokenCwd, true),
+        seeded.runtime,
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    try {
+      const response = await request(app).post('/sessions/backfill-prs');
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces).toHaveLength(2);
+      const broken = response.body.workspaces.find(
+        (w: { workspaceCwd: string }) => w.workspaceCwd === brokenCwd,
+      );
+      expect(broken.error).toContain('ENOTDIR');
+      const good = response.body.workspaces.find(
+        (w: { workspaceCwd: string }) =>
+          w.workspaceCwd === seeded.runtime.workspaceCwd,
+      );
+      expect(good.error).toBeUndefined();
+      expect(good).toMatchObject({ scanned: 1, bound: 1 });
+      expect(response.body).toMatchObject({ v: 1, scanned: 1, bound: 1 });
+    } finally {
+      await seeded.cleanup();
+      await fsp.rm(brokenParent, { recursive: true, force: true });
+    }
+  });
 
   it('invalidates the session-list cache and marks the catalog when bindings are added', async () => {
     const seeded = await seedTrustedBackfillWorkspace();

@@ -122,6 +122,12 @@ export interface SessionPrBackfillWorkspaceResult {
   overLimit: number;
   /** Convention numbers whose URL could not be resolved. */
   unresolved: number;
+  /**
+   * Whether the workspace's `gh pr list` succeeded. False means transcript-
+   * branch mappings were skipped this run, so a zero `bound` count is a
+   * degraded run, not a genuinely empty one.
+   */
+  ghAvailable?: boolean;
   /** Sidecar writes that failed; the affected session keeps its bindings. */
   writeErrors?: number;
   error?: string;
@@ -240,6 +246,7 @@ export async function backfillWorkspaceSessionPrs(
     runtime.env.effectiveEnv,
     { state: 'all', limit: 500, slim: true },
   );
+  result.ghAvailable = prs.kind === 'ok';
   if (prs.kind === 'ok') {
     // A session run on the repository's default branch cannot be attributed
     // to a PR by branch name: fork PRs opened from the fork's default branch
