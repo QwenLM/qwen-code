@@ -7,6 +7,7 @@
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import {
+  isMoonshotModelReasoningHostname,
   normalizeModelReasoningEffort,
   resolveModelReasoningConfiguration,
 } from '../../model-reasoning-config.js';
@@ -22,7 +23,7 @@ export function isMoonshotHostname(
   }
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return hostname === 'api.moonshot.cn';
+    return isMoonshotModelReasoningHostname(hostname);
   } catch {
     return false;
   }

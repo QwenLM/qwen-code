@@ -59,6 +59,42 @@ describe('MoonshotOpenAICompatibleProvider', () => {
     ).toBe(false);
   });
 
+  it('routes the international Moonshot hostname', () => {
+    expect(
+      determineProvider(
+        {
+          apiKey: 'key',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.moonshot.ai/v1',
+          model: 'kimi-k3',
+        },
+        cliConfig,
+      ),
+    ).toBeInstanceOf(MoonshotOpenAICompatibleProvider);
+    expect(
+      MoonshotOpenAICompatibleProvider.isMoonshotHostname({
+        model: 'kimi-k3',
+        baseUrl: 'https://api.moonshot.ai.evil.example/v1',
+      }),
+    ).toBe(false);
+  });
+
+  it('flattens Kimi K3 reasoning effort on the international host', () => {
+    const result = makeProvider({
+      baseUrl: 'https://api.moonshot.ai/v1',
+    }).buildRequest(
+      {
+        model: 'kimi-k3',
+        messages: [{ role: 'user', content: 'hello' }],
+        reasoning: { effort: 'high' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+      'prompt-id',
+    ) as unknown as Record<string, unknown>;
+
+    expect(result['reasoning_effort']).toBe('high');
+    expect(result['reasoning']).toBeUndefined();
+  });
+
   it('flattens Kimi K3 reasoning effort', () => {
     const result = makeProvider().buildRequest(
       {

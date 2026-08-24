@@ -7785,6 +7785,83 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('keeps a configured budget when the registry surface selects default', async () => {
+    // Toggle-only registry models take the same 'default' arm the fallback
+    // surface uses; replacing the whole reasoning block (as
+    // setReasoningDisabled(false) does) would silently destroy a configured
+    // sibling budget_tokens (honored e.g. on the Anthropic wire) while the
+    // selection reports success.
+    const sessionId = 'registry-reasoning-budget-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string; budget_tokens?: number };
+    } = { reasoning: { budget_tokens: 32000 } };
+    let reasoningOverride:
+      | { type: 'disabled' }
+      | { type: 'default' }
+      | { type: 'effort'; effort: string }
+      | undefined;
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.7-plus');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn(
+      (effort: string | undefined, recordDefaultOverride?: boolean) => {
+        const current = generation.reasoning;
+        if (recordDefaultOverride) {
+          reasoningOverride = { type: 'default' };
+        } else {
+          if (current === false) return;
+          reasoningOverride = effort ? { type: 'effort', effort } : undefined;
+        }
+        if (!current) return;
+        if (effort) {
+          generation.reasoning = { ...current, effort };
+          return;
+        }
+        const { effort: _drop, ...rest } = current;
+        generation.reasoning =
+          Object.keys(rest).length > 0
+            ? (rest as { budget_tokens?: number })
+            : undefined;
+      },
+    );
+    innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
+      reasoningOverride = disabled ? { type: 'disabled' } : { type: 'default' };
+      generation.reasoning = disabled ? false : undefined;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as SetSessionConfigOptionResponse;
+
+      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith(
+        undefined,
+        true,
+      );
+      expect(generation.reasoning).toEqual({ budget_tokens: 32000 });
+      expect(reasoningOverride).toEqual({ type: 'default' });
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('default');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects provider-aware DeepSeek reasoning tiers', async () => {
     const sessionId = 'deepseek-v4-reasoning-session';
     const innerConfig = await setupSessionMocks(sessionId);

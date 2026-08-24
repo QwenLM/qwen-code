@@ -57,6 +57,12 @@ export function isDashScopeModelStudioHostname(hostname: string): boolean {
   );
 }
 
+export function isMoonshotModelReasoningHostname(hostname: string): boolean {
+  // First-party Moonshot routes: the built-in Kimi preset defaults to the
+  // international host, so both first-party hosts share one gate.
+  return hostname === 'api.moonshot.cn' || hostname === 'api.moonshot.ai';
+}
+
 export function isZaiModelReasoningHostname(hostname: string): boolean {
   return (
     isHostOrSubdomain(hostname, 'z.ai') ||
@@ -135,7 +141,7 @@ export function classifyModelReasoningEndpoint(
   if (hostname === 'api.deepseek.com') {
     return 'deepseek';
   }
-  if (hostname === 'api.moonshot.cn') {
+  if (isMoonshotModelReasoningHostname(hostname)) {
     return 'moonshot';
   }
   if (isZaiModelReasoningHostname(hostname)) {

@@ -315,6 +315,30 @@ describe('resolveModelReasoningConfiguration', () => {
     });
   });
 
+  it('registers the same Kimi capabilities on the international Moonshot host', () => {
+    // The built-in Kimi preset defaults to the international baseUrl, so the
+    // first-party host gate must cover it exactly like the China host.
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'kimi-k2.6',
+        authType: OPENAI,
+        baseUrl: 'https://api.moonshot.ai/v1',
+      }),
+    ).toEqual({ thinking: true, toggleOnly: true });
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'kimi-k3',
+        authType: OPENAI,
+        baseUrl: 'https://api.moonshot.ai/v1',
+      }),
+    ).toEqual({
+      thinking: true,
+      canDisable: false,
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'max',
+    });
+  });
+
   it('keeps route-specific Kimi inclusions and exclusions', () => {
     for (const modelId of ['kimi-k2.5', 'kimi-k2.6', 'kimi-k3']) {
       expect(
@@ -393,6 +417,7 @@ describe('classifyModelReasoningEndpoint', () => {
   it.each([
     ['https://api.deepseek.com', 'deepseek'],
     ['https://api.moonshot.cn/v1', 'moonshot'],
+    ['https://api.moonshot.ai/v1', 'moonshot'],
     ['https://api.z.ai/api/paas/v4', 'zai'],
     ['https://z.ai/api/paas/v4', 'zai'],
     ['https://custom.bigmodel.cn/api/paas/v4', 'zai'],

@@ -40,12 +40,16 @@ export const moonshotProvider: ProviderConfig = {
       id: 'kimi-k2.7-code',
       contextWindowSize: 262144,
       enableThinking: true,
+      // K2.7 always thinks (matching the Token Plan route); the wire
+      // cannot honor a disable, so never emit one.
+      thinkingMandatory: true,
       modalities: { image: true, video: true },
     },
     {
       id: 'kimi-k2.7-code-highspeed',
       contextWindowSize: 262144,
       enableThinking: true,
+      thinkingMandatory: true,
       modalities: { image: true, video: true },
     },
     {

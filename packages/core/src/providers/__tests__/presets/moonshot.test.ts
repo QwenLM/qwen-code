@@ -91,16 +91,19 @@ describe('moonshotProvider', () => {
     });
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
 
+    // K2.7 is thinking-only on the first-party route too (matching the
+    // Token Plan route): the wire cannot honor a disable, so the preset
+    // marks it mandatory and the config layer discards sticky disables.
     expect(models?.[1]).toMatchObject({
       id: 'kimi-k2.7-code',
       name: '[Kimi] kimi-k2.7-code',
       generationConfig: {
         contextWindowSize: 262144,
         extra_body: { enable_thinking: true },
+        thinkingMandatory: true,
         modalities: { image: true, video: true },
       },
     });
-    expect(models?.[1]?.generationConfig?.thinkingMandatory).toBeUndefined();
 
     expect(models?.[2]).toMatchObject({
       id: 'kimi-k2.7-code-highspeed',
@@ -108,10 +111,10 @@ describe('moonshotProvider', () => {
       generationConfig: {
         contextWindowSize: 262144,
         extra_body: { enable_thinking: true },
+        thinkingMandatory: true,
         modalities: { image: true, video: true },
       },
     });
-    expect(models?.[2]?.generationConfig?.thinkingMandatory).toBeUndefined();
 
     expect(models?.[3]).toMatchObject({
       id: 'kimi-k2.6',

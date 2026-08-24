@@ -5351,7 +5351,15 @@ class QwenAgent implements Agent {
             if (selected === REASONING_EFFORT_NONE) {
               config.setReasoningDisabled(true);
             } else if (selected === REASONING_EFFORT_DEFAULT) {
-              config.setReasoningDisabled(false);
+              if (config.getContentGeneratorConfig().reasoning === false) {
+                config.setReasoningDisabled(false);
+              } else {
+                // Mirrors the fallback branch: replacing the block (as
+                // setReasoningDisabled(false) does) would destroy sibling
+                // keys the wire layer honors, e.g. budget_tokens; only
+                // clear the tier while recording the sticky default.
+                config.setReasoningEffort(undefined, true);
+              }
             } else {
               if (config.getContentGeneratorConfig().reasoning === false) {
                 config.setReasoningDisabled(false);
