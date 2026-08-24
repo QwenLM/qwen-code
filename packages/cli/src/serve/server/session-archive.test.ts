@@ -1366,7 +1366,7 @@ describe('deleteDaemonSessions', () => {
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
   });
 
-  it('reports task maintenance failure after deleting the transcript', async () => {
+  it('repairs task maintenance on retry after deleting the transcript', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440171';
     writeSessionFile(workspaceDir, sessionId, 'active');
     await updateCronTasks(workspaceDir, () => [
@@ -1381,6 +1381,7 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
     const cronFile = getCronFilePath(workspaceDir);
+    const cronContents = fs.readFileSync(cronFile);
     fs.rmSync(cronFile);
     fs.mkdirSync(cronFile);
     const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
@@ -1403,6 +1404,26 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
     expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
+
+    fs.rmSync(cronFile, { recursive: true, force: true });
+    fs.writeFileSync(cronFile, cronContents);
+
+    const retry = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(retry).toEqual({
+      removed: [],
+      notFound: [sessionId],
+      errors: [],
+    });
+    expect(await readCronTasks(workspaceDir)).toEqual([]);
   });
 
   it('collapses case-variant spellings in one batch to a single delete', async () => {

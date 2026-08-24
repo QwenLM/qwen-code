@@ -2291,6 +2291,84 @@ describe('multi-workspace session dispatch', () => {
     },
   );
 
+  it.each([
+    ['qualified', '/workspaces/secondary-id/sessions/archive'],
+    ['owner-routed', '/sessions/archive'],
+  ])(
+    'keeps filesystem classifier failures scoped to their %s batch item',
+    async (_kind, route) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440217';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440218';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalid = await writeLifecycleFixture({
+          sessionId: invalidId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const originalClassifier =
+          SessionService.prototype.getMaintainableSessionLocation;
+        const classifier = vi
+          .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+          .mockImplementation(async function (this: SessionService, sessionId) {
+            if (
+              this.getProjectRoot() === SECONDARY_CWD &&
+              sessionId === invalidId
+            ) {
+              throw Object.assign(new Error('permission denied'), {
+                code: 'EACCES',
+              });
+            }
+            return originalClassifier.call(this, sessionId);
+          });
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await (async () => {
+          try {
+            return await request(app)
+              .post(route)
+              .set('Host', host())
+              .send({ sessionIds: [healthyId, invalidId] });
+          } finally {
+            classifier.mockRestore();
+          }
+        })();
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        await expect(fsp.readFile(invalid.activePath)).resolves.toEqual(
+          invalid.contents,
+        );
+        await expect(fsp.stat(invalid.archivedPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      });
+    },
+  );
+
   it('does not fall back to primary for mixed foreign and local internal storage', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440215';

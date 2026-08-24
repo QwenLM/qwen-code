@@ -365,7 +365,30 @@ async function deletePersistedSessionWithLease(
 ): Promise<DeleteOneResult> {
   const initialLocation = await classifySessionLocation(service, sessionId);
   if (initialLocation === undefined) {
-    return { kind: 'notFound', mutationApplied: false };
+    let maintenanceError: unknown;
+    try {
+      assertCanMutate?.();
+      await updateScheduledTaskForMaintenance(
+        service,
+        sessionId,
+        'delete',
+        assertCanMutate,
+      );
+    } catch (error) {
+      maintenanceError = error;
+      logSessionArchiveWarning(
+        `scheduled task lifecycle update failed action=delete workspace=${safeLogValue(
+          service.getProjectRoot(),
+        )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+          errorMessage(error),
+        )}`,
+      );
+    }
+    return {
+      kind: 'notFound',
+      mutationApplied: false,
+      maintenanceError,
+    };
   }
 
   const mutation = await runWithDaemonWriterLease({

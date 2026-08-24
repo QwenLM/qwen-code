@@ -1161,6 +1161,13 @@ export function registerSessionRoutes(
       if (error instanceof SessionTranscriptIdentityUnavailableError) {
         return true;
       }
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        typeof (error as NodeJS.ErrnoException).code === 'string'
+      ) {
+        return true;
+      }
       throw error;
     }
   };
