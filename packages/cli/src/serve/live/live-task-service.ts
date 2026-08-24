@@ -51,6 +51,7 @@ const DEFAULT_ITEM_TEXT_CHARS = 4_000;
 
 interface LocatedTask {
   runtime: WorkspaceRuntime;
+  threadId: string;
   bridgeSessionId: string;
   persisted: Awaited<ReturnType<SessionService['loadSession']>>;
   summary: BridgeSessionSummary;
@@ -935,8 +936,7 @@ export class LiveTaskService {
     return (
       [...(task.persisted?.conversation.messages ?? [])]
         .reverse()
-        .find((record) => record.type === 'user')?.uuid ??
-      task.summary.sessionId
+        .find((record) => record.type === 'user')?.uuid ?? task.threadId
     );
   }
 
@@ -1069,11 +1069,8 @@ export class LiveTaskService {
     const service = createWorkspaceRuntimeSessionService(task.runtime);
     const metadata =
       task.runtime.provenance === 'live-conversation'
-        ? await readLoadableLiveConversationMetadata(
-            task.summary.sessionId,
-            service,
-          )
-        : await service.readCreationMetadata(task.summary.sessionId);
+        ? await readLoadableLiveConversationMetadata(task.threadId, service)
+        : await service.readCreationMetadata(task.threadId);
     if (metadata === undefined) {
       throw new SessionNotFoundError(task.bridgeSessionId);
     }
@@ -1141,6 +1138,13 @@ export class LiveTaskService {
 
   private async locateTask(threadId: string): Promise<LocatedTask> {
     const bridgeSessionId = normalizeSessionIdForLookup(threadId);
+    const storedRuntimes =
+      bridgeSessionId === threadId
+        ? undefined
+        : await this.findStoredTaskRuntimes(threadId);
+    if (storedRuntimes && storedRuntimes.length > 1) {
+      throw new Error(`Task id is ambiguous: ${threadId}`);
+    }
     const live =
       this.options.workspaceRegistry.resolveLiveSessionOwner(bridgeSessionId);
     if (live.kind === 'ambiguous') {
@@ -1149,25 +1153,22 @@ export class LiveTaskService {
     if (live.kind === 'unavailable') {
       throw conversationRuntimeUnavailableError();
     }
-    const runtimes =
-      live.kind === 'found'
-        ? [live.runtime]
-        : (
-            await Promise.all(
-              (
-                this.options.workspaceRegistry.listAll?.() ??
-                this.options.workspaceRegistry.list()
-              ).map(async (runtime) => ({
-                runtime,
-                exists:
-                  await createWorkspaceRuntimeSessionService(
-                    runtime,
-                  ).sessionExists(threadId),
-              })),
-            )
-          )
-            .filter((entry) => entry.exists)
-            .map((entry) => entry.runtime);
+    if (
+      storedRuntimes?.length === 1 &&
+      live.kind === 'found' &&
+      storedRuntimes[0] !== live.runtime
+    ) {
+      throw new Error(`Task id is ambiguous: ${threadId}`);
+    }
+    let runtimes = storedRuntimes;
+    if (runtimes === undefined) {
+      runtimes =
+        live.kind === 'found'
+          ? [live.runtime]
+          : await this.findStoredTaskRuntimes(threadId);
+    } else if (runtimes.length === 0 && live.kind === 'found') {
+      runtimes = [live.runtime];
+    }
     if (runtimes.length === 0) throw new SessionNotFoundError(threadId);
     if (runtimes.length > 1)
       throw new Error(`Task id is ambiguous: ${threadId}`);
@@ -1202,7 +1203,27 @@ export class LiveTaskService {
       if (!found) throw new SessionNotFoundError(threadId);
       summary = found;
     }
-    return { runtime, bridgeSessionId, persisted, summary };
+    return { runtime, threadId, bridgeSessionId, persisted, summary };
+  }
+
+  private async findStoredTaskRuntimes(
+    threadId: string,
+  ): Promise<WorkspaceRuntime[]> {
+    const entries = await Promise.all(
+      (
+        this.options.workspaceRegistry.listAll?.() ??
+        this.options.workspaceRegistry.list()
+      ).map(async (runtime) => ({
+        runtime,
+        exists:
+          await createWorkspaceRuntimeSessionService(runtime).sessionExists(
+            threadId,
+          ),
+      })),
+    );
+    return entries
+      .filter((entry) => entry.exists)
+      .map((entry) => entry.runtime);
   }
 }
 
