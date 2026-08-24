@@ -128,7 +128,8 @@ export interface ParsedReviewArgs {
   /**
    * The review topology. `auto` (the default) runs the standing effort-driven
    * pipeline; `minimal` runs the single-pass A/B arm and, because it neither
-   * posts nor edits, forces `comment.effective` and `fix.effective` to false.
+   * posts, edits, nor continues an interrupted pipeline run, forces
+   * `comment.effective`, `fix.effective`, and `resume.effective` to false.
    */
   topology: ReviewTopology;
   topologySource: 'explicit' | 'default';
@@ -833,8 +834,11 @@ export function parseReviewArgs(
   const topologySource: ParsedReviewArgs['topologySource'] =
     explicitTopology !== null ? 'explicit' : 'default';
   // The minimal arm is terminal-only — it neither posts to a PR nor edits a
-  // working tree — so both write operations are gated off it. This keeps the
-  // guarantee in code rather than in whichever prose the orchestrator reads.
+  // working tree — so both write operations are gated off it, and so is
+  // `--resume`: a fresh single pass cannot continue an interrupted pipeline
+  // run, and letting `fetch-pr --resume` consume that state would destroy a
+  // run this arm never continues. This keeps the guarantee in code rather
+  // than in whichever prose the orchestrator reads.
   const isMinimal = topology === 'minimal';
 
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
@@ -852,10 +856,14 @@ export function parseReviewArgs(
     );
   }
 
-  const resumeEffective = resumeRequested && isPr;
+  const resumeEffective = resumeRequested && isPr && !isMinimal;
   if (resumeRequested && !isPr) {
     warnings.push(
       'Warning: `--resume` flag is ignored because the review target is not a PR — only a PR review has interrupted state to continue.',
+    );
+  } else if (resumeRequested && isPr && isMinimal) {
+    warnings.push(
+      'Warning: `--resume` is ignored because `--topology minimal` runs a fresh single pass — it neither continues nor consumes an interrupted run.',
     );
   }
 

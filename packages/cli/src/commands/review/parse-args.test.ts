@@ -868,6 +868,21 @@ describe('parseReviewArgs — --topology (the minimal-prompt A/B arm)', () => {
     ).toBe(true);
   });
 
+  it('minimal gates --resume: a fresh single pass cannot continue an interrupted run', () => {
+    // The third flag the minimal arm gates: an effective resume would make
+    // `fetch-pr --resume` consume an interrupted pipeline run's lease and
+    // worktree for a pass that never continues it — destroying resumable
+    // state instead of either continuing or leaving it alone.
+    const got = parseReviewArgs('6711 --topology minimal --resume');
+    expect(got.resume.requested).toBe(true);
+    expect(got.resume.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--resume`') && w.includes('--topology minimal'),
+      ),
+    ).toBe(true);
+  });
+
   it('an invalid value warns naming what is in effect, and never eats the target', () => {
     const got = parseReviewArgs('--topology minial 6711');
     expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
