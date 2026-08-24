@@ -87,6 +87,51 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
   });
 
   describe('buildRequest', () => {
+    it('caps max on an unverified endpoint that merely has deepseek in the model name', () => {
+      const generator = new DeepSeekOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          baseUrl: 'https://llm.example.com/v1',
+          model: 'deepseek-r1-distill',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          model: 'deepseek-r1-distill',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBeUndefined();
+    });
+
+    it('keeps the max tier on a verified DeepSeek host', () => {
+      const generator = new DeepSeekOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          baseUrl: 'https://api.deepseek.com/v1',
+          model: 'deepseek-reasoner',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          model: 'deepseek-reasoner',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+    });
+
     const userPromptId = 'prompt-123';
 
     it('converts array content into a string', () => {
@@ -399,9 +444,12 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       );
       const r = result as unknown as Record<string, unknown>;
 
-      // reasoning_effort NOT injected, nested reasoning preserved verbatim.
+      // reasoning_effort NOT injected. The nested object still ships, but the
+      // tier is capped to the generic ceiling: the same hostname rule that
+      // withholds DeepSeek's wire shape also withholds DeepSeek's ladder, so
+      // an unverified backend never receives a `max` it may reject.
       expect(r['reasoning_effort']).toBeUndefined();
-      expect(r['reasoning']).toEqual({ effort: 'max' });
+      expect(r['reasoning']).toEqual({ effort: 'xhigh' });
       // Content flattening still ran.
       expect((result.messages?.[0] as { content: unknown }).content).toBe('hi');
     });

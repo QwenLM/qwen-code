@@ -1057,12 +1057,13 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect: (value: string) => Promise<void> | void;
+  onSelect?: (value: string) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
+  const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
-    if (busy) return;
+    if (busy || !onSelect) return;
     setBusy(true);
     try {
       await onSelect(value);
@@ -1082,7 +1083,7 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy}
+          disabled={busy || !onSelect}
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
@@ -1090,26 +1091,30 @@ function ModelReasoningControls({
           }
         />
       </div>
-      <div className={styles.reasoningDivider} />
-      <div className={styles.reasoningSectionTitle}>
-        {t('reasoning.effort')}
-      </div>
-      {reasoning.efforts.map((effort) => (
-        <button
-          key={effort}
-          type="button"
-          className={styles.reasoningEffortRow}
-          aria-pressed={reasoning.effort === effort}
-          data-web-shell-effort={effort}
-          disabled={!reasoning.enabled || busy}
-          onClick={() => void select(effort)}
-        >
-          <span>{t(`reasoning.effort.${effort}`)}</span>
-          <span className={styles.dropdownItemCheck}>
-            {reasoning.effort === effort ? <CheckIcon /> : null}
-          </span>
-        </button>
-      ))}
+      {hasEffortOptions ? (
+        <>
+          <div className={styles.reasoningDivider} />
+          <div className={styles.reasoningSectionTitle}>
+            {t('reasoning.effort')}
+          </div>
+          {reasoning.efforts.map((effort) => (
+            <button
+              key={effort}
+              type="button"
+              className={styles.reasoningEffortRow}
+              aria-pressed={reasoning.effort === effort}
+              data-web-shell-effort={effort}
+              disabled={!reasoning.enabled || busy || !onSelect}
+              onClick={() => void select(effort)}
+            >
+              <span>{t(`reasoning.effort.${effort}`)}</span>
+              <span className={styles.dropdownItemCheck}>
+                {reasoning.effort === effort ? <CheckIcon /> : null}
+              </span>
+            </button>
+          ))}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -2308,9 +2313,11 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
-    const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
+    const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
-      ? t(`reasoning.effort.${reasoning.effort}`)
+      ? reasoning.efforts.length > 0
+        ? t(`reasoning.effort.${reasoning.effort}`)
+        : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions
       ? `${modelLabel} · ${
@@ -3123,9 +3130,7 @@ export const ChatEditor = memo(
                             : undefined
                         }
                         header={
-                          showReasoningOptions &&
-                          reasoning &&
-                          onSelectReasoningEffort ? (
+                          showReasoningOptions && reasoning ? (
                             <ModelReasoningControls
                               reasoning={reasoning}
                               onSelect={onSelectReasoningEffort}

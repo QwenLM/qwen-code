@@ -104,6 +104,14 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal so far, summed across its turn windows.
+   *
+   * Measured from the same session token source as `/stats`. Verification and
+   * checkpoint side queries run between turn windows and are not included.
+   * Zero on Goals recovered from a transcript written before the field existed.
+   */
+  tokensUsed: number;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
@@ -120,6 +128,13 @@ export interface GoalSnapshotV2 {
   v: typeof GOAL_STATE_VERSION;
   goal: GoalRecord | null;
   activity: GoalActivity;
+  clearedGoal?: GoalOrder;
+}
+
+export interface GoalOrder {
+  goalId: string;
+  revision: number;
+  updatedAt: number;
 }
 
 /**

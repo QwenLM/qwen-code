@@ -696,6 +696,9 @@ describe('runNonInteractive', () => {
     const [parts, , , options] =
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain(
+      'Runtime continuation context: existing goal',
+    );
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',
@@ -710,6 +713,36 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('includes verifier feedback in a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            verifierFeedback: 'Need independent evidence',
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-feedback',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Verifier feedback: Need independent evidence',
+    );
   });
 
   it('keeps the exact Goal permit through a ToolResult continuation', async () => {
@@ -2060,6 +2093,37 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('always-on guard'),
+    );
+  });
+
+  it('describes a chanting halt as output-or-reasoning repetition', async () => {
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Chant',
+      'prompt-id-chanting-loop',
+    );
+
+    expect(exitCode).toBe(1);
+    // Reasoning-stream chants fire CHANTING_IDENTICAL_SENTENCES while
+    // getResponseText filters reasoning out of visible output, so the
+    // headless label must name both channels — a halt on an empty stdout
+    // with an "output"-only label reads as a detector misfire.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the model repeated the same sentence in its output or reasoning',
+      ),
     );
   });
 

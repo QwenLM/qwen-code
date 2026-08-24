@@ -9,10 +9,9 @@ import type { ImageAttachment } from '../../utils/imageSupport.js';
 import {
   MAX_IMAGE_SIZE,
   MAX_TOTAL_IMAGE_SIZE,
-  isDisplayableImagePath,
   isSupportedPastedImageMimeType,
   getImageExtensionForMimeType,
-  unescapePath,
+  splitMessageContentForImages,
 } from '../../utils/imageSupport.js';
 
 export type { ImageAttachment };
@@ -24,6 +23,14 @@ export interface WebViewMessageBase {
   content: string;
   timestamp: number;
   turnIndex?: number;
+  /**
+   * True for messages generated inside the webview itself (connection /
+   * auth / generic errors, the local "Interrupted" cancel mark) rather than
+   * delivered by the extension. The WebShell transcript renders ACP
+   * `transcriptUpdate` frames only, so the App renders these entries in a
+   * dedicated notice slot to keep them visible.
+   */
+  localOnly?: boolean;
   fileContext?: {
     fileName: string;
     filePath: string;
@@ -42,116 +49,6 @@ export interface WebViewImageMessage extends WebViewMessageBase {
 export type WebViewMessage = WebViewMessageBase | WebViewImageMessage;
 
 // ======================== Message Parsing ========================
-
-interface ParsedImageReference {
-  imagePath: string;
-  start: number;
-  end: number;
-}
-
-function normalizeWhitespace(value: string): string {
-  return value
-    .replace(/[ \t]+/g, ' ')
-    .replace(/ ?\n ?/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-export function splitMessageContentForImages(content: string): {
-  text: string;
-  imagePaths: string[];
-} {
-  if (!content) {
-    return { text: '', imagePaths: [] };
-  }
-
-  const imageReferences = parseImageReferences(content);
-
-  if (imageReferences.length === 0) {
-    return { text: content, imagePaths: [] };
-  }
-
-  let cleanedContent = '';
-  let lastIndex = 0;
-
-  for (const reference of imageReferences) {
-    cleanedContent += content.slice(lastIndex, reference.start);
-    lastIndex = reference.end;
-  }
-
-  cleanedContent += content.slice(lastIndex);
-
-  const cleaned = normalizeWhitespace(cleanedContent);
-  const imagePaths = imageReferences.map((reference) => reference.imagePath);
-
-  return { text: cleaned, imagePaths };
-}
-
-function parseImageReferences(content: string): ParsedImageReference[] {
-  const references: ParsedImageReference[] = [];
-  let currentIndex = 0;
-
-  while (currentIndex < content.length) {
-    let atIndex = -1;
-    let nextSearchIndex = currentIndex;
-
-    while (nextSearchIndex < content.length) {
-      if (
-        content[nextSearchIndex] === '@' &&
-        (nextSearchIndex === 0 || content[nextSearchIndex - 1] !== '\\')
-      ) {
-        atIndex = nextSearchIndex;
-        break;
-      }
-      nextSearchIndex += 1;
-    }
-
-    if (atIndex === -1) {
-      break;
-    }
-
-    let pathEndIndex = atIndex + 1;
-    let inEscape = false;
-
-    while (pathEndIndex < content.length) {
-      const char = content[pathEndIndex];
-
-      if (inEscape) {
-        inEscape = false;
-      } else if (char === '\\') {
-        inEscape = true;
-      } else if (/[,\s;!?()[\]{}]/.test(char)) {
-        break;
-      } else if (char === '.') {
-        const nextChar =
-          pathEndIndex + 1 < content.length ? content[pathEndIndex + 1] : '';
-        if (nextChar === '' || /\s/.test(nextChar)) {
-          break;
-        }
-      }
-
-      pathEndIndex += 1;
-    }
-
-    const rawReference = content.slice(atIndex, pathEndIndex);
-    const unescapedReference = unescapePath(rawReference);
-    const imagePath = unescapedReference.startsWith('@')
-      ? unescapedReference.slice(1)
-      : unescapedReference;
-
-    if (isDisplayableImagePath(imagePath)) {
-      references.push({
-        imagePath,
-        start: atIndex,
-        end: pathEndIndex,
-      });
-    }
-
-    currentIndex = pathEndIndex;
-  }
-
-  return references;
-}
 
 export function expandUserMessageWithImages(message: WebViewMessageBase): {
   messages: WebViewMessage[];

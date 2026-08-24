@@ -278,6 +278,45 @@ describe('requiredAgents — Step 3A', () => {
   });
 });
 
+describe('requiredAgents — the angles promoted out of Agent 1a (#9788)', () => {
+  it('requires the language-pitfall scan at high effort, like the personas', () => {
+    expect(keys(PR)).toContain('1d');
+    expect(keys({ ...PR, effort: 'high' })).toContain('1d');
+    // Not knowing the effort fails safe to the full roster.
+    expect(keys({ ...PR, effort: undefined })).toContain('1d');
+  });
+
+  it('drops both angles when the plan records medium effort', () => {
+    // They are a high-effort dimension, exactly like the personas: a balanced
+    // review deliberately skips them, so requiring them would halt every
+    // medium review of a small diff at check-coverage.
+    const med = keys({ ...PR, effort: 'medium' });
+    expect(med).not.toContain('1d');
+    expect(med).not.toContain('1e');
+  });
+
+  it('requires the wrapper/proxy check unless the plan explicitly says no wrapping type', () => {
+    // No signal recorded — a plan an older CLI wrote — is not "no wrappers",
+    // it is "we do not know", and the safe answer is to run the check: this
+    // change removes the clause from 1a, so a miss here leaves the class
+    // owned by nobody.
+    expect(keys(PR)).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: true })).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: 'nope' })).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: false })).not.toContain('1e');
+    // The explicit false drops ONLY 1e: 1d is unconditional at high effort,
+    // so a refactor nesting `add('1d')` inside the wrapper gate must fail
+    // here — every other fixture omits the field, which reads as true.
+    expect(keys({ ...PR, wrapperSignal: false })).toContain('1d');
+  });
+
+  it('does not demand either in a Step 3B fan-out — a chunk agent owns the dimensions for its lines', () => {
+    const big = { ...PR, srcDiffLines: 5000, diffLines: 6000 };
+    expect(keys(big)).not.toContain('1d');
+    expect(keys(big)).not.toContain('1e');
+  });
+});
+
 describe('hasExecutableScript — the script-lint gate predicate', () => {
   // No longer an agent requirement: the orchestrator runs `qwen review
   // script-lint` and compose-review reads its report. This predicate is what
@@ -411,6 +450,40 @@ describe('requiredAgents — Step 3B', () => {
       ]),
     );
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
+  });
+
+  it('a heavy INTERACTION file KEEPS its invariant agents', () => {
+    // The skip that used to live here rested on the merge base holding still
+    // between rounds: an interaction file's full-range slice is only "already
+    // cleared" while the base it is measured against has not moved. Nothing
+    // enforces that — a backward base move (retargeting the PR to an older
+    // base) is accepted by the anchor gate — and then the file's slice
+    // carries hunks no round has read, with these three the only agents that
+    // would walk them. Its chunk agent is briefed for the seam alone.
+    const base = {
+      ...BIG,
+      files: [
+        { path: 'src/delta.ts', kind: 'source', removedLines: 9, heavy: true },
+        { path: 'src/seam.ts', kind: 'source', removedLines: 9, heavy: true },
+      ],
+    };
+    const incremental = {
+      ...base,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/delta.ts'],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
+      },
+    };
+    const k = keys(incremental as typeof base);
+    expect(k).toContain('invariant-a--src/delta.ts');
+    expect(k).toContain('invariant-a--src/seam.ts');
+    expect(k).toContain('invariant-b--src/seam.ts');
+    expect(k).toContain('invariant-c--src/seam.ts');
   });
 });
 

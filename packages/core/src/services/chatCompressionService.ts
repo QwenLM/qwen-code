@@ -464,7 +464,7 @@ export class ChatCompressionService {
       if (effectiveTokens < auto) {
         // Screenshot-overflow trigger: even below the token threshold,
         // compact once tool-returned images accumulate past the configured
-        // count, so computer-use sessions don't drown the model in stale
+        // count, so tool-driven visual sessions don't drown the model in stale
         // screenshots. Only counted in the would-be-NOOP path and only when
         // enabled, so the common case pays nothing. Counts NESTED tool media
         // only (countToolResponseImages), not user-pasted top-level images.
@@ -571,9 +571,21 @@ export class ChatCompressionService {
     const pendingToolResult = opts.pendingUserMessage?.parts?.some(
       (part) => !!part.functionResponse,
     );
+    // With no pending functionResponse to pair with it, a trailing
+    // model[functionCall] (e.g. a restored ask_user_question preserved by
+    // startChat) would put `model[functionCall] → user[directive]` on the
+    // wire — the shape the API rejects. Strip it like the manual-trigger
+    // strip below; the preserved call stays in chat history untouched.
+    const lastCurated = curatedHistory[curatedHistory.length - 1];
+    const sideQueryBase =
+      !pendingToolResult &&
+      lastCurated?.role === 'model' &&
+      lastCurated.parts?.some((part) => !!part.functionCall)
+        ? curatedHistory.slice(0, -1)
+        : curatedHistory;
     const sideQueryHistory = pendingToolResult
-      ? [...curatedHistory, opts.pendingUserMessage!]
-      : curatedHistory;
+      ? [...sideQueryBase, opts.pendingUserMessage!]
+      : sideQueryBase;
     const pendingToolResultTokenCount = pendingToolResult
       ? estimateContentTokens(
           [opts.pendingUserMessage!],
