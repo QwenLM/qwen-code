@@ -696,9 +696,9 @@ export function formatChannelWorkerDaemonUrl(
  *   - array → first non-empty string element after trim, or undefined
  *   - anything else (object, number, boolean, undefined) → undefined
  *
- * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentMemoryFilename()` default — so a malformed value
- * keeps the daemon alive rather than producing a garbage filename.
+ * Returning `undefined` leaves the daemon on its hard-coded `QWEN.md`
+ * init default — so a malformed value keeps the daemon alive rather
+ * than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {
   if (typeof value === 'string') {
