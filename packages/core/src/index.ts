@@ -250,6 +250,7 @@ export type {
   FindingSource,
   ReportFindingsLevel,
 } from './tools/report-findings.js';
+export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
