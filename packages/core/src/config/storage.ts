@@ -417,6 +417,11 @@ export class Storage {
     Storage.adoptDirectory(dir, 'the fallback landing');
     Storage.assertAuditLandingIsClean(dir);
     Storage.assertAuditLandingIsOutsideRepo(dir, resolved, true);
+    // The content and containment re-checks above FOLLOW the guarded
+    // components, so a swap landing inside either passes every lstat that
+    // already ran; re-adoption runs again after them to refuse that case.
+    Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
+    Storage.adoptDirectory(dir, 'the fallback landing');
     return dir;
   }
 
@@ -518,6 +523,21 @@ export class Storage {
         // like the leaf itself — a planted real subdirectory holding a
         // symlinked file is the same escape.
         Storage.assertAuditLandingIsClean(path.join(dir, entry.name));
+        // The recursion re-read this path with follow semantics, so a swap
+        // for a symlink-to-directory during the walk validated the target.
+        let childStat: fs.Stats;
+        try {
+          childStat = fs.lstatSync(path.join(dir, entry.name));
+        } catch {
+          continue; // vanished during the walk — nothing left to validate
+        }
+        if (!childStat.isDirectory()) {
+          throw new FatalConfigError(
+            `audit: the fallback landing ${dir} contains a symlink ` +
+              `(${entry.name}) — artifacts written under it would land ` +
+              `outside the landing. Remove it and re-run.`,
+          );
+        }
         continue;
       }
       if (!stat.isFile()) {

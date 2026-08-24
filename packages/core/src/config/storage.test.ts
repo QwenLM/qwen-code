@@ -1338,4 +1338,135 @@ describe('Storage – ensureAuditFallbackDir', () => {
       }
     },
   );
+  it.skipIf(process.platform === 'win32')(
+    'refuses a directory child swapped for a symlink inside the final content check',
+    () => {
+      // The directory arm decides "real directory" from a fresh lstat, then
+      // recurses through a readdir that FOLLOWS symlinks: swapping the child
+      // for a link to a clean directory inside that window validates the
+      // link target and returns a landing still holding the link. The arm
+      // must re-lstat the child after the recursion returns.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-dir-child');
+      const sidecar = path.join(leaf, 'audit-2026-01-01.sidecar');
+      actualFs.mkdirSync(sidecar);
+      const cleanTarget = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-clean-'),
+      );
+      let sidecarReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === sidecar) {
+          sidecarReads += 1;
+          if (sidecarReads === 2) {
+            actualFs.rmSync(sidecar, { recursive: true, force: true });
+            actualFs.symlinkSync(cleanTarget, sidecar);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-dir-child'),
+        ).toThrow(/contains a symlink/);
+        expect(actualFs.lstatSync(sidecar).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(cleanTarget, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'tolerates a directory child that vanishes during the final content check',
+    () => {
+      // The post-recursion re-lstat races a landing reused across runs: a
+      // child removed between the recursive walk and that re-lstat leaves
+      // nothing to validate and must not fail the adoption.
+      const leaf = Storage.ensureAuditFallbackDir('/vanished-dir-child');
+      const sidecar = path.join(leaf, 'audit-2026-01-01.sidecar');
+      actualFs.mkdirSync(sidecar);
+      let sidecarReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        const listed = actualFs.readdirSync(String(dir), {
+          withFileTypes: true,
+        });
+        if (String(dir) === sidecar) {
+          sidecarReads += 1;
+          if (sidecarReads === 2) {
+            actualFs.rmSync(sidecar, { recursive: true, force: true });
+          }
+        }
+        return listed;
+      });
+      expect(Storage.ensureAuditFallbackDir('/vanished-dir-child')).toBe(leaf);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a leaf raced into a symlink inside the final content check',
+    () => {
+      // The final content and containment re-checks both FOLLOW the leaf, so
+      // a swap landing inside either passes every check that already ran and
+      // returns a symlinked landing; the re-adoption lstats must run again
+      // after those checks. The earlier leaf race test injects at the FIRST
+      // content check, where the re-adoption lstats still precede the swap.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-leaf-late');
+      const attacker = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-attacker-'),
+      );
+      let leafReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === leaf) {
+          leafReads += 1;
+          if (leafReads === 2) {
+            actualFs.rmSync(leaf, { recursive: true, force: true });
+            actualFs.symlinkSync(attacker, leaf);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-leaf-late'),
+        ).toThrow(/fallback landing .* is not a directory/);
+        expect(actualFs.lstatSync(leaf).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(attacker, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses audits raced into a symlink inside the final content check',
+    () => {
+      // Swapping the `audits` parent relocates the whole landing while the
+      // final content and containment checks FOLLOW the new root and pass;
+      // only a re-adoption lstat after those checks can still see the swap.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-audits-late');
+      const attacker = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-attacker-'),
+      );
+      // The relocation target must hold the predictable leaf name, or the
+      // follow-based checks would fail ENOENT instead of passing the swap.
+      actualFs.mkdirSync(path.join(attacker, path.basename(leaf)));
+      const audits = path.join(home, 'audits');
+      let leafReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === leaf) {
+          leafReads += 1;
+          if (leafReads === 2) {
+            actualFs.rmSync(audits, { recursive: true, force: true });
+            actualFs.symlinkSync(attacker, audits);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-audits-late'),
+        ).toThrow(/audit artifact directory .* is not a directory/);
+        expect(actualFs.lstatSync(audits).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(attacker, { recursive: true, force: true });
+      }
+    },
+  );
 });
