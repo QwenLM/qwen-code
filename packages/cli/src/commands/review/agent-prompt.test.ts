@@ -2689,18 +2689,28 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // old-directive module safe.
     expect(brief).toContain('only under the pre-1.22 per-loop semantics');
     expect(brief).toContain("module's `go` directive in go.mod");
+    expect(brief).toContain('not the installed toolchain');
     expect(brief).toContain('Go 1.22+');
+    expect(brief).toContain(
+      'allocates the loop variable per iteration, so the capture is safe',
+    );
     expect(brief).not.toContain('per-iteration semantics or below');
     // JS/TS: the capture item is scoped to `var` — `let`/`const` for-heads
     // bind per iteration, so an unscoped cue repeats the Go false positive
     // on the most common loop shape in a TypeScript diff.
     expect(brief).toContain('a closure capturing a `var` loop variable');
+    expect(brief).toContain('for-heads bind per iteration');
     // Java and Kotlin are separate entries with opposite equality traps:
     // Java owes `.equals` where `==` stands; Kotlin's `==` already calls
-    // `equals`, so `===` is the operator owed.
-    expect(brief).toContain('**Java:**');
-    expect(brief).toContain('`==` where `.equals` is owed');
-    expect(brief).toContain('`===` where `==` is owed');
+    // `equals`, so `===` is the operator owed. Each cue is pinned adjacent
+    // to its entry label — position-free pins shipped green through a
+    // Java/Kotlin phrase swap — and the Java cue keeps its scope limiter,
+    // or 1d pattern-matches any `==`, including comparisons where `==` is
+    // correct.
+    expect(brief).toContain('**Java:** `==` where `.equals` is owed');
+    expect(brief).toContain('(boxed types, `String`)');
+    expect(brief).toContain('**Kotlin:** `===` where `==` is owed');
+    expect(brief).toContain('`===` is identity');
     expect(brief).not.toContain('**Java/Kotlin:**');
   });
 
