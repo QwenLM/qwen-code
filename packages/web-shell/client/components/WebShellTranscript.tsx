@@ -51,7 +51,6 @@ const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 
 export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
-  renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   className?: string;
@@ -103,7 +102,6 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
 
 function WebShellTranscriptContent({
   blocks,
-  renderMode = 'readonly',
   theme = WebShellThemeId.Dark,
   language,
   className,
@@ -111,7 +109,7 @@ function WebShellTranscriptContent({
   chatMaxWidth,
   workspaceCwd = '',
   compactThinking = false,
-  collapseCompletedTurns,
+  collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
@@ -124,15 +122,11 @@ function WebShellTranscriptContent({
   renderAssistantTurnFooter,
   mcpAppBaseUrl,
 }: WebShellTranscriptProps): ReactElement {
-  const documentMode = renderMode === 'document';
-  const effectiveCollapseCompletedTurns =
-    !documentMode && (collapseCompletedTurns ?? true);
-  const effectiveMarkdownTableMode = documentMode ? 'basic' : markdownTableMode;
   const resolvedLanguage = resolveLanguage(language);
   const t = useMemo(() => getTranslator(resolvedLanguage), [resolvedLanguage]);
   const messages = useMemo(
-    () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
-    [blocks, documentMode, t],
+    () => transcriptBlocksToLocalizedMessages(blocks, t),
+    [blocks, t],
   );
   const todoDetails = useMemo(() => computeTodoDetails(messages), [messages]);
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
@@ -146,16 +140,16 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderAssistantTurnFooter,
       compactThinking,
-      collapseCompletedTurns: effectiveCollapseCompletedTurns,
-      markdownTableMode: effectiveMarkdownTableMode,
+      collapseCompletedTurns,
+      markdownTableMode,
       markdown,
     }),
     [
-      effectiveCollapseCompletedTurns,
+      collapseCompletedTurns,
       compactThinking,
       composerTagIcons,
       markdown,
-      effectiveMarkdownTableMode,
+      markdownTableMode,
       parseUserMessageContent,
       renderAssistantTurnFooter,
       renderComposerTag,
@@ -245,7 +239,7 @@ function WebShellTranscriptContent({
       <I18nProvider language={resolvedLanguage}>
         <McpAppHostContext.Provider value={mcpAppBaseUrl}>
           <WebShellPortalRootContext.Provider value={portalRoot}>
-            <TranscriptRenderModeProvider value={renderMode}>
+            <TranscriptRenderModeProvider value="readonly">
               <WebShellCustomizationProvider value={customization}>
                 <TodoTimelineContext.Provider value={todoTimeline}>
                   <TodoDetailContext.Provider value={todoDetails}>
@@ -256,7 +250,6 @@ function WebShellTranscriptContent({
                         style={rootStyle}
                         data-web-shell-root
                         data-web-shell-shadcn
-                        data-transcript-render-mode={renderMode}
                         lang={resolvedLanguage}
                       >
                         <div
@@ -267,12 +260,7 @@ function WebShellTranscriptContent({
                             pendingApproval={null}
                             isResponding={false}
                             workspaceCwd={workspaceCwd}
-                            virtualScrollThreshold={
-                              documentMode
-                                ? Number.MAX_SAFE_INTEGER
-                                : virtualScrollThreshold
-                            }
-                            hideSessionTimeline={documentMode}
+                            virtualScrollThreshold={virtualScrollThreshold}
                           />
                         </div>
                       </div>

@@ -7,7 +7,6 @@ import {
   type TodoEvent,
 } from '../../utils/todos';
 import { TodoDetailContext } from '../../App';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatTimestamp } from '../MessageTimestamp';
 import { formatDuration } from './StatsMessage';
 import { useI18n } from '../../i18n';
@@ -229,7 +228,6 @@ export function TodoFullList({
   numbered?: boolean;
 }) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
   const details = useContext(TodoDetailContext);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -250,7 +248,7 @@ export function TodoFullList({
         const rowKey = todo.id || String(index);
         const detail = details.get(todoStateKey(todo));
         const expandable = hasTodoDetail(detail);
-        const isOpen = expandable && (documentMode || expanded.has(rowKey));
+        const isOpen = expandable && expanded.has(rowKey);
         const rowInner = (
           <>
             {numbered && (
@@ -262,7 +260,7 @@ export function TodoFullList({
               {getTodoStatusIcon(todo.status)}
             </span>
             <span className={styles.text}>{todo.content}</span>
-            {expandable && !documentMode && (
+            {expandable && (
               <span className={styles.detailChevron} aria-hidden="true">
                 {isOpen ? '▾' : '▸'}
               </span>
@@ -271,7 +269,7 @@ export function TodoFullList({
         );
         return (
           <div key={rowKey} className={styles.item}>
-            {expandable && !documentMode ? (
+            {expandable ? (
               <button
                 type="button"
                 className={`${styles.row} ${styles.rowButton} ${statusClass(todo.status)}`}

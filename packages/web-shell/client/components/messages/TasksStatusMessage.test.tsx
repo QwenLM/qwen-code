@@ -10,10 +10,6 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
-import {
-  TranscriptRenderModeProvider,
-  type TranscriptRenderMode,
-} from '../../transcriptRenderMode';
 
 // The panel only needs getTasks/cancelTask from the daemon SDK; mock the
 // hook so the unit test doesn't pull the whole connection graph. Hoisted
@@ -45,7 +41,6 @@ afterEach(() => {
   mounted.length = 0;
   getTasksMock.mockReset();
   cancelTaskMock.mockReset();
-  vi.useRealTimers();
 });
 
 function agentTask(
@@ -93,7 +88,6 @@ function renderPanel(
     agentTools?: readonly ACPToolCall[];
     onOpenSubagent?: (tool: ACPToolCall) => void;
     onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
-    renderMode?: TranscriptRenderMode;
   } = {},
 ): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
@@ -109,19 +103,15 @@ function renderPanel(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TranscriptRenderModeProvider
-          value={options.renderMode ?? 'interactive'}
-        >
-          <TasksStatusMessage
-            message={{ snapshot }}
-            embedded={options.embedded}
-            manageActiveEvent={false}
-            planTodos={options.planTodos}
-            agentTools={options.agentTools}
-            onOpenSubagent={options.onOpenSubagent}
-            onOpenMonitor={options.onOpenMonitor}
-          />
-        </TranscriptRenderModeProvider>
+        <TasksStatusMessage
+          message={{ snapshot }}
+          embedded={options.embedded}
+          manageActiveEvent={false}
+          planTodos={options.planTodos}
+          agentTools={options.agentTools}
+          onOpenSubagent={options.onOpenSubagent}
+          onOpenMonitor={options.onOpenMonitor}
+        />
       </I18nProvider>,
     );
   });
@@ -129,42 +119,6 @@ function renderPanel(
 }
 
 describe('TasksStatusMessage monitor details', () => {
-  it('renders a complete inert snapshot without polling in document mode', () => {
-    vi.useFakeTimers();
-    const tasks = Array.from({ length: 10 }, (_, index) =>
-      agentTask(`task-${index}`, {
-        prompt:
-          index === 9
-            ? Array.from(
-                { length: 6 },
-                (_value, line) => `prompt-line-${line}`,
-              ).join('\n')
-            : undefined,
-        recentActivities:
-          index === 9
-            ? Array.from({ length: 8 }, (_value, activity) => ({
-                name: 'read_file',
-                description: `activity-${activity}.ts`,
-                at: activity,
-              }))
-            : undefined,
-      }),
-    );
-    const container = renderPanel(tasks, { renderMode: 'document' });
-
-    act(() => vi.advanceTimersByTime(6_000));
-
-    expect(getTasksMock).not.toHaveBeenCalled();
-    expect(cancelTaskMock).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('label-task-0');
-    expect(container.textContent).toContain('label-task-9');
-    expect(container.textContent).toContain('activity-0.ts');
-    expect(container.textContent).toContain('activity-7.ts');
-    expect(container.textContent).toContain('prompt-line-0');
-    expect(container.textContent).toContain('prompt-line-5');
-    expect(container.querySelectorAll('button')).toHaveLength(0);
-  });
-
   it('opens an embedded monitor in the right-panel callback', () => {
     const onOpenMonitor = vi.fn();
     const task = monitorTask();

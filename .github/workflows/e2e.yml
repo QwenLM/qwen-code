@@ -142,9 +142,9 @@ jobs:
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           fi
 
   e2e-test-macos:
@@ -201,7 +201,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
 
   isolated-nightly:
     name: '${{ matrix.label }} (nightly)'

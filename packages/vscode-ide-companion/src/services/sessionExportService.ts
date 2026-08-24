@@ -69,11 +69,10 @@ export function parseExportSlashCommand(
 function renderExportContent(
   format: SessionExportFormat,
   normalizedData: Awaited<ReturnType<typeof normalizeSessionData>>,
-  records: readonly unknown[],
 ): string {
   switch (format) {
     case 'html':
-      return toHtml(normalizedData, records);
+      return toHtml(normalizedData);
     case 'md':
       return toMarkdown(normalizedData);
     case 'json':
@@ -118,11 +117,7 @@ export async function exportSessionToFile(options: {
     sessionData.conversation.messages,
     EXPORT_CONFIG,
   );
-  const content = renderExportContent(
-    format,
-    normalizedData,
-    sessionData.conversation.messages,
-  );
+  const content = renderExportContent(format, normalizedData);
   const defaultFilename = generateExportFilename(format);
 
   // Show native Save dialog so users can choose destination and filename

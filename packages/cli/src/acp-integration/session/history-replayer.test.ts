@@ -80,17 +80,6 @@ describe('HistoryReplayer', () => {
     timestamp: toEpochMs(record.timestamp),
     qwenTranscript: { sourceRecordIds: [record.uuid] },
   });
-  const replayTextMeta = (
-    record: ChatRecord,
-    segmentOrdinal = 0,
-    extra: Record<string, unknown> = {},
-  ) => ({
-    ...replayMeta(record, extra),
-    qwenTranscript: {
-      sourceRecordIds: [record.uuid],
-      segmentId: `${record.uuid}:${segmentOrdinal}`,
-    },
-  });
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -194,7 +183,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'Hello, world!' },
-        _meta: replayTextMeta(record),
+        _meta: replayMeta(record),
       });
     });
 
@@ -223,7 +212,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: replayTextMeta(record, 0, {
+        _meta: replayMeta(record, {
           source: 'mid_turn_message_injected',
           qwenDiscreteMessage: true,
         }),
@@ -241,7 +230,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'I can help with that.' },
-        _meta: replayTextMeta(record),
+        _meta: replayMeta(record),
       });
     });
 
@@ -254,7 +243,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Thinking about this...' },
-        _meta: replayTextMeta(record),
+        _meta: replayMeta(record),
       });
     });
 
@@ -277,17 +266,17 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy.mock.calls[0][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'First part' },
-        _meta: replayTextMeta(record, 0),
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[1][0]).toEqual({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Second part' },
-        _meta: replayTextMeta(record, 1),
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[2][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Third part' },
-        _meta: replayTextMeta(record, 2),
+        _meta: replayMeta(record),
       });
     });
   });
@@ -1194,7 +1183,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Context compressed.' },
-        _meta: replayTextMeta(systemRecord, 0, {
+        _meta: replayMeta(systemRecord, {
           source: 'slash_command',
         }),
       });
@@ -1465,7 +1454,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Hello!' },
-        _meta: replayTextMeta(record),
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
         sessionUpdate: 'agent_message_chunk',

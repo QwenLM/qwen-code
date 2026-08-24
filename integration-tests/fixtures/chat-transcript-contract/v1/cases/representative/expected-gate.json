@@ -1,21 +1,22 @@
 {
   "overall": "fail",
-  "selectedVscodePath": "acp",
+  "selectedVscodePath": null,
   "candidates": {
     "directDaemon": {
-      "status": "pass",
-      "stableUnderPartialPrepend": true,
-      "unstableBlockKinds": [],
-      "missingNativeTextIdentity": []
+      "status": "fail",
+      "stableUnderPartialPrepend": false,
+      "unstableBlockKinds": ["thought", "assistant", "tool", "permission"],
+      "missingNativeTextIdentity": ["user", "thought", "assistant"]
     },
     "acp": {
-      "status": "pass",
-      "stableUnderPartialPrepend": true,
-      "unstableBlockKinds": [],
-      "missingNativeTextIdentity": []
+      "status": "fail",
+      "stableUnderPartialPrepend": false,
+      "unstableBlockKinds": ["thought", "assistant", "tool"],
+      "missingNativeTextIdentity": ["user", "thought", "assistant"]
     }
   },
   "blockers": [
-    "VS Code scope/generation/reconnect, host-action parity, VSIX, and packaged artifact gates remain pending"
+    "direct-daemon uses reducer ordinal block IDs that change when history is prepended",
+    "ACP text updates do not carry a stable source identity and inherit the same ordinal block IDs"
   ]
 }

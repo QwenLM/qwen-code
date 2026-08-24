@@ -35,7 +35,6 @@ import {
   getComposerTagValue,
 } from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -131,7 +130,6 @@ export const UserMessage = memo(function UserMessage({
   onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -329,14 +327,14 @@ export const UserMessage = memo(function UserMessage({
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !documentMode && !expanded
+                heightOverflowing && !expanded
                   ? styles.chatContentCollapsed
                   : ''
               }`}
             >
               {renderedContent}
             </div>
-            {heightOverflowing && !documentMode && (
+            {heightOverflowing && (
               <button
                 type="button"
                 className={styles.toggleButton}

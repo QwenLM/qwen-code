@@ -9,10 +9,7 @@ export {
   normalizeDaemonEvent,
   getSessionUpdatePayload,
 } from './normalizer.js';
-export {
-  createDaemonToolPreview,
-  createDaemonToolResultPreview,
-} from './toolPreview.js';
+export { createDaemonToolPreview } from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
@@ -85,9 +82,6 @@ export type {
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
-  DaemonToolResultPreview,
-  DaemonTodoListPreview,
-  DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptBlockChangeSummary,

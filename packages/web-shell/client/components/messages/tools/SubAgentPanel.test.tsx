@@ -4,8 +4,6 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
-import { WebShellCustomizationProvider } from '../../../customization';
-import { TranscriptRenderModeProvider } from '../../../transcriptRenderMode';
 import { formatTimestamp } from '../../MessageTimestamp';
 
 // SubAgentPanel pulls in ToolGroup, which imports App for TodoTimelineContext;
@@ -34,28 +32,14 @@ afterEach(() => {
   }
 });
 
-function renderPanel(
-  tool: ACPToolCall,
-  options: {
-    compactThinking?: boolean;
-    renderMode?: 'interactive' | 'document';
-  } = {},
-): HTMLElement {
+function renderPanel(tool: ACPToolCall): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TranscriptRenderModeProvider
-          value={options.renderMode ?? 'interactive'}
-        >
-          <WebShellCustomizationProvider
-            value={{ compactThinking: options.compactThinking }}
-          >
-            <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
-          </WebShellCustomizationProvider>
-        </TranscriptRenderModeProvider>
+        <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
       </I18nProvider>,
     );
   });
@@ -190,26 +174,6 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     expect(container.querySelector('[class*="stream"]')).not.toBeNull();
     // The running flow is uncaptioned — no conclusion exists yet.
     expect(container.textContent).not.toContain('Result');
-  });
-
-  it('keeps the live stream fully expanded in compact document mode', () => {
-    const container = renderPanel(
-      {
-        callId: 'agent-1',
-        toolName: 'Task',
-        status: 'in_progress',
-        subContent: Array.from(
-          { length: 20 },
-          (_, index) => `stream line ${index}`,
-        ).join('\n'),
-      },
-      { compactThinking: true, renderMode: 'document' },
-    );
-    const stream = container.querySelector('pre[class*="stream"]');
-
-    expect(stream).not.toBeNull();
-    expect(stream?.className).not.toContain('streamCollapsed');
-    expect(container.querySelector('[aria-expanded]')).toBeNull();
   });
 
   it('renders a completed agent stream text as the conclusion, not the live stream', () => {

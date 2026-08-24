@@ -1,47 +1,36 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, relative, resolve, sep } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { SchemaValidator } from '@qwen-code/qwen-code-core';
-import { DAEMON_ERROR_KINDS, type DaemonEvent } from '@qwen-code/sdk/daemon';
-import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { createExportTranscriptDocumentV1 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
-import { TranscriptUpdateIdentityProjector } from '../packages/cli/src/acp-integration/session/transcript-update-identity.js';
-import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 import {
-  adaptDirectDaemonEvents,
-  readJsonLines,
-  stableTailIdentity,
-} from './helpers/chat-transcript-contract.js';
-import { adaptAcpTranscriptUpdates } from '../packages/vscode-ide-companion/src/webview/adapters/acpTranscriptAdapter.js';
+  createDaemonTranscriptState,
+  DAEMON_ERROR_KINDS,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+  type DaemonEvent,
+  type DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = resolve(
   repoRoot,
   'integration-tests/fixtures/chat-transcript-contract/v1',
 );
-const sharedFixtureHashes = {
-  'capability-matrix.md':
-    'beebee1595b78ad82bc178523b0a440b6709df027987c57ebf4879a70d1a99f1',
-  'schema/manifest.schema.json':
-    'c6c72f87a9fafff94ba62cd031259a6fdf7235277a8638be21aa26cc3366f3fa',
-} as const;
-const casesRoot = resolve(fixtureRoot, 'cases');
 const caseRoot = resolve(fixtureRoot, 'cases/representative');
-const scopeKey = 'workspace-a:session-a';
 
 interface FixtureManifest {
   readonly fixtureVersion: number;
   readonly name: string;
-  readonly generatorVersion: string;
+  readonly generatorVersion?: string;
   readonly sources: readonly string[];
-  readonly capabilities: readonly string[];
   readonly consumers: readonly string[];
-  readonly expectedDiagnostics: readonly string[];
-  readonly normalizedFields: readonly string[];
+  readonly capabilities: readonly string[];
   readonly complete: boolean;
+  readonly expectedDiagnostics: readonly string[];
+  readonly normalizedFields?: readonly string[];
   readonly hashes: Readonly<Record<string, string>>;
 }
 
@@ -49,7 +38,6 @@ interface ExpectedModel {
   readonly kinds: readonly string[];
   readonly texts: readonly string[];
   readonly sourceRecordIds: readonly (readonly string[])[];
-  readonly rawFreeToolResult: string;
 }
 
 interface ExpectedRenderItems {
@@ -60,20 +48,28 @@ interface ExpectedRenderItems {
   readonly expectedToolResult: unknown;
 }
 
-interface ExpectedExport {
+interface ExpectedExportContract {
   readonly schemaVersion: number;
   readonly forbiddenFields: readonly string[];
   readonly frozenErrorKinds: readonly string[];
-  readonly expectedToolResult: string;
   readonly timestamps: number;
+  readonly implementation: string;
+}
+
+interface IdentityCandidateResult {
+  readonly status: 'fail';
+  readonly stableUnderPartialPrepend: false;
+  readonly unstableBlockKinds: readonly string[];
+  readonly missingNativeTextIdentity: readonly string[];
 }
 
 interface ExpectedGate {
-  readonly overall: 'pass' | 'fail';
-  readonly selectedVscodePath: 'acp' | 'direct-daemon' | null;
-  readonly candidates: Readonly<
-    Record<'directDaemon' | 'acp', { readonly status: 'pass' | 'fail' }>
-  >;
+  readonly overall: 'fail';
+  readonly selectedVscodePath: null;
+  readonly candidates: {
+    readonly directDaemon: IdentityCandidateResult;
+    readonly acp: IdentityCandidateResult;
+  };
   readonly blockers: readonly string[];
 }
 
@@ -81,16 +77,34 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
 }
 
+function readJsonLines<T>(path: string): T[] {
+  return readFileSync(path, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as T);
+}
+
 function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function listFixtureFiles(directory: string, root = directory): string[] {
+function listFixtureEvidenceFiles(
+  directory: string,
+  relativeDirectory = '',
+): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const entryPath = resolve(directory, entry.name);
-    if (entry.isDirectory()) return listFixtureFiles(entryPath, root);
-    if (!entry.isFile()) return [];
-    return [relative(root, entryPath).split(sep).join('/')];
+    const relativePath = relativeDirectory
+      ? `${relativeDirectory}/${entry.name}`
+      : entry.name;
+    if (entry.isDirectory()) {
+      return listFixtureEvidenceFiles(
+        resolve(directory, entry.name),
+        relativePath,
+      );
+    }
+    return relativePath === 'cases/representative/manifest.json'
+      ? []
+      : [relativePath];
   });
 }
 
@@ -98,27 +112,56 @@ function expectManifestToMatchSchema(
   manifest: FixtureManifest,
   schema: Record<string, unknown>,
 ): void {
-  expect(SchemaValidator.validateStrict(schema, manifest)).toBeNull();
-  const properties = schema['properties'] as Record<string, unknown>;
-  const required = schema['required'] as string[];
+  const properties = schema['properties'] as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const required = schema['required'];
+  expect(properties).toBeTypeOf('object');
+  expect(required).toBeInstanceOf(Array);
   expect(schema['additionalProperties']).toBe(false);
-  expect(Object.keys(manifest).every((key) => key in properties)).toBe(true);
-  for (const key of required) expect(manifest).toHaveProperty(key);
-  const hashSchema = (
-    properties['hashes'] as { additionalProperties: { pattern: string } }
-  ).additionalProperties;
-  for (const key of ['sources', 'consumers', 'capabilities']) {
-    expect((properties[key] as { uniqueItems?: boolean }).uniqueItems).toBe(
-      true,
+
+  const allowedKeys = new Set(Object.keys(properties));
+  for (const key of Object.keys(manifest)) {
+    expect(allowedKeys.has(key), `manifest property ${key}`).toBe(true);
+  }
+  for (const key of required as string[]) {
+    expect(manifest, `required manifest property ${key}`).toHaveProperty(key);
+  }
+
+  const nameSchema = properties['name'];
+  expect(manifest.name.length).toBeGreaterThanOrEqual(
+    nameSchema?.['minLength'] as number,
+  );
+  expect(manifest.name.length).toBeLessThanOrEqual(
+    nameSchema?.['maxLength'] as number,
+  );
+  const capabilitySchema = properties['capabilities'];
+  const capabilityItemSchema = capabilitySchema?.['items'] as Record<
+    string,
+    unknown
+  >;
+  expect(manifest.capabilities.length).toBeGreaterThanOrEqual(
+    capabilitySchema?.['minItems'] as number,
+  );
+  expect(new Set(manifest.capabilities)).toHaveLength(
+    manifest.capabilities.length,
+  );
+  for (const capability of manifest.capabilities) {
+    expect(capability).toBeTypeOf('string');
+    expect(capability.length).toBeLessThanOrEqual(
+      capabilityItemSchema['maxLength'] as number,
     );
   }
-  expect((properties['capabilities'] as { minItems?: number }).minItems).toBe(
-    1,
-  );
-  expect(hashSchema.pattern).toBe('^[a-f0-9]{64}$');
-  const pattern = new RegExp(hashSchema.pattern, 'u');
-  for (const hash of Object.values(manifest.hashes))
-    expect(hash).toMatch(pattern);
+  const hashSchema = properties['hashes']?.['additionalProperties'] as Record<
+    string,
+    unknown
+  >;
+  const hashPattern = new RegExp(hashSchema['pattern'] as string, 'u');
+  for (const [relativePath, hash] of Object.entries(manifest.hashes)) {
+    expect(relativePath).not.toBe('cases/representative/manifest.json');
+    expect(hash, relativePath).toMatch(hashPattern);
+  }
 }
 
 function collectDeclaredSchemaProperties(
@@ -130,6 +173,7 @@ function collectDeclaredSchemaProperties(
     return names;
   }
   if (!value || typeof value !== 'object') return names;
+
   for (const [key, item] of Object.entries(value)) {
     if (key === 'properties' && item && typeof item === 'object') {
       for (const propertyName of Object.keys(item)) names.add(propertyName);
@@ -139,24 +183,107 @@ function collectDeclaredSchemaProperties(
   return names;
 }
 
-function collectObjectKeys(
-  value: unknown,
-  keys = new Set<string>(),
-): Set<string> {
-  if (Array.isArray(value)) {
-    for (const item of value) collectObjectKeys(item, keys);
-    return keys;
+function reduceDaemonEvents(
+  events: readonly DaemonEvent[],
+): readonly DaemonTranscriptBlock[] {
+  let state = createDaemonTranscriptState({ now: 0 });
+  for (const event of events) {
+    state = reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event), {
+      now: 0,
+    });
   }
-  if (!value || typeof value !== 'object') return keys;
-  for (const [key, item] of Object.entries(value)) {
-    keys.add(key);
-    collectObjectKeys(item, keys);
-  }
-  return keys;
+  return state.blocks;
 }
 
-describe('chat transcript cross-host contract', () => {
-  it('locks fixture hashes, schemas, consumers, and capability decisions', () => {
+function reduceAcpUpdates(
+  updates: readonly unknown[],
+): readonly DaemonTranscriptBlock[] {
+  return reduceDaemonEvents(
+    updates.map(
+      (update): DaemonEvent => ({
+        v: 1,
+        type: 'session_update',
+        data: { update },
+      }),
+    ),
+  );
+}
+
+function blockSemanticKey(block: DaemonTranscriptBlock): string {
+  switch (block.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thought':
+      return `${block.kind}:${block.text}`;
+    case 'tool':
+      return `tool:${block.toolCallId}`;
+    case 'permission':
+      return `permission:${block.requestId}`;
+    default:
+      throw new Error(`Unsupported identity probe block kind: ${block.kind}`);
+  }
+}
+
+function indexBlocksBySemanticKey(
+  blocks: readonly DaemonTranscriptBlock[],
+  label: 'complete' | 'partial',
+): ReadonlyMap<string, DaemonTranscriptBlock> {
+  const indexed = new Map<string, DaemonTranscriptBlock>();
+  for (const block of blocks) {
+    const key = blockSemanticKey(block);
+    if (indexed.has(key)) {
+      throw new Error(`Ambiguous ${label} identity probe semantic key: ${key}`);
+    }
+    indexed.set(key, block);
+  }
+  return indexed;
+}
+
+function probeIdentity(
+  complete: readonly DaemonTranscriptBlock[],
+  partial: readonly DaemonTranscriptBlock[],
+): IdentityCandidateResult {
+  const completeBySemanticKey = indexBlocksBySemanticKey(complete, 'complete');
+  const partialBySemanticKey = indexBlocksBySemanticKey(partial, 'partial');
+  const unstableBlockKinds = [
+    ...new Set(
+      [...partialBySemanticKey].flatMap(([key, block]) => {
+        const completeBlock = completeBySemanticKey.get(key);
+        if (!completeBlock) {
+          throw new Error(`Missing complete identity probe block: ${key}`);
+        }
+        return completeBlock.id !== block.id ? [block.kind] : [];
+      }),
+    ),
+  ];
+  const missingNativeTextIdentity = [
+    ...new Set(
+      complete.flatMap((block) => {
+        if (
+          block.kind !== 'user' &&
+          block.kind !== 'assistant' &&
+          block.kind !== 'thought'
+        ) {
+          return [];
+        }
+        return block.sourceRecordIds?.length || block.promptId
+          ? []
+          : [block.kind];
+      }),
+    ),
+  ];
+
+  expect(unstableBlockKinds.length).toBeGreaterThan(0);
+  return {
+    status: 'fail',
+    stableUnderPartialPrepend: false,
+    unstableBlockKinds,
+    missingNativeTextIdentity,
+  };
+}
+
+describe('chat transcript contract prevalidation', () => {
+  it('locks the evidence fixtures, schemas, and fail-first capability decision', () => {
     const manifest = readJson<FixtureManifest>(
       resolve(caseRoot, 'manifest.json'),
     );
@@ -164,44 +291,49 @@ describe('chat transcript cross-host contract', () => {
       resolve(fixtureRoot, 'schema/manifest.schema.json'),
     );
     const exportSchema = readJson<Record<string, unknown>>(
-      resolve(
-        repoRoot,
-        'packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json',
-      ),
+      resolve(fixtureRoot, 'schema/export-transcript-document-v1.schema.json'),
     );
-    const expectedExport = readJson<ExpectedExport>(
+    const expectedExport = readJson<ExpectedExportContract>(
       resolve(caseRoot, 'expected-export.json'),
-    );
-    const expectedGate = readJson<ExpectedGate>(
-      resolve(caseRoot, 'expected-gate.json'),
     );
     const matrix = readFileSync(
       resolve(fixtureRoot, 'capability-matrix.md'),
       'utf8',
     );
 
-    expect(manifest.fixtureVersion).toBe(1);
     expectManifestToMatchSchema(manifest, manifestSchema);
+    const manifestWithUnknownProperty = {
+      ...manifest,
+      unknownProperty: true,
+    };
+    expect(() =>
+      expectManifestToMatchSchema(manifestWithUnknownProperty, manifestSchema),
+    ).toThrow(/manifest property unknownProperty/u);
+    expect(manifest.fixtureVersion).toBe(1);
     expect(manifest.complete).toBe(true);
     expect(new Set(manifest.sources)).toEqual(
       new Set(['daemon', 'acp', 'chat-records']),
     );
-    expect(manifest.name).toBe('representative');
-    expect(manifest.generatorVersion).toBe('chat-transcript-prevalidation-v1');
-    expect(new Set(manifest.capabilities)).toEqual(
-      new Set([
-        'text-thinking-usage-images',
-        'streaming-replay-prepend',
-        'tools-plan-permission',
-        'render-action-identity',
-        'scope-generation',
-        'export-security-network-budgets',
-      ]),
-    );
     expect(new Set(manifest.consumers)).toEqual(
       new Set(['web', 'tauri', 'vscode', 'html']),
     );
-    expect(manifest.expectedDiagnostics).toEqual([]);
+    expect(manifest.name).toBe('representative');
+    expect(manifest.generatorVersion).toBe(
+      'chat-transcript-prevalidation-evidence-v1',
+    );
+    expect(new Set(manifest.capabilities)).toEqual(
+      new Set([
+        'semantic-projection',
+        'runtime-raw-compatibility',
+        'stable-identity-prepend-probe',
+        'export-document-schema',
+        'two-mr-migration-gate',
+      ]),
+    );
+    expect(manifest.expectedDiagnostics).toEqual([
+      'direct_daemon_unstable_identity',
+      'acp_unstable_identity',
+    ]);
     expect(manifest.normalizedFields).toEqual([
       'clientReceivedAt',
       'createdAt',
@@ -209,38 +341,12 @@ describe('chat transcript cross-host contract', () => {
     ]);
     expect(manifestSchema['additionalProperties']).toBe(false);
     expect(exportSchema['additionalProperties']).toBe(false);
+
     const exportDefinitions = exportSchema['$defs'] as Record<string, unknown>;
-    const metadataSchema = exportDefinitions['metadata'] as {
-      properties: Record<string, unknown>;
+    const blockSchema = exportDefinitions['block'] as {
+      oneOf: Array<{ $ref: string }>;
     };
-    expect(metadataSchema.properties).not.toHaveProperty('sessionLabel');
-    const toolPreviewSchema = exportDefinitions['toolPreview'] as {
-      oneOf: Array<Record<string, unknown>>;
-    };
-    expect(toolPreviewSchema.oneOf).toHaveLength(14);
-    expect(
-      toolPreviewSchema.oneOf
-        .filter((entry) => !('$ref' in entry))
-        .every((entry) => entry['additionalProperties'] === false),
-    ).toBe(true);
-    for (const definition of Object.values(exportDefinitions)) {
-      const entry = definition as Record<string, unknown>;
-      if (entry['type'] === 'object') {
-        expect(entry['additionalProperties']).toBe(false);
-      }
-    }
-    const permissionBlockSchema = exportDefinitions['permissionBlock'] as {
-      properties: {
-        resolved: { enum: string[] };
-      };
-    };
-    expect(permissionBlockSchema.properties.resolved.enum).toEqual([
-      'approved',
-      'rejected',
-      'cancelled',
-      'expired',
-      'resolved',
-    ]);
+    expect(blockSchema.oneOf).toHaveLength(10);
     for (const definitionName of ['statusBlock', 'errorBlock']) {
       const definition = exportDefinitions[definitionName] as {
         properties: { errorKind: { enum: string[] } };
@@ -249,7 +355,20 @@ describe('chat transcript cross-host contract', () => {
         expectedExport.frozenErrorKinds,
       );
     }
-    expect(expectedExport.frozenErrorKinds).toEqual(DAEMON_ERROR_KINDS);
+    for (const errorKind of expectedExport.frozenErrorKinds) {
+      expect(
+        DAEMON_ERROR_KINDS,
+        `Export V1 error kind ${errorKind} must remain supported by the SDK`,
+      ).toContain(errorKind);
+    }
+    const declaredExportProperties =
+      collectDeclaredSchemaProperties(exportSchema);
+    for (const field of expectedExport.forbiddenFields) {
+      expect(declaredExportProperties.has(field), field).toBe(false);
+    }
+    const permissionOption = exportDefinitions['permissionOption'] as {
+      properties: { raw: { const: unknown } };
+    };
     const toolBlock = exportDefinitions['toolBlock'] as {
       properties: Record<string, unknown>;
     };
@@ -262,74 +381,21 @@ describe('chat transcript cross-host contract', () => {
     expect(toolBlock.properties).not.toHaveProperty('content');
     expect(statusBlock.properties).not.toHaveProperty('data');
     expect(errorBlock.properties).not.toHaveProperty('data');
-    const permissionOption = exportDefinitions['permissionOption'] as {
-      properties: { raw: { const: unknown } };
-    };
     expect(permissionOption.properties.raw.const).toBeNull();
-    const declaredExportProperties =
-      collectDeclaredSchemaProperties(exportSchema);
-    for (const field of expectedExport.forbiddenFields) {
-      expect(declaredExportProperties.has(field), field).toBe(false);
-    }
-    const blockSchema = exportDefinitions['block'] as {
-      oneOf: Array<{ $ref: string }>;
-    };
-    expect(blockSchema.oneOf).toHaveLength(10);
-    for (const { $ref } of blockSchema.oneOf) {
-      const definitionName = $ref.replace('#/$defs/', '');
-      const definition = exportDefinitions[definitionName] as Record<
-        string,
-        unknown
-      >;
-      expect(definition['additionalProperties']).toBe(false);
-      const kind = (definition['properties'] as Record<string, unknown>)[
-        'kind'
-      ] as Record<string, unknown>;
-      expect(typeof kind['const']).toBe('string');
-    }
-    const declaredCaseFiles = readdirSync(casesRoot, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .flatMap((entry) => {
-        const fixtureCaseRoot = resolve(casesRoot, entry.name);
-        const fixtureCaseManifest = readJson<FixtureManifest>(
-          resolve(fixtureCaseRoot, 'manifest.json'),
-        );
-        expectManifestToMatchSchema(fixtureCaseManifest, manifestSchema);
-        const evidenceFiles = Object.keys(fixtureCaseManifest.hashes);
-        expect(listFixtureFiles(fixtureCaseRoot).sort()).toEqual(
-          ['manifest.json', ...evidenceFiles].sort(),
-        );
-        for (const [relativePath, expectedHash] of Object.entries(
-          fixtureCaseManifest.hashes,
-        )) {
-          expect(sha256(resolve(fixtureCaseRoot, relativePath))).toBe(
-            expectedHash,
-          );
-        }
-        return ['manifest.json', ...evidenceFiles].map(
-          (path) => `cases/${entry.name}/${path}`,
-        );
-      });
-    expect(listFixtureFiles(fixtureRoot).sort()).toEqual(
-      [...Object.keys(sharedFixtureHashes), ...declaredCaseFiles].sort(),
+    expect(expectedExport).toMatchObject({
+      schemaVersion: 1,
+      timestamps: 0,
+      implementation: 'deferred-to-mr2',
+    });
+
+    expect(Object.keys(manifest.hashes).sort()).toEqual(
+      listFixtureEvidenceFiles(fixtureRoot).sort(),
     );
     for (const [relativePath, expectedHash] of Object.entries(
-      sharedFixtureHashes,
+      manifest.hashes,
     )) {
       expect(sha256(resolve(fixtureRoot, relativePath))).toBe(expectedHash);
     }
-    expect(matrix).toContain('pass; stable under append/prepend/replay');
-    expect(matrix).toContain('pass; selected product path, rollout pending');
-    expect(matrix).not.toMatch(/\b(?:TBD|unknown)\b/i);
-    expect(expectedGate).toMatchObject({
-      overall: 'fail',
-      selectedVscodePath: 'acp',
-      candidates: {
-        directDaemon: { status: 'pass' },
-        acp: { status: 'pass' },
-      },
-    });
-    expect(expectedGate.blockers).not.toHaveLength(0);
 
     const exportProperties = exportSchema['properties'] as Record<
       string,
@@ -344,49 +410,44 @@ describe('chat transcript cross-host contract', () => {
       '1.2.3-beta.1+build.7',
       'a'.repeat(64),
     ]) {
-      expect(rendererVersionPattern.test(validVersion), validVersion).toBe(
-        true,
-      );
+      expect(validVersion, validVersion).toMatch(rendererVersionPattern);
     }
     for (const invalidVersion of [
+      'LATEST',
       'latest',
+      '1.0.0 - 2.0.0',
+      '1.x',
+      '1.0.0 || 2.0.0',
       '^1.2.3',
-      '>=1.2.3',
-      '1.2',
-      '1.2.3 || 2.0.0',
-      'not-a-version',
+      '~1.2.3',
+      '*',
+      '>=1.0.0',
     ]) {
-      expect(rendererVersionPattern.test(invalidVersion), invalidVersion).toBe(
-        false,
+      expect(invalidVersion, invalidVersion).not.toMatch(
+        rendererVersionPattern,
       );
     }
+    expect(matrix).toContain('FAIL — migration blocked');
+    expect(matrix).toContain('No VS Code transport is selected in MR1');
+    expect(matrix).not.toMatch(/pass; selected/i);
   });
 
-  it('keeps document semantics after all raw renderer fields are removed', () => {
-    const records = readJsonLines(resolve(caseRoot, 'chat-records.jsonl'));
+  it('preserves current ChatRecord and Web Shell runtime semantics', () => {
+    const records = readJsonLines<unknown>(
+      resolve(caseRoot, 'chat-records.jsonl'),
+    );
     const expected = readJson<ExpectedModel>(
       resolve(caseRoot, 'expected-model.json'),
     );
     const expectedRender = readJson<ExpectedRenderItems>(
       resolve(caseRoot, 'expected-render-items.json'),
     );
-    const expectedExport = readJson<ExpectedExport>(
-      resolve(caseRoot, 'expected-export.json'),
-    );
     const projection = projectChatRecordsToDaemonTranscript(records);
-    const runtimeMessages = transcriptBlocksToDaemonMessages(projection.blocks);
-    const exportDocument = createExportTranscriptDocumentV1(
-      records,
-      { startTime: '2026-08-16T00:00:00.000Z' },
-      {
-        rendererVersion: '0.21.11-contract-probe.1',
-        exportedAt: '2026-08-16T01:00:00.000Z',
-      },
+    const messages = transcriptBlocksToDaemonMessages(projection.blocks);
+    const toolBlock = projection.blocks.find((block) => block.kind === 'tool');
+    const toolMessage = messages.find(
+      (message) => message.role === 'tool_group',
     );
-    const messages = transcriptBlocksToDaemonMessages(exportDocument.blocks, {
-      safeToolProjection: true,
-    });
-    const exportedKeys = collectObjectKeys(exportDocument);
 
     expect(projection.complete).toBe(true);
     expect(projection.diagnostics).toEqual([]);
@@ -394,36 +455,40 @@ describe('chat transcript cross-host contract', () => {
       expected.kinds,
     );
     expect(
+      projection.blocks.flatMap((block) => {
+        switch (block.kind) {
+          case 'user':
+          case 'assistant':
+          case 'thought':
+            return [block.text];
+          default:
+            return [];
+        }
+      }),
+    ).toEqual(expected.texts);
+    expect(
       projection.blocks.map((block) => block.sourceRecordIds ?? []),
     ).toEqual(expected.sourceRecordIds);
-    expect(
-      projection.blocks.flatMap((block) =>
-        'text' in block && typeof block.text === 'string' ? [block.text] : [],
-      ),
-    ).toEqual(expected.texts);
     expect(messages.map((message) => message.role)).toEqual(
       expectedRender.roles,
     );
     expect(
-      messages.flatMap((message) =>
-        'content' in message && typeof message.content === 'string'
-          ? [message.content]
-          : [],
-      ),
+      messages.flatMap((message) => {
+        switch (message.role) {
+          case 'user':
+          case 'thinking':
+          case 'assistant':
+            return [message.content];
+          default:
+            return [];
+        }
+      }),
     ).toEqual(expectedRender.expectedTextContent);
-    expect(
-      messages.find((message) => message.role === 'tool_group')?.tools[0]
-        ?.rawOutput,
-    ).toBe(expected.rawFreeToolResult);
-    expect(
-      projection.blocks.find((block) => block.kind === 'tool'),
-    ).toMatchObject({
+    expect(toolBlock).toMatchObject({
       rawInput: expectedRender.expectedToolArgs,
       rawOutput: expectedRender.expectedToolResult,
     });
-    expect(
-      runtimeMessages.find((message) => message.role === 'tool_group'),
-    ).toMatchObject({
+    expect(toolMessage).toMatchObject({
       tools: [
         {
           args: expectedRender.expectedToolArgs,
@@ -432,91 +497,95 @@ describe('chat transcript cross-host contract', () => {
       ],
     });
     expect(expectedRender.runtimeFields).toEqual(['rawInput', 'rawOutput']);
-    expect(messages.every((message) => message.id.length > 0)).toBe(true);
-    expect(exportDocument.schemaVersion).toBe(expectedExport.schemaVersion);
-    expect(
-      exportDocument.blocks.find((block) => block.kind === 'tool')
-        ?.resultPreview,
-    ).toMatchObject({
-      kind: 'text',
-      text: expectedExport.expectedToolResult,
-    });
-    expect(
-      exportDocument.blocks.every(
-        (block) =>
-          block.clientReceivedAt === expectedExport.timestamps &&
-          block.createdAt === expectedExport.timestamps &&
-          block.updatedAt === expectedExport.timestamps,
-      ),
-    ).toBe(true);
-    for (const field of expectedExport.forbiddenFields) {
-      expect(exportedKeys.has(field), field).toBe(false);
-    }
   });
 
-  it('keeps identity stable in both VS Code candidates', () => {
-    const daemonEvents = readJsonLines(
+  it('records both VS Code identity candidates as reproducible blockers', () => {
+    const daemonEvents = readJsonLines<DaemonEvent>(
       resolve(caseRoot, 'daemon-events.jsonl'),
-    ) as DaemonEvent[];
-    const acpUpdates = readJsonLines(
+    );
+    const acpUpdates = readJsonLines<unknown>(
       resolve(caseRoot, 'acp-session-updates.jsonl'),
     );
-    const direct = adaptDirectDaemonEvents(daemonEvents, scopeKey);
-    const directTail = adaptDirectDaemonEvents(daemonEvents.slice(1), scopeKey);
-    const acp = adaptAcpTranscriptUpdates(acpUpdates, scopeKey);
-    const acpTail = adaptAcpTranscriptUpdates(acpUpdates.slice(1), scopeKey);
-
-    const liveIdentity = new TranscriptUpdateIdentityProjector();
-    const liveAcp = adaptAcpTranscriptUpdates(
-      [
-        liveIdentity.project(
-          {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'live answer' },
-          } as SessionUpdate,
-          'session-a########1',
+    const expectedGate = readJson<ExpectedGate>(
+      resolve(caseRoot, 'expected-gate.json'),
+    );
+    const observedGate: ExpectedGate = {
+      overall: 'fail',
+      selectedVscodePath: null,
+      candidates: {
+        directDaemon: probeIdentity(
+          reduceDaemonEvents(daemonEvents),
+          reduceDaemonEvents(daemonEvents.slice(1)),
         ),
+        acp: probeIdentity(
+          reduceAcpUpdates(acpUpdates),
+          reduceAcpUpdates(acpUpdates.slice(1)),
+        ),
+      },
+      blockers: [
+        'direct-daemon uses reducer ordinal block IDs that change when history is prepended',
+        'ACP text updates do not carry a stable source identity and inherit the same ordinal block IDs',
       ],
-      scopeKey,
-    );
-    const taggedAcpSegments = ['first ', 'second'].map((text, index) => ({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text },
-      _meta: {
-        qwenTranscript: {
-          segmentId: `record-${index + 1}:0`,
-          sourceRecordIds: [`record-${index + 1}`],
-        },
-      },
-    }));
-    const completeTaggedAcp = adaptAcpTranscriptUpdates(
-      taggedAcpSegments,
-      scopeKey,
-    );
-    const tailTaggedAcp = adaptAcpTranscriptUpdates(
-      taggedAcpSegments.slice(1),
-      scopeKey,
-    );
-    const deltaUpdates = ['first ', 'second'].map((text) => ({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text },
-      _meta: {
-        qwenTranscript: {
-          segmentId: 'prompt-multi-delta:assistant:0',
-        },
-      },
-    }));
-    const completeDelta = adaptAcpTranscriptUpdates(deltaUpdates, scopeKey);
-    const tailDelta = adaptAcpTranscriptUpdates(
-      deltaUpdates.slice(1),
-      scopeKey,
-    );
+    };
 
-    expect(stableTailIdentity(direct, directTail)).toBe(true);
-    expect(stableTailIdentity(acp, acpTail)).toBe(true);
-    expect(stableTailIdentity(completeTaggedAcp, tailTaggedAcp)).toBe(true);
-    expect(stableTailIdentity(completeDelta, tailDelta, 0)).toBe(true);
-    expect(liveAcp.compatible).toBe(true);
-    expect(liveAcp.blocks[0]?.segmentId).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(observedGate).toEqual(expectedGate);
+  });
+
+  it('fails closed on ambiguous identity keys and records kind sets', () => {
+    const assistantBlock = (
+      id: string,
+      text: string,
+    ): DaemonTranscriptBlock => ({
+      id,
+      kind: 'assistant',
+      clientReceivedAt: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      text,
+    });
+
+    expect(() =>
+      probeIdentity(
+        [assistantBlock('complete-1', 'duplicate')],
+        [
+          assistantBlock('partial-1', 'duplicate'),
+          assistantBlock('partial-2', 'duplicate'),
+        ],
+      ),
+    ).toThrow(/Ambiguous partial identity probe semantic key/u);
+
+    expect(
+      probeIdentity(
+        [
+          assistantBlock('complete-1', 'first'),
+          assistantBlock('complete-2', 'second'),
+        ],
+        [
+          assistantBlock('partial-1', 'first'),
+          assistantBlock('partial-2', 'second'),
+        ],
+      ),
+    ).toEqual({
+      status: 'fail',
+      stableUnderPartialPrepend: false,
+      unstableBlockKinds: ['assistant'],
+      missingNativeTextIdentity: ['assistant'],
+    });
+
+    expect(() =>
+      probeIdentity(
+        [
+          {
+            id: 'status-1',
+            kind: 'status',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'status',
+          },
+        ],
+        [],
+      ),
+    ).toThrow(/Unsupported identity probe block kind: status/u);
   });
 });

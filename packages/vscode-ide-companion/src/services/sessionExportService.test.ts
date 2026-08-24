@@ -155,10 +155,7 @@ describe('sessionExportService', () => {
         expect.anything(),
       );
       expect(mockNormalizeSessionData).toHaveBeenCalled();
-      expect(mockToHtml).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: 'session-1' }),
-        [],
-      );
+      expect(mockToHtml).toHaveBeenCalled();
       expect(mockShowSaveDialog).toHaveBeenCalledWith(
         expect.objectContaining({
           title: 'Export Session as HTML',

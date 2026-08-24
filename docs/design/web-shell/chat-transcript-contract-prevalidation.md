@@ -1,12 +1,9 @@
 # Web Shell、VS Code、Desktop 与 HTML Export 统一 Chat Transcript 总体设计
 
-> 文档地位：本方案的唯一规范性设计文档
->
-> 实施方式：两个 MR 按顺序合入
->
-> 当前状态：MR1 契约预验证已完成；当前分支实施 MR2 的真实 VS Code ACP 时间线消费者与 HTML Export 消费者
->
-> 当前门禁：direct-daemon/ACP identity 和产品 HTML browser gate 已通过并选择 ACP；`overall: "fail"`，直到 scope/generation、VSIX/宿主动作和 packaging 门禁完成
+> 文档地位：本方案的唯一规范性设计文档  
+> 实施方式：两个 MR 按顺序合入  
+> 当前状态：MR1 契约预验证已在当前分支准备；MR2 生产迁移尚未进入当前分支  
+> 当前门禁：`overall: "fail"`，`selectedVscodePath: null`
 
 ## 0. 文档治理
 
@@ -58,13 +55,13 @@ ChatTranscriptModel
 
 ### 2.1 当前生产边界
 
-| 消费端                  | 当前事实                                                                                                                          | 本方案处理                                            |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Web/Qwen Server         | daemon state 经 SDK reducer 产生 `DaemonTranscriptBlock[]`，完整 WebShell 渲染                                                    | 保持生产路径不变；作为语义和兼容基线                  |
-| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                                                      | 不增加 Desktop adapter；MR1 不认证安装产物行为        |
-| VS Code                 | ACP raw update 同时进入稳定 identity adapter；feature flag 开启且输入兼容时由 `WebShellTranscript` 渲染，默认仍是 legacy timeline | ACP 为选定生产路径；legacy 保留为默认回退             |
-| HTML Export             | CLI、Web API 和 VS Code 导出均把原始 records 交给 document projector，并使用版本绑定的产品模板                                    | 产品路径已收敛；无 records 的公共调用保留 legacy 兼容 |
-| OpenWork/Craft Electron | 独立聊天实现                                                                                                                      | 本方案范围外                                          |
+| 消费端                  | 当前事实                                                                                             | 本方案处理                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Web/Qwen Server         | daemon state 经 SDK reducer 产生 `DaemonTranscriptBlock[]`，完整 WebShell 渲染                       | 保持生产路径不变；作为语义和兼容基线                    |
+| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                         | 不增加 Desktop adapter；MR1 不认证安装产物行为          |
+| VS Code                 | `QwenAgentManager` 仍以 ACP、自有消息状态和现有 Webview 时间线为主；仓库存在 daemon connection spike | MR2 选择 direct-daemon 或 ACP 薄转换，只替换时间线      |
+| HTML Export             | 产品和 integration runner 仍有独立 HTML/ChatViewer 路径                                              | MR2 收敛到版本绑定的 `WebShellTranscript` document mode |
+| OpenWork/Craft Electron | 独立聊天实现                                                                                         | 本方案范围外                                            |
 
 当前 `WebShellTranscript`：
 
@@ -72,23 +69,22 @@ ChatTranscriptModel
 - 固定运行在 `readonly` render mode；
 - 不连接 daemon、不提供 composer、不响应权限、不修改 session；
 - 默认 adapter 仍从 runtime block 的 raw 字段恢复完整工具展示和 Turn Output 语义；
-- 已提供独立 `document` render mode；interactive/readonly 的 raw adapter 语义保持不变。
+- 尚无 `document` render mode。
 
 ### 2.2 两个 MR 的状态
 
-| 范围                                             | 当前状态                                                              | 结论                          |
-| ------------------------------------------------ | --------------------------------------------------------------------- | ----------------------------- |
-| MR1 fixtures/schema/hash/capability matrix       | 已完成                                                                | PASS                          |
-| ChatRecord → SDK → Web Shell 默认 adapter 等价性 | 默认 raw 路径回归通过                                                 | PASS                          |
-| `write_file` → Turn Output 完整 diff 回归        | 继续读取完整 runtime raw content                                      | PASS                          |
-| direct-daemon stable identity                    | actual SDK reducer + stable projection 通过 partial-prepend           | PASS（保留候选）              |
-| ACP stable identity                              | actual ACP adapter 通过 live/history/partial-prepend                  | PASS（选定路径）              |
-| VS Code 时间线                                   | feature flag 下使用真实 ACP adapter；默认 legacy，缺 identity 回退    | IMPLEMENTED / rollout pending |
-| Export document schema/builder                   | canonical schema、严格结构校验和语义安全校验进入产品路径              | PASS                          |
-| document mode/HTML wiring                        | CLI、Web API、VS Code export 使用同一版本绑定产品模板                 | IMPLEMENTED                   |
-| Browser/Scope/VSIX/Packaging                     | 产品 HTML browser gate 已通过；scope/reconnect、VSIX/安装产物尚未认证 | PARTIAL / DEFERRED            |
+| 范围                                             | 当前状态                   | 结论                    |
+| ------------------------------------------------ | -------------------------- | ----------------------- |
+| MR1 fixtures/schema/hash/capability matrix       | 当前分支已准备             | PASS                    |
+| ChatRecord → SDK → Web Shell 默认 adapter 等价性 | 当前分支已准备             | PASS                    |
+| `write_file` → Turn Output 完整 diff 回归        | 当前分支已准备             | PASS                    |
+| direct-daemon stable identity                    | partial-prepend 可重复失败 | FAIL                    |
+| ACP stable identity                              | partial-prepend 可重复失败 | FAIL                    |
+| VS Code 路径选择                                 | 前置 identity 未通过       | BLOCKED                 |
+| Export document schema                           | V1 目标 schema 已冻结      | DEFERRED implementation |
+| Export builder/document mode/HTML wiring         | 当前分支无生产代码         | DEFERRED to MR2         |
 
-`overall` 仍为 FAIL 不是 identity、HTML renderer 或实现失败，而是 required 的 VS Code 宿主与发布级行为证据尚未全部完成；不能因生产代码已接线就提前翻转为 PASS。
+“MR1 测试通过”表示当前事实和 FAIL blocker 能稳定复现，不表示迁移门禁已经通过。
 
 ## 3. 目标与非目标
 
@@ -292,7 +288,7 @@ MR2 在 source producer/admission 边界建立 segment identity：
 
 稳定 block ID 由版本化确定性函数从 `{scopeKey, blockKind, nativeSourceIdentity}` 派生。父子 block 引用必须同步重写。默认 Web/Tauri reducer 的 ordinal runtime ID 可保持兼容；稳定投影只进入明确需要它的 VS Code adapter/probe，除非后续单独证明全局替换无回归。
 
-### 7.5 MR1 历史 FAIL 与 MR2 当前证据
+### 7.5 当前 FAIL 证据
 
 MR1 的 read-only probe 使用当前 `normalizeDaemonEvent` 和 `reduceDaemonTranscriptEvents`：
 
@@ -301,7 +297,7 @@ MR1 的 read-only probe 使用当前 `normalizeDaemonEvent` 和 `reduceDaemonTra
 3. 通过语义 key 对齐同一 block；
 4. 比较当前 block ID，并记录 source provenance 是否存在。
 
-MR1 当时的结果：
+当前结果：
 
 | Candidate     | partial-prepend       | 原生文本 identity           | MR1 gate |
 | ------------- | --------------------- | --------------------------- | -------- |
@@ -309,8 +305,6 @@ MR1 当时的结果：
 | ACP           | ordinal block ID 漂移 | user/thought/assistant 缺失 | FAIL     |
 
 MR2 合入前，两条候选都必须运行完整 identity matrix 并通过；若要永久放弃其中一条，必须先在本文档中记录范围变更与理由，不能只从测试中删除失败候选。
-
-MR2 当前实现不再保留只供门禁调用的生产 probe。门禁直接调用实际 SDK reducer、实际 VS Code ACP adapter 与实际 Web Shell message projector。producer-stamped `segmentId`、scope-keyed stable ID projection 以及“不同 tagged segment 不合并”的 renderer 规则已使两条候选通过 append/partial-prepend/replay matrix。ACP 因为是现有 VS Code transport 而被选为 feature-flagged 产品路径；direct-daemon 只保留为已验证候选，不在本 MR 建立第二条产品 transport。
 
 ## 8. Renderer item 与宿主动作 identity
 
@@ -403,8 +397,6 @@ ACP adapter 只做协议归一化和 provenance 传递：
 4. 能在 feature flag 关闭时完整回退 legacy timeline。
 
 ACP 是当前生产基线，因此在两条路径同等可行时优先 ACP 薄转换；这不是 MR1 的预选结果。最终选择及舍弃理由写入 capability matrix 和本文档状态表。
-
-当前选择已经确定为 ACP：`QwenAgentManager` 在不改变 legacy callback 的前提下旁路转发 raw `session/update`，Webview 内由实际 SDK normalizer/reducer 和 stable projection 生成 blocks。只有 `qwen-code.experimental.webShellTranscript` 开启、blocks 非空且全部具备稳定 identity 时才使用共享时间线；其余情况完整回退 legacy。此选择不等于默认 rollout 完成，宿主动作 parity、VSIX 和三平台门禁仍需独立通过。
 
 ### 9.6 HTML Export
 
@@ -624,10 +616,9 @@ integration-tests/fixtures/chat-transcript-contract/v1/
 │       ├── expected-export.json
 │       └── expected-gate.json
 └── schema/
-    └── manifest.schema.json
+    ├── manifest.schema.json
+    └── export-transcript-document-v1.schema.json
 ```
-
-Export schema 的唯一生产副本位于 `packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json`。integration gate 直接读取该文件；fixture 不再复制第二份容易漂移的 schema。
 
 规则：
 
@@ -703,18 +694,16 @@ MR2 中每项生产代码必须有真实消费者。实施顺序：
 
 MR2 不能只修改 `expected-gate.json` 或恢复拆分前整包代码。应按上述消费者顺序选择性迁移备份实现，并重新对照当前 `main`。
 
-本轮收敛遵循真实消费者优先的顺序：先接入产品 HTML Export，再接入 feature-flagged VS Code ACP 时间线；随后让门禁直接覆盖这两个实现，删除 VS Code/Web Shell 的生产 probe；最后把结构校验收敛到生产 JSON Schema + 共享 strict validator，并合并 integration helper。JSON Schema 无法表达的 credential URL、脱敏 path、总字节和资源预算继续由小型语义安全层负责，不恢复重复的逐字段结构 validator。
-
 ## 13. 验证架构与测试矩阵
 
 ```mermaid
 flowchart TD
   INPUTS["daemon / ACP / ChatRecord fixtures"] --> SEM["semantic projection"]
   INPUTS --> IDS["block identity matrix"]
-  SEM --> RENDER["actual Web Shell message projector"]
+  SEM --> RENDER["renderer item/action probe"]
   SEM --> EXPORT["export allowlist projector"]
   EXPORT --> SCHEMA["schema + budget + canary"]
-  SCHEMA --> BROWSER["product HTML browser gate"]
+  SCHEMA --> BROWSER["document browser probe"]
   RENDER --> HOSTS["Web / Tauri / VS Code"]
   BROWSER --> HTML["HTML Export"]
   IDS --> GATE{"overall gate"}
@@ -751,8 +740,6 @@ MR1 不以源码文本断言认证 Desktop 打包行为。Web/Tauri 的现有构
 
 Passing test 也必须反向审计：测试是否断言了正确语义、是否加载当前构建产物、是否真的覆盖真实消费者，不能用静态 source assertion 替代浏览器或 VSIX 行为验证。
 
-当前验证结果：SDK、Core、CLI、Web Shell、VS Code 聚焦测试和 direct-daemon/ACP integration identity gate 已通过；产品 HTML 已完成构建、Node 侧安全断言和真实 Chromium browser gate，concurrent runner 也复用同一产品收集、归一化和 formatter。browser gate 已覆盖最大文档、真实产品入口、零网络、主动 CSP 违规、canary、搜索、复制、打印、远程资源降级和 epoch 时间戳排除；总体仍等待 VS Code scope/generation/reconnect、宿主动作、VSIX 与 packaged artifact 证据。
-
 ## 14. 门禁
 
 ### 14.1 共享语义门禁
@@ -782,14 +769,14 @@ Passing test 也必须反向审计：测试是否断言了正确语义、是否�
 - 正常 Markdown、code、diff、LaTeX、Mermaid、tool/plan/permission 与 metadata 不被过度删除；
 - schema/renderer 不兼容安全失败。
 
-### 14.4 当前与最终结论
+### 14.4 最终结论
 
-MR1 的历史结论是 FAIL evidence。MR2 当前已选择 ACP，两候选 identity 与产品 HTML browser gate 通过，但总体门禁仍因 scope/generation、VSIX/宿主动作与 packaging 未完成而保持 FAIL：
+MR1 的正确结论是 FAIL evidence：
 
 ```json
 {
   "overall": "fail",
-  "selectedVscodePath": "acp"
+  "selectedVscodePath": null
 }
 ```
 

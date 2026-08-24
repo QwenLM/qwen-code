@@ -101,7 +101,6 @@ function DocumentApp({ value }: { value: ExportTranscriptDocument }) {
       </header>
       <WebShellTranscript
         blocks={value.blocks}
-        renderMode="document"
         compactThinking
         theme={theme}
       />

@@ -8,11 +8,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
-  createDaemonToolResultPreview,
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
-  daemonBlockToMarkdown,
-  daemonBlockToPlainText,
   daemonUiEventToTerminalText,
   estimateDaemonTranscriptBlockBytes,
   getOutputText,
@@ -116,65 +113,6 @@ describe('daemon UI normalizer and transcript reducer', () => {
         text: 'historical answer',
         branchRecordId: 'checkpoint-record',
       },
-    ]);
-  });
-
-  it('carries source segment identity without changing legacy ordinal block IDs', () => {
-    const project = (eventId: number) =>
-      reduceDaemonTranscriptEvents(
-        createDaemonTranscriptState({ now: 1 }),
-        normalizeDaemonEvent({
-          id: eventId,
-          v: 1,
-          type: 'session_update',
-          data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'stable' },
-              _meta: {
-                qwenTranscript: { segmentId: 'record-1:0' },
-              },
-            },
-          },
-        }),
-        { now: 2 },
-      );
-
-    const first = project(10);
-    const replayed = project(999);
-
-    expect(first.blocks[0]?.segmentId).toBe('record-1:0');
-    expect(replayed.blocks[0]?.segmentId).toBe('record-1:0');
-    expect(first.blocks[0]?.id).toMatch(/^assistant-\d+$/);
-    expect(replayed.blocks[0]?.id).toBe(first.blocks[0]?.id);
-  });
-
-  it('keeps distinct source segments in distinct transcript blocks', () => {
-    const makeEvent = (segmentId: string, text: string) =>
-      normalizeDaemonEvent({
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text },
-            _meta: { qwenTranscript: { segmentId } },
-          },
-        },
-      });
-
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        ...makeEvent('record-1:0', 'first'),
-        ...makeEvent('record-2:0', 'second'),
-      ],
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { text: 'first', segmentId: 'record-1:0' },
-      { text: 'second', segmentId: 'record-2:0' },
     ]);
   });
 
@@ -1104,13 +1042,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: {
           requestId: 'perm-1',
           sessionId: 'session-1',
-          toolCall: {
-            toolCallId: 'call-1',
-            name: 'Bash',
-            kind: 'execute',
-            command: 'npm test',
-            _meta: { toolName: 'run_shell_command' },
-          },
+          toolCall: { name: 'Bash', command: 'npm test' },
           options: [{ optionId: 'allow', label: 'Allow', raw: null }],
         },
       }),
@@ -1138,31 +1070,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
       {
         kind: 'permission',
         requestId: 'perm-1',
-        toolCallId: 'call-1',
-        toolName: 'run_shell_command',
-        toolKind: 'execute',
         resolved: 'selected:allow',
       },
-    ]);
-  });
-
-  it('uses the permission tool name as a safe identity fallback', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      normalizeDaemonEvent({
-        v: 1,
-        type: 'permission_request',
-        data: {
-          requestId: 'perm-name',
-          toolCall: { name: 'Bash' },
-          options: [],
-        },
-      }),
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { kind: 'permission', requestId: 'perm-name', toolName: 'Bash' },
     ]);
   });
 
@@ -1215,7 +1124,6 @@ describe('daemon UI normalizer and transcript reducer', () => {
         rawOutput: 'ok',
       },
     ]);
-    expect(state.blocks[0]?.id).toBe('tool-1');
     expect(state.blockIndexById).toEqual({ 'tool-1': 0 });
 
     state = reduceDaemonTranscriptEvents(
@@ -1279,44 +1187,6 @@ describe('daemon UI normalizer and transcript reducer', () => {
         text: 'Tool tool-1 output trimmed (max blocks reached)',
         eventId: 8,
       },
-    ]);
-  });
-
-  it('stamps background tools on create and existing-block update paths', () => {
-    let state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'tool.update',
-          toolCallId: 'background-create',
-          status: 'completed',
-          rawOutput: { status: 'background' },
-        },
-        {
-          type: 'tool.update',
-          toolCallId: 'background-update',
-          status: 'in_progress',
-          rawOutput: { status: 'running' },
-        },
-      ],
-      { now: 2 },
-    );
-    state = reduceDaemonTranscriptEvents(
-      state,
-      [
-        {
-          type: 'tool.update',
-          toolCallId: 'background-update',
-          status: 'completed',
-          rawOutput: { status: 'background' },
-        },
-      ],
-      { now: 3 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { kind: 'tool', toolCallId: 'background-create', background: true },
-      { kind: 'tool', toolCallId: 'background-update', background: true },
     ]);
   });
 
@@ -2762,70 +2632,6 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { kind: 'shell', text: 'out-1out-2', stream: 'stdout' },
       { kind: 'shell', text: 'err-1', stream: 'stderr' },
       { kind: 'shell', text: 'unknown-1unknown-2' },
-    ]);
-  });
-
-  it('splits shell output when the producer segment changes', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'shell.output',
-          text: 'first',
-          stream: 'stdout',
-          segmentId: 'segment-1',
-        },
-        {
-          type: 'shell.output',
-          text: 'second',
-          stream: 'stdout',
-          segmentId: 'segment-2',
-        },
-        {
-          type: 'shell.output',
-          text: ' third',
-          stream: 'stdout',
-          segmentId: 'segment-2',
-        },
-      ],
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { kind: 'shell', text: 'first', segmentId: 'segment-1' },
-      { kind: 'shell', text: 'second third', segmentId: 'segment-2' },
-    ]);
-  });
-
-  it('splits user shell output when the producer segment changes', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'user.shell.output',
-          text: 'first',
-          stream: 'stdout',
-          segmentId: 'segment-1',
-        },
-        {
-          type: 'user.shell.output',
-          text: 'second',
-          stream: 'stdout',
-          segmentId: 'segment-2',
-        },
-        {
-          type: 'user.shell.output',
-          text: ' third',
-          stream: 'stdout',
-          segmentId: 'segment-2',
-        },
-      ],
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { kind: 'user_shell', text: 'first', segmentId: 'segment-1' },
-      { kind: 'user_shell', text: 'second third', segmentId: 'segment-2' },
     ]);
   });
 
@@ -5130,262 +4936,6 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     expect((preview as { argsSummary?: string }).argsSummary).toContain(
       'issueTitle',
     );
-  });
-
-  it('keeps structured MCP argument summaries redacted and single-line', () => {
-    const preview = createDaemonToolPreview(
-      {
-        arguments: {
-          issue: {
-            title: 'Bug report',
-            apiKey: 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT',
-          },
-        },
-      },
-      { toolName: 'mcp__github__create_issue' },
-    );
-
-    expect(preview).toMatchObject({
-      kind: 'mcp_invocation',
-      argsSummary: 'issue={"title":"Bug report","apiKey":"[redacted]"}',
-    });
-    expect((preview as { argsSummary?: string }).argsSummary).not.toContain(
-      '\n',
-    );
-  });
-
-  it('redacts sensitive MCP arguments from the typed preview', () => {
-    const preview = createDaemonToolPreview(
-      { arguments: { apiKey: 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT' } },
-      { toolName: 'mcp__github__create_issue' },
-    );
-
-    expect(preview).toMatchObject({
-      kind: 'mcp_invocation',
-      argsSummary: 'apiKey=[redacted]',
-    });
-    expect(JSON.stringify(preview)).not.toContain(
-      'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT',
-    );
-  });
-
-  it('bounds typed tool result text before duplicating renderer content', () => {
-    const content = (text: string) => [
-      { type: 'content', content: { type: 'text', text } },
-    ];
-
-    expect(
-      createDaemonToolResultPreview(undefined, content('visible')),
-    ).toEqual({ kind: 'text', text: 'visible' });
-    expect(
-      createDaemonToolResultPreview(undefined, content('x'.repeat(100_001))),
-    ).toBeUndefined();
-  });
-
-  it('does not retain a stale result preview when a later result is unsafe to preview', () => {
-    let state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'tool.update',
-          toolCallId: 'preview-replaced',
-          status: 'running',
-          resultPreview: { kind: 'text', text: 'partial result' },
-        },
-      ],
-      { now: 2 },
-    );
-
-    state = reduceDaemonTranscriptEvents(
-      state,
-      [
-        {
-          type: 'tool.update',
-          toolCallId: 'preview-replaced',
-          status: 'completed',
-          content: [
-            {
-              type: 'content',
-              content: { type: 'text', text: 'x'.repeat(100_001) },
-            },
-          ],
-        },
-      ],
-      { now: 3 },
-    );
-
-    expect(state.blocks[0]).not.toHaveProperty('resultPreview');
-  });
-
-  it('normalizes trusted replay result previews within the size limit', () => {
-    const normalize = (text: string) =>
-      normalizeDaemonEvent({
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'tool_call_update',
-            toolCallId: 'preview-1',
-            status: 'completed',
-            _meta: { qwenTranscript: { resultPreviewText: text } },
-          },
-        },
-      });
-
-    expect(normalize('Visible')).toMatchObject([
-      {
-        type: 'tool.update',
-        resultPreview: { kind: 'text', text: 'Visible' },
-      },
-    ]);
-    expect(normalize('x'.repeat(100_001))[0]).not.toHaveProperty(
-      'resultPreview',
-    );
-  });
-
-  it('drops negative todo revisions from the typed preview', () => {
-    const preview = createDaemonToolPreview(
-      {
-        entries: [{ id: 'todo-1', content: 'Implement', status: 'pending' }],
-        plan: { id: 'plan-1', revision: -1 },
-      },
-      { toolName: 'todo_write' },
-    );
-
-    expect(preview).toMatchObject({
-      kind: 'todo_list',
-      planId: 'plan-1',
-    });
-    expect(preview).not.toHaveProperty('revision');
-  });
-
-  it('keeps the legacy runtime summary for typed todo previews', () => {
-    const preview = createDaemonToolPreview(
-      {
-        entries: [{ content: 'Implement', status: 'pending' }],
-        plan: { id: 'plan-1', revision: 1 },
-      },
-      { toolName: 'todo_write' },
-    );
-    const block = {
-      id: 'tool-1',
-      kind: 'tool',
-      toolCallId: 'todo-1',
-      title: 'Update plan',
-      status: 'completed',
-      preview,
-      clientReceivedAt: 0,
-      createdAt: 0,
-      updatedAt: 0,
-    } satisfies DaemonTranscriptBlock;
-
-    expect(daemonBlockToMarkdown(block)).toContain(String.raw`_todo\_write_`);
-    expect(daemonBlockToPlainText(block)).toContain('todo_write');
-  });
-
-  it('marks an invalid todo status as a lossy preview', () => {
-    for (const status of [true, 1, ' ']) {
-      const preview = createDaemonToolPreview(
-        { entries: [{ content: 'Implement', status }] },
-        { toolName: 'todo_write' },
-      );
-
-      expect(preview).toMatchObject({
-        kind: 'todo_list',
-        entries: [{ content: 'Implement', status: 'pending' }],
-        truncated: true,
-      });
-    }
-  });
-
-  it('bounds cumulative todo preview text', () => {
-    const preview = createDaemonToolPreview(
-      {
-        entries: [
-          { content: 'a'.repeat(60_000), status: 'pending' },
-          { content: 'b'.repeat(60_000), status: 'pending' },
-          { content: 'not retained', status: 'pending' },
-        ],
-      },
-      { toolName: 'todo_write' },
-    );
-
-    expect(preview).toMatchObject({
-      kind: 'todo_list',
-      truncated: true,
-    });
-    expect(
-      preview.kind === 'todo_list'
-        ? preview.entries.reduce(
-            (total, entry) => total + entry.content.length,
-            0,
-          )
-        : 0,
-    ).toBe(100_000);
-  });
-
-  it('bounds cumulative todo dependency inputs', () => {
-    const preview = createDaemonToolPreview(
-      {
-        entries: [
-          {
-            content: 'Implement',
-            status: 'pending',
-            _meta: {
-              qwenTodo: {
-                id: 'todo-1',
-                blockedBy: Array.from(
-                  { length: 1_001 },
-                  (_, index) => `todo-${index + 2}`,
-                ),
-              },
-            },
-          },
-        ],
-      },
-      { toolName: 'todo_write' },
-    );
-
-    expect(preview).toMatchObject({
-      kind: 'todo_list',
-      truncated: true,
-    });
-    expect(
-      preview.kind === 'todo_list' ? preview.entries[0]?.blockedBy?.length : 0,
-    ).toBe(1_000);
-  });
-
-  it('preserves top-level todo result dependencies and revision', () => {
-    const preview = createDaemonToolResultPreview(
-      {
-        todos: [
-          {
-            id: 'todo-2',
-            content: 'Implement',
-            status: 'in_progress',
-            blockedBy: ['todo-1'],
-          },
-        ],
-        planId: 'plan-1',
-        revision: 3,
-      },
-      undefined,
-      { toolName: 'todo_write' },
-    );
-
-    expect(preview).toEqual({
-      kind: 'todo_list',
-      entries: [
-        {
-          id: 'todo-2',
-          content: 'Implement',
-          status: 'in_progress',
-          blockedBy: ['todo-1'],
-        },
-      ],
-      planId: 'plan-1',
-      revision: 3,
-    });
   });
 
   it('mcp_invocation takes priority over file_diff (more specific)', () => {
@@ -7765,75 +7315,6 @@ describe('R5 review batch — coverage additions', () => {
           qwenDiscreteMessage: true,
         },
       }),
-    ]);
-  });
-
-  it('keeps live discrete user messages in separate blocks', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'user.text.delta',
-          text: 'first',
-          meta: { qwenDiscreteMessage: true },
-        },
-        {
-          type: 'user.text.delta',
-          text: 'second',
-          meta: { qwenDiscreteMessage: true },
-        },
-      ],
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      { kind: 'user', text: 'first' },
-      { kind: 'user', text: 'second' },
-    ]);
-  });
-
-  it('separates recorded user lanes without splitting one segment', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        {
-          type: 'user.text.delta',
-          text: 'first\n',
-          segmentId: 'record-1:0',
-          sourceRecordIds: ['record-1'],
-          meta: { qwenDiscreteMessage: true },
-        },
-        {
-          type: 'user.text.delta',
-          text: '[Attachment is no longer available]',
-          segmentId: 'record-1:1',
-          sourceRecordIds: ['record-1'],
-          meta: { qwenDiscreteMessage: true },
-        },
-        {
-          type: 'user.text.delta',
-          text: 'second',
-          segmentId: 'record-1:2',
-          sourceRecordIds: ['record-1'],
-          meta: { qwenDiscreteMessage: true },
-        },
-        {
-          type: 'user.text.delta',
-          text: 'third',
-          segmentId: 'record-1:2',
-          sourceRecordIds: ['record-1'],
-          meta: { qwenDiscreteMessage: true },
-        },
-      ],
-      { now: 2 },
-    );
-
-    expect(state.blocks).toMatchObject([
-      {
-        kind: 'user',
-        text: 'first\n[Attachment is no longer available]\nsecondthird',
-        segmentId: 'record-1:2',
-      },
     ]);
   });
 
