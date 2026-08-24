@@ -7143,7 +7143,9 @@ export class Config {
    * counts exactly what `PermissionManager.isToolEnabled()` counts, while
    * activation still comes only from `settings.permissions.allow` rules
    * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
-   * same way `PermissionManager.initialize`'s `parseRules` does. Entries are
+   * same way `PermissionManager.initialize`'s `parseRules` does (and
+   * skipping non-string entries, which settings load never type-validates).
+   * Entries are
    * normalised with `parseRule` — the same parser `PermissionManager` uses —
    * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
    * match; the check honours meta-categories (`Read`) via
@@ -7166,6 +7168,11 @@ export class Config {
     // registry never registers it, so it silently vanishes from `/tools` and
     // the model request while calls to it fail with TOOL_NOT_REGISTERED.
     const coveredByPermissionRule = (raw: string): boolean => {
+      // Mirror the `parseRules` guard: settings load performs no
+      // element-type validation (the schema declares only `type: 'array'`),
+      // so a stray non-string/empty entry must be skipped here, never
+      // crash registry construction (#9827).
+      if (typeof raw !== 'string' || raw.trim() === '') return false;
       const rule = parseRule(raw);
       return (
         !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
@@ -7175,10 +7182,13 @@ export class Config {
     // requires at least one non-empty valid entry — exactly how
     // `PermissionManager.initialize` computes it (`parseRules` filters empty
     // entries before parsing, and `parseRule('')` carries no `invalid` flag),
-    // so a degenerate `[""]` leaves the allowlist inactive in both places
-    // (#9827).
+    // so a degenerate `[""]` leaves the allowlist inactive in both places.
+    // The `typeof` guard mirrors that filter for non-string entries too:
+    // `PermissionManager.initialize` tolerates them in the same settings
+    // file, so this gate must not become a new startup crash (#9827).
     const allowListActive = this.getRegistryAllowList().some(
-      (raw) => raw.trim() !== '' && !parseRule(raw).invalid,
+      (raw) =>
+        typeof raw === 'string' && raw.trim() !== '' && !parseRule(raw).invalid,
     );
     if (!allowListActive) return false;
     // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow

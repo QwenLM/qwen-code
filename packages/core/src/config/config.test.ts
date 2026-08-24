@@ -8415,6 +8415,60 @@ describe('Server Config (config.ts)', () => {
       ).not.toContain(ToolNames.LS);
     });
 
+    it('does not crash when permissions arrays hold non-string entries (#9827)', async () => {
+      // Settings load performs no element-type validation (the schema
+      // declares only `type: 'array'`), and `PermissionManager.initialize`'s
+      // `parseRules` tolerates falsy entries like `[null]` in the same
+      // settings file. The opt-in gate scans the same arrays during
+      // `createToolRegistry`, so it must skip non-string entries the same
+      // way instead of throwing a `TypeError` and crashing startup.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null, ToolNames.EDIT] as unknown as string[],
+          registryAllowList: [null, ToolNames.EDIT] as unknown as string[],
+          ask: [undefined, 'ListFiles'] as unknown as string[],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      // The valid entries still take effect: the settings rule activates
+      // the allowlist and the ask rule (after the non-string entry is
+      // skipped) covers list_directory.
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('keeps the gate closed when the settings allow list holds only non-string entries (#9827)', async () => {
+      // `[null]` alone carries no valid rule: `parseRules` filters it out,
+      // so `PermissionManager.initialize` reports the allowlist inactive —
+      // the opt-in gate must agree (and must not throw on the entry).
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null] as unknown as string[],
+          registryAllowList: [null] as unknown as string[],
+          ask: ['ListFiles'],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
