@@ -32,7 +32,10 @@
  * See `permissionMediator.ts` for the production implementation.
  */
 export type PermissionPolicy =
-  'first-responder' | 'designated' | 'consensus' | 'local-only';
+  | 'first-responder'
+  | 'designated'
+  | 'consensus'
+  | 'local-only';
 
 /**
  * One pending permission tracked by a `PermissionMediator`. The
