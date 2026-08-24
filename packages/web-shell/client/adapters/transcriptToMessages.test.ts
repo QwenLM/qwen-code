@@ -3591,7 +3591,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('agent-end', 'agent-1', 'completed', 20, {
         title: 'Agent: work done',
         toolName: 'agent',
-        rawOutput: { type: 'task_execution', totalTokens: 500 },
+        rawOutput: {
+          type: 'task_execution',
+          executionMode: 'background',
+          totalTokens: 500,
+        },
         updatedAt: 25,
       }),
     ]);
@@ -3602,8 +3606,10 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool?.title).toBe('Agent: work done');
     expect(tool?.status).toBe('completed');
     expect(tool?.endTime).toBe(25);
+    expect(tool?.executionMode).toBe('background');
     expect(tool?.rawOutput).toEqual({
       type: 'task_execution',
+      executionMode: 'background',
       totalTokens: 500,
     });
   });

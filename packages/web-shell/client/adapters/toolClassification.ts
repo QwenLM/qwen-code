@@ -31,18 +31,12 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   return Boolean(tool.args?.subagent_type);
 }
 
-// NOTE: This background-classification heuristic (top-level `agent` call, no
-// explicit `run_in_background`, no `working_dir`, no named teammate) mirrors two
-// other implementations that must stay in sync:
-//   - core dispatch (source of truth): packages/core/src/tools/agent/agent.ts
-//     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
-//   - desktop UI: packages/desktop/packages/shared/src/agent/tool-matching.ts
-//     (`detectBackgroundEvents`)
-// If the routing rule changes in core, update all three. Divergences already
-// exist (e.g. `subagentConfig.background` is invisible here; the desktop copy
-// lacks the `rawOutput.status === 'background'` fallback below).
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
+  if (tool.executionMode) return tool.executionMode === 'background';
+
+  // Older daemon frames and recorded sessions do not include executionMode.
+  // Preserve their existing argument/status inference as a compatibility path.
   const rawOutput = getRecord(tool.rawOutput);
   const name = tool.toolName.toLowerCase();
   const args = tool.args;
