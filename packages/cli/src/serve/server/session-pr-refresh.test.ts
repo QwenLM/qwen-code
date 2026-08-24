@@ -353,6 +353,62 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect(raw.prs[0].state).toBe('open');
   });
 
+  it('reaches sessions whose mtime ties a pagination boundary', async () => {
+    // 1007 sidecars, four of them sharing the mtime of the 1000th file:
+    // listSessions' strict-`<` cursor boundary drops those boundary twins
+    // on every paging run, so no sweep that pages it can ever refresh them.
+    const total = 1007;
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const baseMtime = Date.UTC(2026, 7, 1);
+    for (let i = 0; i < total; i++) {
+      const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.pr.json`),
+        JSON.stringify({
+          prs: [
+            {
+              number: 100_000 + i,
+              url: `https://github.com/o/r/pull/${100_000 + i}`,
+              createdAt: '2026-08-01T00:00:00.000Z',
+              state: 'open',
+            },
+          ],
+        }),
+        'utf8',
+      );
+      const mtimeMs =
+        i >= 999 && i <= 1002 ? baseMtime - 999_000 : baseMtime - i * 1000;
+      const mtime = new Date(mtimeMs);
+      await fsp.utimes(path.join(chatsDir, `${sessionId}.jsonl`), mtime, mtime);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result.scanned).toBe(total);
+    expect(result.updated).toBe(0);
+  }, 60_000);
+
   it('never stamps a same-number PR of another repository', async () => {
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(

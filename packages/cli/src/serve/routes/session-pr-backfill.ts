@@ -13,6 +13,7 @@ import {
   fetchRemoteWebUrl,
   readWorktreeSession,
   repoKeyFromWebUrl,
+  SESSION_PR_LIST_LIMIT,
   upsertSessionPrs,
   type SessionArchiveState,
   type SessionPrState,
@@ -83,17 +84,16 @@ const PRINTED_PR_URL_PATTERN =
   /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})/g;
 
 // `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
-// only at COMMAND position (line start): user-turn prose — including
-// bundled skill bodies recorded verbatim as user records — mentions
-// `/review` mid-line, and only a line-leading command names a PR to bind.
-// The bare-number alternative comes first: `/review 42 and fix #7` names 42,
-// and the lazy span alternative would otherwise consume the line and
-// capture the later token. Bare session git branches are NOT a source: they
-// bind the workspace's current branch PR onto every session (including
-// unrelated chats and reviews of other PRs) — measured pure noise, removed
-// with cleanup.
+// only at COMMAND position — the very start of the prompt the user typed.
+// User records lead with that prompt; @-imported file content is appended
+// as later text parts, and shipped docs contain line-leading `/review N`
+// examples, so nothing after the first part may seed a binding. `[ \t]+`
+// (not `\s+`) keeps the number on the command's own line. The bare-number
+// alternative comes first: `/review 42 and fix #7` names 42. Bare session
+// git branches are NOT a source: they bind the workspace's current branch
+// PR onto every session — measured pure noise, removed with cleanup.
 const REVIEW_COMMAND_PATTERN =
-  /(?:^|\n)\s*\/review\s+#?(\d{1,9})|(?:^|\n)\s*\/review\b[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9}))/g;
+  /^\s*\/review(?:[ \t]+#?(\d{1,9})|\b[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})))/;
 
 const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 
@@ -169,9 +169,11 @@ function collectGhPrCreateBindings(
   return bindings;
 }
 
-// Only USER text records count: assistant prose, tool calls, and tool
-// results (read_file echoes of fixtures/docs) quote `/review <N>` without
-// requesting one, and raw-text matching over escaped JSON would bind them.
+// Only USER records count, and only the prompt the user typed: assistant
+// prose, tool calls, and tool results (read_file echoes of fixtures/docs)
+// quote `/review <N>` without requesting one, and the parts after the first
+// carry @-imported file content whose line-leading examples would forge
+// bindings.
 function collectReviewedPrNumbers(
   raw: string,
   workspaceRepoKey: string | undefined,
@@ -191,34 +193,33 @@ function collectReviewedPrNumbers(
       continue;
     }
     if (record.type !== 'user') continue;
-    for (const part of record.message?.parts ?? []) {
-      if (typeof part.text !== 'string' || part.functionResponse) {
-        continue;
-      }
-      for (const match of part.text.matchAll(REVIEW_COMMAND_PATTERN)) {
-        const bareNumber = match[1];
-        if (bareNumber !== undefined) {
-          // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
-          // declines it, so it must never count as a binding.
-          if (Number(bareNumber) > 0) numbers.add(Number(bareNumber));
-          continue;
-        }
-        const url = match[2];
-        const urlNumber = match[3];
-        if (url === undefined || urlNumber === undefined) continue;
-        // The URL form names the repo it reviewed. Resolution would prefer
-        // the workspace's own page and bind its same-numbered PR instead,
-        // so gate here: a foreign repo's PR must never bind into this
-        // workspace, and an unknown workspace key fails closed.
-        if (
-          workspaceRepoKey === undefined ||
-          repoKeyFromWebUrl(url) !== workspaceRepoKey
-        ) {
-          continue;
-        }
-        if (Number(urlNumber) > 0) numbers.add(Number(urlNumber));
-      }
+    const firstPart = record.message?.parts?.[0];
+    if (typeof firstPart?.text !== 'string' || firstPart.functionResponse) {
+      continue;
     }
+    const match = REVIEW_COMMAND_PATTERN.exec(firstPart.text);
+    if (!match) continue;
+    const bareNumber = match[1];
+    if (bareNumber !== undefined) {
+      // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
+      // declines it, so it must never count as a binding.
+      if (Number(bareNumber) > 0) numbers.add(Number(bareNumber));
+      continue;
+    }
+    const url = match[2];
+    const urlNumber = match[3];
+    if (url === undefined || urlNumber === undefined) continue;
+    // The URL form names the repo it reviewed. Resolution would prefer
+    // the workspace's own page and bind its same-numbered PR instead,
+    // so gate here: a foreign repo's PR must never bind into this
+    // workspace, and an unknown workspace key fails closed.
+    if (
+      workspaceRepoKey === undefined ||
+      repoKeyFromWebUrl(url) !== workspaceRepoKey
+    ) {
+      continue;
+    }
+    if (Number(urlNumber) > 0) numbers.add(Number(urlNumber));
   }
   return [...numbers];
 }
@@ -257,71 +258,64 @@ export async function backfillWorkspaceSessionPrs(
   const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
-        archiveState,
-      });
-      for (const item of page.items) {
-        // `item.sessionId` comes verbatim from the transcript's first
-        // record, and every sidecar path below embeds it — a traversal id
-        // must be rejected before path construction, the same way the
-        // sibling sidecar routes gate.
-        if (!isValidSessionId(item.sessionId)) continue;
-        result.scanned += 1;
-        const dir = path.dirname(
-          sessionService.getWorktreeSessionPathForArchiveState(
-            item.sessionId,
-            archiveState,
-          ),
-        );
-        let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
-        try {
-          worktree = await readWorktreeSession(
-            path.join(dir, `${item.sessionId}.worktree.json`),
-          );
-        } catch {
-          worktree = null;
-        }
-        let transcriptRaw: string;
-        try {
-          transcriptRaw = await fs.readFile(
-            path.join(dir, `${item.sessionId}.jsonl`),
-            'utf8',
-          );
-        } catch {
-          transcriptRaw = '';
-        }
-        const direct = collectGhPrCreateBindings(
-          transcriptRaw,
-          workspaceRepoKey,
-        );
-        const reviewed = collectReviewedPrNumbers(
-          transcriptRaw,
-          workspaceRepoKey,
-        );
-        const conventionNumber = worktree
-          ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
-          : undefined;
-        if (
-          conventionNumber === undefined &&
-          direct.size === 0 &&
-          reviewed.length === 0
-        ) {
-          continue;
-        }
-        candidates.push({
-          sessionId: item.sessionId,
+    // Enumerate the chats dir directly: paging listSessions would
+    // permanently skip every session whose mtime ties a page's last entry
+    // (its cursor boundary is a strict `<`).
+    for (const sessionId of await sessionService.enumerateSessionIdsForArchiveState(
+      archiveState,
+    )) {
+      // The id comes verbatim from the transcript's first record, and every
+      // sidecar path below embeds it — a traversal id must be rejected
+      // before path construction, the same way the sibling sidecar routes
+      // gate.
+      if (!isValidSessionId(sessionId)) continue;
+      result.scanned += 1;
+      const dir = path.dirname(
+        sessionService.getWorktreeSessionPathForArchiveState(
+          sessionId,
           archiveState,
-          conventionNumber,
-          direct,
-          reviewed,
-        });
+        ),
+      );
+      let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
+      try {
+        worktree = await readWorktreeSession(
+          path.join(dir, `${sessionId}.worktree.json`),
+        );
+      } catch {
+        worktree = null;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      let transcriptRaw: string;
+      try {
+        transcriptRaw = await fs.readFile(
+          path.join(dir, `${sessionId}.jsonl`),
+          'utf8',
+        );
+      } catch {
+        transcriptRaw = '';
+      }
+      const direct = collectGhPrCreateBindings(transcriptRaw, workspaceRepoKey);
+      const reviewed = collectReviewedPrNumbers(
+        transcriptRaw,
+        workspaceRepoKey,
+      );
+      const conventionNumber = worktree
+        ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
+        : undefined;
+      if (
+        conventionNumber === undefined &&
+        direct.size === 0 &&
+        reviewed.length === 0
+      ) {
+        continue;
+      }
+      candidates.push({
+        sessionId,
+        archiveState,
+        conventionNumber,
+        direct,
+        reviewed,
+      });
+    }
   }
   if (candidates.length === 0) return result;
 
@@ -387,6 +381,14 @@ export async function backfillWorkspaceSessionPrs(
       numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
+    // Offer at most one full sidecar: weak candidates beyond the cap would
+    // only be appended past it and re-appended on every re-run, rotating
+    // the persisted list until the convention binding itself is evicted.
+    // Dropping them here keeps re-runs idempotent — the strongest candidates
+    // land in the persisted tail and later runs find everything bound.
+    if (numbers.length > SESSION_PR_LIST_LIMIT) {
+      numbers.splice(0, numbers.length - SESSION_PR_LIST_LIMIT);
+    }
     // One unwritable sidecar (EISDIR/EACCES/EIO) must not abort the whole
     // workspace run and drop every later candidate; record and continue.
     try {

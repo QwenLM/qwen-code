@@ -1688,6 +1688,53 @@ export class SessionService {
   }
 
   /**
+   * Enumerates persisted session ids for one archive state by scanning the
+   * chats directory directly, in deterministic filename order. Paging
+   * `listSessions` instead would permanently miss every session whose mtime
+   * ties a page's last entry (its mtime cursor boundary is a strict `<`),
+   * so bulk consumers that need the FULL set must use this instead of
+   * paging. Membership is checked the same way as `listSessions`.
+   */
+  async enumerateSessionIdsForArchiveState(
+    archiveState: SessionArchiveState,
+  ): Promise<string[]> {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    fileNames.sort();
+    const sessionIds: string[] = [];
+    let filesProcessed = 0;
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed += 1;
+      const filePath = path.join(chatsDir, name);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) continue;
+        const firstRecord = records[0]!;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          ))
+        ) {
+          continue;
+        }
+        sessionIds.push(firstRecord.sessionId);
+      } catch {
+        continue;
+      }
+    }
+    return sessionIds;
+  }
+
+  /**
    * Reads all records from a session file.
    */
   private async readAllRecords(filePath: string): Promise<ChatRecord[]> {

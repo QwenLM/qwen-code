@@ -834,6 +834,123 @@ describe('backfillWorkspaceSessionPrs', () => {
       ),
     ).toBeNull();
   });
+
+  it('stays idempotent when candidates exceed the sidecar cap', async () => {
+    // With 11+ candidates, re-runs must not keep offering the weak numbers
+    // the cap evicted: re-appending them after the convention entry would
+    // rotate the persisted list on every run until the convention binding
+    // itself falls off the head.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-7', 'worktree-pr-7');
+    for (const n of [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]) {
+      await appendUserText(SESSION_A, `/review ${n}`);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+
+    const run1 = await backfillWorkspaceSessionPrs(runtime);
+    const afterRun1 = await readSessionPrs(prPath);
+    const run2 = await backfillWorkspaceSessionPrs(runtime);
+    const afterRun2 = await readSessionPrs(prPath);
+
+    expect(run1.bound).toBe(10);
+    expect(run2).toMatchObject({ bound: 0, alreadyBound: 10 });
+    expect(afterRun2?.map((p) => p.number)).toEqual(
+      afterRun1?.map((p) => p.number),
+    );
+    expect(afterRun2?.map((p) => p.number)).toContain(7);
+  });
+
+  it('does not bind /review lines inside @-imported content parts', async () => {
+    // @-imports persist the EXPANDED request: the typed prompt leads, the
+    // inlined file body follows as later text parts. Only the typed prompt
+    // may request a review — expanded content is arbitrary text, and a part
+    // starting in a line-leading `/review N` example must not seed a
+    // binding.
+    await seedSession(SESSION_A);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      transcriptRecord(SESSION_A, 'user', [
+        { text: '@docs/users/features/code-review.md summarize this' },
+        {
+          text: '/review 123\nprose\n/review 456',
+        },
+      ]) + '\n',
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'docs'), pr(456, 'docs')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not bind a bare number on the line after /review', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review\n5 things broke today');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'fix/5')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+  });
+
+  it('scans sessions whose mtime ties a pagination boundary', async () => {
+    // 1007 sessions, four of them sharing the mtime of the 1000th file:
+    // listSessions' strict-`<` cursor boundary drops those boundary twins
+    // on every paging run, so a pager can never reach them. Backfill must.
+    const total = 1007;
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const baseMtime = Date.UTC(2026, 7, 1);
+    for (let i = 0; i < total; i++) {
+      const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+      const mtimeMs =
+        i >= 999 && i <= 1002 ? baseMtime - 999_000 : baseMtime - i * 1000;
+      const mtime = new Date(mtimeMs);
+      await fsp.utimes(filePath, mtime, mtime);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.scanned).toBe(total);
+  }, 60_000);
 });
 
 describe('registerSessionPrBackfillRoutes', () => {

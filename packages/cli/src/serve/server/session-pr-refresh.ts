@@ -70,42 +70,37 @@ export async function refreshWorkspaceSessionPrStates(
   }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
+    // Enumerate the chats dir directly: paging listSessions would
+    // permanently skip every session whose mtime ties a page's last entry
+    // (its mtime cursor boundary is a strict `<`).
+    for (const sessionId of await sessionService.enumerateSessionIdsForArchiveState(
+      archiveState,
+    )) {
+      // The id comes verbatim from the transcript's first record and names
+      // the sidecar path below — a traversal id must be rejected before
+      // path construction (the backfill route shares this sink).
+      if (!isValidSessionId(sessionId)) continue;
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
         archiveState,
-      });
-      for (const item of page.items) {
-        // `item.sessionId` comes verbatim from the transcript's first
-        // record and names the sidecar path below — a traversal id must be
-        // rejected before path construction (the backfill route shares
-        // this sink).
-        if (!isValidSessionId(item.sessionId)) continue;
-        const prPath = sessionService.getPrSessionPathForArchiveState(
-          item.sessionId,
-          archiveState,
-        );
-        let prs: Awaited<ReturnType<typeof readSessionPrs>>;
-        try {
-          prs = await readSessionPrs(prPath);
-        } catch {
-          continue;
-        }
-        if (!prs) continue;
-        scanned += 1;
-        const bindings = prs
-          // Only merged is terminal: closed PRs can be reopened, so they
-          // keep participating in the sweep.
-          .filter((p) => p.state !== 'merged')
-          .map((p) => ({ number: p.number, url: p.url }));
-        if (bindings.length > 0) {
-          pendingBindings.push({ prPath, bindings });
-        }
+      );
+      let prs: Awaited<ReturnType<typeof readSessionPrs>>;
+      try {
+        prs = await readSessionPrs(prPath);
+      } catch {
+        continue;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      if (!prs) continue;
+      scanned += 1;
+      const bindings = prs
+        // Only merged is terminal: closed PRs can be reopened, so they
+        // keep participating in the sweep.
+        .filter((p) => p.state !== 'merged')
+        .map((p) => ({ number: p.number, url: p.url }));
+      if (bindings.length > 0) {
+        pendingBindings.push({ prPath, bindings });
+      }
+    }
   }
   if (pendingBindings.length === 0) return { scanned, updated: 0 };
 
