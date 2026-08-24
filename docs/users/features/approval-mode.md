@@ -164,9 +164,11 @@ letting the model run unattended.
   `time rm -rf build` and `python3 -c "…"` would launder a write past the
   analysis.
 - **Build and package tools** (`make`, `npm`, `npx`, `pnpm`, `yarn`, `cargo`,
-  `cmake`, `gcc`, and similar). Their payload is a Makefile recipe or a package
-  script — it never appears in the command line, so nothing about
-  `make` on its own says what `make` will do.
+  `cmake`, `gcc`, `c++`, `clang`, `rustc`, `javac`, `ninja`, `scons`, `pip`,
+  `uv`, `uvx`, `poetry`, `conda`, `gradle`, `mvn`, `docker`, and similar).
+  Their payload is a Makefile recipe, a build manifest, a package downloaded
+  mid-command, or a plugin the compiler loads — it never appears in the command
+  line, so nothing about `make` on its own says what `make` will do.
 - **Shell builtins that rebind name resolution or assign variables** (`hash`,
   `alias`, `unalias`, `bind`, `complete`, `enable`, `set`, `shopt`, `read`,
   `getopts`, `mapfile`, and similar). One of these can change what a _later_
@@ -181,7 +183,15 @@ so the vouch is honoured only for an invocation it can read literally:
   `$cmd` and `*` all reach the binary as `rm`), so `ib $cmd` prompts;
 - no argument may name a command Qwen Code knows, which is why
   `ib exec rm -rf build` prompts even though `ib` is vouched and `ib exec` is
-  not otherwise special.
+  not otherwise special. `.` and `..` are the exception: as arguments they name
+  a directory, not the POSIX spelling of `source`, so `ib list .` is fine.
+
+A vouched command is also treated as a possible `git` frontend. `git diff` and
+`git status` are downgraded to a prompt when the repository's own
+`.git/config` sets `diff.external` or `core.fsmonitor`, because git then runs a
+script the command line never names; a wrapper you vouched for gets the same
+treatment, since Qwen Code cannot know which of its verbs reach git. In a
+repository that plants neither setting — the ordinary case — nothing changes.
 
 The cost is an occasional extra prompt — when a CLI's own sub-command shares a
 name with a real command, or when an argument needs quoting. Prompting costs a
@@ -192,8 +202,9 @@ a string containing shell metacharacters) is also ignored, and so is the whole
 setting if it is not a list of strings. Entries are lowercased, and a command
 is matched by its exact lowercase name — `MyTool` and `mytool` are different
 binaries on Linux, so an invocation spelled with capitals still prompts. A
-trailing `.exe` is ignored on both sides, so listing `mytool` also covers
-`mytool.exe`.
+trailing `.exe` is stripped from the _invocation_, so listing `mytool` covers
+both `mytool` and `mytool.exe`. It is not stripped from the entry: listing
+`mytool.exe` covers only `mytool.exe`. List the bare name.
 
 **Scope.** This setting applies only in Plan Mode. In every other mode, use
 `permissions.allow` (e.g. `"Bash(ib *)"`) to auto-approve a command.

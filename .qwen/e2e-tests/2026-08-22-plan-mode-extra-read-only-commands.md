@@ -76,19 +76,21 @@ there at all.)
 ### 3. Command substitution still prompts
 
 - Ask for `ib domain list $(whoami)`.
-- **Expect**: the one-time `unknown` confirmation prompt, with "Always allow"
-  hidden.
+- **Expect**: the `unknown` confirmation prompt, with "Always allow" hidden.
+  The approval is `ProceedOnce`, so it does not stick — repeating the same
+  invocation prompts again, as in case 1.
 
 ### 4. Environment-assignment prefix still prompts
 
 - Ask for `IB_TOKEN=x ib domain list`.
-- **Expect**: the one-time `unknown` confirmation prompt.
+- **Expect**: the `unknown` confirmation prompt, again re-firing on every
+  identical invocation.
 
 ### 5a. A pipe into an unknown command still prompts
 
 - Ask for `ib domain list | badcmd`.
-- **Expect**: the one-time `unknown` confirmation prompt — unchanged from
-  baseline.
+- **Expect**: the `unknown` confirmation prompt, re-firing per invocation —
+  unchanged from baseline.
 
 ### 5b. A pipe into a known read-only command runs
 
@@ -136,6 +138,40 @@ these outcomes, since each refusal happens at the argument layer — ask for:
 
 This is what keeps the guarantee from depending on an exhaustive list of
 launcher names.
+
+### 6b-2. Payload-executing tools fail closed under their own names
+
+Add `"uv"`, `"gradle"`, `"ninja"`, `"c++"`, and `"run0"` to
+`extraReadOnlyCommands` and restart. Each of these takes its payload from a
+file, a manifest, or a downloaded package rather than from argv, so no
+argument inspection can see what it runs.
+
+- `uv run ./probe.py`, `gradle build`, `ninja`, `c++ -fplugin=./probe.so x.cpp`,
+  `run0 ./probe` — **expect** a prompt for each.
+- `luajit-2.1.0-beta3 probe.lua` and `python3.7m probe.py`, with those exact
+  names vouched — **expect** prompts. Versioned spellings are matched by shape,
+  not listed release by release.
+
+### 6d. A vouched git frontend gets git's planted-config gate
+
+`git diff` and `git status` are downgraded when a repository's own
+`.git/config` sets `diff.external` or `core.fsmonitor`, because git then runs a
+script the command line never names. A vouched wrapper must not escape that.
+
+```bash
+cd /tmp/ib-e2e && git init -q hostile && cd hostile
+git config core.fsmonitor example-fsmonitor
+printf '#!/bin/sh\nexec git "$@"\n' > /tmp/ib-e2e/bin/gitw
+chmod +x /tmp/ib-e2e/bin/gitw
+```
+
+With `"gitw"` vouched, launch the CLI from `/tmp/ib-e2e/hostile`:
+
+- Ask for `gitw status`. **Expect**: a prompt, the same one literal
+  `git status` gets here.
+- Return to `/tmp/ib-e2e` (no planted config) and ask again. **Expect**: no
+  prompt. The gate is keyed to the repository's risk, not to the vouch, so an
+  ordinary checkout is unaffected.
 
 ### 6c. A workspace cannot vouch for itself
 

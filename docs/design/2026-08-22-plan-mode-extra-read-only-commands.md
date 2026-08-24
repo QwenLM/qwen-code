@@ -62,7 +62,7 @@ if/else chain, ending in:
 ```ts
 } else if (READ_ONLY_ROOT_COMMANDS.has(root)) {
   result = 'read-only';
-} else if (extra.has(root)) {
+} else if (extra.has(root) || extra.has(root.replace(/\.exe$/, ''))) {
   result = vouchedRootIsSafe(root, argNodes) ? 'read-only' : 'unknown';
 } else {
   result = 'unknown';
@@ -109,9 +109,12 @@ Which roots are _refusable_ is deliberately not decided here — see below.
 ### Who may vouch
 
 The vouch is taken from user, system and system-default settings only;
-`stripWorkspaceSecurityBypasses` drops it from workspace scope, and a warning
-fires if a workspace file sets it. This is the same treatment
-`security.allowPrivateNetworkHooks` gets, for the same reason.
+`stripWorkspaceRestrictedSettings` drops it from workspace scope, and a warning
+fires if a workspace file sets it. Both read the one
+`WORKSPACE_RESTRICTED_SETTINGS` list in `settingsUtils.ts`, which is also what
+filters the settings dialog, so the three surfaces cannot drift apart. This is
+the same treatment `security.allowPrivateNetworkHooks` gets, for the same
+reason.
 
 It is also what bounds everything below. Four review rounds produced four
 batches of roots whose payload the classifier cannot see — launchers,

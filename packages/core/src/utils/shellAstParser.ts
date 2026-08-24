@@ -200,11 +200,26 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // can see it either.
   'cargo',
   'cc',
+  'c++',
+  'clang',
+  'clang++',
   'cmake',
+  'conda',
   'go',
   'g++',
   'gcc',
+  'gradle',
+  'javac',
   'make',
+  'mvn',
+  'ninja',
+  'pip',
+  'pip3',
+  'poetry',
+  'rustc',
+  'scons',
+  'uv',
+  'uvx',
   // Container runtimes: the payload can live entirely inside the image.
   'docker',
   'podman',
@@ -215,19 +230,26 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   // Privilege, namespace, scheduling, and process launchers.
   'at',
   'batch',
+  'bwrap',
   'crontab',
   'caffeinate',
   'chroot',
   'doas',
   'env',
+  'fakeroot',
   'flock',
   'ionice',
+  'linux32',
+  'linux64',
+  'newgrp',
   'nice',
   'nohup',
   'nsenter',
   'parallel',
   'pkexec',
+  'run0',
   'runuser',
+  'setarch',
   'script',
   'rsh',
   'setsid',
@@ -237,6 +259,7 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'su',
   'sudo',
   'sudoedit',
+  'systemd-nspawn',
   'systemd-run',
   'time',
   'timeout',
@@ -276,12 +299,16 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Versioned spellings of the interpreters above — `python3.12`, `lua5.4`, and
- * the free-threaded `python3.13t`. Listing every release of every interpreter
- * is not a finite job.
+ * Versioned spellings of the interpreters and compiler drivers above —
+ * `python3.12`, `lua5.4`, the free-threaded `python3.13t`, Debian's
+ * hyphenated `gcc-13` and `clang-15`, the historical ABI suffix `python3.7m`,
+ * and upstream tarball spellings such as `luajit-2.1.0-beta3` and
+ * `expect5.45`. Listing every release of every interpreter is not a finite
+ * job, so the family name is matched and everything after the first digit is
+ * accepted as a version.
  */
 const VERSIONED_INTERPRETER =
-  /^(?:python|ruby|perl|php|lua|tclsh|wish|node|java)[0-9]+(?:\.[0-9]+)*t?$/;
+  /^(?:python|ruby|perl|php|luajit|lua|tclsh|wish|node|javac|java|expect|pip|clang\+\+|clang|gcc|g\+\+|c\+\+|cc|rustc)-?[0-9][0-9a-z.-]*$/;
 
 /** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
 const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
@@ -292,12 +319,19 @@ const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
  * `.exe`, so `/bin/rm`, `rm.exe` and `--exec=/bin/rm` all name `rm` while an
  * ordinary path argument does not — `./report.json` names `report.json`, not
  * the `.` that is the POSIX spelling of `source`.
+ *
+ * `.` and `..` contribute nothing: as a whole word they are the directory a
+ * read-only CLI is routinely pointed at (`ib list .`), and they can never
+ * name an executable in argument position. The POSIX `source` spelling is
+ * refused as a *root* by the dispatch chain, which reaches
+ * `NEVER_READ_ONLY_ROOT_COMMANDS` before any vouch is consulted.
  */
 function namesAKnownCommand(word: string): boolean {
   return word
     .toLowerCase()
     .split('=')
     .flatMap((part) => {
+      if (part === '.' || part === '..') return [];
       const basename = part.split(/[\\/]/).pop() ?? '';
       return [basename, basename.replace(/\.exe$/, '')];
     })
@@ -1429,9 +1463,24 @@ function evaluateStatementSafety(
   return childrenSafety(node, extra, 'unknown');
 }
 
+/**
+ * Whether a repository's own `.git/config` turns this command into a write.
+ *
+ * A hostile checkout can set `diff.external` or `core.fsmonitor` to a script
+ * of its choosing, so `git diff` and `git status` run attacker code without
+ * either word appearing in the command.
+ *
+ * A caller-vouched root gets the same treatment as literal `git`, and without
+ * the sub-command filter: the vouch exists for wrapper CLIs, a wrapper is
+ * free to spell its verb anywhere in argv (the reporting issue's own CLI puts
+ * it in the *second* argument), and this file cannot know which of a private
+ * binary's verbs reach git. Repositories that plant nothing are unaffected —
+ * `getLocalGitConfigRisk` reports no risk and the command stays read-only.
+ */
 function localGitConfigMakesCommandUnsafe(
   root: SyntaxNode,
   cwd: string,
+  extra: ReadonlySet<string>,
 ): boolean {
   let changedDirectory = false;
   let usesDiff = false;
@@ -1443,7 +1492,14 @@ function localGitConfigMakesCommandUnsafe(
       changedDirectory = true;
       continue;
     }
-    if (name !== 'git') continue;
+    if (name === null) continue;
+    if (name !== 'git') {
+      if (!extra.has(name) && !extra.has(name.replace(/\.exe$/, ''))) continue;
+      if (changedDirectory) return true;
+      usesDiff = true;
+      usesStatus = true;
+      continue;
+    }
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
@@ -1491,7 +1547,7 @@ async function classifyInternal(
       if (normalizedSafety !== 'read-only') return 'unknown';
     }
     if (safety !== 'read-only' || !cwd) return safety;
-    return localGitConfigMakesCommandUnsafe(root, cwd)
+    return localGitConfigMakesCommandUnsafe(root, cwd, extra)
       ? 'unknown'
       : 'read-only';
   } finally {

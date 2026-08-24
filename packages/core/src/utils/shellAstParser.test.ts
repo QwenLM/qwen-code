@@ -130,6 +130,40 @@ describe('isShellCommandReadOnlyAST', () => {
       );
     });
 
+    it('gives a vouched git frontend the same planted-config gate', async () => {
+      // The vouch exists for wrapper CLIs, so keying this defence to the
+      // literal name `git` would let `gitw status` run a planted
+      // `core.fsmonitor` that `git status` is stopped from running. A wrapper
+      // is free to spell its verb anywhere in argv, so the gate is not
+      // sub-command filtered for vouched roots.
+      const vouched = { extraReadOnlyRoots: new Set(['gitw']) };
+      const clean = createRepo();
+      // A repository that plants nothing is unaffected: the gate is keyed to
+      // the risk, not to the vouch.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('gitw status', clean, {
+          extraReadOnlyRoots: new Set(['gitw']),
+        }),
+      ).toBe(true);
+
+      const hostile = createRepo();
+      gitConfig(hostile, 'core.fsmonitor', 'example-fsmonitor');
+      gitConfig(hostile, 'diff.external', 'example-external-diff');
+      for (const command of ['gitw status', 'gitw diff', 'gitw repo status']) {
+        expect(
+          await isShellCommandReadOnlyASTInDirectory(command, hostile, vouched),
+        ).toBe(false);
+      }
+      // Without the vouch the wrapper was already prompting, and literal
+      // `git` is unchanged.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('gitw status', hostile),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', hostile),
+      ).toBe(false);
+    });
+
     it('fails closed instead of simulating a changed directory', async () => {
       const cwd = createRepo();
       const target = createRepo();
@@ -513,7 +547,7 @@ describe('isShellCommandReadOnlyAST', () => {
 describe('substitution hidden in an expansion pattern word', () => {
   // tree-sitter-bash parses the pattern word as a leaf, so the substitution
   // never becomes a command_substitution node — but bash still runs it.
-  it.each(['%%', '%', '##', '#'])(
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
     'treats ${var%so$(cmd)} as unknown',
     async (operator) => {
       expect(
@@ -536,7 +570,7 @@ describe('substitution hidden in an expansion pattern word', () => {
 
   // bash runs `<(…)` and `>(…)` in a pattern word exactly as it runs `$(…)`,
   // and tree-sitter emits no node for those either.
-  it.each(['%%', '%', '##', '#'])(
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
     'treats a process substitution in ${var%so…} as unknown',
     async (operator) => {
       for (const opener of ['<(', '>(']) {
@@ -556,12 +590,36 @@ describe('substitution hidden in an expansion pattern word', () => {
 
   // `${v@P}` runs any $(…) held in the variable's value, and in a pattern word
   // it is a leaf, so the @/P child-adjacency check never sees it either.
-  it.each(['%%', '%', '##', '#'])(
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
     'treats ${var%so${v@P}} as unknown',
     async (operator) => {
       expect(
         await classifyShellCommandSafety(`echo \${x${operator}\${v@P}}`),
       ).toBe('unknown');
+    },
+  );
+
+  // `${var/pat/rep}` has two halves and bash expands both, so each needs its
+  // own pin — the pattern half is where the other operators put their word,
+  // and the replacement half is the one an operator-shaped test never reaches.
+  // A `$(…)` here does become a real command_substitution node, so it is
+  // classified from the command inside it — `write`, which is stronger than
+  // the `unknown` the leaf-parsed spellings get. Both are refusals; they are
+  // pinned apart so that a spelling silently changing category is a failure.
+  it.each([
+    ['pattern', 'echo ${x/$(rm -rf build)/rep}', 'write'],
+    ['pattern', 'echo ${x/`rm -rf build`/rep}', 'unknown'],
+    ['pattern', 'echo ${x/<(rm -rf build)/rep}', 'unknown'],
+    ['pattern', 'echo ${x/${v@P}/rep}', 'unknown'],
+    ['replacement', 'echo ${x/pat/$(rm -rf build)}', 'write'],
+    ['replacement', 'echo ${x/pat/`rm -rf build`}', 'unknown'],
+    ['replacement', 'echo ${x/pat/<(rm -rf build)}', 'unknown'],
+    ['replacement', 'echo ${x//pat/$(rm -rf build)}', 'write'],
+  ])(
+    'refuses a substitution in the %s half of ${var/…/…}',
+    async (_half, command, expected) => {
+      expect(await classifyShellCommandSafety(command)).toBe(expected);
+      expect(await classifyShellCommandSafety(`"${command}"`)).toBe(expected);
     },
   );
 
@@ -590,6 +648,28 @@ describe('substitution hidden in a heredoc body', () => {
     expect(
       await classifyShellCommandSafety('cat <<-EOF\n`rm -rf build`\nEOF'),
     ).toBe('unknown');
+  });
+
+  it('treats $(…) in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the `$(` branch of the body
+    // regex is the only thing that catches this — the AST walk sees no
+    // command_substitution node to classify.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t$(rm -rf build)\n\tEOF'),
+    ).not.toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n$(rm -rf build)\nEOF'),
+    ).not.toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n$(rm -rf build)\nEOF'),
+    ).not.toBe('read-only');
+    // Nested one level deep, where the closing paren is not the last
+    // character of the line.
+    expect(
+      await classifyShellCommandSafety(
+        'cat <<-EOF\n\tprefix $(rm -rf build) suffix\n\tEOF',
+      ),
+    ).not.toBe('read-only');
   });
 
   it('treats ${v@P} in a body as unsafe, tab-stripped form included', async () => {
@@ -1272,6 +1352,19 @@ describe('extraReadOnlyRoots', () => {
     'node20',
     'java17',
     'python3.13t',
+    // One spelling per regex family, so a family dropped from the alternation
+    // fails here rather than silently un-refusing its releases.
+    'wish8.6',
+    'expect5.45',
+    'javac11',
+    'pip3.11',
+    'rustc-1.75',
+    // Upstream tarball, Debian hyphen, and the historical ABI suffix.
+    'luajit-2.1.0-beta3',
+    'gcc-13',
+    'clang-15',
+    'c++-14',
+    'python3.7m',
   ])('refuses to vouch the versioned interpreter %s', async (root) => {
     expect(
       await classifyShellCommandSafety(`${root} verify.py`, {
@@ -1319,8 +1412,47 @@ describe('extraReadOnlyRoots', () => {
       'crontab',
       'go',
       'docker',
+      // Payload-executing siblings of the names already above. Each runs code
+      // that never appears in argv: a lockfile, a build manifest, a package
+      // downloaded mid-command, or a plugin the compiler dlopens.
+      'uv',
+      'uvx',
+      'pip',
+      'poetry',
+      'conda',
+      'gradle',
+      'mvn',
+      'ninja',
+      'scons',
+      'clang',
+      'rustc',
+      'javac',
     ]) {
       expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
+    }
+  });
+
+  // A refusal list built by family is only as good as its edges: each pair
+  // below is one listed name beside the differently-spelled sibling that does
+  // the same thing, which is where every round of this review found a gap.
+  it.each([
+    ['sg', 'newgrp'],
+    ['sudo', 'run0'],
+    ['cc', 'c++'],
+    ['g++', 'clang++'],
+    ['chroot', 'bwrap'],
+    ['systemd-run', 'systemd-nspawn'],
+    ['nsenter', 'setarch'],
+    ['npm', 'pip'],
+    ['cmake', 'ninja'],
+  ])('refuses %s and its sibling %s alike', async (listed, sibling) => {
+    for (const root of [listed, sibling]) {
+      expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
+      expect(
+        await classifyShellCommandSafety(`${root} ./payload`, {
+          extraReadOnlyRoots: new Set([root]),
+        }),
+      ).toBe('unknown');
     }
   });
 
@@ -1337,6 +1469,11 @@ describe('extraReadOnlyRoots', () => {
       'ib get 报告.md',
       'ib get café.txt',
       'ib get 文档/报告.md',
+      // `.` is the POSIX spelling of `source`, but only in root position —
+      // as an argument it is the directory a read-only CLI is pointed at.
+      'ib list .',
+      'ib list ..',
+      'ib list ./',
     ]) {
       expect(await classifyShellCommandSafety(command, withIb)).toBe(
         'read-only',
