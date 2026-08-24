@@ -184,7 +184,7 @@ describe('readManyFiles', () => {
       expect(result.files).toHaveLength(0);
     });
 
-    it('drops a validated path when inode identity is unverifiable', async () => {
+    it('surfaces an error when validated inode identity is unverifiable', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('zero-inode.txt');
       const approvedStats = await fs.stat(absolutePath);
@@ -224,7 +224,13 @@ describe('readManyFiles', () => {
         expect(contentToString(result.contentParts)).not.toContain(
           'Content of zero-inode.txt',
         );
-        expect(result.files).toHaveLength(0);
+        expect(contentToString(result.contentParts)).toContain(
+          'Validated file identity is unavailable on this filesystem',
+        );
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.error).toContain(
+          'Validated file identity is unavailable on this filesystem',
+        );
       } finally {
         statSpy.mockRestore();
         openSpy.mockRestore();
