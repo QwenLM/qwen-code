@@ -280,6 +280,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
+                  supersededFindingsDisplay: undefined,
                   images: undefined,
                   omittedImageCount: undefined,
                 };

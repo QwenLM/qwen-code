@@ -336,6 +336,47 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     }
   });
 
+  it('falls back to text for malformed findings_list payloads even when permissive keys are present', () => {
+    // A `findings_list` record must be judged by its full shape BEFORE the
+    // permissive display arms run: `ansiOutput`/`fileDiff` keys used to
+    // short-circuit the OR chain and smuggle an unvalidated payload through
+    // as structured output, which then crashed FindingsDisplay.
+    const payloads: unknown[] = [
+      {
+        type: 'findings_list',
+        ansiOutput: '',
+        findings: [{ severity: 'bogus' }],
+      },
+      { type: 'findings_list', fileDiff: '--- a\n+++ b', findings: null },
+      { type: 'findings_list', ansiOutput: 'x' },
+    ];
+    for (const rawOutput of payloads) {
+      const updates = reduceDaemonEventToTuiUpdates({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-findings-bypass',
+            kind: 'think',
+            title: 'ReportFindings',
+            status: 'completed',
+            rawOutput,
+          },
+        },
+      });
+      const resultDisplay = (
+        updates[0] as {
+          item: { tools: Array<{ resultDisplay: unknown }> };
+        }
+      ).item.tools[0].resultDisplay;
+      expect(typeof resultDisplay).toBe('string');
+      expect(resultDisplay as string).toContain('findings_list');
+    }
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({

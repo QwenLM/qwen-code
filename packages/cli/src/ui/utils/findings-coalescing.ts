@@ -35,8 +35,10 @@ export function isFindingsListDisplay(
 
 /**
  * Keeps only the last delivered findings list across the tool groups; every
- * earlier one takes the replacement marker. Returns the input array itself
- * when there is nothing to coalesce (at most one delivered list).
+ * earlier one takes the replacement marker. The superseded display stays on
+ * the tool so a rewind past the replacing call can restore it. Returns the
+ * input array itself when there is nothing to coalesce (at most one
+ * delivered list).
  */
 export function coalesceFindingsHistoryItems<T extends HistoryItemWithoutId>(
   items: T[],
@@ -64,11 +66,49 @@ export function coalesceFindingsHistoryItems<T extends HistoryItemWithoutId>(
       if (i === lastItem && j === lastTool) return tool;
       if (!isFindingsListDisplay(tool.resultDisplay)) return tool;
       toolsChanged = true;
-      return { ...tool, resultDisplay: SUPERSEDED_FINDINGS_MESSAGE };
+      return {
+        ...tool,
+        resultDisplay: SUPERSEDED_FINDINGS_MESSAGE,
+        supersededFindingsDisplay:
+          tool.supersededFindingsDisplay ?? tool.resultDisplay,
+      };
     });
     if (!toolsChanged) return item;
     changed = true;
     return { ...item, tools } as T;
   });
   return changed ? next : items;
+}
+
+/**
+ * Truncation/rewind repair: restores superseded displays whose replacing
+ * call no longer survives, then coalesces the survivors again so the
+ * keep-only-the-last-list invariant holds over the truncated transcript.
+ */
+export function recoalesceFindingsHistoryItems<T extends HistoryItemWithoutId>(
+  items: T[],
+): T[] {
+  let restored = false;
+  const next = items.map((item) => {
+    if (item.type !== 'tool_group') return item;
+    let toolsChanged = false;
+    const tools: IndividualToolCallDisplay[] = item.tools.map((tool) => {
+      if (
+        tool.resultDisplay !== SUPERSEDED_FINDINGS_MESSAGE ||
+        !tool.supersededFindingsDisplay
+      ) {
+        return tool;
+      }
+      toolsChanged = true;
+      return {
+        ...tool,
+        resultDisplay: tool.supersededFindingsDisplay,
+        supersededFindingsDisplay: undefined,
+      };
+    });
+    if (!toolsChanged) return item;
+    restored = true;
+    return { ...item, tools } as T;
+  });
+  return coalesceFindingsHistoryItems(restored ? next : items);
 }

@@ -425,6 +425,81 @@ describe('useHistoryManager', () => {
       expect(recentTool.detailedDisplay).toBe('full secret file content here');
     });
 
+    it('also drops the carried superseded findings display when compacting (Ctrl+O privacy)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+      const findingsGroup = (callId: string) => ({
+        type: 'tool_group' as const,
+        tools: [
+          {
+            callId,
+            name: 'report_findings',
+            description: 'Report findings',
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+            resultDisplay: {
+              type: 'findings_list' as const,
+              findings: [
+                {
+                  id: 'R1-1',
+                  severity: 'Critical' as const,
+                  file: 'src/foo.ts',
+                  summary: 's',
+                  shortSummary: 's',
+                  failureScenario: 'f',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      act(() => {
+        result.current.addItem(findingsGroup('call-1'), ts);
+      });
+      act(() => {
+        result.current.addItem(findingsGroup('call-2'), ts + 1);
+      });
+      // The second report superseded the first; the first tool now carries
+      // the marker plus the original display for rewind recovery.
+      const superseded = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(superseded.resultDisplay).toBe(SUPERSEDED_FINDINGS_MESSAGE);
+      expect(superseded.supersededFindingsDisplay).toBeDefined();
+
+      for (let i = 0; i < 24; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: `plain-${i}`,
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + 2 + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const compacted = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(compacted.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
+      expect(compacted.supersededFindingsDisplay).toBeUndefined();
+    });
+
     it('clears image payloads from old tool results', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();

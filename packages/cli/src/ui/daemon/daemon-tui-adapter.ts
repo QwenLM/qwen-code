@@ -337,12 +337,21 @@ function formatToolResultDisplay(
   ) {
     return sanitizeDisplayText(value['fallbackText']);
   }
-  if (
+  if (isRecord(value) && value['type'] === 'findings_list') {
+    // Discriminator-first rejection: a findings_list record that fails the
+    // full shape check falls back to the text rendering below no matter
+    // what other keys it carries, so `ansiOutput`/`fileDiff` cannot smuggle
+    // it past the guard and into FindingsDisplay.
+    if (isFindingsListDisplay(value)) {
+      return sanitizeDaemonValue(
+        value,
+      ) as IndividualToolCallDisplay['resultDisplay'];
+    }
+  } else if (
     isRecord(value) &&
     (typeof value['fileDiff'] === 'string' ||
       'ansiOutput' in value ||
       value['type'] === 'todo_list' ||
-      isFindingsListDisplay(value) ||
       value['type'] === 'plan_summary' ||
       value['type'] === 'task_execution' ||
       value['type'] === 'mcp_tool_progress')
