@@ -22,10 +22,11 @@
 
 import type { CommandModule } from 'yargs';
 import { roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
+import { REVIEW_TMP_DIR } from './lib/paths.js';
 import {
   coverageFromTranscripts,
   verificationGaps,
@@ -750,6 +751,27 @@ export interface ComposeReviewInput {
    */
   findingsPath?: string;
   /**
+   * This round is a decided-stop's ledger re-rule (SKILL Step 1's stop
+   * branches): the capture decided there is nothing to review, and the
+   * orchestrator re-ruled the previous round's open findings against the
+   * current tree to build this state. No agents ever ran, so no transcripts,
+   * verifiers, reverse audit, or script-lint evidence exist or CAN exist —
+   * demanding any of them is an unsatisfiable cap, the exact shape the
+   * deterministic sources handle by provenance.
+   *
+   * Honoured only when the plan the state points at carries the capture's
+   * own `nothingToReview` decision — the field `capture-local` writes into
+   * it; a state that claims the flag on a full round gets the regular
+   * floors, never the skip. The plan's path arrives through the
+   * model-written state — the same seam every other `planPath` reader in
+   * this module trusts — so under a `review run` parent (which publishes a
+   * run id) a second read binds the grant: the stop sidecar the same
+   * capture wrote must carry this run's stamp, exactly the fence `run.ts`
+   * applies to the same decision. A stale or forged plan matches the shape
+   * but never the stamp.
+   */
+  stopReRule?: boolean;
+  /**
    * Where to look for the harness's records. Defaults to the environment the CLI
    * exported. A test seam only — production never passes it, and a model cannot:
    * `compose-review` reads its input as JSON, and this is not serialisable into
@@ -1336,6 +1358,70 @@ function toBool(value: unknown, field: string): boolean {
     );
   }
   return value;
+}
+
+/**
+ * Does the plan carry the capture's own decided-stop decision — the
+ * `nothingToReview` field `capture-local` writes when the round is one of the
+ * three decided stops? The FIELD is the capture's own — no full-round plan
+ * carries it, so a model-written flag on a full round finds nothing here and
+ * earns the regular floors. (The path it is read off arrives through the
+ * model-written state, the same seam every other `planPath` reader here
+ * trusts — see `stopReRule` for what that does and does not defend.) A plan
+ * that does not read carries nothing.
+ */
+function planCarriesDecidedStop(planPath: string | undefined): boolean {
+  if (!planPath) return false;
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      nothingToReview?: unknown;
+    };
+    const stop = plan.nothingToReview;
+    return (
+      typeof stop === 'object' &&
+      stop !== null &&
+      typeof (stop as { reason?: unknown }).reason === 'string' &&
+      (stop as { reason: string }).reason !== ''
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fence `run.ts` applies to the same decided-stop decision
+ * (`readStopSidecar`): the capture stamps its stop sidecar with the run id
+ * the parent published, and the exemption `stopReRule` grants is read
+ * against that stamp — a shape match on a file the state points at is what
+ * a stale stop plan left behind by an earlier round matches just as well.
+ * No published id (an interactive round no `review run` gate reads) → no
+ * fence to match, the plan-shape check stands alone. Published id but no
+ * sidecar stamped with it → refused.
+ */
+function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
+  const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  if (typeof runId !== 'string' || runId === '') return true;
+  let names: string[];
+  try {
+    names = readdirSync(REVIEW_TMP_DIR);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    // `stopNameFor`'s shape: `qwen-review-<target-stem>-stop.json`. The
+    // target class is not knowable here, so match the family and let the
+    // stamp decide.
+    if (!/^qwen-review-.*-stop\.json$/.test(name)) continue;
+    try {
+      const stop = JSON.parse(
+        readFileSync(join(REVIEW_TMP_DIR, name), 'utf8'),
+      ) as { runId?: unknown };
+      if (stop.runId === runId) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 export function composeReview(
@@ -2305,6 +2391,17 @@ function composeReviewBody(
     'suggestionsDroppedAsDuplicates',
     attribution,
   );
+  // The decided-stop re-rule state (SKILL Step 1's stop branches). The skips
+  // below are honoured ONLY on the capture's own decision, read twice: the
+  // plan's `nothingToReview` field (a full round's plan never carries it),
+  // and — under a `review run` parent, which publishes a run id — the
+  // runId-fenced stop sidecar the same capture wrote, the fence run.ts
+  // applies to the same decision. A claim that fails either read gets the
+  // regular floors, never a bypass.
+  const stopReRule =
+    toBool(input.stopReRule, 'stopReRule') &&
+    planCarriesDecidedStop(input.planPath) &&
+    stopSidecarFenced(input.env);
   // A Critical marker in the deferral channel is RELOCATED, never fatal and
   // never deferred: it counts toward `C`, the event blocks, and the round
   // posts (a throw would lose the whole round — the round-5 doctrine). The
@@ -2587,9 +2684,10 @@ function composeReviewBody(
   // the re-post out of the body while `modelBodyCriticals` still counted it
   // toward `criticalsNeedingVerify` — a blocker the linter proved would go on
   // pulling the unverified cap through a copy that no longer posts.
-  const gate = input.planPath
-    ? scriptLintGate(input.planPath)
-    : { criticals: [], unreviewed: [], disclosed: [] };
+  const gate =
+    input.planPath && !stopReRule
+      ? scriptLintGate(input.planPath)
+      : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
   bodyCriticals.push(...ownAfterGateDedup);
@@ -2605,7 +2703,7 @@ function composeReviewBody(
   // resolve one after a specialist inspects it, so capping here would make every
   // affected review impossible to approve.
   const repositoryContextNotes: string[] = [];
-  if (input.planPath) {
+  if (input.planPath && !stopReRule) {
     // The gate ran above, where its claims were needed to dedup the model's
     // re-posts before provenance was taken. ONE invocation, reused here.
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
@@ -2673,6 +2771,15 @@ function composeReviewBody(
   //
   // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
   // transcripts are found from the environment the CLI exported.
+  //
+  // The one round this recomputation does not run: a decided-stop re-rule
+  // (`stopReRule`). No agents launched — the round IS the capture's stop
+  // decision plus the orchestrator's re-rule of the open ledger — so there
+  // are no transcripts to read and no verifier/reverse-audit floor to clear;
+  // demanding them caps every stop verdict on an unsatisfiable requirement,
+  // the exact shape the deterministic sources handle by provenance. The skip
+  // is granted by the two-read gate above — the plan's own `nothingToReview`
+  // field plus the runId-fenced sidecar — never on this state's say-so.
   if (!input.planPath) {
     coverageEntries.push({
       subject: 'coverage',
@@ -2683,7 +2790,7 @@ function composeReviewBody(
       reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
     criticalsUnverified = criticalsNeedingVerify >= 1;
-  } else {
+  } else if (!stopReRule) {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;

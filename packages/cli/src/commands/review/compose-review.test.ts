@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import {
   budgetStopEntry,
@@ -12903,5 +12904,193 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     // ...and the differential is not vacuously true because every arm is
     // undefined: the prescribed shape does carry its id.
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
+  });
+});
+
+describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () => {
+  // A decided-stop round is one the CAPTURE decided: the plan carries the
+  // CLI-written `nothingToReview` field, no agents ever ran, and no
+  // transcripts exist. `stopReRule` tells compose-review the verdict is the
+  // orchestrator's re-rule of the open ledger — the agent-transcript floors
+  // cannot be satisfied on such a round and must not cap it. The skip is
+  // granted on the plan's own field, never on the state's say-so.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'compose-stop-rerule-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  function stopPlan(reason: string): string {
+    const p = join(dir, 'qwen-review-local-plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        chunks: [],
+        skippedFiles: [],
+        nothingToReview: { reason },
+      }),
+    );
+    return p;
+  }
+
+  it.each(['clean-tree', 'unchanged-since-last-round', 'scope-emptied'])(
+    'a still-standing Critical under %s requests changes with no caps',
+    (reason) => {
+      const r = composeReview({
+        planPath: stopPlan(reason),
+        stopReRule: true,
+        bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+        modelId: MODEL,
+      });
+      expect(r.event).toBe('REQUEST_CHANGES');
+      expect(r.baseEvent).toBe('REQUEST_CHANGES');
+      expect(r.cappedBy).toEqual([]);
+    },
+  );
+
+  it('a re-rule that finds nothing standing approves without caps', () => {
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: [],
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+  });
+
+  it('a stopReRule claim on a full-round plan gets the regular floors, never the skip', () => {
+    const p = join(dir, 'full-plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+      }),
+    );
+    const r = composeReview({
+      planPath: p,
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+    });
+    // No transcripts: the verifier floor fires and softens the would-be
+    // Request changes to Comment — the normal fail-closed path, which is
+    // what keeps the flag from laundering a full round past its floors.
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('a malformed nothingToReview carries no provenance either', () => {
+    const p = join(dir, 'malformed-stop-plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({ chunks: [], nothingToReview: { reason: 42 } }),
+    );
+    const r = composeReview({
+      planPath: p,
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('an empty stop reason carries no provenance either', () => {
+    const p = join(dir, 'empty-reason-plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({ chunks: [], nothingToReview: { reason: '' } }),
+    );
+    const r = composeReview({
+      planPath: p,
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('a plan that does not read carries no provenance either', () => {
+    const r = composeReview({
+      planPath: join(dir, 'does-not-exist-plan.json'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+    });
+    // Unreadable plan: the fail-closed floors fire, never the skip.
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('rejects a non-boolean stopReRule', () => {
+    expect(() =>
+      composeReview({
+        planPath: stopPlan('clean-tree'),
+        stopReRule: 'yes' as unknown as boolean,
+        modelId: MODEL,
+      }),
+    ).toThrow('stopReRule must be a boolean');
+  });
+
+  // Under a `review run` parent a run id is published, and the grant binds
+  // to the runId-fenced stop sidecar — the fence run.ts applies to the same
+  // decision. The sidecar rides REVIEW_TMP_DIR (cwd-relative), not the
+  // per-test temp dir.
+  const SIDECAR = join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json');
+  const fenceEnv = { QWEN_REVIEW_RUN_ID: 'run-1' };
+
+  function writeSidecar(runId: string): void {
+    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    writeFileSync(SIDECAR, JSON.stringify({ reason: 'clean-tree', runId }));
+  }
+
+  afterEach(() => {
+    rmSync(SIDECAR, { force: true });
+  });
+
+  it('a sidecar stamped by this run grants the skip', () => {
+    writeSidecar('run-1');
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+      env: fenceEnv,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toEqual([]);
+  });
+
+  it('a sidecar stamped by another run carries no provenance', () => {
+    writeSidecar('run-OTHER');
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+      env: fenceEnv,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('a published run id with no sidecar carries no provenance', () => {
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
+      env: fenceEnv,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
   });
 });
