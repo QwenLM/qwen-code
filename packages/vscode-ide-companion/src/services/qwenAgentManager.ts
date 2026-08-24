@@ -127,6 +127,11 @@ export class QwenAgentManager {
 
     // Set ACP connection callbacks
     this.connection.onSessionUpdate = (data: SessionNotification) => {
+      // Forward the raw notification verbatim for consumers that reduce the
+      // transcript themselves (WebShell transcript UI). This runs before the
+      // rehydration branch so history replay and live streaming are both
+      // captured with the same shape the daemon SSE envelope would carry.
+      this.callbacks.onTranscriptUpdate?.(data);
       // If we are rehydrating a loaded session, map message chunks into
       // discrete messages for the UI instead of streaming behavior.
       // During rehydration the webview is NOT in streaming mode, so
@@ -1481,6 +1486,19 @@ export class QwenAgentManager {
   ): void {
     this.callbacks.onSlashCommandNotification = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register a handler for raw ACP session/update notifications. Unlike the
+   * dedicated callbacks (onStreamChunk, onToolCall, ...) this is emitted
+   * verbatim from {@link onSessionUpdate} before any rehydration/streaming
+   * shaping, so transcript-reducing consumers see the same shape the daemon
+   * SSE envelope would carry.
+   */
+  onTranscriptUpdate(
+    callback: (notification: SessionNotification) => void,
+  ): void {
+    this.callbacks.onTranscriptUpdate = callback;
   }
 
   /**

@@ -273,4 +273,32 @@ describe('build artifact — package boundary', () => {
       ),
     ).toBe(true);
   });
+
+  it('ships self-contained KaTeX styles and fonts for embedded transcripts', () => {
+    const css = readInjectedCss();
+    const root = postcss.parse(css);
+    let mathmlRule: Rule | undefined;
+    let hasInlineFont = false;
+
+    root.walkRules((rule) => {
+      if (rule.selector.includes('.katex-mathml')) {
+        mathmlRule = rule;
+      }
+    });
+    root.walkAtRules('font-face', (atRule) => {
+      if (
+        atRule.nodes?.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === 'src' &&
+            node.value.includes('data:font/woff2;base64,'),
+        )
+      ) {
+        hasInlineFont = true;
+      }
+    });
+
+    expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
+    expect(hasInlineFont).toBe(true);
+  });
 });
