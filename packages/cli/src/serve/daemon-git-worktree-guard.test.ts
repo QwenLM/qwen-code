@@ -2287,3 +2287,78 @@ it -C ${outsideRepo} reset --hard`,
     expect(externalGuard).not.toHaveBeenCalled();
   });
 });
+
+// The win32 backslash-masking surface only runs on the Windows lane today, so
+// these tests stub the platform + shell to exercise the fail-closed gates on
+// the Linux CI lane as well. `process.platform` is stubbed through a getter
+// (the pattern used elsewhere in this suite); `getShellConfiguration()` reads
+// `os.platform()` plus the environment, so forcing `ComSpec=cmd.exe` with no
+// MSYSTEM/TERM makes the guard believe it is masking for cmd.exe.
+describe('createDaemonToolGuard – win32 backslash masking (platform-stubbed)', () => {
+  const savedPlatformDescriptor = Object.getOwnPropertyDescriptor(
+    process,
+    'platform',
+  );
+  const savedMsystem = process.env['MSYSTEM'];
+  const savedTerm = process.env['TERM'];
+  const savedComSpec = process.env['ComSpec'];
+
+  let platformSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    delete process.env['MSYSTEM'];
+    delete process.env['TERM'];
+    process.env['ComSpec'] = 'cmd.exe';
+  });
+
+  afterEach(() => {
+    platformSpy.mockRestore();
+    delete process.env['MSYSTEM'];
+    delete process.env['TERM'];
+    delete process.env['ComSpec'];
+    if (savedMsystem !== undefined) process.env['MSYSTEM'] = savedMsystem;
+    if (savedTerm !== undefined) process.env['TERM'] = savedTerm;
+    if (savedComSpec !== undefined) process.env['ComSpec'] = savedComSpec;
+    if (savedPlatformDescriptor !== undefined) {
+      Object.defineProperty(process, 'platform', savedPlatformDescriptor);
+    }
+  });
+
+  it('keeps an in-boundary, backslash-free command allowed', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(guard(request('git status'))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
+  it('fails closed when a segment already contains the placeholder byte', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -c user.name=${'\u0001'} -C C:\\proj reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('could not be parsed'),
+    });
+  });
+
+  it('fails closed when a double-quoted section holds a backslash before a quote', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -C "sub x\\" ..\\..\\outside" reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('could not be parsed'),
+    });
+  });
+
+  it('fails closed when masking would turn an escaped # into a comment', async () => {
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request(`git -c a.b=\\# -C ..\\outside reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('could not be parsed'),
+    });
+  });
+});

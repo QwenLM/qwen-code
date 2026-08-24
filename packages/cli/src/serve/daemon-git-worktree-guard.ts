@@ -9,6 +9,7 @@ import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
   GitWorktreeService,
+  getShellConfiguration,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
@@ -403,25 +404,27 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
-// On Windows the daemon runs shell commands through cmd.exe/PowerShell,
-// where a backslash is a literal path separator rather than a POSIX escape.
-// shell-quote models POSIX sh, so an unquoted `C:\Users\repo` would arrive
-// stripped to `C:Usersrepo` and every Windows path the guard resolves
-// becomes relative garbage: legitimate commands get denied on an
+// On Windows the daemon normally runs shell commands through cmd.exe or
+// PowerShell, where a backslash is a literal path separator rather than a
+// POSIX escape. shell-quote models POSIX sh, so an unquoted `C:\Users\repo`
+// would arrive stripped to `C:Usersrepo` and every Windows path the guard
+// resolves becomes relative garbage: legitimate commands get denied on an
 // unresolvable target while relocated ones slip through via the nearest
 // existing ancestor. Mask each backslash behind a control-character
-// placeholder for the parse and restore it in the tokens afterwards; the
-// placeholder takes no part in quoting or escape handling, so the token
-// structure matches what the real Windows shell sees.
+// placeholder for the parse and restore it in the tokens afterwards.
+//
+// The divergence masking corrects lives in *which shell executes the
+// command*, not in the OS platform: under Git Bash (an MSYSTEM/MINGW or a
+// msys/cygwin TERM) the shell is bash, a backslash *is* a POSIX escape, and
+// the un-masked parse already matches the executing shell — so masking is
+// skipped there, mirroring how core tools/shell.ts gates the same decision on
+// the detected shell. Only cmd.exe/PowerShell get the literal-separator
+// reading.
 const WIN32_BACKSLASH_PLACEHOLDER = '\u0001';
 
-function maskWindowsBackslashes(segment: string): string | null {
-  if (process.platform !== 'win32') return null;
-  // A segment that already contains the placeholder cannot be masked
-  // safely; fall back to the POSIX reading instead of corrupting the
-  // restore step.
-  if (segment.includes(WIN32_BACKSLASH_PLACEHOLDER)) return null;
-  return segment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER);
+function shouldMaskWindowsBackslashes(): boolean {
+  if (process.platform !== 'win32') return false;
+  return getShellConfiguration().shell !== 'bash';
 }
 
 function restoreWindowsBackslashes(
@@ -441,18 +444,79 @@ function restoreWindowsBackslashes(
   return entry;
 }
 
+// Masking is only safe when it cannot change the parse the way a backslash
+// ordinarily would: the placeholder is not an escape, so a `\"` that POSIX
+// keeps open would close the quoted section early (changing where a quoted
+// `-C` value ends relative to git's own MSVC argv rules), and a `\#` that
+// POSIX turns into a literal `#` instead becomes a comment that hides every
+// relocation after it. Either way the guard and the executing shell read the
+// command differently and a containment decision is unknowable — fail closed.
+function hasUnmaskableBackslash(segment: string): boolean {
+  return /\\"/.test(segment);
+}
+
+// Masking is also unsafe when the masked parse changes the token structure
+// (a comment appears, an operator sequence shifts, the token count differs)
+// relative to the raw POSIX parse: that is exactly the set of inputs whose
+// semantics come apart under the placeholder. When they disagree, fail closed
+// instead of trusting a parse that diverges from what the executing shell
+// sees.
+function parseStructure(entries: ReturnType<typeof parse>): string {
+  return entries
+    .map((entry) => {
+      if (typeof entry === 'string') return 's';
+      if (entry === null || typeof entry !== 'object') return '?';
+      if ('comment' in entry) return 'c';
+      if ('op' in entry) return 'o';
+      if ('pattern' in entry) return 'g';
+      return '?';
+    })
+    .join('');
+}
+
+function structureDiffers(
+  masked: ReturnType<typeof parse>,
+  raw: ReturnType<typeof parse> | null,
+): boolean {
+  // If the raw parse fails while the masked one succeeds, the two reads of
+  // the same text do not agree either; the pre-mask arm would have failed
+  // closed here, so fall back to that.
+  return raw === null || parseStructure(masked) !== parseStructure(raw);
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
-  const masked = maskWindowsBackslashes(segment);
+  const masking = shouldMaskWindowsBackslashes();
+  if (masking && segment.includes(WIN32_BACKSLASH_PLACEHOLDER)) {
+    // A literal placeholder in the input cannot be masked without corrupting
+    // the restore step, and parsing it raw reintroduces the escape-eating bug
+    // in a form that can flip an outside relocation into an in-boundary one.
+    return null;
+  }
+  if (masking && hasUnmaskableBackslash(segment)) {
+    return null;
+  }
+  const masked = masking
+    ? segment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER)
+    : null;
   let parsed: ReturnType<typeof parse>;
+  let raw: ReturnType<typeof parse> | null = null;
   try {
     parsed = parse(masked ?? segment, (key) => `$${key}`);
   } catch {
     return null;
   }
   if (masked !== null) {
+    try {
+      raw = parse(segment, (key) => `$${key}`);
+    } catch {
+      raw = null;
+    }
+    if (structureDiffers(parsed, raw)) {
+      return null;
+    }
     parsed = parsed.map(restoreWindowsBackslashes);
   }
   let depth = startDepth;

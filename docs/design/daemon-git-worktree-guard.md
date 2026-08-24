@@ -109,17 +109,25 @@ during option parsing and resolves relative `--git-dir`/`--work-tree` against
 the post-`-C` cwd, so relative targets resolve against the final cwd of the
 `-C` chain regardless of argv order.
 
-On Windows the command runs under cmd.exe or PowerShell, where a backslash is
-a literal path separator rather than a POSIX escape, so the tokenizer masks
-every backslash behind a placeholder for the POSIX-shaped parse and restores
-it in the tokens afterwards — an unquoted `C:\repo` keeps its separators
-instead of collapsing into a mangled relative word that could neither be
-contained (denying legitimate commands) nor resolved (allowing relocated ones
-through the nearest-existing-ancestor fallback). Physical resolution strips a
-target's root before walking its components, so an absolute `C:\repo`
-resolves from `C:\` onward instead of onto a doubled `C:\C:\repo`, and a UNC
-target drops its `\\server\share` prefix whole. Non-Windows parsing and
-resolution are unchanged.
+On Windows the command normally runs under cmd.exe or PowerShell, where a
+backslash is a literal path separator rather than a POSIX escape, so the
+tokenizer masks every backslash behind a placeholder for the POSIX-shaped
+parse and restores it in the tokens afterwards — an unquoted `C:\repo` keeps
+its separators instead of collapsing into a mangled relative word that could
+neither be contained (denying legitimate commands) nor resolved (allowing
+relocated ones through the nearest-existing-ancestor fallback). The masking is
+gated on the detected shell rather than the platform: under Git Bash
+(MSYSTEM/MINGW or a msys/cygwin TERM) the shell is bash, a backslash is a
+POSIX escape, and the un-masked parse already matches the executing shell, so
+those runs are left alone. Masking is also applied only when it cannot change
+the parse: a segment whose masked parse diverges from its raw parse — a `\"`
+that closes a quoted section early, a `\#` that becomes a comment and hides
+the relocation after it, a token structure that differs at all — fails closed
+as unparseable rather than trusting a reading that disagrees with the
+executing shell. Physical resolution strips a target's root before walking its
+components, so an absolute `C:\repo` resolves from `C:\` onward instead of onto
+a doubled `C:\C:\repo`, and a UNC target drops its `\\server\share` prefix
+whole. Non-Windows parsing and resolution are unchanged.
 
 A statically resolved Git relocation is denied when both of the following
 hold:
