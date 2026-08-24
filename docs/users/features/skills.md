@@ -23,7 +23,7 @@ If you want to invoke a Skill explicitly, type it as a slash command using the S
 /<skill-name>
 ```
 
-Skill commands are not shown in the top-level `/` completion menu. Use `/skills` to open the Skills panel, where you can browse, search, toggle, and launch Skills interactively. If you already know a Skill's name, you can still type `/<skill-name>` directly.
+Start typing `/` to autocomplete available Skills. In the terminal UI's root `/` list, Skills appear after other commands; typing part of a Skill name, such as `/rev`, still finds it. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively.
 
 > **Note:** If you previously ran a Skill with `/skills <skill-name>`, that syntax now just opens the Skills panel and ignores the trailing argument. Use `/<skill-name>` to run a Skill directly.
 

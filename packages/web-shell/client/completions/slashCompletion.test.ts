@@ -104,7 +104,7 @@ describe('getSlashCommandCompletionResult', () => {
     ]);
   });
 
-  it('keeps skill commands out of the top-level slash panel', () => {
+  it('keeps skill commands in browse and fuzzy results', () => {
     const commands: CommandInfo[] = [
       {
         name: 'skills',
@@ -118,16 +118,18 @@ describe('getSlashCommandCompletionResult', () => {
       },
     ];
 
-    expect(
+    const labelsFor = (query: string) =>
       getSlashCommandCompletionResult(
-        '/',
-        1,
+        query,
+        query.length,
         commands,
         [],
         'en',
         getTranslator('en'),
-      )?.items.map((item) => item.label),
-    ).toEqual(['/skills']);
+      )?.items.map((item) => item.label);
+
+    expect(labelsFor('/')).toEqual(['/review', '/skills']);
+    expect(labelsFor('/rev')).toEqual(['/review']);
   });
 
   it('returns explicit subcommands after accepting a parent command', () => {
@@ -437,7 +439,7 @@ describe('slashCompletionSource', () => {
     ]);
   });
 
-  it('omits skill commands from the legacy slash completion source', () => {
+  it('orders slash commands by custom, skill, then system categories', () => {
     const commands: CommandInfo[] = [
       {
         name: 'clear',
@@ -466,6 +468,7 @@ describe('slashCompletionSource', () => {
 
     expect(result?.options.map((option) => option.label)).toEqual([
       '/demo:ping',
+      '/batch',
       '/clear',
     ]);
     expect(
@@ -476,8 +479,24 @@ describe('slashCompletionSource', () => {
       }),
     ).toEqual([
       { name: 'Custom commands', rank: 0 },
+      { name: 'Skill commands', rank: 1 },
       { name: 'System commands', rank: 2 },
     ]);
+  });
+
+  it('keeps skills in legacy fuzzy slash completion', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'review',
+        description: 'Review current code',
+        displayCategory: 'skill',
+      },
+    ];
+    const source = slashCompletionSource(() => commands);
+    const state = EditorState.create({ doc: '/rev' });
+    const result = source(new CompletionContext(state, 4, true));
+
+    expect(result?.options.map((option) => option.label)).toEqual(['/review']);
   });
 
   it('localizes slash command category section titles', () => {
@@ -513,7 +532,7 @@ describe('slashCompletionSource', () => {
           typeof option.section === 'string' ? undefined : option.section;
         return section?.name;
       }),
-    ).toEqual(['自定义', '系统']);
+    ).toEqual(['自定义', 'Skill', '系统']);
   });
 
   it('only includes sections for categories with matching commands', () => {
@@ -584,6 +603,7 @@ describe('slashCompletionSource', () => {
     expect(result?.options.map((option) => option.label)).toEqual([
       '/clear',
       '/demo:ping',
+      '/batch',
     ]);
     expect(
       result?.options.map((option) => {
@@ -594,6 +614,7 @@ describe('slashCompletionSource', () => {
     ).toEqual([
       { name: 'System commands', rank: 0 },
       { name: 'Custom commands', rank: 1 },
+      { name: 'Skill commands', rank: 2 },
     ]);
   });
 

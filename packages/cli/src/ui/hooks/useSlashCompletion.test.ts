@@ -149,6 +149,7 @@ function useTestHarnessForSlashCompletion(
     string,
     { name: string; usedAt: number; count: number }
   >,
+  groupSkillsLast = true,
 ) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
@@ -158,6 +159,7 @@ function useTestHarnessForSlashCompletion(
     enabled,
     query,
     slashCommands,
+    groupSkillsLast,
     commandContext,
     recentCommands,
     setSuggestions,
@@ -226,7 +228,7 @@ describe('useSlashCompletion', () => {
       );
     });
 
-    it('should keep skills out of top-level suggestions', async () => {
+    it('should list skills after other top-level commands', async () => {
       const slashCommands = [
         createTestCommand({
           name: 'help',
@@ -256,6 +258,32 @@ describe('useSlashCompletion', () => {
         expect(result.current.suggestions.map((s) => s.value)).toEqual([
           'help',
           'skills',
+          'review',
+        ]);
+      });
+    });
+
+    it('should keep skills in fuzzy top-level suggestions', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/rev',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toEqual([
+          'review',
         ]);
       });
     });
@@ -1132,6 +1160,7 @@ describe('useSlashCompletion', () => {
           enabled,
           query,
           slashCommands,
+          groupSkillsLast: true,
           commandContext: mockCommandContext,
           setSuggestions: mockSetSuggestions,
           setIsLoadingSuggestions: mockSetIsLoadingSuggestions,

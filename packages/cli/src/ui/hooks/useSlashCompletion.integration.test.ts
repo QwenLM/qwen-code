@@ -35,6 +35,7 @@ function useTestHarnessForSlashCompletion(
     string,
     { name: string; usedAt: number; count: number }
   >,
+  groupSkillsLast = true,
 ) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
@@ -44,6 +45,7 @@ function useTestHarnessForSlashCompletion(
     enabled,
     query,
     slashCommands,
+    groupSkillsLast,
     commandContext,
     recentCommands,
     setSuggestions,
@@ -62,6 +64,31 @@ function useTestHarnessForSlashCompletion(
 
 describe('useSlashCompletion integration', () => {
   const mockCommandContext = {} as CommandContext;
+
+  it('keeps skills available for fuzzy top-level queries', async () => {
+    const slashCommands = [
+      createTestCommand({
+        name: 'review',
+        description: 'Review changed code',
+        kind: CommandKind.SKILL,
+      }),
+    ];
+
+    const { result } = renderHook(() =>
+      useTestHarnessForSlashCompletion(
+        true,
+        '/rev',
+        slashCommands,
+        mockCommandContext,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.suggestions.map((item) => item.value)).toEqual([
+        'review',
+      ]);
+    });
+  });
 
   it('prefers higher completionPriority over weaker fuzzy matches', async () => {
     const slashCommands = [

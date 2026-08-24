@@ -331,6 +331,7 @@ function useCommandSuggestions(
     commands: readonly SlashCommand[],
     partial: string,
   ) => RankedCommandMatch[],
+  groupSkillsLast: boolean,
   recentCommands?: RecentSlashCommands,
 ): SuggestionsResult {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -357,7 +358,6 @@ function useCommandSuggestions(
       commandPathParts,
       partial,
       currentLevel,
-      exactMatchAsParent,
     } = parserResult;
 
     if (isArgumentCompletion) {
@@ -411,18 +411,13 @@ function useCommandSuggestions(
     }
 
     const commandsToSearch = currentLevel || [];
-    const topLevelCommands =
-      commandPathParts.length === 0 && !exactMatchAsParent
-        ? commandsToSearch.filter((cmd) => cmd.kind !== CommandKind.SKILL)
-        : commandsToSearch;
-    if (topLevelCommands.length > 0) {
+    if (commandsToSearch.length > 0) {
       const performFuzzySearch = async () => {
         if (signal.aborted) return;
         let rankedSuggestions: RankedCommandMatch[] = [];
 
         if (partial === '') {
-          // If no partial query, recently used commands should be the most prominent.
-          rankedSuggestions = topLevelCommands
+          rankedSuggestions = commandsToSearch
             .flatMap((cmd, index) => {
               if (!cmd.description || cmd.hidden) {
                 return [];
@@ -439,6 +434,14 @@ function useCommandSuggestions(
               ];
             })
             .sort((left, right) => {
+              if (groupSkillsLast && commandPathParts.length === 0) {
+                const skillDifference =
+                  Number(left.command.kind === CommandKind.SKILL) -
+                  Number(right.command.kind === CommandKind.SKILL);
+                if (skillDifference !== 0) {
+                  return skillDifference;
+                }
+              }
               const recentDifference = right.recentScore - left.recentScore;
               if (recentDifference !== 0) {
                 return recentDifference;
@@ -447,13 +450,13 @@ function useCommandSuggestions(
             });
         } else {
           // Use fuzzy search for non-empty partial queries with fallback
-          const fzfInstance = getFzfForCommands(topLevelCommands);
+          const fzfInstance = getFzfForCommands(commandsToSearch);
           if (fzfInstance) {
             try {
               const fzfResults = await fzfInstance.fzf.find(partial);
               if (signal.aborted) return;
               const commandOrder = new Map<SlashCommand, number>();
-              topLevelCommands.forEach((cmd, index) => {
+              commandsToSearch.forEach((cmd, index) => {
                 commandOrder.set(cmd, index);
               });
               const rankedMatches = new Map<SlashCommand, RankedCommandMatch>();
@@ -488,13 +491,13 @@ function useCommandSuggestions(
               );
               // Fallback to prefix-based filtering
               rankedSuggestions = getPrefixSuggestions(
-                topLevelCommands,
+                commandsToSearch,
                 partial,
               );
             }
           } else {
             // Fallback to prefix-based filtering when fzf instance creation fails
-            rankedSuggestions = getPrefixSuggestions(topLevelCommands, partial);
+            rankedSuggestions = getPrefixSuggestions(commandsToSearch, partial);
           }
         }
 
@@ -527,7 +530,13 @@ function useCommandSuggestions(
     // commandContext is deliberately absent: it is read through
     // commandContextRef so context-identity churn alone never re-runs the
     // search and rebuilds the suggestions array (#9494).
-  }, [parserResult, getFzfForCommands, getPrefixSuggestions, recentCommands]);
+  }, [
+    parserResult,
+    getFzfForCommands,
+    getPrefixSuggestions,
+    groupSkillsLast,
+    recentCommands,
+  ]);
 
   return { suggestions, isLoading };
 }
@@ -609,6 +618,7 @@ export interface UseSlashCompletionProps {
   enabled: boolean;
   query: string | null;
   slashCommands: readonly SlashCommand[];
+  groupSkillsLast: boolean;
   commandContext: CommandContext;
   recentCommands?: RecentSlashCommands;
   setSuggestions: (suggestions: Suggestion[]) => void;
@@ -624,6 +634,7 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
     enabled,
     query,
     slashCommands,
+    groupSkillsLast,
     commandContext,
     recentCommands,
     setSuggestions,
@@ -745,6 +756,7 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
     commandContext,
     getFzfForCommands,
     getPrefixSuggestions,
+    groupSkillsLast,
     recentCommands,
   );
   const { start: calculatedStart, end: calculatedEnd } = useCompletionPositions(

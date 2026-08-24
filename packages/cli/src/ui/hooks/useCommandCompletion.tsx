@@ -262,6 +262,8 @@ export function useCommandCompletion(
     enabled: completionMode === CompletionMode.SLASH,
     query,
     slashCommands: slashCommandsForCompletion,
+    groupSkillsLast:
+      slashCompletionContext === SlashCompletionContext.LINE_START,
     commandContext,
     recentCommands,
     setSuggestions,
