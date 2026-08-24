@@ -1776,36 +1776,6 @@ function isDerivedConfig(config: Config): boolean {
   );
 }
 
-/**
- * State ownership for a Config derived through {@link deriveConfig}.
- *
- * - `shared`: reads and mutations intentionally resolve to the parent.
- * - `copied`: the factory installs an own snapshot on the child.
- * - `child-local`: Config lazily installs independent mutable state.
- * - `prohibited`: the child must not resolve the parent's runtime object.
- */
-export type DerivedConfigStateOwnership =
-  | 'shared'
-  | 'copied'
-  | 'child-local'
-  | 'prohibited';
-
-export const DERIVED_CONFIG_STATE_OWNERSHIP = {
-  workspacePathAndContext: 'shared',
-  fileService: 'shared',
-  toolRegistry: 'shared',
-  permissionManager: 'shared',
-  approvalModeState: 'shared',
-  fileReadCache: 'child-local',
-  memoryPressureMonitor: 'child-local',
-  activeTodoState: 'child-local',
-  chatRecordingService: 'shared',
-  goalRuntime: 'prohibited',
-  sessionWriterState: 'prohibited',
-  canonicalLifecycle: 'prohibited',
-  approvalModeMutation: 'prohibited',
-} as const satisfies Record<string, DerivedConfigStateOwnership>;
-
 export type DerivedConfigOverrides = Partial<
   Pick<
     Config,
@@ -1843,6 +1813,8 @@ export type DerivedConfigOverrides = Partial<
  * Creates a Config overlay while keeping prototype delegation inside one
  * reviewable boundary. Callers supply only public getter overrides; Config's
  * child-local and prohibited runtime state remains enforced by its accessors.
+ * Approval-mode override wrappers that call Config prototype mutators must keep
+ * owning their strip/restore lifecycle before migrating to this factory.
  */
 export function deriveConfig(
   base: Config,
@@ -5434,6 +5406,8 @@ export class Config {
     skipSessionWriter?: boolean;
     strictResourceCleanup?: boolean;
   }): Promise<void> {
+    // Derived Configs share parent resources; any replacement resource a profile
+    // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
     this.settingsWatcher?.stopWatching();

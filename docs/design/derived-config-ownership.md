@@ -26,3 +26,5 @@ Migration order:
 4. Enforce that production prototype derivation occurs only inside `deriveConfig`.
 
 The factory intentionally accepts public getter overrides only. Private field rebinding needed by worktree contexts remains a separate migration concern and must be encoded without exposing arbitrary Config mutation.
+
+Approval-mode override wrappers that call Config prototype mutators remain outside `deriveConfig` until their strip/restore lifecycle is owned independently from the parent permission manager.

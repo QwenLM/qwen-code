@@ -15,7 +15,6 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
-  DERIVED_CONFIG_STATE_OWNERSHIP,
   deriveConfig,
   TrustGateError,
   matchesServerPattern,
@@ -1648,18 +1647,6 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('derived Config ownership', () => {
-    it('declares the mutable ownership decisions enforced by Config accessors', () => {
-      expect(DERIVED_CONFIG_STATE_OWNERSHIP).toMatchObject({
-        fileReadCache: 'child-local',
-        memoryPressureMonitor: 'child-local',
-        activeTodoState: 'child-local',
-        goalRuntime: 'prohibited',
-        sessionWriterState: 'prohibited',
-        canonicalLifecycle: 'prohibited',
-        approvalModeMutation: 'prohibited',
-      });
-    });
-
     it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
       const child = deriveConfig(parent, {
@@ -2319,7 +2306,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('MemoryPressureMonitor isolation', () => {
-    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+    it('returns a distinct monitor for child Configs created via deriveConfig', async () => {
       const parent = new Config(baseParams);
       await parent.initialize({ skipGeminiInitialization: true });
       const child = deriveConfig(parent);
