@@ -6574,7 +6574,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       restoreAskUserQuestionHint !== true ||
       // Nobody can answer the re-hung question without an attached client;
       // internal restores (boot rehydrate, keepalive, sub-session resume)
-      // pass no clientId and must not fabricate a 5-minute permission wait.
+      // pass no clientId and must not fabricate an unbounded permission wait.
       requestedClientId === undefined ||
       options.suppressRestorePrompt === true ||
       // Admission-time busy check: pendingPromptCount flips synchronously
