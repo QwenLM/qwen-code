@@ -1882,6 +1882,98 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
+    it('does not re-send the journaled envelope when retrying an accepted-then-failed round (Ctrl+Y)', async () => {
+      // Regression pin: the accept branch journals the delivery but must
+      // ALSO strip the envelope parts from the stored retry payload —
+      // otherwise Ctrl+Y resubmits an already-delivered envelope verbatim
+      // (the leader sees the identical report twice while the journal
+      // records one delivery).
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Same shape as the test above: the settlement shim accepts after
+      // the first event, then a terminal error event ends the stream,
+      // setting lastPromptErroredRef and making Ctrl+Y admissible.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      // The accepted boundary submission carried the envelope ...
+      expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+      ]);
+      // ... and its delivery was journaled exactly once.
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: teammateModelText }],
+        teammateDisplay,
+        undefined,
+        undefined,
+      );
+
+      // Settle to Idle. The envelope was accepted (journaled, NOT
+      // requeued), so the Idle fallback has nothing left to deliver.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // Ctrl+Y retry of the failed round: the payload must be the
+      // tool-response parts only — the envelope is already in the session
+      // history from the accepted push.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        completed.response.responseParts,
+      );
+      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      // Still exactly one journaled delivery.
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+    });
+
     it('restores a boundary-drained envelope when a UserPromptSubmit hook blocks the round submission', async () => {
       const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
         renderBusyMultiRoundTask([createExecutingToolCall()]);
