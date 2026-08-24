@@ -7,6 +7,7 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
@@ -16,6 +17,7 @@ import {
   type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
+import { sanitizeLogText } from './sanitize.js';
 import {
   ChannelLoopMcpServer,
   type JsonRpcMessage,
@@ -98,6 +100,12 @@ export interface DaemonChannelBridgeOptions {
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
   deleteSessionData?: (sessionId: string) => Promise<void>;
   promptAuthorization?: string;
+  /**
+   * The daemon advertises the `session_attachments` capability. Daemons
+   * predating the attachment upload routes receive prompt images inline
+   * instead, as before the upload path existed.
+   */
+  sessionAttachments?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -132,11 +140,12 @@ function getTextContent(content: unknown): string | undefined {
   return getString(content['text']);
 }
 
-function channelImageName(mimeType: string, index = 0): string {
-  const extension =
-    mimeType === 'image/jpeg' ? 'jpeg' : mimeType.slice('image/'.length);
-  if (!['bmp', 'gif', 'jpeg', 'png', 'webp'].includes(extension)) {
-    throw new Error(`Unsupported channel image MIME type: ${mimeType}`);
+const CHANNEL_IMAGE_EXTENSIONS = ['bmp', 'gif', 'jpeg', 'png', 'webp'];
+
+function channelImageName(mimeType: string, index = 0): string | undefined {
+  const extension = mimeType.slice('image/'.length);
+  if (!CHANNEL_IMAGE_EXTENSIONS.includes(extension)) {
+    return undefined;
   }
   return index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
 }
@@ -428,36 +437,44 @@ export class DaemonChannelBridge
 
     try {
       const prompt: Array<Record<string, unknown>> = [];
-      const images =
-        options?.images && options.images.length > 0
-          ? options.images
-          : options?.imageBase64 && options.imageMimeType
-            ? [
-                {
-                  data: options.imageBase64,
-                  mimeType: options.imageMimeType,
-                },
-              ]
-            : [];
-      try {
-        for (const [index, image] of images.entries()) {
-          const mimeType =
-            image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-          const attachment = await session.uploadAttachment(
-            new Blob([Buffer.from(image.data, 'base64')], {
-              type: mimeType,
-            }),
-            channelImageName(mimeType, index),
-            mimeType,
-            controller.signal,
-          );
-          prompt.push(attachment);
-          const attachmentId = getString(attachment['attachmentId']);
-          if (attachmentId) uploadedAttachmentIds.push(attachmentId);
+      const images = resolvePromptImages(options);
+      if (this.options.sessionAttachments) {
+        try {
+          for (const [index, image] of images.entries()) {
+            const name = channelImageName(image.mimeType, index);
+            if (!name) {
+              // One unrecognized subtype must not fail the whole turn;
+              // degrade by omission like the core read path.
+              process.stderr.write(
+                `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)}\n`,
+              );
+              continue;
+            }
+            const attachment = await session.uploadAttachment(
+              new Blob([Buffer.from(image.data, 'base64')], {
+                type: image.mimeType,
+              }),
+              name,
+              image.mimeType,
+              controller.signal,
+            );
+            prompt.push(attachment);
+            const attachmentId = getString(attachment['attachmentId']);
+            if (attachmentId) uploadedAttachmentIds.push(attachmentId);
+          }
+        } catch (error) {
+          rollbackUploadedAttachments = true;
+          throw error;
         }
-      } catch (error) {
-        rollbackUploadedAttachments = true;
-        throw error;
+      } else {
+        // Daemons without `session_attachments` take images inline.
+        for (const image of images) {
+          prompt.push({
+            type: 'image',
+            data: image.data,
+            mimeType: image.mimeType,
+          });
+        }
       }
       prompt.push({ type: 'text', text });
       // Always presented: the daemon validates it for the channel-turn

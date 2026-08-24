@@ -542,6 +542,30 @@ describe('AcpBridge', () => {
     });
   });
 
+  it('sends a legacy-only image pair as one inline image block', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe', {
+      imageBase64: 'base64-image',
+      imageMimeType: 'image/png',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+        { type: 'text', text: 'describe' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
   it('excludes nested subagent text from the final response', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

@@ -121,6 +121,32 @@ export interface ChannelAgentBridgePromptOptions {
   displayText?: string;
 }
 
+/**
+ * Resolves the ordered `images` contract, falling back to the legacy
+ * single-image pair, and normalizes MIME types in one place: channel
+ * adapters forward CDN `content-type` headers verbatim, so values arrive
+ * with parameters and mixed case (e.g. `image/png; charset=binary`), and
+ * the non-standard `image/jpg` alias rides them too.
+ */
+export function resolvePromptImages(
+  options?: ChannelAgentBridgePromptOptions,
+): ChannelPromptImage[] {
+  const images =
+    options?.images && options.images.length > 0
+      ? options.images
+      : options?.imageBase64 && options.imageMimeType
+        ? [{ data: options.imageBase64, mimeType: options.imageMimeType }]
+        : [];
+  return images.map((image) => {
+    const cleaned = image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+    return {
+      data: image.data,
+      // Normalize the alias like the daemon attachment store's own naming.
+      mimeType: cleaned === 'image/jpg' ? 'image/jpeg' : cleaned,
+    };
+  });
+}
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
   getAvailableCommands?(sessionId: string): AvailableCommand[];

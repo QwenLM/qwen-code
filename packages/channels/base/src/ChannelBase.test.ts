@@ -10214,6 +10214,8 @@ describe('ChannelBase', () => {
         { data: 'base64data', mimeType: 'image/png' },
         { data: 'second-image', mimeType: 'image/jpeg' },
       ]);
+      expect(options.imageBase64).toBe('base64data');
+      expect(options.imageMimeType).toBe('image/png');
     });
 
     it('uses legacy imageBase64 when no attachment image', async () => {
@@ -10229,6 +10231,30 @@ describe('ChannelBase', () => {
       const options = (bridge.prompt as any).mock.calls[0][2];
       expect(options.images).toEqual([
         { data: 'legacydata', mimeType: 'image/jpeg' },
+      ]);
+    });
+
+    it('orders the legacy image before attachment images', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          text: 'see image',
+          imageBase64: 'legacydata',
+          imageMimeType: 'image/jpeg',
+          attachments: [
+            {
+              type: 'image',
+              data: 'attachmentdata',
+              mimeType: 'image/png',
+            },
+          ],
+        }),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const options = (bridge.prompt as any).mock.calls[0][2];
+      expect(options.images).toEqual([
+        { data: 'legacydata', mimeType: 'image/jpeg' },
+        { data: 'attachmentdata', mimeType: 'image/png' },
       ]);
     });
 
