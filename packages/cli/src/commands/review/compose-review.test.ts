@@ -2960,6 +2960,74 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it('fires the persistently-critical advisory under a SIGNAL-engaged floor too (#9903)', async () => {
+    // The floor engaged early, on the flat-trend streak, at round 4 — two
+    // rounds before the round-6 schedule. Round 5 stands behind the same
+    // not-converging shape; the advisory's floor-engagement conjunct must
+    // read the signal engagement, not re-derive it from the schedule alone
+    // (which would suppress the advisory until round 7).
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-sig-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: { shape: string } };
+    try {
+      // Round 4 signal-engaged the floor: its marker carries the pinned
+      // streak and the `c` floor, Critical-only work list (no Suggestion —
+      // the enforcement moved them out before the marker was built).
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 4,
+          findings: [{ id: 'R4-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          flatRounds: 2,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+      });
+      const conv = stderr().filter((l) => l.startsWith('RESIDUAL-RISK: '));
+      expect(conv).toHaveLength(1);
+      expect(conv[0]).toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('stays silent on the persistently-critical advisory when the loop IS converging (#9410)', async () => {
     // Same shape as above except the volume is SHRINKING — the loop is
     // working its Criticals down, so no advisory fires. Every degraded arm
@@ -11103,6 +11171,195 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.floorEnforced).toEqual([0]);
     expect(r.body).not.toContain('c.ts:2.5');
     expect(r.body).toContain('fractional line');
+  });
+});
+
+describe('the signal-driven early floor (#9903)', () => {
+  // The convergence diagnosis has named the remedy since round 3 — "drop
+  // this PR's reviews to `--severity-floor critical`" — but under `auto`
+  // the floor waited for the round-6 schedule, so rounds 3–5 kept posting
+  // Suggestions at full volume while the body printed the advice. The
+  // `flatRounds` streak closes that gap: two consecutive rounds of a
+  // not-falling first-time-finding rate engage the floor early, the
+  // engagement latches in the marker, and every case here is a row of the
+  // streak's state machine.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'flat-floor-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (prev: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...prev }),
+    );
+  // A firing round: two FRESH drafts (the Critical and the unmarked
+  // Suggestion) against a predecessor that recorded one — the carried
+  // `R2-4:` re-post is the control that must NOT count. Prior findings sit
+  // in other files so the recurrence half cannot fire either: the streak
+  // reads the volume trend alone.
+  const firingPrev = (over: Record<string, unknown> = {}) => ({
+    round: 3,
+    posted: 3,
+    fresh: 1,
+    floor: 'o',
+    findings: [
+      { id: 'R2-4', sev: 'S', file: 'b.ts', title: 'still standing' },
+      { id: 'R3-1', sev: 'S', file: 'b.ts', title: 'retired' },
+    ],
+    ...over,
+  });
+  const drafts = () => [
+    { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+    { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+    { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'auto',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('one flat round advances the streak but leaves the floor open', () => {
+    sideFile(firingPrev());
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    // The streak is on the record even though nothing engaged: the next
+    // round's trigger reads it back from the marker.
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('a second consecutive flat round engages the floor — as auto-signaled, disclosed', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    // The engagement says WHY: an unexplained critical floor at round 5
+    // would read as a pipeline fault.
+    expect(r.body).toContain(
+      'the floor engaged early: the first-time-finding rate has not fallen for 2 consecutive round(s)',
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.flatRounds).toBe(2);
+    expect(ledger.floor).toBe('c');
+  });
+
+  it('latches: a quiet round past the bar keeps the floor engaged and the streak pinned', () => {
+    // The floor itself quiets the posted-set trend — re-measuring would
+    // release it the round after it engaged. `fresh` falls well below the
+    // predecessor here, so only the pin can keep the streak.
+    sideFile(firingPrev({ round: 4, flatRounds: 2, fresh: 9, posted: 9 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+    expect(parseLedger(r.body)?.floor).toBe('c');
+  });
+
+  it('resets below the bar on a round whose rate fell — no carry-on-unmeasured', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1, fresh: 9, posted: 9 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('reads FRESH drafts only — a round of carried re-posts is the steady state, not a streak', () => {
+    // Triage constraint: re-posts of unfixed findings are the loop holding
+    // its position, and counting them would engage the floor on the calmest
+    // shape there is. Both drafts re-post standing entries here.
+    sideFile(
+      firingPrev({
+        round: 4,
+        flatRounds: 1,
+        fresh: 2,
+        findings: [
+          { id: 'R2-4', sev: 'S', file: 'b.ts', title: 'still standing' },
+          { id: 'R3-2', sev: 'C', file: 'a.ts', title: 'still blocking' },
+        ],
+      }),
+    );
+    const r = compose({
+      draftedComments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** R3-2: boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('an explicit suggestion floor overrides the latch — the operator keeps the posture', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 2 }));
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+    // The streak stays pinned in the record — the override is per-invocation,
+    // not a measured convergence — but it engages nothing while it stands.
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('fails open in the context-unavailable state — the round is unknowable', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('does not pre-empt the round-6 schedule — auto-resolved stays its own kind', () => {
+    // Round 6 engages with a sub-bar streak that ALSO reaches the bar this
+    // round — exactly the scenario where the two arms diverge. The schedule
+    // must win, and the body must not credit the signal for what the
+    // schedule did.
+    sideFile({
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      floor: 'o',
+      flatRounds: 1,
+      findings: [],
+    });
+    const r = compose({
+      draftedComments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      suggestionsInline: 1,
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(r.body).not.toContain('engaged early');
+  });
+
+  it('clamps a planted streak to the round it rides — the latch cannot pin rounds the PR never ran', () => {
+    // The side file is the same untrusted shape as the marker. A planted
+    // `flatRounds` reaches the bar only up to the rounds that exist — the
+    // disclosure names the clamped count, and the latch pins THAT value,
+    // never the planted one.
+    sideFile(firingPrev({ round: 3, flatRounds: 9999 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(r.body).toContain('for 3 consecutive round(s)');
+    expect(r.body).not.toContain('9999');
+    expect(parseLedger(r.body)?.flatRounds).toBe(3);
+  });
+
+  it('reads no streak off a round-0 side file — the trigger cannot engage round 1', () => {
+    // A side file with no usable round names rounds this PR never ran; its
+    // streak must not engage anything, exactly as the churn streak's
+    // round-0 zero rule does.
+    sideFile({ round: 0, flatRounds: 9, findings: [] });
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
   });
 });
 
