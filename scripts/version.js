@@ -43,8 +43,12 @@ if (!versionType) {
 run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk and mobile-mcp versions independently.
-const workspacesToExclude = ['@qwen-code/sdk', '@qwen-code/mobile-mcp'];
+// We intend to maintain sdk, mobile-mcp, and node-repl versions independently.
+const workspacesToExclude = [
+  '@qwen-code/sdk',
+  '@qwen-code/mobile-mcp',
+  '@qwen-code/node-repl-mcp',
+];
 let lsOutput;
 try {
   lsOutput = JSON.parse(
