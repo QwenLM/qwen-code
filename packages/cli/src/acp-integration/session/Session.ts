@@ -5139,6 +5139,9 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
+                // The send result assigns this before any read; null-stream
+                // paths return before the record site, so a pre-send route
+                // computation here would only be discarded.
                 let requestRouteKey = '';
 
                 try {
@@ -5904,6 +5907,9 @@ export class Session implements SessionContext {
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      // The send result assigns this before any read; null-stream paths
+      // return before the record site, so a pre-send route computation here
+      // would only be discarded.
       let requestRouteKey = '';
 
       try {
