@@ -2015,6 +2015,46 @@ describe('Gemini Client (client.ts)', () => {
       expect(hasFunctionResponse).toBe(false);
     });
 
+    it('repairs a restorable ask_user_question when restore preservation is suppressed', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      Object.assign(mockConfig, {
+        getPreserveRestorableAskUserQuestion: vi.fn().mockReturnValue(false),
+      });
+
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const hasFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse?.id === 'call_auq_resume'),
+      );
+      expect(hasFunctionResponse).toBe(true);
+    });
+
     it('is a no-op when the resumed transcript has no dangling tool_use', async () => {
       // Happy resume path: don't inject a synthetic functionResponse
       // into a transcript whose tool_use pairing is already valid (or,

@@ -1524,7 +1524,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1536,7 +1537,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'already_running'
       | 'queued'
       | 'memory_tool'
-      | 'memory_pressure';
+      | 'memory_pressure'
+      | 'session_mismatch';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;

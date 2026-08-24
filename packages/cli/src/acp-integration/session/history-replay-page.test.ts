@@ -28,10 +28,10 @@ import {
 
 const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
 vi.mock(
-  '../../utils/tool-result-boundary-diagnostics.js',
+  '../../nonInteractive/tool-result-boundary-diagnostics.js',
   async (original) => ({
     ...(await original<
-      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../../nonInteractive/tool-result-boundary-diagnostics.js')
     >()),
     observeAcpToolResultProjection: observeAcpProjectionMock,
   }),
@@ -50,6 +50,7 @@ const GOAL_STATE: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'goal-state' },
     turnCount: 2,
     activeTimeMs: 1000,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -730,6 +731,7 @@ describe('history replay page', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 3,
         activeTimeMs: 1234,
+        tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
       },

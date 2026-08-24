@@ -30,6 +30,7 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { GeminiEventType } from '../../core/turn.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -63,6 +64,7 @@ import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
 import type { SubagentExecutionEvent } from '../../telemetry/types.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -4206,6 +4208,62 @@ describe('subagent.ts', () => {
           'rejected to prevent writing truncated content',
         );
       });
+
+      it.each([
+        { retry: { type: 'retry' as const, isContinuation: true } },
+        { retry: { type: 'retry' as const } },
+      ])(
+        'forwards retry events to subagent loop detection',
+        async ({ retry }) => {
+          const loopSpy = vi
+            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+            .mockReturnValue(false);
+
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockResolvedValue(
+            (async function* () {
+              yield {
+                ...retry,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      finishReason: 'STOP',
+                      content: { parts: [{ text: 'done' }] },
+                    },
+                  ],
+                },
+              };
+            })(),
+          );
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+            { tools: [] },
+            new AgentEventEmitter(),
+          );
+
+          await scope.execute(new ContextState());
+
+          const retryArg = loopSpy.mock.calls.find(
+            ([event]) => event.type === GeminiEventType.Retry,
+          )?.[0] as { type: GeminiEventType; isContinuation?: boolean };
+          expect(retryArg).toEqual(
+            expect.objectContaining({ type: GeminiEventType.Retry }),
+          );
+          if ('isContinuation' in retry) {
+            expect(retryArg.isContinuation).toBe(true);
+          } else {
+            expect(retryArg).not.toHaveProperty('isContinuation');
+          }
+        },
+      );
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {

@@ -1816,9 +1816,11 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        const preserveCallIds = this.config.getRestoreAskUserQuestion?.()
-          ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
-          : undefined;
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
         this.repairOrphanedToolUseTurnsInHistory(
           undefined,
           preserveCallIds ? { preserveCallIds } : undefined,
@@ -4137,8 +4139,8 @@ export class GeminiClient {
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
         // Save cache-safe params here — before any early return — so that
-        // background extract/dream agents calling getCacheSafeParams() always
-        // see the current turn's history regardless of which path exits below.
+        // background readers calling getCacheSafeParams(sessionId) can see the
+        // current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;

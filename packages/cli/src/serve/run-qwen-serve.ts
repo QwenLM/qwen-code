@@ -4614,6 +4614,29 @@ async function runQwenServeImpl(
       };
     };
 
+    const readLiveConversationScheduledTasks = async () => {
+      if (!fs.existsSync(liveConversationWorkspace.rootPath)) return [];
+      const { canonicalRoot } = await liveConversationWorkspace.revalidate();
+      let settings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        settings = settingsRuntime.settings.loadSettings(canonicalRoot, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: false,
+          workspaceTrusted: true,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: could not read full settings for Conversations ` +
+            `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
+        );
+      }
+      const env = createRuntimeEnvMetadata(canonicalRoot, settings, true);
+      return core.Storage.runWithResolvedRuntimeBaseDir(
+        env.sessionRuntimeBaseDir,
+        () => core.readCronTasks(canonicalRoot),
+      );
+    };
+
     // Collects stop() callbacks from every per-workspace sub-session launcher
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
@@ -5606,13 +5629,6 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        if (runtimeAdded.provenance === 'live-conversation') return;
-        channelWebhookEnvByWorkspace.set(
-          runtimeAdded.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -5621,6 +5637,13 @@ async function runQwenServeImpl(
           'startScheduledTaskKeepaliveForWorkspace'
         ] as ((runtime: WorkspaceRuntime) => void) | undefined;
         startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
+        if (runtimeAdded.provenance === 'live-conversation') return;
+        channelWebhookEnvByWorkspace.set(
+          runtimeAdded.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
         if (!channelWorkerManager) return;
         try {
           if (runtimeAdded.trusted) {
@@ -5984,6 +6007,7 @@ async function runQwenServeImpl(
         : {}),
       managedScratchRoot,
       liveConversationWorkspace,
+      readLiveConversationScheduledTasks,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       workspaceTrustHotReloadAvailable,
