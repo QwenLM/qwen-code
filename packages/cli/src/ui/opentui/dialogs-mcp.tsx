@@ -328,9 +328,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   const [navigationStack, setNavigationStack] = useState<string[]>([
     MCP_MANAGEMENT_STEPS.SERVER_LIST,
   ]);
-  const [selectedServer, setSelectedServer] = useState<McpServerInfo | null>(
+  // ink derives the selected server from the live list (useMemo on
+  // [servers, selectedServerIndex]) so a reload after an action refreshes
+  // the detail view; keying by name survives the host rebuilding the array.
+  const [selectedServerName, setSelectedServerName] = useState<string | null>(
     null,
   );
+  const selectedServer = selectedServerName
+    ? (servers.find((server) => server.name === selectedServerName) ?? null)
+    : null;
   const [selectedTool, setSelectedTool] = useState<McpToolInfo | null>(null);
   const [selectedResource, setSelectedResource] =
     useState<McpResourceInfo | null>(null);
@@ -382,7 +388,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       } else if (name === 'return') {
         const server = flatServers[serverCursor];
         if (server) {
-          setSelectedServer(server);
+          setSelectedServerName(server.name);
           setActionCursor(0);
           navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
         }
@@ -599,7 +605,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                     onMouseOver={() => setServerCursor(globalIndex)}
                     onMouseUp={() => {
                       setServerCursor(globalIndex);
-                      setSelectedServer(server);
+                      setSelectedServerName(server.name);
                       setActionCursor(0);
                       navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
                     }}

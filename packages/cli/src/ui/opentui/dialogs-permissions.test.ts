@@ -107,6 +107,12 @@ describe('validateWorkspaceDirectory', () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
+  it('returns the falsy empty-input sentinel (handler must short-circuit)', () => {
+    // ink short-circuits empty input in the submit handler before calling
+    // the validator — the sentinel keeps that contract visible here.
+    expect(validateWorkspaceDirectory('   ', [])).toEqual({ error: '' });
+  });
+
   it('rejects paths that do not exist', () => {
     const result = validateWorkspaceDirectory(
       nodePath.join(tmpRoot, 'missing'),

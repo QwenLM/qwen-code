@@ -15,6 +15,7 @@
 import { useLayoutEffect, useState, type ReactNode } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
 import {
+  applyReasoningEffort,
   APPROVAL_MODES,
   REASONING_EFFORT_TIERS,
   type ApprovalMode,
@@ -22,6 +23,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
 
@@ -128,8 +130,11 @@ export function OpenTuiApprovalModeDialog(props: {
     const mode = modes[sel];
     if (mode) {
       try {
-        settings.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
-        config?.setApprovalMode?.(mode);
+        // ink defaults the persist scope to User (its scope picker) — an
+        // untrusted workspace never receives writes; the runtime applies the
+        // merged setting (useApprovalModeCommand parity).
+        settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
+        config?.setApprovalMode?.(settings.merged.tools?.approvalMode ?? mode);
         onApprovalModeChanged(mode);
       } catch {
         /* trust gate */
@@ -168,16 +173,27 @@ export function OpenTuiEffortDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
 }) {
-  const { settings, onClose } = props;
+  const { config, settings, onClose } = props;
   const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
-  const [sel, setSel] = useState(0);
+  // Pre-select the live tier only when one is configured; an unset effort
+  // starts at the top (ink EffortDialog initialIndex parity).
+  const currentEffort = config?.getReasoningEffort?.();
+  const [sel, setSel] = useState(
+    currentEffort ? Math.max(0, tiers.indexOf(currentEffort)) : 0,
+  );
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
     if (effort) {
       try {
+        // Apply at runtime (next turn) and persist for future sessions;
+        // provider adapters clamp the tier per model (ink useEffortCommand
+        // parity — the request pipeline reads the live config per request).
+        if (config) {
+          applyReasoningEffort(config, effort);
+        }
         settings.setValue(
-          SettingScope.Workspace,
+          getPersistScopeForModelSelection(settings),
           'model.reasoningEffort',
           effort,
         );

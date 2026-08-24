@@ -92,6 +92,18 @@ const Row = ({ label, value }: { label: string; value: string }) => (
   </box>
 );
 
+/**
+ * ink MemoryDialog readToggle parity: managed-memory toggles default ON,
+ * and bare/safe modes gate every one of them off (runtime gates the config
+ * getters on !getBareMode() && !isSafeMode()).
+ */
+export function readMemoryToggle(
+  value: unknown,
+  modes: { bareMode: boolean; safeMode: boolean },
+): boolean {
+  return !modes.bareMode && !modes.safeMode && Boolean(value ?? true);
+}
+
 export function OpenTuiMemoryDialog(props: {
   config?: Config;
   settings: LoadedSettings;
@@ -100,7 +112,11 @@ export function OpenTuiMemoryDialog(props: {
   const { config, settings, onClose } = props;
   useEsc(onClose);
   const mem = (settings.merged as { memory?: Record<string, unknown> })?.memory;
-  const toggle = (k: string, dflt: boolean) => Boolean(mem?.[k] ?? dflt);
+  const modes = {
+    bareMode: config?.getBareMode?.() ?? false,
+    safeMode: config?.isSafeMode?.() ?? false,
+  };
+  const toggle = (k: string) => readMemoryToggle(mem?.[k], modes);
   // Real memory file names (audit 01 G-8): ink's MemoryDialog resolves the
   // user file from Storage.getGlobalQwenDir() and the project file from the
   // working dir, both through getAllGeminiMdFilenames() (default QWEN.md) —
@@ -122,15 +138,15 @@ export function OpenTuiMemoryDialog(props: {
         )}
         <Row
           label="Managed auto-memory:"
-          value={toggle('enableManagedAutoMemory', false) ? 'on' : 'off'}
+          value={toggle('enableManagedAutoMemory') ? 'on' : 'off'}
         />
         <Row
           label="Auto-dream:"
-          value={toggle('enableManagedAutoDream', false) ? 'on' : 'off'}
+          value={toggle('enableManagedAutoDream') ? 'on' : 'off'}
         />
         <Row
           label="Auto-skill:"
-          value={toggle('enableAutoSkill', false) ? 'on' : 'off'}
+          value={toggle('enableAutoSkill') ? 'on' : 'off'}
         />
       </box>
     </Shell>

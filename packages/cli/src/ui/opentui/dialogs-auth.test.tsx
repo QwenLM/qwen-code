@@ -302,6 +302,22 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('surfaces the model-ids error on empty submit (ink modelIdsError parity)', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (custom input focused)
+    await press('return'); // empty submit → flow sets modelIdsError
+    expect(screen.getByText(/Model IDs cannot be empty/)).toBeTruthy();
+    // the error is non-fatal: the step stays mounted
+    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+  });
+
   it('keeps the dialog open and shows the error when the plan fails', async () => {
     core.applyProviderInstallPlan.mockRejectedValueOnce(
       new Error('disk on fire'),

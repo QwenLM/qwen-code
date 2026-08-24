@@ -27,6 +27,7 @@ import {
   filterSettingsItems,
   isSubDialogSetting,
   nextToggleValue,
+  parseEditCommit,
   SETTINGS_LIST_MAX_ITEMS,
   settingsTabLabel,
   SETTINGS_TAB_ORDER,
@@ -167,5 +168,26 @@ describe('inline edit buffer', () => {
     expect(editMoveCursor(emoji, 'home').cursor).toBe(0);
     expect(editMoveCursor(emoji, 'end').cursor).toBe(2);
     expect(editMoveCursor({ buffer: 'a', cursor: 0 }, 'left').cursor).toBe(0);
+  });
+});
+
+describe('parseEditCommit', () => {
+  it('commits outputLanguage trimmed, with empty meaning auto', () => {
+    expect(parseEditCommit('general.outputLanguage', 'string', '  zh  ')).toBe(
+      'zh',
+    );
+    expect(parseEditCommit('general.outputLanguage', 'string', '   ')).toBe(
+      'auto',
+    );
+  });
+
+  it('keeps the raw buffer for other string keys (ink parity)', () => {
+    expect(parseEditCommit('general.telemetry', 'string', ' a ')).toBe(' a ');
+  });
+
+  it('parses numbers and cancels empty or NaN input', () => {
+    expect(parseEditCommit('general.maxInitEvents', 'number', ' 12 ')).toBe(12);
+    expect(parseEditCommit('general.maxInitEvents', 'number', '')).toBeNull();
+    expect(parseEditCommit('general.maxInitEvents', 'number', 'x')).toBeNull();
   });
 });

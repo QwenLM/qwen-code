@@ -33,9 +33,10 @@ import { C } from './theme.js';
 const SESSION_START = Date.now();
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
-function useEscToClose(onClose: () => void) {
+function useEscToClose(onClose: () => void, enabled: boolean) {
   const renderer = useRenderer();
   useLayoutEffect(() => {
+    if (!enabled) return;
     const onRawInput = (sequence: string): boolean => {
       if (sequence !== '\x1b') return false;
       onClose();
@@ -43,10 +44,11 @@ function useEscToClose(onClose: () => void) {
     };
     renderer.addInputHandler(onRawInput);
     return () => renderer.removeInputHandler(onRawInput);
-  }, [renderer, onClose]);
+  }, [renderer, onClose, enabled]);
   // Fallback: also close via the parsed-key path in case the lone-ESC raw
   // sequence is swallowed by the input parser.
   useKeyboard((key) => {
+    if (!enabled) return;
     if (toOriginalKey(key).name === 'escape') onClose();
   });
 }
@@ -99,11 +101,14 @@ const TABS: Array<{ name: StatsTabName; label: string }> = [
 export function OpenTuiStatsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
+  /** Embedded hosts pass false while their own focus zone owns the keys. */
+  isFocused?: boolean;
 }) {
-  const { config, onClose } = props;
+  const { config, onClose, isFocused = true } = props;
   const [tab, setTab] = useState<StatsTabName>('session');
-  useEscToClose(onClose);
+  useEscToClose(onClose, isFocused);
   useKeyboard((key) => {
+    if (!isFocused) return;
     const original = toOriginalKey(key);
     if (original.name === 'tab') {
       const order = TABS.map((t) => t.name);
@@ -376,7 +381,7 @@ export function OpenTuiSkillsDialog(props: {
   const { config, onClose } = props;
   const [rows, setRows] = useState<SkillRow[]>([]);
   const [loading, setLoading] = useState(true);
-  useEscToClose(onClose);
+  useEscToClose(onClose, true);
   useEffect(() => {
     let alive = true;
     const mgr = config?.getSkillManager?.();

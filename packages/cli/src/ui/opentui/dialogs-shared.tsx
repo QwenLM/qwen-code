@@ -122,6 +122,12 @@ export function DialogTabBar(props: {
 export interface UseDialogSelectOptions<TItem extends DialogListItem<unknown>> {
   items: readonly TItem[];
   initialIndex?: number;
+  /**
+   * Re-apply initialIndex whenever this key changes. Dialogs that keep one
+   * mounted hook for several views use it to re-sync the cursor on view
+   * entry, matching ink's remounted selection components.
+   */
+  resyncKey?: string | number;
   /** Only react to keys while true (multiple lists share one keyboard). */
   focused?: boolean;
   /** Numeric quick-select (the numbered rows' "type the row number"). */
@@ -156,6 +162,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const {
     items,
     initialIndex = 0,
+    resyncKey,
     focused = true,
     numbers = true,
     maxItemsToShow = DEFAULT_MAX_ITEMS_TO_SHOW,
@@ -173,6 +180,19 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       maxItemsToShow,
     ),
   );
+
+  // Resync during render when the key changes (React's adjust-state-during-
+  // render pattern): consumers that swap views over one mounted hook get
+  // the fresh initialIndex instead of the mount-time snapshot.
+  const [appliedResyncKey, setAppliedResyncKey] = useState(resyncKey);
+  if (appliedResyncKey !== resyncKey) {
+    setAppliedResyncKey(resyncKey);
+    const next = computeInitialActiveIndex(initialIndex, items);
+    setActiveIndexState(next);
+    setScrollOffset(
+      getSelectionScrollOffset(next, items.length, maxItemsToShow),
+    );
+  }
 
   const numberBuffer = useRef('');
   const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -224,6 +244,13 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     const original = toOriginalKey(key);
 
     if (numbers && !original.ctrl && /^[0-9]$/.test(original.sequence)) {
+      // The original hook clears the pending flush on every digit first —
+      // an invalid digit (leading '0', out-of-range) must disarm it, or the
+      // stale timer would later commit the pre-digit highlight.
+      if (numberTimer.current) {
+        clearTimeout(numberTimer.current);
+        numberTimer.current = null;
+      }
       const result = applyNumberSelectKey(
         { buffer: numberBuffer.current },
         original.sequence,
@@ -240,7 +267,6 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
         const item = items[result.activeIndex ?? activeIndex];
         if (item && !item.disabled) onSelect?.(item.value);
       } else if (result.pendingSelect) {
-        if (numberTimer.current) clearTimeout(numberTimer.current);
         numberTimer.current = setTimeout(() => {
           clearNumberBuffer();
           // Flush against the highlight at timeout time, not at digit time.

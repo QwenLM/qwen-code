@@ -531,6 +531,11 @@ function ModelsStep({
         )}
       </text>
       <InputLine value={customText} placeholder="model-id" active={focus < 0} />
+      {flow.state.modelIdsError && (
+        <box marginTop={1}>
+          <text fg={C.red}>{flow.state.modelIdsError}</text>
+        </box>
+      )}
       {hasSelectableModels ? (
         <>
           <box marginTop={1}>

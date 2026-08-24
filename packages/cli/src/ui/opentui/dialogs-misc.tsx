@@ -550,10 +550,27 @@ export function OpenTuiBranchDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiHooksDialog({ settings, onClose }: P) {
+/**
+ * The real hooks switch is the top-level `disableAllHooks` setting (default
+ * false = enabled); `hooks` is an event-name → hook-arrays map with no
+ * `enabled` field. Runtime additionally disables hooks in bare/safe mode
+ * (config.getDisableAllHooks).
+ */
+export function readHooksEnabled(
+  config: Pick<Config, 'getDisableAllHooks'> | undefined,
+  settings: LoadedSettings,
+): boolean {
+  return config?.getDisableAllHooks
+    ? !config.getDisableAllHooks()
+    : !(
+        (settings.merged as { disableAllHooks?: boolean }).disableAllHooks ??
+        false
+      );
+}
+
+export function OpenTuiHooksDialog({ config, settings, onClose }: P) {
   useEsc(onClose);
-  const hooks = (settings.merged as { hooks?: Record<string, unknown> })?.hooks;
-  const enabled = Boolean((hooks as { enabled?: boolean })?.enabled ?? false);
+  const enabled = readHooksEnabled(config, settings);
   return (
     <Shell title="Hooks" onClose={onClose}>
       <box flexDirection="column" marginTop={1}>

@@ -29,6 +29,7 @@ import {
   checkForExtensionUpdate,
   ExtensionUpdateState,
   getMCPServerStatus,
+  isGatedMcpScope,
   isImageCapable,
   logModelSlashCommand,
   matchesAnyServerPattern,
@@ -42,12 +43,15 @@ import {
   parseVisionModelSetting,
   redactUrlCredentials,
   removeMCPServerStatus,
+  resolveModelId,
   SettingScope as CoreSettingScope,
 } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ContentGeneratorConfig,
   Extension,
+  MCPServerConfig,
+  ResolvedModelId,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -55,6 +59,7 @@ import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import {
   isSelectableVoiceModel,
@@ -212,11 +217,20 @@ export function computeModelDialogInitialKey(params: {
   if (byKey.has(trimmed)) return trimmed;
   const parsed = parseVisionModelSetting(trimmed);
   if (!parsed) return undefined;
-  const selector = parsed.selector;
-  const colonIdx = selector.indexOf(':');
-  const selectorAuth = colonIdx >= 0 ? selector.slice(0, colonIdx) : undefined;
-  const selectorModelId =
-    colonIdx >= 0 ? selector.slice(colonIdx + 1) : selector;
+  // Core splits only on a known-AuthType prefix — model IDs may themselves
+  // contain colons (e.g. gpt-4o:online), which a raw first-colon split
+  // mangles (ink: parsed*ModelSetting in ModelDialog).
+  let resolved: ResolvedModelId | undefined;
+  try {
+    resolved = resolveModelId(parsed.selector);
+  } catch {
+    resolved = undefined;
+  }
+  if (!resolved) return undefined;
+  const selectorModelId = resolved.modelId;
+  const selectorAuth = resolved.authType
+    ? String(resolved.authType)
+    : undefined;
   const match = entries.find((entry) => {
     if (entry.modelId !== selectorModelId) return false;
     if (selectorAuth && entry.authType !== selectorAuth) return false;
@@ -681,7 +695,10 @@ export function buildMcpServers(
   return infos;
 }
 
-/** Tool detail feed for the MCP dialog's tool list step. */
+/**
+ * Tool detail feed for the MCP dialog's tool list step (ink getServerTools
+ * parity: validity via isToolValid, invalidReason, and tool annotations).
+ */
 export function getMcpServerTools(
   config: Config | null | undefined,
   serverName: string,
@@ -691,11 +708,30 @@ export function getMcpServerTools(
     .filter(
       (tool) => (tool as { serverName?: string }).serverName === serverName,
     )
-    .map((tool) => ({
-      name: tool.name ?? '',
-      ...(tool.description ? { description: tool.description } : {}),
-      isValid: Boolean(tool.name && tool.description),
-    }));
+    .map((tool) => {
+      const discovered = tool as {
+        name?: string;
+        description?: string;
+        annotations?: McpToolInfo['annotations'];
+      };
+      const isValid = isToolValid(discovered.name, discovered.description);
+      const invalidReason = isValid
+        ? undefined
+        : getToolInvalidReasons(discovered.name, discovered.description).join(
+            ', ',
+          );
+      return {
+        name: discovered.name ?? '',
+        ...(discovered.description
+          ? { description: discovered.description }
+          : {}),
+        ...(discovered.annotations
+          ? { annotations: discovered.annotations }
+          : {}),
+        isValid,
+        ...(invalidReason ? { invalidReason } : {}),
+      };
+    });
 }
 
 /** Resource feed for the MCP dialog's resource list step. */
@@ -727,6 +763,10 @@ export async function enrichMcpOAuthState(
 ): Promise<McpServerInfo[]> {
   const mcpServers = config?.getMcpServers?.() ?? {};
   const tokenStorage = new MCPOAuthTokenStorage();
+  // Approval state is keyed by the same project root discovery gated on
+  // (`config.getWorkingDir()`, ink fetchServerData parity).
+  const approvalRoot = config?.getWorkingDir?.();
+  const approvals = approvalRoot ? loadMcpApprovals() : undefined;
   const enriched: McpServerInfo[] = [];
   for (const info of servers) {
     let hasOAuthTokens = false;
@@ -735,15 +775,33 @@ export async function enrichMcpOAuthState(
     } catch {
       // Unreadable token store = no tokens.
     }
-    const serverConfig = mcpServers[info.name] as
-      | { oauth?: { enabled?: boolean } }
-      | undefined;
+    const serverConfig = mcpServers[info.name] as MCPServerConfig | undefined;
     const status = getMCPServerStatus(info.name);
     const requiresAuth =
       status !== MCPServerStatus.CONNECTED &&
       (mcpServerRequiresOAuth.get(info.name) === true ||
         (Boolean(serverConfig?.oauth?.enabled) && !hasOAuthTokens));
-    enriched.push({ ...info, status, hasOAuthTokens, requiresAuth });
+    // Why a gated (#4615) server is skipped by discovery: pending or
+    // rejected. `approved` (and non-gated scopes) leave approvalState unset.
+    let approvalState: McpServerInfo['approvalState'];
+    if (
+      approvals &&
+      approvalRoot &&
+      serverConfig &&
+      isGatedMcpScope(serverConfig.scope)
+    ) {
+      const state = approvals.getState(approvalRoot, info.name, serverConfig);
+      if (state !== 'approved') {
+        approvalState = state;
+      }
+    }
+    enriched.push({
+      ...info,
+      status,
+      hasOAuthTokens,
+      requiresAuth,
+      ...(approvalState ? { approvalState } : {}),
+    });
   }
   return enriched;
 }
@@ -877,7 +935,7 @@ export async function applyMcpServerAction(
       }
       case 'authenticate': {
         const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
-          | { oauth?: { enabled?: boolean }; url?: string }
+          | { oauth?: { enabled?: boolean }; url?: string; httpUrl?: string }
           | undefined;
         const oauthConfig = rawConfig?.oauth ?? { enabled: false };
         const events = new EventEmitter();
@@ -891,10 +949,13 @@ export async function applyMcpServerAction(
           }
         });
         const provider = new MCPOAuthProvider(new MCPOAuthTokenStorage());
+        // Streamable-http servers expose httpUrl; ink passes it ahead of the
+        // SSE url (AuthenticateStep parity) — the provider's discovery only
+        // runs when a server URL is present.
         await provider.authenticate(
           server.name,
           oauthConfig,
-          rawConfig?.url,
+          rawConfig?.httpUrl || rawConfig?.url,
           events,
         );
         if (toolRegistry) {

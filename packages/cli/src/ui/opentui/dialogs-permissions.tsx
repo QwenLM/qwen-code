@@ -419,6 +419,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         return;
       }
       if (name === 'return') {
+        // ink's handleAddDirSubmit returns early on empty input — the user
+        // stays in the form instead of silently dropping back to the list
+        // (validateWorkspaceDirectory's empty-input sentinel is falsy).
+        if (!newDirInput.trim()) return;
         const result = validateWorkspaceDirectory(newDirInput, directories);
         if (result.error) {
           setDirInputError(result.error);

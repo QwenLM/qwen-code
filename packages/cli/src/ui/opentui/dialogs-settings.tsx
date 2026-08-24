@@ -62,6 +62,7 @@ import {
   FooterHint,
   useDialogSelect,
 } from './dialogs-shared.js';
+import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 
 export type SettingsTab = 'settings' | 'status' | 'stats';
 
@@ -165,6 +166,28 @@ export function nextToggleValue(
     return options[0].value;
   }
   return undefined;
+}
+
+/**
+ * Parity of commitEdit's value parsing. Numbers must parse (empty or NaN
+ * cancels the edit, returned as null); outputLanguage commits the trimmed
+ * value with empty meaning 'auto'; other string keys keep the raw buffer.
+ */
+export function parseEditCommit(
+  key: string,
+  type: SettingsType | undefined,
+  buffer: string,
+): string | number | null | undefined {
+  const trimmed = buffer.trim();
+  if (type === 'number') {
+    if (trimmed === '') return null;
+    const numParsed = Number(trimmed);
+    return Number.isNaN(numParsed) ? null : numParsed;
+  }
+  if (key === 'general.outputLanguage') {
+    return trimmed === '' ? 'auto' : trimmed;
+  }
+  return buffer;
 }
 
 export interface EditBufferState {
@@ -287,6 +310,13 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     };
   }, [activeTab, config, settings, statusReloadNonce]);
 
+  // Keep the selection valid as the search query narrows the list (ink has
+  // the same [searchQuery] reset effect).
+  useEffect(() => {
+    setActiveSettingIndex(0);
+    setScrollOffset(0);
+  }, [searchQuery]);
+
   const allItems = buildSettingsListItems();
   const items = filterSettingsItems(allItems, searchQuery, (key) =>
     getScopeMessageForSetting(key, selectedScope, settings),
@@ -344,30 +374,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
 
   const commitEdit = (key: string) => {
     const definition = getSettingDefinition(key);
-    const type = definition?.type;
-    const trimmed = edit.buffer.trim();
-
-    let parsed: string | number | undefined;
-    if (type === 'number') {
-      if (trimmed === '') {
-        setEditingKey(null);
-        setEdit({ buffer: '', cursor: 0 });
-        return;
-      }
-      const numParsed = Number(trimmed);
-      if (Number.isNaN(numParsed)) {
-        setEditingKey(null);
-        setEdit({ buffer: '', cursor: 0 });
-        return;
-      }
-      parsed = numParsed;
-    } else {
-      parsed =
-        key === 'general.outputLanguage' && trimmed === ''
-          ? 'auto'
-          : edit.buffer;
+    const parsed = parseEditCommit(key, definition?.type, edit.buffer);
+    if (parsed === null) {
+      setEditingKey(null);
+      setEdit({ buffer: '', cursor: 0 });
+      return;
     }
-
     if (definition && validateSettingValue(definition, parsed)) {
       setEditingKey(null);
       setEdit({ buffer: '', cursor: 0 });
@@ -463,6 +475,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         setFocusZone('tabs');
         return;
       }
+      // The Stats tab embeds OpenTuiStatsDialog whose own handlers drive
+      // Tab and Esc (Esc defocuses to the tab bar via onClose) — don't
+      // double-handle them here.
+      if (activeTab === 'stats') return;
       if (name === 'escape') onSelect(undefined, selectedScope);
       return;
     }
@@ -503,9 +519,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       return;
     }
 
-    // Settings tab, list focused.
+    // Settings tab, list focused. Tab toggles the scope selector (ink
+    // parity: setMode from the previous value — a fixed 'settings' would be
+    // a no-op, since mode is always 'settings' in this branch).
     if (name === 'tab') {
-      setMode('settings');
+      setMode((prev) => (prev === 'settings' ? 'scope' : 'settings'));
       return;
     }
     if (editingKey) {
@@ -669,7 +687,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
           <text fg={C.dim}>{t('Loading status…')}</text>
         )
       ) : activeTab === 'stats' ? (
-        <text fg={C.dim}>{t('Loading stats...')}</text>
+        <OpenTuiStatsDialog
+          config={config}
+          isFocused={focusZone === 'list'}
+          onClose={() => setFocusZone('tabs')}
+        />
       ) : mode === 'scope' ? (
         <box flexDirection="column">
           <text fg={C.text} attributes={1}>

@@ -332,6 +332,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     // Default the cursor to the current scope so the user sees what is in
     // effect (ink scopeItems initialIndex parity).
     initialIndex: currentRow?.scope === 'project' ? 1 : 0,
+    // ink remounts the radio select on every scope-view entry; resync on
+    // entry re-applies the live-scope initialIndex (the mount-time lazy
+    // initializer runs before any row is selected).
+    resyncKey: view,
     focused: view === 'scope-select',
     onSelect: (scope) => {
       if (currentRow) onDetailAction?.(currentRow, 'change-scope', scope);

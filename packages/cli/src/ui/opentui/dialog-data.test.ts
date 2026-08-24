@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 
 // theme.ts (via the dialog modules) builds a SyntaxStyle at module scope,
 // which needs the OpenTUI native FFI — unavailable in the test runtime. Stub
@@ -25,6 +26,7 @@ import {
   MCPServerStatus,
   type AvailableModel,
   type Config,
+  type OAuthToken,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
@@ -918,6 +920,12 @@ describe('mcp and extension feeds', () => {
       getAllTools: () => [
         { serverName: 'docs', name: 'search', description: 'Search docs' },
         { serverName: 'docs', name: 'broken' },
+        {
+          serverName: 'docs',
+          name: 'annotated',
+          description: 'Annotated',
+          annotations: { readOnlyHint: true },
+        },
         { serverName: 'other', name: 'unrelated' },
       ],
     })) as unknown as Config['getToolRegistry'],
@@ -937,7 +945,7 @@ describe('mcp and extension feeds', () => {
     const docs = servers.find((server) => server.name === 'docs');
     expect(docs).toMatchObject({
       source: 'project',
-      toolCount: 2,
+      toolCount: 3,
       invalidToolCount: 1,
       isDisabled: false,
       command: 'npx docs-mcp',
@@ -947,11 +955,21 @@ describe('mcp and extension feeds', () => {
     expect(legacy).toMatchObject({ source: 'user', isDisabled: true });
   });
 
-  it('feeds the tool list for one server', () => {
+  it('feeds the tool list with validity, invalidReason and annotations', () => {
     const tools = getMcpServerTools(config, 'docs');
     expect(tools).toEqual([
       { name: 'search', description: 'Search docs', isValid: true },
-      { name: 'broken', isValid: false },
+      {
+        name: 'broken',
+        isValid: false,
+        invalidReason: 'missing description',
+      },
+      {
+        name: 'annotated',
+        description: 'Annotated',
+        annotations: { readOnlyHint: true },
+        isValid: true,
+      },
     ]);
   });
 
@@ -1084,10 +1102,34 @@ describe('MCP OAuth enrichment (real token state)', () => {
       requiresAuth: false,
     });
   });
+
+  it('carries approvalState for gated scopes, unset otherwise', async () => {
+    const { MCPOAuthTokenStorage } = await import('@qwen-code/qwen-code-core');
+    vi.spyOn(
+      MCPOAuthTokenStorage.prototype,
+      'getCredentials',
+    ).mockResolvedValue(null);
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        'gated-srv': { scope: 'project' },
+        'user-srv': {},
+      })) as unknown as Config['getMcpServers'],
+      getWorkingDir: (() => '/proj') as Config['getWorkingDir'],
+    } as Partial<Config>);
+    const enriched = await enrichMcpOAuthState(config, [
+      serverInfo('gated-srv'),
+      serverInfo('user-srv'),
+    ]);
+    expect(enriched[0].approvalState).toBe('pending');
+    expect(enriched[1].approvalState).toBeUndefined();
+  });
 });
 
 vi.mock('../../config/mcpApprovals.js', () => ({
-  loadMcpApprovals: () => ({ setState: vi.fn() }),
+  loadMcpApprovals: () => ({
+    setState: vi.fn(),
+    getState: vi.fn(() => 'pending'),
+  }),
 }));
 
 describe('applyMcpServerAction (real server actions)', () => {
@@ -1236,6 +1278,51 @@ describe('applyMcpServerAction (real server actions)', () => {
     expect(result.changed).toBe(true);
   });
 
+  it('authenticate passes httpUrl ahead of the SSE url', async () => {
+    const { MCPOAuthProvider } = await import('@qwen-code/qwen-code-core');
+    const authenticate = vi
+      .spyOn(MCPOAuthProvider.prototype, 'authenticate')
+      .mockResolvedValue({} as OAuthToken);
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {
+          oauth: { enabled: true },
+          httpUrl: 'https://mcp.example/mcp',
+          url: 'https://mcp.example/sse',
+        },
+        'sse-only': { url: 'https://mcp.example/sse' },
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer: vi.fn(async () => {}),
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ name: 'srv', hasOAuthTokens: true }),
+      'authenticate',
+    );
+    expect(authenticate).toHaveBeenCalledWith(
+      'srv',
+      { enabled: true },
+      'https://mcp.example/mcp',
+      expect.any(EventEmitter),
+    );
+    await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ name: 'sse-only' }),
+      'authenticate',
+    );
+    expect(authenticate).toHaveBeenLastCalledWith(
+      'sse-only',
+      { enabled: false },
+      'https://mcp.example/sse',
+      expect.any(EventEmitter),
+    );
+  });
+
   it('reports failures instead of throwing', async () => {
     const config = stubConfig({
       getToolRegistry: (() => ({
@@ -1347,6 +1434,24 @@ describe('computeModelDialogInitialKey (/model opens on the current model)', () 
       mode: 'fast',
     });
     expect(key).toBe(baseEntries[0].key);
+  });
+
+  it('does not split a colon-bearing model id that is not an authType prefix', () => {
+    const settings = {
+      merged: { fastModel: 'gpt-4o:online' },
+    } as unknown as LoadedSettings;
+    const colonEntry = entry({
+      key: buildModelSelectionKey(AuthType.USE_OPENAI, 'gpt-4o:online'),
+      authType: AuthType.USE_OPENAI,
+      modelId: 'gpt-4o:online',
+    });
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({}),
+      settings,
+      entries: [...baseEntries, colonEntry],
+      mode: 'fast',
+    });
+    expect(key).toBe(colonEntry.key);
   });
 
   it('returns undefined without a current model (dialog starts on row 1)', () => {

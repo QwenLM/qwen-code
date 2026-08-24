@@ -24,7 +24,29 @@ import {
   getAllGeminiMdFilenames,
   setGeminiMdFilename,
 } from '@qwen-code/qwen-code-core';
-import { resolvePreferredMemoryFile } from './dialogs-memory-status.js';
+import {
+  resolvePreferredMemoryFile,
+  readMemoryToggle,
+} from './dialogs-memory-status.js';
+
+describe('readMemoryToggle (ink readToggle parity)', () => {
+  const off = { bareMode: false, safeMode: false };
+
+  it('defaults managed-memory toggles ON and honors explicit values', () => {
+    expect(readMemoryToggle(undefined, off)).toBe(true);
+    expect(readMemoryToggle(true, off)).toBe(true);
+    expect(readMemoryToggle(false, off)).toBe(false);
+  });
+
+  it('gates every toggle off in bare and safe modes', () => {
+    expect(readMemoryToggle(true, { bareMode: true, safeMode: false })).toBe(
+      false,
+    );
+    expect(readMemoryToggle(true, { bareMode: false, safeMode: true })).toBe(
+      false,
+    );
+  });
+});
 
 describe('resolvePreferredMemoryFile', () => {
   let dir: string;
