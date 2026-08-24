@@ -1,3 +1,4 @@
+import 'katex/dist/katex.min.css';
 import '../styles/globals.css';
 import {
   useLayoutEffect,

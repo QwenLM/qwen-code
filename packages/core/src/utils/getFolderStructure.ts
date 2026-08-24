@@ -9,8 +9,8 @@ import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { getErrorMessage, isNodeError } from './errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import type { FileFilteringOptions } from '../config/constants.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import type { FileFilteringOptions } from './file-filtering-options.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from './file-filtering-options.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('FOLDER_STRUCTURE');
