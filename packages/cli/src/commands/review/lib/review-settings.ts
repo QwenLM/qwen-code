@@ -13,6 +13,7 @@ const SAFE_DEFAULTS: OperatorReviewSettings = {
   comment: false,
   effort: undefined,
   reverseAuditRounds: undefined,
+  approachRounds: undefined,
 };
 
 export interface OperatorReviewSettings {
@@ -41,6 +42,15 @@ export interface OperatorReviewSettings {
    * topology can honour (it may only lower a tier, never raise it).
    */
   reverseAuditRounds?: number;
+  /**
+   * How many rounds a PR must reach before the review may say the approach
+   * itself is the open question, when the operator sets a real number.
+   *
+   * Only a positive integer survives re-validation; anything else reads as
+   * absent and the built-in default applies. Raising it makes the signal
+   * later; a large value effectively silences it.
+   */
+  approachRounds?: number;
 }
 
 /**
@@ -88,6 +98,7 @@ export function operatorReviewSettings(): OperatorReviewSettings {
   // non-boolean `attribution` falls back to the schema default (on); a
   // non-boolean `comment` never enables auto-posting.
   const rounds = review?.reverseAuditRounds;
+  const approach = review?.approachRounds;
   return {
     attribution:
       typeof review?.attribution === 'boolean' ? review.attribution : true,
@@ -100,6 +111,10 @@ export function operatorReviewSettings(): OperatorReviewSettings {
     reverseAuditRounds:
       typeof rounds === 'number' && Number.isInteger(rounds) && rounds > 0
         ? rounds
+        : undefined,
+    approachRounds:
+      typeof approach === 'number' && Number.isInteger(approach) && approach > 0
+        ? approach
         : undefined,
   };
 }
