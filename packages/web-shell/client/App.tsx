@@ -956,6 +956,12 @@ export interface WebShellProps {
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
+   * Called with the initial merged agent task snapshot and when its roster,
+   * status, or stable metadata changes. Poll-only runtime, stats, and activity
+   * updates are suppressed.
+   */
+  onAgentTasksChange?: (tasks: readonly DaemonSessionAgentTaskStatus[]) => void;
+  /**
    * Called whenever transcript blocks change. Receives the full blocks array
    * at most once per animation frame during active generation.
    */
@@ -1900,6 +1906,7 @@ export function App({
   virtualScrollThreshold,
   markdown,
   loadingPhrases,
+  onAgentTasksChange,
   onTranscriptChange,
   onToast,
   composerRef,
@@ -4119,6 +4126,27 @@ export function App({
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
   );
+  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!onAgentTasksChange) {
+      lastReportedAgentTasksRef.current = undefined;
+      return;
+    }
+    const snapshot = JSON.stringify(
+      environmentAgentTasks.map(
+        ({
+          runtimeMs: _runtimeMs,
+          stats: _stats,
+          recentActivities: _recentActivities,
+          prompt: _prompt,
+          ...stable
+        }) => stable,
+      ),
+    );
+    if (snapshot === lastReportedAgentTasksRef.current) return;
+    lastReportedAgentTasksRef.current = snapshot;
+    onAgentTasksChange(environmentAgentTasks);
+  }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),
     [sessionTasks],
@@ -13352,10 +13380,12 @@ export function App({
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      variant="drawer"
-                    />
+                    <CompactModeContext.Provider value={compactMode}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        variant="drawer"
+                      />
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
@@ -13420,12 +13450,14 @@ export function App({
                     />
                   )}
                   <WebShellCustomizationProvider value={customization}>
-                    <div className={styles.artifactPanelClip}>
-                      <ArtifactPanel
-                        {...artifactPanelSharedProps}
-                        panelWidth={artifactPanelWidth}
-                      />
-                    </div>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <div className={styles.artifactPanelClip}>
+                        <ArtifactPanel
+                          {...artifactPanelSharedProps}
+                          panelWidth={artifactPanelWidth}
+                        />
+                      </div>
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,

@@ -146,6 +146,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 
