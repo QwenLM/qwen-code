@@ -218,29 +218,51 @@ export function extractHunkPatch(
  * captures always use default prefixes; a non-standard one arrives only
  * through arbitrary `--diff`, and refusing it is safe where mutating is not.
  */
-export function sectionHasUnsupportedPrefix(
+export function sectionUnsafeToRevert(
   diffText: string,
   file: DiffFile,
-): boolean {
+): string | null {
   const lines = diffText.split('\n');
   const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
   const tok = (pfx: string) =>
     header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '';
-  // Standard git prefixes only, checked for EVERY section rather than just
-  // rename/copy: the command assumes a/ b/ at every layer (parseDiff strips
-  // them, extractHunkPatch rewrites with them, git apply -R uses -p1), and a
-  // custom (--src-prefix) or absent (--no-prefix) prefix mis-targets one of
-  // those. `/dev/null` is a creation/deletion side; a quoted token is
-  // standard only when it quotes an a/ or b/ prefix; an empty token (no such
-  // header line) does not mask the real reason.
-  const standard = (t: string) =>
-    t === '' ||
-    t === '/dev/null' ||
-    t.startsWith('a/') ||
-    t.startsWith('b/') ||
-    t.startsWith('"a/') ||
-    t.startsWith('"b/');
-  return !standard(tok('--- ')) || !standard(tok('+++ '));
+  const minus = tok('--- ');
+  const plus = tok('+++ ');
+  // An empty header token means a binary/mode-only section this command
+  // already refuses for lacking hunks — not this gate's concern.
+  if (minus === '' || plus === '') return null;
+  // The command assumes git's DEFAULT prefixes at every layer (parseDiff
+  // strips a/ b/, extractHunkPatch rewrites with them, git apply -R uses
+  // -p1). The old side must be `a/…` and the new side `b/…` (quoted or
+  // /dev/null variants included). This rejects --src-prefix / --dst-prefix,
+  // --no-prefix (whose bare or a/-only tokens read as non-standard), crossed
+  // prefixes, and a top-level directory literally named a or b under
+  // --no-prefix (the +++ then lacks its b/).
+  const oldOk =
+    minus === '/dev/null' || minus.startsWith('a/') || minus.startsWith('"a/');
+  const newOk =
+    plus === '/dev/null' || plus.startsWith('b/') || plus.startsWith('"b/');
+  if (!oldOk || !newOk) {
+    return `hunk sits in a section whose diff prefixes are not git's standard a/ b/ (got --- ${JSON.stringify(minus)}, +++ ${JSON.stringify(plus)}) — this command assumes default prefixes at every layer. Recapture with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix).`;
+  }
+  // Standard prefixes confirmed. When the two paths DIFFER it must be a real
+  // rename/copy (metadata present), or `git apply -R` would MOVE the file
+  // rather than revert its content — the mutation the report does not name.
+  const strip = (t: string) =>
+    t === '/dev/null' ? t : t.startsWith('"') ? t.slice(3) : t.slice(2);
+  const isMoveOrCopy =
+    file.renameFrom !== undefined ||
+    header.some(
+      (l) => l.startsWith('copy from ') || l.startsWith('rename from '),
+    );
+  // A creation (`--- /dev/null`) or deletion (`+++ /dev/null`) legitimately
+  // has differing sides — only two REAL paths differing without metadata is
+  // the move-inducing shape.
+  const bothReal = minus !== '/dev/null' && plus !== '/dev/null';
+  if (bothReal && strip(minus) !== strip(plus) && !isMoveOrCopy) {
+    return `hunk sits in a section whose --- and +++ paths differ with no rename/copy metadata — a reverse-apply would move the file rather than revert its content. This command reverts git-produced diffs; recapture with git.`;
+  }
+  return null;
 }
 
 /** Split `<path>:<n>` from the RIGHT — a path may itself contain a colon. */
@@ -337,12 +359,13 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const entry = listHunks(diffText).find(
     (h) => h.path === sel.path && h.n === sel.n,
   )!;
-  if (sectionHasUnsupportedPrefix(diffText, file)) {
+  const unsafe = sectionUnsafeToRevert(diffText, file);
+  if (unsafe !== null) {
     return {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `hunk ${args.hunk} sits in a section whose diff prefixes are not the standard a/ b/ — this command assumes git's default prefixes at every layer (path parsing, the -p1 apply, the rename rewrite), and a custom or absent prefix mis-targets the reverse-apply. Recapture with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix); nothing was changed.`,
+      note: `${args.hunk}: ${unsafe} Nothing was changed.`,
     };
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
@@ -421,7 +444,16 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       note: `reverted hunk ${args.hunk} (${entry.header}) in ${tree}. Re-run the probe the intact tree passed — the intact/reverted pair is the witness — and reset the scratch tree afterwards. A compiled product needs its rebuild between revert and probe, or the probe measures the previous build.`,
     };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // Best effort: an EACCES (a same-uid peer chmods the staging dir mid-run;
+    // `force:true` only suppresses ENOENT) must not throw out of the finally
+    // and displace the return — the tree may already be reverted, and losing
+    // `applied:true` reads to the caller as a refusal over a mutation that
+    // happened.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* leak over lie */
+    }
   }
 }
 

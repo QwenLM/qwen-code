@@ -322,21 +322,24 @@ describe('runAbDrive, harnessed', () => {
     expect(h.events()).not.toContain('new:arm-b');
   });
 
-  it('re-validates --shared-cwd for a revoked search bit, not only deletion', () => {
-    const sharedCwd = tempDir('ab-shcwd3-');
-    const args = baseArgs({ shared: 'run-daemon', sharedCwd });
-    const h = harness({
-      server: args.server,
-      onSession: (name) => {
-        if (name === 'hold') chmodSync(sharedCwd, 0o000);
-      },
-    });
-    const r = runAbDrive({ ...args, exec: h.exec });
-    chmodSync(sharedCwd, 0o755);
-    expect(r.a?.outcome).toBe('unavailable');
-    expect(r.note).toContain('--shared-cwd');
-    expect(r.note).toContain('searchable');
-  });
+  it.skipIf(process.platform === 'win32')(
+    're-validates --shared-cwd for a revoked search bit, not only deletion',
+    () => {
+      const sharedCwd = tempDir('ab-shcwd3-');
+      const args = baseArgs({ shared: 'run-daemon', sharedCwd });
+      const h = harness({
+        server: args.server,
+        onSession: (name) => {
+          if (name === 'hold') chmodSync(sharedCwd, 0o000);
+        },
+      });
+      const r = runAbDrive({ ...args, exec: h.exec });
+      chmodSync(sharedCwd, 0o755);
+      expect(r.a?.outcome).toBe('unavailable');
+      expect(r.note).toContain('--shared-cwd');
+      expect(r.note).toContain('searchable');
+    },
+  );
 
   it('re-validates --shared-cwd at its use site too', () => {
     const sharedCwd = tempDir('ab-shcwd2-');

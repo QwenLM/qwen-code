@@ -15,7 +15,7 @@
 
 import { describe, it, expect, vi, afterAll } from 'vitest';
 import yargs from 'yargs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -26,7 +26,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   extractHunkPatch,
@@ -113,6 +113,11 @@ describe('listHunks', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    // Repo convention for git-fixture tests: pin LF so `git apply -R` does not
+    // write CRLF into the reverted tree under a core.autocrlf=true host
+    // (the Git-for-Windows default), which would fail the exact-LF asserts.
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'c.txt'), 'one\ntwo\nthree\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-qm', 'base');
@@ -226,6 +231,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
     writeFileSync(join(dir, 'old.txt'), `top-old\n${body}\n`);
     git(dir, 'add', '.');
@@ -262,6 +268,7 @@ describe('runRevertHunk', () => {
       git(dir, 'init', '-q', '-b', 'main');
       git(dir, 'config', 'user.email', 't@t');
       git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'core.autocrlf', 'false');
       writeFileSync(join(dir, 'run.sh'), '#!/bin/sh\necho old\n');
       git(dir, 'add', '.');
       git(dir, 'commit', '-qm', 'base');
@@ -291,6 +298,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'caf\u00e9.txt'), 'top-old\nmid\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-qm', 'base');
@@ -317,6 +325,32 @@ describe('runRevertHunk', () => {
     expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toBe(before);
   });
 
+  it('refuses a hand-crafted section whose paths differ without rename metadata', () => {
+    // git never emits `--- a/old` / `+++ b/new` without a rename/copy header;
+    // a hand-assembled --diff can, and reverse-applying it would MOVE the
+    // file. Build one by taking a real single-file diff and rewriting its
+    // +++ path.
+    const { dir, diffPath } = twoHunkFixture();
+    const raw = readFileSync(diffPath, 'utf8');
+    const crafted = raw
+      .replace('+++ b/f.txt', '+++ b/other.txt')
+      .replace('diff --git a/f.txt b/f.txt', 'diff --git a/f.txt b/other.txt');
+    const craftedPath = join(dir, 'crafted.diff');
+    writeFileSync(craftedPath, crafted);
+    const before = readFileSync(join(dir, 'f.txt'), 'utf8');
+    const r = runRevertHunk({
+      diff: craftedPath,
+      tree: dir,
+      hunk: 'other.txt:1',
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('no rename/copy metadata');
+    // Neither file moved or changed.
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe(before);
+    expect(existsSync(join(dir, 'other.txt'))).toBe(false);
+  });
+
   it('refuses an ambiguous hunk id — a path in more than one diff section', () => {
     // format-patch --stdout concatenates per-commit sections; a path edited
     // in two commits yields two `f.txt:1` rows and files.find would silently
@@ -326,6 +360,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'f.txt'), 'v0\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-qm', 'c0');
@@ -360,6 +395,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
     writeFileSync(join(dir, 'orig.txt'), `top-old\n${body}\n`);
     git(dir, 'add', '.');
@@ -394,6 +430,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
     writeFileSync(join(dir, 'plain.txt'), `top-old\n${body}\n`);
     git(dir, 'add', '.');
@@ -466,6 +503,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'stays.txt'), 'anchor\n');
     writeFileSync(join(dir, 'doomed.txt'), 'old content\n');
     git(dir, 'add', '.');
@@ -503,6 +541,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
     writeFileSync(join(dir, 'orig.txt'), `top-old\n${body}\n`);
     git(dir, 'add', '.');
@@ -533,6 +572,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const body = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n');
     writeFileSync(join(dir, 'plain.txt'), `top-old\n${body}\n`);
     git(dir, 'add', '.');
@@ -568,6 +608,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     const mid = Buffer.from('caf\xe9 latin1 line\n', 'latin1');
     writeFileSync(
       join(dir, 'legacy.txt'),
@@ -605,6 +646,7 @@ describe('runRevertHunk', () => {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 't@t');
     git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'a.txt'), 'a-old\n');
     writeFileSync(join(dir, 'b.txt'), 'b-old\n');
     git(dir, 'add', '.');
@@ -667,6 +709,31 @@ describe('runRevertHunk', () => {
     expect(r.note).toContain('PARTIALLY modified');
     expect(r.conflict).toBeUndefined();
     expect(r.harnessFailure).toBe(true);
+  });
+
+  it('returns the applied report even if the staging sweep cannot remove the dir', () => {
+    // The finally's rmSync is best-effort: an un-removable staging dir (a
+    // same-uid peer chmods it mid-apply) must not throw out of the finally
+    // and turn applied:true into a refusal exit. Simulate by making the dir
+    // read-only right as the apply runs, via the exec seam.
+    const { dir, diffPath } = twoHunkFixture();
+    let stagingDir: string | undefined;
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+      exec: (cwd, gitArgs) => {
+        // The patch path is the last arg; its dirname is the staging dir.
+        const patch = gitArgs[gitArgs.length - 1];
+        stagingDir = dirname(patch);
+        if (!gitArgs.includes('--check')) chmodSync(stagingDir, 0o500);
+        // Delegate to real git so the revert actually applies.
+        const res = spawnSync('git', gitArgs, { cwd, encoding: 'utf8' });
+        return { status: res.status ?? null, stderr: res.stderr ?? '' };
+      },
+    });
+    if (stagingDir) chmodSync(stagingDir, 0o700); // let afterAll clean up
+    expect(r.applied).toBe(true);
   });
 
   it('cleans its patch staging directory up on every outcome', () => {
