@@ -5,7 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 
 export interface ResolvedModelId {
   authType?: AuthType;
