@@ -2940,7 +2940,8 @@ const SETTINGS_SCHEMA = {
           '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
           'which means UNANIMITY for M=2 (quorum=2, both must agree) and ' +
           'supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). ' +
-          'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
+          'For M=2 specifically, split votes resolve only via the configured ' +
+          'permission timeout, voter cancellation, or session cancellation. ' +
           '`local-only` = only loopback clients can RESOLVE; remote clients ' +
           'can still ABORT a pending permission via the cancel sentinel ' +
           '({outcome:"cancelled"}) — cancel stays cross-policy for ' +
