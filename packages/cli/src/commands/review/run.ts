@@ -26,7 +26,10 @@
 // reached a verdict" from "blocking verdict" (opt-in via --fail-on).
 
 import type { CommandModule } from 'yargs';
-import { isUnusableScriptEntry } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  isUnusableScriptEntry,
+} from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -677,7 +680,7 @@ export const runCommand: CommandModule = {
       .option('approval-mode', {
         type: 'string',
         default: 'yolo',
-        choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+        choices: APPROVAL_MODES,
         describe:
           'Approval mode for the child CLI. The default is yolo: headless runs cannot answer ' +
           'confirmation prompts, and anything still unapproved would be auto-denied mid-review.',
