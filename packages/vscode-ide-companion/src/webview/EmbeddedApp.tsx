@@ -66,6 +66,10 @@ type InsightProgress = {
 const LIGHT_THEME_RE = /light/i;
 
 const VSCODE_THEME_STYLE = {
+  '--font-sans':
+    'var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, sans-serif))',
+  '--font-mono':
+    'var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace)',
   '--background': 'var(--vscode-sideBar-background)',
   '--foreground': 'var(--vscode-foreground)',
   '--card': 'var(--vscode-editorWidget-background)',
@@ -82,6 +86,8 @@ const VSCODE_THEME_STYLE = {
   '--accent-foreground': 'var(--vscode-list-hoverForeground)',
   '--border': 'var(--vscode-widget-border, var(--vscode-panel-border))',
   '--ring': 'var(--vscode-focusBorder)',
+  '--destructive': 'var(--vscode-errorForeground)',
+  '--error-border': 'var(--vscode-inputValidation-errorBorder)',
   '--chat-editor-bg-primary': 'var(--vscode-input-background)',
   '--chat-editor-bg-tertiary': 'var(--vscode-sideBar-background)',
   '--chat-editor-border-color':
@@ -260,7 +266,6 @@ function accountNotice(info: AccountInfo): string {
 
 export function EmbeddedApp() {
   const vscode = useVSCode();
-  const inputFieldRef = useRef<HTMLDivElement | null>(null);
   const sessionManagement = useSessionManagement(vscode);
   const fileContext = useFileContext(vscode);
   const messageHandling = useMessageHandling();
@@ -299,6 +304,10 @@ export function EmbeddedApp() {
   );
   const [uiError, setUiError] = useState<string | null>(null);
   const [webShellTheme, setWebShellTheme] = useState<WebShellTheme>(readTheme);
+  const [composerInput, setComposerInput] = useState<WebShellComposerInput>();
+  const [composerInputVersion, setComposerInputVersion] = useState(0);
+  const [includeActiveFile, setIncludeActiveFile] = useState(true);
+  const composerTextRef = useRef('');
   const transcriptBlocksRef = useRef(blocks);
   const contextMenuRowKeyRef = useRef<string | null>(null);
 
@@ -361,6 +370,15 @@ export function EmbeddedApp() {
     }
   }, [blocks.length, messageHandling.isStreaming]);
 
+  const appendComposerText = useCallback((text: string) => {
+    const current = composerTextRef.current;
+    const separator = current && !/\s$/.test(current) ? ' ' : '';
+    const next = `${current}${separator}${text}`;
+    composerTextRef.current = next;
+    setComposerInput({ text: next });
+    setComposerInputVersion((version) => version + 1);
+  }, []);
+
   useWebViewMessages({
     sessionManagement,
     fileContext,
@@ -371,8 +389,7 @@ export function EmbeddedApp() {
     setPlanEntries: () => undefined,
     handlePermissionRequest: setPermissionRequest,
     handleAskUserQuestion: setQuestionRequest,
-    inputFieldRef,
-    setInputText: () => undefined,
+    appendComposerText,
     setEditMode,
     setIsAuthenticated,
     setUsageStats: (stats) => setUsageStats(stats ?? null),
@@ -491,7 +508,7 @@ export function EmbeddedApp() {
         value: ref.value,
         isImage: isDisplayableImagePath(ref.value),
       }));
-      if (fileContext.activeFilePath) {
+      if (fileContext.activeFilePath && includeActiveFile) {
         context.push({
           type: 'file',
           name: fileContext.activeFileName || 'current file',
@@ -502,14 +519,15 @@ export function EmbeddedApp() {
         });
       }
 
-      const fileContextForMessage = fileContext.activeFilePath
-        ? {
-            fileName: fileContext.activeFileName || 'current file',
-            filePath: fileContext.activeFilePath,
-            startLine: fileContext.activeSelection?.startLine,
-            endLine: fileContext.activeSelection?.endLine,
-          }
-        : undefined;
+      const fileContextForMessage =
+        fileContext.activeFilePath && includeActiveFile
+          ? {
+              fileName: fileContext.activeFileName || 'current file',
+              filePath: fileContext.activeFilePath,
+              startLine: fileContext.activeSelection?.startLine,
+              endLine: fileContext.activeSelection?.endLine,
+            }
+          : undefined;
       const attachments = submission.images?.map(mapImageAttachment);
 
       try {
@@ -545,7 +563,7 @@ export function EmbeddedApp() {
         return false;
       }
     },
-    [fileContext, messageHandling, vscode],
+    [fileContext, includeActiveFile, messageHandling, vscode],
   );
 
   const onCancel = useCallback(() => {
@@ -630,10 +648,19 @@ export function EmbeddedApp() {
       actionLabel?: string;
     }> = [];
     if (uiError) {
-      next.push({ id: 'embedded-error', message: uiError, tone: 'error' });
+      next.push({
+        id: 'embedded-error',
+        message: uiError,
+        tone: 'error',
+        actionLabel: 'Dismiss',
+      });
     }
     if (accountInfo) {
-      next.push({ id: 'account-info', message: accountNotice(accountInfo) });
+      next.push({
+        id: 'account-info',
+        message: accountNotice(accountInfo),
+        actionLabel: 'Dismiss',
+      });
     }
     if (insightProgress) {
       next.push({
@@ -668,7 +695,6 @@ export function EmbeddedApp() {
     uiError,
   ]);
 
-  const input: WebShellComposerInput | undefined = undefined;
   const usageInputTokens =
     usageStats?.usage?.inputTokens ?? usageStats?.usage?.promptTokens ?? 0;
   const contextWindow =
@@ -724,8 +750,23 @@ export function EmbeddedApp() {
         currentMode={editMode}
         tokenCount={usageInputTokens}
         contextWindow={contextWindow}
-        composerInput={input}
+        composerInput={composerInput}
+        composerInputVersion={composerInputVersion}
+        onComposerTextChange={(text: string) => {
+          composerTextRef.current = text;
+        }}
         atProviders={atProviders}
+        activeFile={
+          fileContext.activeFilePath
+            ? {
+                name: fileContext.activeFileName || 'Current file',
+                path: fileContext.activeFilePath,
+                startLine: fileContext.activeSelection?.startLine,
+                endLine: fileContext.activeSelection?.endLine,
+                included: includeActiveFile,
+              }
+            : null
+        }
         pendingPermission={isAuthenticated ? pendingPermission : null}
         pendingQuestion={isAuthenticated ? pendingQuestion : null}
         notices={notices}
@@ -753,10 +794,19 @@ export function EmbeddedApp() {
             data: { text: '/context' },
           })
         }
+        onAttachFile={() =>
+          vscode.postMessage({ type: 'attachFile', data: {} })
+        }
+        onFocusActiveFile={fileContext.focusActiveEditor}
+        onActiveFileIncludedChange={setIncludeActiveFile}
         onPermissionResponse={onPermissionResponse}
         onQuestionResponse={onQuestionResponse}
         onNoticeAction={(noticeId: string) => {
-          if (noticeId === 'insight-report' && insightReportPath) {
+          if (noticeId === 'embedded-error') {
+            setUiError(null);
+          } else if (noticeId === 'account-info') {
+            setAccountInfo(null);
+          } else if (noticeId === 'insight-report' && insightReportPath) {
             vscode.postMessage({
               type: 'openInsightReport',
               data: { path: insightReportPath },

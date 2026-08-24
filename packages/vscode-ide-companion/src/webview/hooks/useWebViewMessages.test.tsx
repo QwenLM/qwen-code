@@ -6,7 +6,7 @@
 
 /** @vitest-environment jsdom */
 
-import { act, createRef } from 'react';
+import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useWebViewMessages } from './useWebViewMessages.js';
@@ -93,8 +93,7 @@ function renderHookHarness(overrides?: {
     setPlanEntries: vi.fn(),
     handlePermissionRequest: vi.fn(),
     handleAskUserQuestion: vi.fn(),
-    inputFieldRef: createRef<HTMLDivElement>(),
-    setInputText: vi.fn(),
+    appendComposerText: vi.fn(),
     setEditMode: vi.fn(),
     setIsAuthenticated: vi.fn(),
     setUsageStats,
@@ -604,11 +603,6 @@ describe('useWebViewMessages', () => {
     root = rendered.root;
     container = rendered.container;
 
-    const input = document.createElement('div');
-    (
-      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
-    ).current = input;
-
     act(() => {
       window.dispatchEvent(
         new MessageEvent('message', {
@@ -633,10 +627,7 @@ describe('useWebViewMessages', () => {
       'C:\\Users\\Me\\Pictures\\screen shot.png',
       'C:\\Users\\Me\\Pictures\\screen shot.png',
     );
-    expect(input.textContent).toBe(
-      '@C:\\Users\\Me\\Pictures\\screen shot.png ',
-    );
-    expect(rendered.handlers.setInputText).toHaveBeenCalledWith(
+    expect(rendered.handlers.appendComposerText).toHaveBeenCalledWith(
       '@C:\\Users\\Me\\Pictures\\screen shot.png ',
     );
   });
@@ -645,11 +636,6 @@ describe('useWebViewMessages', () => {
     const rendered = renderHookHarness();
     root = rendered.root;
     container = rendered.container;
-
-    const input = document.createElement('div');
-    (
-      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
-    ).current = input;
 
     act(() => {
       window.dispatchEvent(
@@ -667,8 +653,9 @@ describe('useWebViewMessages', () => {
       );
     });
 
-    expect(input.textContent).toBe('@notes.txt ');
-    expect(rendered.handlers.setInputText).toHaveBeenCalledWith('@notes.txt ');
+    expect(rendered.handlers.appendComposerText).toHaveBeenCalledWith(
+      '@notes.txt ',
+    );
   });
 
   it('marks locally generated error notices so the App can render them outside the ACP transcript', () => {

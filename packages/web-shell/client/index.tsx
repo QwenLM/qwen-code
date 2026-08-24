@@ -9,6 +9,7 @@ export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export { EmbeddedWebShell } from './components/EmbeddedWebShell';
 export type {
+  EmbeddedWebShellActiveFile,
   EmbeddedWebShellNotice,
   EmbeddedWebShellPermissionRequest,
   EmbeddedWebShellProps,

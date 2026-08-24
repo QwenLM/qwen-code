@@ -2,19 +2,27 @@
   height: 100%;
   min-height: 0;
   min-width: 0;
+  --chat-content-width: 100%;
+  --chat-regular-content-width: 100%;
+  --chat-shell-width: 100%;
   --radius: 4px;
   font-family: var(--vscode-font-family, var(--font-sans));
   font-size: 13px;
   line-height: 1.4;
 }
 
+.root,
+.root * {
+  scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
+}
+
 .root :global([data-web-shell-message-list]) {
-  padding: 8px 12px 4px;
-  scroll-padding-bottom: 4px;
+  padding: 10px 12px 6px;
+  scroll-padding-bottom: 6px;
 }
 
 .root :global([data-web-shell-user-row]) {
-  margin: 10px 0 8px;
+  margin: 8px 0 10px;
 }
 
 .root :global([data-web-shell-user-row] > div) {
@@ -49,16 +57,34 @@
 }
 
 .root :global([data-web-shell-composer-surface]) {
-  --chat-editor-min-height: 96px;
+  --chat-editor-min-height: 80px;
   --chat-editor-max-height: min(260px, 42vh);
-  --chat-editor-input-min-height: 36px;
+  --chat-editor-input-min-height: 30px;
   --chat-editor-input-max-height: 200px;
+  --dac-glow-on: 0 !important;
+  --dac-glow-pulse: 0 !important;
   border-radius: 6px;
+}
+
+.root :global([data-web-shell-composer-surface] > [aria-hidden='true']) {
+  display: none;
 }
 
 .root :global([data-web-shell-composer-content]) {
   padding: 8px 10px;
   border-width: 1px;
+  border-color: var(
+    --vscode-input-border,
+    var(--vscode-widget-border, transparent)
+  );
+  background: var(--vscode-input-background);
+}
+
+.root :global([data-web-shell-composer-surface]:focus-within)
+  :global([data-web-shell-composer-content]) {
+  border-color: var(--vscode-focusBorder);
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 
 .root :global([data-web-shell-composer-editor] .cm-content) {
@@ -66,13 +92,123 @@
   line-height: 1.5;
 }
 
+.hostToolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.hostToolbarButton,
+.activeFileName,
+.activeFileToggle {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, var(--muted-foreground));
+  cursor: pointer;
+  font: inherit;
+}
+
+.hostToolbarButton {
+  width: 24px;
+  flex: 0 0 auto;
+}
+
+.hostToolbarButton:hover,
+.hostToolbarButton:focus-visible,
+.activeFileName:hover,
+.activeFileName:focus-visible,
+.activeFileToggle:hover,
+.activeFileToggle:focus-visible {
+  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+  color: var(--foreground);
+  outline: none;
+}
+
+.hostToolbarButton svg,
+.activeFileName svg,
+.activeFileToggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.activeFileChip {
+  display: flex;
+  min-width: 0;
+  max-width: 150px;
+  align-items: center;
+  border: 1px solid
+    var(--vscode-input-border, var(--vscode-widget-border, transparent));
+  border-radius: 4px;
+  background: var(--vscode-badge-background, var(--secondary));
+}
+
+.activeFileName {
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 4px;
+  padding: 0 4px 0 5px;
+  border-radius: 3px 0 0 3px;
+}
+
+.activeFileName span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activeFileToggle {
+  width: 24px;
+  flex: 0 0 auto;
+  border-left: 1px solid
+    var(--vscode-input-border, var(--vscode-widget-border, transparent));
+  border-radius: 0 3px 3px 0;
+}
+
+.activeFileToggle[aria-pressed='false'] {
+  opacity: 0.65;
+}
+
+.hostToolbarButton:disabled,
+.activeFileName:disabled,
+.activeFileToggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.root :global([data-web-shell-ask-panel]),
+.root :global([data-web-shell-permission-panel]) {
+  padding: 12px;
+  border-width: 1px;
+  border-radius: 6px;
+  box-shadow: none;
+  background: var(--vscode-sideBar-background);
+}
+
+.root :global([data-web-shell-ask-option]),
+.root :global([data-web-shell-permission-option]) {
+  border-radius: 4px;
+}
+
+.root :global([data-web-shell-ask-option]) {
+  min-height: 32px;
+  padding: 5px 8px;
+}
+
 .header {
   display: flex;
-  min-height: 44px;
+  min-height: 36px;
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px 6px 12px;
+  padding: 4px 8px 4px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--background);
 }
@@ -90,8 +226,8 @@
 
 .headerAction {
   display: inline-flex;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -111,8 +247,8 @@
 }
 
 .headerAction svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 
 .body {
@@ -222,7 +358,7 @@
   width: min(100%, var(--chat-shell-width, 1040px));
   flex: 0 0 auto;
   margin: 0 auto;
-  padding: 0 8px 8px;
+  padding: 0 12px 12px;
 }
 
 .historyBackdrop {
@@ -242,7 +378,7 @@
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--background);
-  box-shadow: -12px 0 32px color-mix(in srgb, #000 18%, transparent);
+  box-shadow: none;
 }
 
 .historyHeader {
@@ -264,6 +400,12 @@
   background: var(--background);
   color: var(--foreground);
   font: inherit;
+}
+
+.historySearch:focus {
+  border-color: var(--vscode-focusBorder);
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 
 .historyList {
@@ -311,5 +453,43 @@
 }
 
 .loadMore {
-  margin: 8px;
+  min-height: 28px;
+  align-self: flex-start;
+  margin: 4px 8px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, var(--foreground));
+}
+
+.loadMore:hover,
+.loadMore:focus-visible {
+  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+  outline: none;
+}
+
+@media (max-width: 480px) {
+  .history {
+    width: 100%;
+    border-left: 0;
+    box-shadow: none;
+  }
+
+  .historyHeader {
+    min-height: 40px;
+    padding: 5px 10px;
+  }
+
+  .historySearch {
+    height: 30px;
+  }
+
+  .historyList {
+    padding: 4px 6px;
+  }
+
+  .sessionRow {
+    min-height: 36px;
+    padding: 6px 8px;
+  }
 }

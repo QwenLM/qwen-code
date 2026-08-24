@@ -123,9 +123,7 @@ interface UseWebViewMessagesProps {
     } | null,
   ) => void;
 
-  // Input
-  inputFieldRef: React.RefObject<HTMLDivElement | null>;
-  setInputText: (text: string) => void;
+  appendComposerText: (text: string) => void;
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
@@ -280,8 +278,7 @@ export const useWebViewMessages = ({
   setPlanEntries,
   handlePermissionRequest,
   handleAskUserQuestion,
-  inputFieldRef,
-  setInputText,
+  appendComposerText,
   setEditMode,
   setIsAuthenticated,
   setUsageStats,
@@ -1301,30 +1298,16 @@ export const useWebViewMessages = ({
             attachment.value,
           );
 
-          if (inputFieldRef.current) {
-            const currentText = inputFieldRef.current.textContent || '';
-            const referenceText = isDisplayableImagePath(attachment.value)
-              ? attachment.value
-              : attachment.name;
-            if (referenceText !== attachment.name) {
-              handlers.fileContext.addFileReference(
-                referenceText,
-                attachment.value,
-              );
-            }
-            const newText = currentText
-              ? `${currentText} @${referenceText} `
-              : `@${referenceText} `;
-            inputFieldRef.current.textContent = newText;
-            setInputText(newText);
-
-            const range = document.createRange();
-            const sel = window.getSelection();
-            range.selectNodeContents(inputFieldRef.current);
-            range.collapse(false);
-            sel?.removeAllRanges();
-            sel?.addRange(range);
+          const referenceText = isDisplayableImagePath(attachment.value)
+            ? attachment.value
+            : attachment.name;
+          if (referenceText !== attachment.name) {
+            handlers.fileContext.addFileReference(
+              referenceText,
+              attachment.value,
+            );
           }
+          appendComposerText(`@${referenceText} `);
           break;
         }
 
@@ -1400,8 +1383,7 @@ export const useWebViewMessages = ({
       }
     },
     [
-      inputFieldRef,
-      setInputText,
+      appendComposerText,
       vscode,
       setEditMode,
       materializeMessages,

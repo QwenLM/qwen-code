@@ -227,7 +227,12 @@ export const useFileContext = (vscode: VSCodeAPI) => {
    */
   const clearFileReferences = useCallback(() => {
     fileReferenceMap.current.clear();
-  }, []);
+    for (const file of workspaceFiles) {
+      fileReferenceMap.current.set(file.label, file.path);
+      fileReferenceMap.current.set(file.description, file.path);
+      fileReferenceMap.current.set(file.path, file.path);
+    }
+  }, [workspaceFiles]);
 
   /**
    * Request active editor info
