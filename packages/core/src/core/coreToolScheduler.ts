@@ -2473,7 +2473,22 @@ export class CoreToolScheduler {
             let permissionErrorMessage: string;
             if (matchingRule) {
               permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
-            } else if (pm.isPermissionsAllowListActive()) {
+            } else if (
+              pm.isPermissionsAllowListActive() &&
+              // Only attribute the miss to `permissions.allow` when the tool
+              // is genuinely uncovered. While the allowlist is active a
+              // COVERED tool can still be rejected by a different gate —
+              // e.g. the legacy `coreTools` (`--core-tools` / `tools.core`)
+              // allowlist — and there the "add a permissions.allow rule"
+              // advice is factually wrong and a no-op (#9827). The optional
+              // call keeps scoped PermissionManager shims (installed via
+              // `as unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they grow
+              // the delegation; they keep the pre-#9827 message meanwhile.
+              (typeof pm.isCoveredByAllowOrAskRule === 'function'
+                ? !pm.isCoveredByAllowOrAskRule(canonicalName)
+                : true)
+            ) {
               // The tool was rejected by the `permissions.allow` registry
               // allowlist, not by any deny rule: it is not covered by an
               // allow/ask rule and so was never registered. Point at the

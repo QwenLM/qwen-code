@@ -851,8 +851,14 @@ export class PermissionManager {
    * that were never stored, so such a call still fails TOOL_NOT_REGISTERED
    * until the rule is added to settings `permissions.allow` and the
    * session restarts (#9827).
+   *
+   * Public so the scheduler can tell an allowlist miss (tool genuinely
+   * uncovered) apart from a rejection by a different gate — e.g. the
+   * legacy `coreTools` allowlist — for a tool that IS covered, where
+   * "add a permissions.allow rule" advice would be a no-op (#9827).
    */
-  private isCoveredByAllowOrAskRule(canonicalName: string): boolean {
+  isCoveredByAllowOrAskRule(toolName: string): boolean {
+    const canonicalName = resolveToolName(toolName);
     const covered = (rule: PermissionRule): boolean =>
       !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName);
     return (
