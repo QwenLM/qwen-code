@@ -97,6 +97,34 @@ describe('readManyFiles', () => {
     return { relativePath, absolutePath };
   }
 
+  function mockZeroInodeForPath(absolutePath: string): { restore(): void } {
+    const originalStat = fs.stat.bind(fs);
+    const originalOpen = fs.open.bind(fs);
+    const statSpy = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const stats = await originalStat(...args);
+      if (String(args[0]) === absolutePath) {
+        Object.defineProperty(stats, 'ino', { value: 0 });
+      }
+      return stats;
+    });
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalHandleStat = handle.stat.bind(handle);
+      vi.spyOn(handle, 'stat').mockImplementation(async () => {
+        const stats = await originalHandleStat();
+        Object.defineProperty(stats, 'ino', { value: 0 });
+        return stats;
+      });
+      return handle;
+    });
+    return {
+      restore: () => {
+        statSpy.mockRestore();
+        openSpy.mockRestore();
+      },
+    };
+  }
+
   async function createTestDir(...pathSegments: string[]): Promise<string> {
     const absolutePath = path.join(tempRootDir, ...pathSegments);
     await fs.mkdir(absolutePath, { recursive: true });
@@ -188,29 +216,7 @@ describe('readManyFiles', () => {
       const { relativePath, absolutePath } =
         await createTestFile('zero-inode.txt');
       const approvedStats = await fs.stat(absolutePath);
-      const originalStat = fs.stat.bind(fs);
-      const originalOpen = fs.open.bind(fs);
-      const statSpy = vi
-        .spyOn(fs, 'stat')
-        .mockImplementation(async (...args) => {
-          const stats = await originalStat(...args);
-          if (String(args[0]) === absolutePath) {
-            Object.defineProperty(stats, 'ino', { value: 0 });
-          }
-          return stats;
-        });
-      const openSpy = vi
-        .spyOn(fs, 'open')
-        .mockImplementation(async (...args) => {
-          const handle = await originalOpen(...args);
-          const originalHandleStat = handle.stat.bind(handle);
-          vi.spyOn(handle, 'stat').mockImplementation(async () => {
-            const stats = await originalHandleStat();
-            Object.defineProperty(stats, 'ino', { value: 0 });
-            return stats;
-          });
-          return handle;
-        });
+      const zeroInodeMock = mockZeroInodeForPath(absolutePath);
       const mockConfig = createMockConfig(tempRootDir);
 
       try {
@@ -232,8 +238,7 @@ describe('readManyFiles', () => {
           'Validated file identity is unavailable on this filesystem',
         );
       } finally {
-        statSpy.mockRestore();
-        openSpy.mockRestore();
+        zeroInodeMock.restore();
       }
     });
 
@@ -242,29 +247,7 @@ describe('readManyFiles', () => {
         'zero-inode-duplicate.txt',
       );
       const approvedStats = await fs.stat(absolutePath);
-      const originalStat = fs.stat.bind(fs);
-      const originalOpen = fs.open.bind(fs);
-      const statSpy = vi
-        .spyOn(fs, 'stat')
-        .mockImplementation(async (...args) => {
-          const stats = await originalStat(...args);
-          if (String(args[0]) === absolutePath) {
-            Object.defineProperty(stats, 'ino', { value: 0 });
-          }
-          return stats;
-        });
-      const openSpy = vi
-        .spyOn(fs, 'open')
-        .mockImplementation(async (...args) => {
-          const handle = await originalOpen(...args);
-          const originalHandleStat = handle.stat.bind(handle);
-          vi.spyOn(handle, 'stat').mockImplementation(async () => {
-            const stats = await originalHandleStat();
-            Object.defineProperty(stats, 'ino', { value: 0 });
-            return stats;
-          });
-          return handle;
-        });
+      const zeroInodeMock = mockZeroInodeForPath(absolutePath);
       const mockConfig = createMockConfig(tempRootDir);
 
       try {
@@ -285,8 +268,7 @@ describe('readManyFiles', () => {
           'Validated file identity is unavailable',
         );
       } finally {
-        statSpy.mockRestore();
-        openSpy.mockRestore();
+        zeroInodeMock.restore();
       }
     });
 
