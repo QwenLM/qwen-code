@@ -586,4 +586,42 @@ describe('stripPartialMediaMarkersBeforeBake (R19-x / R6-3)', () => {
     const clean = 'intro [FILE: /ws/a.pdf] mid [IMAGE: /ws/b.png] outro';
     expect(stripPartialMediaMarkersBeforeBake(clean)).toBe(clean);
   });
+
+  // R22-5: entry-locked alignment used to advance only on a positional hit.
+  // An entry span-removed by the other kind's fail-closed residue sweep never
+  // got consumed, so every later legitimate same-kind marker failed alignment
+  // and was destroyed — rewritten to `[Image pending]` instead of delivered.
+  // Alignment is subsequence-tolerant now: a span-removed entry desyncs only
+  // itself.
+  it('keeps a well-formed marker after a same-kind entry was span-removed', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      '[FILE: [IMAGE: /ws/a.png] junk\n[IMAGE: /ws/b.png]',
+    );
+    expect(findImageMarkers(out).map((m) => m.path)).toEqual(['/ws/b.png']);
+    // The marker inside the FILE residue span keeps its documented
+    // fail-closed removal.
+    expect(out).not.toContain('/ws/a.png');
+
+    const mirror = stripPartialMediaMarkersBeforeBake(
+      '[IMAGE: [FILE: /ws/a.txt] junk\n[FILE: /ws/b.txt]',
+    );
+    expect(findFileMarkers(mirror).map((m) => m.path)).toContain('/ws/b.txt');
+  });
+
+  // R23-1: a gap sanitizer used to bound its residue only by its OWN kind's
+  // aligned markers, so an ill-formed opening whose same-line residue extent
+  // reached a kept marker of the OTHER kind deleted it — violating the
+  // invariant that a gap sanitizer never touches a marker the alignment
+  // kept. Residue now stops at the cross-kind kept marker.
+  it('never lets a gap sanitizer eat a cross-kind kept marker', () => {
+    const out = stripPartialMediaMarkersBeforeBake(
+      '[IMAGE: /a [b]] [FILE: /ws/c.pdf]',
+    );
+    expect(findFileMarkers(out).map((m) => m.path)).toEqual(['/ws/c.pdf']);
+
+    const mirror = stripPartialMediaMarkersBeforeBake(
+      '[FILE: /a [b]] [IMAGE: /ws/c.png]',
+    );
+    expect(findImageMarkers(mirror).map((m) => m.path)).toEqual(['/ws/c.png']);
+  });
 });

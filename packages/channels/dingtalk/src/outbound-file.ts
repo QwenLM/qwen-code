@@ -121,19 +121,68 @@ export function sanitizeMediaMarkersToStable(
 }
 
 /**
+ * The markers of `markerName` in `text` that align — by path, in order —
+ * with the `expected` list locked at the pipeline's entry.
+ *
+ * R22-5: the match is subsequence-tolerant. Strict positional matching
+ * advanced the cursor only on a hit, so an expected entry removed by the
+ * OTHER kind's fail-closed residue sweep never got consumed — every later
+ * legitimate same-kind marker then failed alignment, landed in gap
+ * sanitization, and was destroyed instead of delivered. A mismatch now
+ * searches `expected` forward from the cursor, so a span-removed entry
+ * desyncs only itself. Markers past the exhausted list or absent from it
+ * stay unaligned: they are splice artifacts a removal minted, or a surplus
+ * past the entry list, and the gap sanitizer removes them.
+ */
+function alignMarkers(
+  text: string,
+  markerName: 'IMAGE' | 'FILE',
+  expected: readonly string[],
+): OutboundMediaMarker[] {
+  const markers = findOutboundMediaMarkers(text, markerName);
+  const kept: OutboundMediaMarker[] = [];
+  let matched = 0;
+  for (const marker of markers) {
+    if (matched >= expected.length) break;
+    const alignedAt =
+      marker.path === expected[matched]
+        ? matched
+        : expected.indexOf(marker.path, matched);
+    if (alignedAt === -1) continue;
+    kept.push(marker);
+    matched = alignedAt + 1;
+  }
+  return kept;
+}
+
+/**
  * One residue pass over the gaps between the markers of `markerName` that
- * align — by path, in order — with the `expected` list locked at the
- * pipeline's entry. Unaligned markers stay in their gap, where the gap
- * sanitizer removes them along with the residue: they are splice artifacts
- * a removal minted, or a surplus past the entry list, and a gap sanitizer
- * never touches a marker the alignment kept.
+ * {@link alignMarkers} keeps, plus any `protectedSpans` — markers of the
+ * OTHER kind the joint composition has already decided to keep. Unaligned
+ * markers stay in their gap, where the gap sanitizer removes them along
+ * with the residue; a gap sanitizer never touches a kept or protected span.
+ *
+ * R23-1: protection is what bounds the gap residue by BOTH kinds. A gap
+ * bounded only by one kind's kept markers lets an ill-formed opening of
+ * that kind run its same-line residue extent straight through a kept
+ * marker of the other kind — deleting an aligned deliverable and violating
+ * this function's own invariant. Splitting every gap around the protected
+ * spans makes the residue stop at the cross-kind kept marker instead of
+ * eating to end-of-line.
  */
 function stripAlignedMarkers(
   text: string,
   markerName: 'IMAGE' | 'FILE',
   expected: readonly string[],
+  protectedSpans: readonly OutboundMediaMarker[] = [],
 ): string {
-  const markers = findOutboundMediaMarkers(text, markerName);
+  // Kept spans of this kind and protected spans of the other are disjoint —
+  // marker spans of either kind cannot nest inside one another — so one
+  // sorted island list bounds every gap.
+  const islands = [
+    ...alignMarkers(text, markerName, expected),
+    ...protectedSpans,
+  ].sort((a, b) => a.start - b.start);
   // R19-x (R6-3 closure): the gap residue strip is balance-aware. The depth
   // counts the ORIGINAL text before the gap — an ill-formed outer opening
   // keeps its balance obligation even after its own residue is stripped, so
@@ -147,17 +196,13 @@ function stripAlignedMarkers(
   };
   let sanitized = '';
   let previousEnd = 0;
-  let matched = 0;
-  for (const marker of markers) {
-    if (matched < expected.length && marker.path === expected[matched]) {
-      sanitized += sanitizeGap(
-        text.slice(previousEnd, marker.start),
-        bracketDepth(text, 0, previousEnd),
-      );
-      sanitized += text.slice(marker.start, marker.end);
-      previousEnd = marker.end;
-      matched++;
-    }
+  for (const island of islands) {
+    sanitized += sanitizeGap(
+      text.slice(previousEnd, island.start),
+      bracketDepth(text, 0, previousEnd),
+    );
+    sanitized += text.slice(island.start, island.end);
+    previousEnd = island.end;
   }
   return (
     sanitized +
@@ -210,10 +255,33 @@ export function stripPartialMediaMarkersBeforeBake(text: string): string {
   );
   let current = text;
   for (let pass = 0; pass < FILE_FIXED_POINT_PASS_BUDGET; pass++) {
-    const next = stripAlignedMarkers(
-      stripAlignedMarkers(current, 'FILE', expectedFile),
+    // R23-1: the FILE sweep's residue must stop at an IMAGE marker the
+    // entry alignment keeps — otherwise an ill-formed `[FILE:` whose line
+    // balances before a kept IMAGE marker eats it to end-of-line. Only a
+    // span starting at bracket depth 0 qualifies: one still inside an
+    // unclosed opening sits within a genuine residue span and shares its
+    // fail-closed removal (the R16-5 pin).
+    const protectedImages = alignMarkers(
+      current,
       'IMAGE',
       expectedImage,
+    ).filter((marker) => bracketDepth(current, 0, marker.start) === 0);
+    const afterFile = stripAlignedMarkers(
+      current,
+      'FILE',
+      expectedFile,
+      protectedImages,
+    );
+    // R22-5/R23-1: the IMAGE sweep must never eat a FILE marker the FILE
+    // sweep's alignment kept. Re-align against the FILE sweep's OUTPUT: the
+    // spans that survive it are exactly the kept ones — a splice artifact
+    // the sweep minted fails the entry-locked alignment and stays residue.
+    const protectedFiles = alignMarkers(afterFile, 'FILE', expectedFile);
+    const next = stripAlignedMarkers(
+      afterFile,
+      'IMAGE',
+      expectedImage,
+      protectedFiles,
     );
     if (next === current) return next;
     current = next;
