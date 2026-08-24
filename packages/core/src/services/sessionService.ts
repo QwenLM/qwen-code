@@ -2746,7 +2746,8 @@ export class SessionService {
    * pick the first free numeric suffix in memory.
    *
    * Matches the session picker by preferring `customTitle` and falling back
-   * to the first prompt. Message counts and other metadata stay unhydrated.
+   * to the first prompt. Each untitled candidate performs one head read
+   * bounded by `MAX_PROMPT_SCAN_LINES`; other metadata stays unhydrated.
    *
    * @param prefix Case-insensitive title prefix to match.
    */
@@ -3073,10 +3074,13 @@ export async function computeUniqueBranchTitle(
   }
 }
 
-export function normalizeDerivedBranchTitle(baseName: string): string {
-  return baseName
+export function normalizeDerivedBranchTitle(
+  baseName: string,
+): string | undefined {
+  const normalized = baseName
     .trim()
     .replace(/\s*\(Branch(?:\s+\d+)?\)$/, '')
     .replace(/(\S)\(\d+\)$/, '$1')
     .trim();
+  return normalized || undefined;
 }

@@ -12002,13 +12002,13 @@ class QwenAgent implements Agent {
                   const sessionService = sourceConfig.getSessionService();
 
                   const requestedName = normalizeRequestedBranchName(name);
-                  const resolveSourceDisplayName =
-                    requestedName === undefined || atRecordId !== undefined;
-                  const sourceCustomTitle = resolveSourceDisplayName
-                    ? recording?.getCurrentCustomTitle()
-                    : undefined;
+                  const sourceCustomTitle =
+                    requestedName === undefined
+                      ? recording?.getCurrentCustomTitle()
+                      : undefined;
                   const persistedDisplayName =
-                    resolveSourceDisplayName && sourceCustomTitle === undefined
+                    requestedName === undefined &&
+                    sourceCustomTitle === undefined
                       ? await sessionService.getSessionDisplayName(sessionId)
                       : undefined;
                   const sourceDisplayName =
@@ -12017,11 +12017,7 @@ class QwenAgent implements Agent {
                     ? normalizeDerivedBranchTitle(sourceCustomTitle)
                     : sourceDisplayName;
                   const baseName =
-                    requestedName === undefined
-                      ? (derivedBaseName ?? sessionId.slice(0, 8))
-                      : requestedName === sourceDisplayName
-                        ? (derivedBaseName ?? requestedName)
-                        : requestedName;
+                    requestedName ?? derivedBaseName ?? sessionId.slice(0, 8);
 
                   const title = await computeUniqueBranchTitle(
                     baseName,
@@ -12064,7 +12060,8 @@ class QwenAgent implements Agent {
         if (title === undefined) {
           const sourceCustomTitle = recording?.getCurrentCustomTitle();
           title = sourceCustomTitle
-            ? normalizeDerivedBranchTitle(sourceCustomTitle)
+            ? (normalizeDerivedBranchTitle(sourceCustomTitle) ??
+              sessionId.slice(0, 8))
             : sessionId.slice(0, 8);
         }
         const newSessionId = randomUUID();

@@ -6016,6 +6016,15 @@ describe('SessionService', () => {
       );
     });
 
+    it('returns undefined for missing sessions and invalid ids', async () => {
+      await expect(
+        service.getSessionDisplayName('44444444-4444-4444-8444-444444444444'),
+      ).resolves.toBeUndefined();
+      await expect(
+        service.getSessionDisplayName('not-a-session'),
+      ).resolves.toBeUndefined();
+    });
+
     it('uses the picker prompt when a session has no custom title', async () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const chatsDir = realPath.join(
@@ -6044,6 +6053,11 @@ describe('SessionService', () => {
       const titles =
         await service.findSessionTitlesByPrefix('创建 MR 描述生成 Skill(');
       expect(titles).toEqual(['创建 MR 描述生成 Skill(1)']);
+      expect(
+        vi
+          .mocked(jsonl.readLines)
+          .mock.calls.filter(([filePath]) => filePath === file),
+      ).toEqual([[file, 10]]);
       await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
         '创建 MR 描述生成 Skill(1)',
       );
@@ -6075,6 +6089,8 @@ describe('SessionService', () => {
       ['Source session (Branch 2)', 'Source session'],
       ['Source session(2)', 'Source session'],
       ['Sprint (2)', 'Sprint (2)'],
+      ['(Branch)', undefined],
+      ['(Branch 2)', undefined],
     ])('normalizes derived branch title %s', (title, expected) => {
       expect(normalizeDerivedBranchTitle(title)).toBe(expected);
     });

@@ -6969,7 +6969,6 @@ describe('App session callbacks', () => {
       switchStarted: boolean;
     }>();
     mockSessionActions.branchSession.mockReturnValue(branch.promise);
-    mockConnection.displayName = '创建 MR 描述生成 Skill';
     renderApp();
     await flush();
 
@@ -6983,7 +6982,7 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      '创建 MR 描述生成 Skill',
+      undefined,
       'checkpoint-1',
     );
     expect(request!).toBeInstanceOf(Promise);
@@ -7087,7 +7086,7 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      'Session One',
+      undefined,
       'stale-checkpoint',
     );
     expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
@@ -7118,7 +7117,7 @@ describe('App session callbacks', () => {
         testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
     });
     expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      'Session One',
+      undefined,
       'stale-checkpoint',
     );
 

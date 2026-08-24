@@ -7851,9 +7851,9 @@ export function App({
   );
   const handleBranchCurrentSession = useCallback(
     (atRecordId?: string) => {
-      return branchCurrentSession(sessionDisplayName, atRecordId);
+      return branchCurrentSession(undefined, atRecordId);
     },
-    [branchCurrentSession, sessionDisplayName],
+    [branchCurrentSession],
   );
 
   const composerFocusRequestRef = useRef(0);

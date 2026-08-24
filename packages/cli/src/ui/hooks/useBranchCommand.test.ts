@@ -21,6 +21,7 @@ describe('useBranchCommand', () => {
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
   let getCurrentCustomTitle: ReturnType<typeof vi.fn>;
+  let getSessionDisplayName: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
@@ -96,6 +97,7 @@ describe('useBranchCommand', () => {
     finalize = vi.fn();
     flush = vi.fn().mockResolvedValue(undefined);
     getCurrentCustomTitle = vi.fn().mockReturnValue(undefined);
+    getSessionDisplayName = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
@@ -134,6 +136,7 @@ describe('useBranchCommand', () => {
         removeSession,
         renameSession,
         findSessionTitlesByPrefix,
+        getSessionDisplayName,
       }),
       getChatRecordingService: () => ({
         finalize,
@@ -406,6 +409,8 @@ describe('useBranchCommand', () => {
     ['My Project (Branch)', 'My Project(1)'],
     ['My Project (Branch 2)', 'My Project(1)'],
     ['My Project (2)', 'My Project (2)(1)'],
+    ['(Branch)', 'help me fix the login bug(1)'],
+    ['(Branch 2)', 'help me fix the login bug(1)'],
   ])(
     'normalizes the derived source title %s',
     async (sourceTitle, expectedTitle) => {
@@ -423,6 +428,25 @@ describe('useBranchCommand', () => {
       );
     },
   );
+
+  it('uses the picker display name for an untitled source session', async () => {
+    const pickerDisplayName = `Error: first line\n${'x'.repeat(120)}`;
+    getSessionDisplayName.mockResolvedValue(pickerDisplayName);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch();
+    });
+
+    expect(getSessionDisplayName).toHaveBeenCalledWith(
+      '12345678-aaaa-bbbb-cccc-dddddddddddd',
+    );
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      `${pickerDisplayName}(1)`,
+      'auto',
+    );
+  });
 
   it('preserves a numeric token in an explicit branch name', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));

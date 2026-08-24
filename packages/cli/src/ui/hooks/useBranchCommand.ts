@@ -144,6 +144,10 @@ export function useBranchCommand(
         const sourceCustomTitle = outgoingRecording?.getCurrentCustomTitle();
         outgoingRecording?.finalize();
         await outgoingRecording?.flush();
+        const sourceDisplayName =
+          name === undefined && sourceCustomTitle === undefined
+            ? await sessionService.getSessionDisplayName(oldSessionId)
+            : undefined;
 
         // 2. Snapshot the parent JSONL state for rollback. `/branch` is
         //    guarded on `isIdleRef`, so the file isn't being mutated
@@ -173,7 +177,8 @@ export function useBranchCommand(
           name ??
           (sourceCustomTitle
             ? normalizeDerivedBranchTitle(sourceCustomTitle)
-            : deriveFirstPrompt(provisional.conversation.messages));
+            : sourceDisplayName) ??
+          deriveFirstPrompt(provisional.conversation.messages);
         const effectiveTitle = await computeUniqueBranchTitle(
           baseName,
           sessionService,
