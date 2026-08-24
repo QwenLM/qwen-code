@@ -111,7 +111,10 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import { parseRule } from '../permissions/rule-parser.js';
+import {
+  parseRule,
+  toolMatchesRuleToolName,
+} from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -7005,19 +7008,35 @@ export class Config {
 
   /**
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
-   * is disabled by default and turns on either through the
-   * `tools.listDirectory.enabled` setting or by being explicitly listed in
-   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
-   * same parser `PermissionManager` uses to build its allowlist — so alias
-   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
+   * is disabled by default and turns on through the
+   * `tools.listDirectory.enabled` setting, by being explicitly listed in the
+   * `coreTools` allowlist, or by being covered by a `permissions.allow`
+   * registry-allowlist rule (#9827). Entries are normalised with `parseRule`
+   * — the same parser `PermissionManager` uses — so alias forms (`ListFiles`)
+   * and specifier forms (`list_directory(/src)`) match; the allowlist check
+   * honours meta-categories (`Read`) via `toolMatchesRuleToolName`, matching
+   * the coverage semantics of the registry gate itself.
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
-    return (
+    if (
       this.getCoreTools()?.some(
         (name) => parseRule(name).toolName === ToolNames.LS,
-      ) ?? false
-    );
+      ) ??
+      false
+    ) {
+      return true;
+    }
+    // `permissions.allow` registry allowlist (#9827): without this branch the
+    // allowlisted tool passes `PermissionManager.isToolEnabled()` but the
+    // registry never registers it, so it silently vanishes from `/tools` and
+    // the model request while calls to it fail with TOOL_NOT_REGISTERED.
+    return this.getRegistryAllowList().some((raw) => {
+      const rule = parseRule(raw);
+      return (
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
+      );
+    });
   }
 
   isAgentTeamEnabled(): boolean {

@@ -7951,6 +7951,58 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.each([
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+      { label: 'the Read meta-category', entry: 'Read' },
+    ])(
+      'registers list_directory when covered by permissions.allow via $label (#9827)',
+      async ({ entry }) => {
+        const settingsAllow = [entry];
+        const config = new Config({
+          ...baseParams,
+          coreTools: undefined,
+          permissions: {
+            allow: settingsAllow,
+            registryAllowList: settingsAllow,
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
+
+    it('does not register list_directory when an active permissions.allow does not cover it (#9827)', async () => {
+      // `edit` does not cover list_directory (it is not the Read
+      // meta-category), so the opt-in gate must stay closed even though the
+      // allowlist is active.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
