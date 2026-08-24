@@ -354,6 +354,59 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('Reply was not sent: worker is gone');
   });
 
+  it('does not let an older reply settle clear a newer peek target', async () => {
+    let resolveFirstSend: ((value: { sent: boolean }) => void) | undefined;
+    const sendToSession = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ sent: boolean }>((resolve) => {
+            resolveFirstSend = resolve;
+          }),
+      )
+      .mockResolvedValue({ sent: true });
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[row('session-A'), row('session-B')]}
+        actions={actions({
+          sendToSession,
+          loadRows: vi.fn(async () => {
+            throw new Error('refresh failed');
+          }),
+          peekSelected: async (sessionId) =>
+            sessionPanel(sessionId, ['Result: ready']),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await settleInput();
+    for (const char of 'forA') stdin.write(char);
+    stdin.write('\r');
+    await vi.waitFor(() => expect(sendToSession).toHaveBeenCalledOnce());
+
+    stdin.write(' ');
+    await settleInput();
+    stdin.write('\x1b[B');
+    await settleInput();
+    stdin.write(' ');
+    await settleInput();
+    for (const char of 'forB') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+
+    await act(async () => {
+      resolveFirstSend?.({ sent: true });
+      await flushInk();
+    });
+    stdin.write('\r');
+    await vi.waitFor(() => expect(sendToSession).toHaveBeenCalledTimes(2));
+
+    expect(sendToSession).toHaveBeenNthCalledWith(2, 'session-B', 'forB');
+  });
+
   it('keeps a reply error visible when an older peek load finishes', async () => {
     let resolvePeek: ((panel: AgentViewSessionPanel) => void) | undefined;
     const peekSelected = vi.fn(

@@ -17,7 +17,7 @@ import {
 import {
   cleanSingleLineText,
   getCachedStringWidth,
-  stripUnsafeCharacters,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
@@ -594,6 +594,7 @@ function ManagedAgentViewSessionPreview({
   session: SessionData;
   onExit: () => void;
 }): React.JSX.Element {
+  const { columns } = useTerminalSize();
   useKeypress(
     (key) => {
       if (
@@ -619,7 +620,10 @@ function ManagedAgentViewSessionPreview({
       </Text>
       {session.agentViewLastResult ? (
         <Text color={theme.text.secondary}>
-          {stripUnsafeCharacters(session.agentViewLastResult)}
+          {truncateToWidth(
+            cleanSingleLineText(session.agentViewLastResult),
+            Math.max(columns - 6, 8),
+          )}
         </Text>
       ) : null}
       <Text color={theme.text.secondary}>

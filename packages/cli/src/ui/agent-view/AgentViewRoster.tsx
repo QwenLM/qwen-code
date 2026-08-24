@@ -74,6 +74,8 @@ export interface AgentViewRosterProps {
   onCancel: () => void;
 }
 
+const TERMINAL_ESCAPE_GRACE_MS = 25;
+
 export type AgentViewPanel =
   | AgentViewSessionPanel
   | {
@@ -192,40 +194,65 @@ export function AgentViewRoster({
   // re-renders; an imperative mirror keeps peek accumulation from reading a
   // stale prop on the second event.
   const peekPromptRef = useRef(peekPrompt);
-  const terminalEscapePendingRef = useRef(false);
+  const terminalEscapeTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
   useEffect(() => {
     peekPromptRef.current = peekPrompt;
   }, [peekPrompt]);
+  useEffect(
+    () => () => {
+      if (terminalEscapeTimerRef.current) {
+        clearTimeout(terminalEscapeTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const handleEscape = () => {
+    if (promptInput.showSuggestions) {
+      promptInput.dismissCompletion();
+      return;
+    }
+    if (peekPanel) {
+      peekPromptRef.current = '';
+      onPeekPromptChange('');
+    } else {
+      promptEditedRef.current = false;
+    }
+    onCancel();
+  };
 
   useInput((input, key) => {
     const currentPrompt = promptInput.buffer.text;
     const hasPrompt = currentPrompt.trim().length > 0;
 
     if (key.escape) {
-      terminalEscapePendingRef.current = false;
-    } else if (
-      isUnresolvedTerminalControlInput(input, terminalEscapePendingRef)
-    ) {
+      if (terminalEscapeTimerRef.current) {
+        clearTimeout(terminalEscapeTimerRef.current);
+      }
+      terminalEscapeTimerRef.current = setTimeout(() => {
+        terminalEscapeTimerRef.current = undefined;
+        handleEscape();
+      }, TERMINAL_ESCAPE_GRACE_MS);
+      return;
+    }
+
+    if (isTerminalControlInput(input)) {
+      if (terminalEscapeTimerRef.current) {
+        clearTimeout(terminalEscapeTimerRef.current);
+        terminalEscapeTimerRef.current = undefined;
+      }
+      return;
+    }
+
+    if (terminalEscapeTimerRef.current) {
+      clearTimeout(terminalEscapeTimerRef.current);
+      terminalEscapeTimerRef.current = undefined;
+      handleEscape();
       return;
     }
 
     const selectedRow = rows[selectedIndexRef.current];
     const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
-
-    if (key.escape) {
-      if (promptInput.showSuggestions) {
-        promptInput.dismissCompletion();
-        return;
-      }
-      if (peekPanel) {
-        peekPromptRef.current = '';
-        onPeekPromptChange('');
-      } else {
-        promptEditedRef.current = false;
-      }
-      onCancel();
-      return;
-    }
 
     if (
       isCtrlInput(input, key, 't', '\x14') &&
@@ -461,10 +488,12 @@ export function AgentViewRoster({
       ) : null}
       {notice ? (
         <Box flexDirection="column" marginBottom={1}>
-          {notice.title ? <Text bold>{notice.title}</Text> : null}
+          {notice.title ? (
+            <Text bold>{formatNoticeLine(notice.title)}</Text>
+          ) : null}
           {notice.lines.map((line, index) => (
             <Text key={index} color={theme.text.secondary}>
-              {line}
+              {formatNoticeLine(line)}
             </Text>
           ))}
         </Box>
@@ -483,19 +512,20 @@ function isReturnInput(input: string, key: RosterInputKey): boolean {
   return getReturnInputPrefix(input, key) !== undefined;
 }
 
-const CSI_RESIDUE_PATTERN = /^\[[\x20-\x3f]*[\x40-\x7e]$/;
+const STRIPPED_TERMINAL_CONTROL_PATTERN =
+  /^(?:\[[?>][\d;]*[uc]|\[\d+(?:;\d+)+R|\[[IO])$/;
 
-function isUnresolvedTerminalControlInput(
-  input: string,
-  pendingEscape: { current: boolean },
-): boolean {
-  if (input.includes('\x1b')) {
-    pendingEscape.current = input === '\x1b';
-    return true;
-  }
-  if (!pendingEscape.current) return false;
-  pendingEscape.current = false;
-  return CSI_RESIDUE_PATTERN.test(input);
+function isTerminalControlInput(input: string): boolean {
+  return (
+    input.includes('\x1b') || STRIPPED_TERMINAL_CONTROL_PATTERN.test(input)
+  );
+}
+
+function formatNoticeLine(line: string): string {
+  return truncateToWidth(
+    cleanSingleLineText(line),
+    Math.max(8, (process.stdout.columns ?? 80) - 4),
+  );
 }
 
 function getReturnInputPrefix(

@@ -364,14 +364,16 @@ export function AgentViewApp({
           }
           // The reply was delivered; only restore it if the send itself
           // failed, never on a post-success refresh failure.
-          try {
-            const rows = await refreshRows();
-            const row = rows.find(
-              (item) => item.sessionId === target.sessionId,
-            );
-            setPeekReplyTarget(row ? getReplyTarget(row) : undefined);
-          } catch {
-            setPeekReplyTarget(undefined);
+          if (peekGenerationRef.current === generation) {
+            try {
+              const rows = await refreshRows();
+              const row = rows.find(
+                (item) => item.sessionId === target.sessionId,
+              );
+              setPeekReplyTarget(row ? getReplyTarget(row) : undefined);
+            } catch {
+              setPeekReplyTarget(undefined);
+            }
           }
           setPeekSubmittedPreview(undefined);
         } catch (error) {

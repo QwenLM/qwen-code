@@ -248,21 +248,26 @@ describe('AgentViewRoster', () => {
     expect(onPromptChange).toHaveBeenLastCalledWith('abc\n');
   });
 
-  it('drops terminal escape sequences but keeps focus-like user text', () => {
+  it('drops terminal responses but keeps bracketed user text', async () => {
     const onPromptChange = vi.fn();
+    const onCancel = vi.fn();
 
-    renderRoster({ onPromptChange });
+    renderRoster({ onPromptChange, onCancel });
 
     press('\x1b[I', {});
     press('\x1b[?u', {});
     press('\x1b[10;20R', {});
-    press('\x1b', {});
-    press('[?u', {});
-    press('\x1b', {});
+    press('[?1;2c', {});
+    press('[I', {});
     press('[10;20R', {});
-    press('\x1b', {});
-    press('[27;2;13~', {});
+    press('\x1b[27;2;13~', {});
+    press('', { escape: true });
+    press('[?u', {});
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
     expect(onPromptChange).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
 
     press('[3]', {});
     expect(onPromptChange).toHaveBeenLastCalledWith('[3]');
@@ -289,7 +294,7 @@ describe('AgentViewRoster', () => {
     expect(onPeekPromptChange).toHaveBeenLastCalledWith('[404]');
   });
 
-  it('moves selection and cancels from keyboard shortcuts', () => {
+  it('moves selection and cancels from keyboard shortcuts', async () => {
     const onMoveSelection = vi.fn();
     const onCancel = vi.fn();
 
@@ -301,10 +306,31 @@ describe('AgentViewRoster', () => {
     press('', { upArrow: true });
     press('', { downArrow: true });
     press('', { escape: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
 
     expect(onMoveSelection).toHaveBeenNthCalledWith(1, -1);
     expect(onMoveSelection).toHaveBeenNthCalledWith(2, 1);
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders notices as a bounded single line', () => {
+    const longNotice = Array.from(
+      { length: 25 },
+      (_, index) => `line-${index + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderRoster({
+      notice: { lines: [`Starting session: ${longNotice}`] },
+    });
+
+    const noticeLine = (lastFrame() ?? '')
+      .split('\n')
+      .find((line) => line.includes('Starting session:'));
+    expect(noticeLine).toBeDefined();
+    expect(noticeLine).toContain('line-1 line-2');
+    expect(noticeLine).toContain('…');
+    expect(noticeLine).not.toContain('line-25');
   });
 
   it('peeks the selected session on Space when prompt is empty', () => {
