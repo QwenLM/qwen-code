@@ -221,6 +221,56 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     ]);
   });
 
+  it('falls back to text for findings_list payloads that fail the shape check', () => {
+    // The daemon boundary must not hand FindingsDisplay a payload it would
+    // read `findings.length` off — a discriminator-only shape used to crash
+    // the TUI.
+    const payloads: unknown[] = [
+      { type: 'findings_list' },
+      { type: 'findings_list', findings: [{ severity: 'Critical' }] },
+      { type: 'findings_list', findings: 'not-an-array' },
+      { type: 'findings_list', level: 'ultra', findings: [] },
+      {
+        type: 'findings_list',
+        findings: [
+          {
+            severity: 'Critical',
+            file: 'a.ts',
+            summary: 's',
+            shortSummary: 's',
+            failureScenario: 'f',
+            outcome: 'wontfix',
+          },
+        ],
+      },
+    ];
+    for (const rawOutput of payloads) {
+      const updates = reduceDaemonEventToTuiUpdates({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-findings-bad',
+            kind: 'think',
+            title: 'ReportFindings',
+            status: 'completed',
+            rawOutput,
+          },
+        },
+      });
+      const resultDisplay = (
+        updates[0] as {
+          item: { tools: Array<{ resultDisplay: unknown }> };
+        }
+      ).item.tools[0].resultDisplay;
+      expect(typeof resultDisplay).toBe('string');
+      expect(resultDisplay as string).toContain('findings_list');
+    }
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({

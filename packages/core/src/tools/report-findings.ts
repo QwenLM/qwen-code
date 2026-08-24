@@ -20,7 +20,9 @@
 // applied, the reporter calls again with every finding carrying an `outcome`,
 // and — like the artifact's own `--outcomes` merge — a PARTIAL outcome set is
 // refused. A fixer that applies six of nine findings and reports six has not
-// lied about any one of them; it has silently shortened the list.
+// lied about any one of them; it has silently shortened the list — so an
+// outcome call is also held to the active report's identity: the same ids,
+// none dropped, none added.
 
 import type { ToolInvocation, ToolResult, ReportedFinding } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -65,6 +67,11 @@ export type ReportFindingsLevel = (typeof REPORT_FINDINGS_LEVELS)[number];
 
 export const REPORT_FINDINGS_MAX = 50;
 export const SHORT_SUMMARY_MAX = 60;
+// The artifact and the repository set the path domain: repo-relative paths
+// run to the filesystem limit (PATH_MAX, 4096), and the artifact keeps any
+// one of them — a narrower cap refused whole lists the artifact preserves,
+// and truncating a path would identify a different location.
+export const REPORT_FINDINGS_FILE_MAX = 4096;
 
 /** `shortSummary`, when the caller did not supply one within the cap. */
 export function compressFindingSummary(
@@ -145,7 +152,7 @@ const FINDING_ITEM_SCHEMA = {
     },
     file: {
       type: 'string',
-      maxLength: 512,
+      maxLength: REPORT_FINDINGS_FILE_MAX,
       description:
         'Repo-relative path, or the review\'s "(body)" stand-in for an unanchored finding.',
     },
@@ -286,6 +293,12 @@ export class ReportFindingsTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.REPORT_FINDINGS;
 
+  // Id set of the most recent accepted report whose findings all carried
+  // ids. An outcome call replaces the whole list, so it must match this
+  // identity in full; undefined when there is no identity to join on (no
+  // report yet, or a low-effort report without artifact ids).
+  private activeReportIds: ReadonlySet<string> | undefined;
+
   constructor() {
     super(
       ReportFindingsTool.Name,
@@ -355,6 +368,12 @@ export class ReportFindingsTool extends BaseDeclarativeTool<
       if (!finding.failureScenario.trim()) {
         return `Finding at index ${index}: "failureScenario" must not be empty`;
       }
+      if (finding.line !== undefined && !Number.isSafeInteger(finding.line)) {
+        return `Finding at index ${index}: "line" must be an integer within JavaScript's safe range`;
+      }
+      if (finding.outcome === 'skipped' && !finding.outcomeNote?.trim()) {
+        return `Finding at index ${index}: "outcomeNote" is required when "outcome" is "skipped" — the reader is owed the reason for work not done`;
+      }
       const id = finding.id?.trim();
       if (id) {
         if (seenIds.has(id)) {
@@ -367,12 +386,55 @@ export class ReportFindingsTool extends BaseDeclarativeTool<
     if (withOutcome > 0 && withOutcome < params.findings.length) {
       return `${withOutcome} of ${params.findings.length} findings carry an "outcome". Outcomes account for every finding or none: a partial set silently shortens the list. Add the missing outcomes (or remove them all) and call again.`;
     }
+    const activeIds = this.activeReportIds;
+    if (
+      withOutcome === params.findings.length &&
+      params.findings.length > 0 &&
+      activeIds !== undefined
+    ) {
+      const newIds = new Set(
+        params.findings.map((finding) => finding.id?.trim() ?? ''),
+      );
+      const missing = [...activeIds].filter((id) => !newIds.has(id));
+      if (missing.length > 0) {
+        return `Outcome report drops ${missing.length} finding(s) from the active report: ${missing
+          .map((id) => JSON.stringify(id))
+          .join(
+            ', ',
+          )}. An outcome call replaces the whole list — re-report every active finding with its outcome.`;
+      }
+      const unknown = [...newIds].filter(
+        (id) => id === '' || !activeIds.has(id),
+      );
+      if (unknown.length > 0) {
+        return `Outcome report carries finding(s) the active report does not have: ${unknown
+          .map((id) => (id === '' ? '(missing id)' : JSON.stringify(id)))
+          .join(', ')}. Outcomes join back to the active report by id.`;
+      }
+    }
     return null;
   }
 
   protected createInvocation(
     params: ReportFindingsParams,
   ): ToolInvocation<ReportFindingsParams, ToolResult> {
+    this.activeReportIds = reportIdentity(params.findings);
     return new ReportFindingsInvocation(params);
   }
+}
+
+/**
+ * The identity an outcome replacement is held to: the id set of a report
+ * whose findings ALL carry ids. A report with any id-less finding (a
+ * low-effort pass has no artifact ids) has no identity to join on, so a
+ * later outcome call is accepted on its own terms.
+ */
+function reportIdentity(
+  findings: readonly ReportFindingsFindingParams[],
+): ReadonlySet<string> | undefined {
+  const ids = findings.map((finding) => finding.id?.trim() ?? '');
+  if (findings.length === 0 || ids.some((id) => id === '')) {
+    return undefined;
+  }
+  return new Set(ids);
 }

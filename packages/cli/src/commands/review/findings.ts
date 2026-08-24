@@ -764,6 +764,13 @@ export function validateOutcomes(raw: unknown): OutcomeEntry[] {
           `expected one of ${OUTCOMES.map((s) => JSON.stringify(s)).join(', ')}.`,
       );
     }
+    // The report_findings contract refuses a skipped outcome the reader
+    // cannot inspect; the ledger feeding it must not accept one either.
+    if (outcome === 'skipped' && !asString(o, 'note')) {
+      throw new Error(
+        `Outcome for ${JSON.stringify(id)} is "skipped" with no note — the reader is owed the reason for work not done.`,
+      );
+    }
     return {
       id,
       outcome,

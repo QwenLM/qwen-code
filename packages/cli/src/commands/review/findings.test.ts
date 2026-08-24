@@ -425,6 +425,24 @@ describe('validateOutcomes', () => {
       /index 0 is missing a string "id"/,
     );
   });
+
+  it('rejects a skipped outcome with no note', () => {
+    // `skipped` keeps the finding on the reader's plate and the note is the
+    // reader's only handle on it — and the report_findings contract refuses
+    // a skipped outcome that carries none, so the ledger feeding it must not
+    // accept one either.
+    expect(() => validateOutcomes([{ id: 'f1', outcome: 'skipped' }])).toThrow(
+      /"skipped" with no note/,
+    );
+    expect(() =>
+      validateOutcomes([{ id: 'f1', outcome: 'skipped', note: '   ' }]),
+    ).toThrow(/"skipped" with no note/);
+    expect(
+      validateOutcomes([
+        { id: 'f1', outcome: 'skipped', note: 'needs a product call' },
+      ]),
+    ).toEqual([{ id: 'f1', outcome: 'skipped', note: 'needs a product call' }]);
+  });
 });
 
 describe('buildReport', () => {

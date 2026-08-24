@@ -11,7 +11,12 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createDebugLogger,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SEVERITIES,
+  FINDING_SOURCES,
   isVisionBridgeNoticeDisplay,
+  REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core';
 import {
   ToolCallStatus,
@@ -262,6 +267,48 @@ function createSanitizedDaemonError(error: unknown): Error {
   return new Error(`Daemon RPC failed: ${message}`);
 }
 
+function isEnumValue(value: unknown, allowed: readonly string[]): boolean {
+  return typeof value === 'string' && allowed.includes(value);
+}
+
+// The trust boundary for findings_list: past this check the payload reaches
+// FindingsDisplay, which reads `findings` and its fields unconditionally.
+// Anything short of the full typed shape — a discriminator-only payload, a
+// missing array, a bad enum — falls back to the plain-text rendering instead
+// of crashing the TUI.
+function isFindingsListDisplay(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value['findings'])) {
+    return false;
+  }
+  if (
+    value['level'] !== undefined &&
+    !isEnumValue(value['level'], REPORT_FINDINGS_LEVELS)
+  ) {
+    return false;
+  }
+  return (value['findings'] as unknown[]).every(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry['file'] === 'string' &&
+      typeof entry['summary'] === 'string' &&
+      typeof entry['shortSummary'] === 'string' &&
+      typeof entry['failureScenario'] === 'string' &&
+      isEnumValue(entry['severity'], FINDING_SEVERITIES) &&
+      (entry['confidence'] === undefined ||
+        isEnumValue(entry['confidence'], FINDING_CONFIDENCES)) &&
+      (entry['source'] === undefined ||
+        isEnumValue(entry['source'], FINDING_SOURCES)) &&
+      (entry['outcome'] === undefined ||
+        isEnumValue(entry['outcome'], FINDING_OUTCOMES)) &&
+      (entry['line'] === undefined || typeof entry['line'] === 'number') &&
+      (entry['id'] === undefined || typeof entry['id'] === 'string') &&
+      (entry['category'] === undefined ||
+        typeof entry['category'] === 'string') &&
+      (entry['outcomeNote'] === undefined ||
+        typeof entry['outcomeNote'] === 'string'),
+  );
+}
+
 function formatToolResultDisplay(
   value: unknown,
 ): IndividualToolCallDisplay['resultDisplay'] {
@@ -288,7 +335,7 @@ function formatToolResultDisplay(
     (typeof value['fileDiff'] === 'string' ||
       'ansiOutput' in value ||
       value['type'] === 'todo_list' ||
-      value['type'] === 'findings_list' ||
+      isFindingsListDisplay(value) ||
       value['type'] === 'plan_summary' ||
       value['type'] === 'task_execution' ||
       value['type'] === 'mcp_tool_progress')

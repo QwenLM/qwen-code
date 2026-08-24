@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ReportFindingsTool,
   compressFindingSummary,
+  REPORT_FINDINGS_FILE_MAX,
   REPORT_FINDINGS_MAX,
   type ReportFindingsFindingParams,
   type ReportFindingsParams,
@@ -377,6 +378,123 @@ describe('ReportFindingsTool', () => {
     const [item] = displayOf(result).findings;
     expect(item.id).toBe('R2-7');
     expect(item.line).toBe(314);
+  });
+
+  it('accepts file paths the artifact preserves and refuses beyond the path domain', async () => {
+    // The artifact keeps repo-relative paths to the filesystem limit; a
+    // 513-character path it preserves must not refuse the whole in-band list.
+    const file = `src/${'a'.repeat(506)}.ts`;
+    expect(file).toHaveLength(513);
+    const result = await run({ findings: [finding({ file })] });
+    expect(displayOf(result).findings[0].file).toBe(file);
+    const tool = new ReportFindingsTool();
+    expect(() =>
+      tool.build({
+        findings: [finding({ file: 'a'.repeat(REPORT_FINDINGS_FILE_MAX) })],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      tool.build({
+        findings: [finding({ file: 'a'.repeat(REPORT_FINDINGS_FILE_MAX + 1) })],
+      }),
+    ).toThrow();
+  });
+
+  it('accepts MAX_SAFE_INTEGER line numbers and refuses unsafe ones', async () => {
+    const result = await run({
+      findings: [finding({ line: Number.MAX_SAFE_INTEGER })],
+    });
+    expect(displayOf(result).findings[0].line).toBe(Number.MAX_SAFE_INTEGER);
+    const tool = new ReportFindingsTool();
+    // MAX_SAFE_INTEGER + 1 is representable — JSON keeps it, and the
+    // rounding that produced it is invisible — so the schema alone cannot
+    // catch it.
+    expect(() =>
+      tool.build({
+        findings: [finding({ line: Number.MAX_SAFE_INTEGER + 1 })],
+      }),
+    ).toThrow(/safe range/);
+  });
+
+  it('requires a non-empty outcomeNote for every skipped outcome', () => {
+    const tool = new ReportFindingsTool();
+    expect(() =>
+      tool.build({ findings: [finding({ outcome: 'skipped' })] }),
+    ).toThrow(/"outcomeNote" is required/);
+    expect(() =>
+      tool.build({
+        findings: [finding({ outcome: 'skipped', outcomeNote: '   ' })],
+      }),
+    ).toThrow(/"outcomeNote" is required/);
+    expect(() =>
+      tool.build({
+        findings: [
+          finding({ outcome: 'skipped', outcomeNote: 'needs a product call' }),
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it('refuses an outcome replacement that does not match the active report', async () => {
+    // Nine findings reported, six fixed: the other three must not silently
+    // disappear from the client state behind an outcome set that covers only
+    // what the fixer handled.
+    const tool = new ReportFindingsTool();
+    const nine = Array.from({ length: 9 }, (_, i) =>
+      finding({ id: `R1-${i + 1}`, file: `src/f${i}.ts` }),
+    );
+    await tool.build({ findings: nine }).execute(new AbortController().signal);
+
+    const subset = nine
+      .slice(0, 6)
+      .map((f) => ({ ...f, outcome: 'fixed' as const }));
+    expect(() => tool.build({ findings: subset })).toThrow(
+      /drops 3 finding\(s\) from the active report: "R1-7", "R1-8", "R1-9"/,
+    );
+
+    const ghost = [...nine, finding({ id: 'R1-10', file: 'src/ghost.ts' })].map(
+      (f) => ({ ...f, outcome: 'fixed' as const }),
+    );
+    expect(() => tool.build({ findings: ghost })).toThrow(/"R1-10"/);
+
+    const full = nine.map((f) => ({ ...f, outcome: 'fixed' as const }));
+    const result = await tool
+      .build({ findings: full })
+      .execute(new AbortController().signal);
+    expect(displayOf(result).findings).toHaveLength(9);
+
+    // A fresh report without outcomes replaces the active identity.
+    await tool
+      .build({ findings: [finding({ id: 'R2-1', file: 'src/new.ts' })] })
+      .execute(new AbortController().signal);
+    await tool
+      .build({
+        findings: [
+          finding({
+            id: 'R2-1',
+            file: 'src/new.ts',
+            outcome: 'no_change_needed',
+          }),
+        ],
+      })
+      .execute(new AbortController().signal);
+  });
+
+  it('does not hold an outcome call to a report that had no identity', async () => {
+    // A low-effort pass reports without artifact ids, so there is no id set
+    // a later outcome call could be joined against; an empty report
+    // establishes no identity either.
+    const tool = new ReportFindingsTool();
+    await tool
+      .build({ findings: [finding()] })
+      .execute(new AbortController().signal);
+    await tool
+      .build({ findings: [finding({ outcome: 'fixed' })] })
+      .execute(new AbortController().signal);
+    await tool.build({ findings: [] }).execute(new AbortController().signal);
+    await tool
+      .build({ findings: [finding({ outcome: 'fixed' })] })
+      .execute(new AbortController().signal);
   });
 });
 

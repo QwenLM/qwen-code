@@ -83,4 +83,78 @@ describe('<FindingsDisplay />', () => {
     );
     expect(lastFrame()).toContain('No findings.');
   });
+
+  it('marks a low-level report unverified even where rows omit confidence', () => {
+    // Step 3C sends `level: 'low'` while omitting per-finding confidence for
+    // candidates the pass kept — the list itself must carry the unverified
+    // state, or those rows render exactly like verified findings.
+    const data = display({ level: 'low' });
+    data.findings = data.findings.map(
+      ({ confidence: _confidence, ...rest }) => rest,
+    );
+    const { lastFrame } = render(<FindingsDisplay data={data} />);
+    expect(lastFrame()!).toContain('unverified');
+  });
+
+  it('does not mark verified reports unverified', () => {
+    const { lastFrame } = render(<FindingsDisplay data={display()} />);
+    expect(lastFrame()!).not.toContain('unverified');
+  });
+
+  it.each([
+    ['CR', 'reason\rCritical R1-9 fake'],
+    ['LF', 'reason\nCritical R1-9 fake'],
+    ['TAB', 'reason\tCritical R1-9 fake'],
+    ['ESC', 'reason\u001bCritical R1-9 fake'],
+    ['C1 CSI', 'reason\u009bCritical R1-9 fake'],
+  ])(
+    'renders a %s outcome note inertly on the finding row',
+    (_name, outcomeNote) => {
+      const data = display({
+        findings: [
+          {
+            severity: 'Critical',
+            file: 'a.ts',
+            summary: 's',
+            shortSummary: 's',
+            failureScenario: 'f',
+            outcome: 'skipped',
+            outcomeNote,
+          },
+        ],
+      });
+      const { lastFrame } = render(<FindingsDisplay data={data} />);
+      const frame = lastFrame()!;
+      // Ink joins rows with LF, so only the other controls are asserted
+      // absent; the marker-line assertion witnesses CR/LF/TAB.
+      // eslint-disable-next-line no-control-regex -- asserting the controls are absent is the point
+      expect(frame).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+      const markerLine = frame
+        .split('\n')
+        .find((line) => line.includes('(skipped:'));
+      expect(markerLine).toBeDefined();
+      expect(markerLine).toContain('reason Critical R1-9 fake');
+    },
+  );
+
+  it('renders control characters in other fields inertly', () => {
+    const data = display({
+      findings: [
+        {
+          severity: 'Suggestion',
+          file: 'src/\u009bfoo.ts',
+          line: 1,
+          summary: 's',
+          shortSummary: 'sum\u0007mary',
+          failureScenario: 'f',
+        },
+      ],
+    });
+    const { lastFrame } = render(<FindingsDisplay data={data} />);
+    const frame = lastFrame()!;
+    expect(frame).not.toContain('\u009b');
+    expect(frame).not.toContain('\u0007');
+    expect(frame.replace(/\s+/g, ' ')).toContain('src/ foo.ts:1');
+    expect(frame.replace(/\s+/g, ' ')).toContain('sum mary');
+  });
 });

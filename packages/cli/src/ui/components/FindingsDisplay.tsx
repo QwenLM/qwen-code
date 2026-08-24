@@ -23,6 +23,16 @@ const SEVERITY_COLORS: Record<ReportedFinding['severity'], () => string> = {
   'Nice to have': () => Colors.Gray,
 };
 
+// Every interpolated value renders through this: `outcomeNote` legitimately
+// carries line whitespace, and any control character that survived the
+// validator could forge or overwrite lines that read as trusted findings.
+function terminalSafe(text: string): string {
+  /* eslint-disable no-control-regex -- C0/DEL/C1 controls are exactly what this strips */
+  const withoutControls = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+  /* eslint-enable no-control-regex */
+  return withoutControls.replace(/\s+/g, ' ').trim();
+}
+
 const OUTCOME_LABELS: Record<
   NonNullable<ReportedFinding['outcome']>,
   string
@@ -43,6 +53,13 @@ export const FindingsDisplay: React.FC<FindingsDisplayProps> = ({ data }) => {
 
   return (
     <Box flexDirection="column">
+      {data.level === 'low' && (
+        <Box minHeight={1}>
+          <Text color={Colors.Gray}>
+            (low-effort pass — findings are unverified)
+          </Text>
+        </Box>
+      )}
       {data.findings.map((finding, index) => (
         <FindingRow
           key={finding.id ?? `${finding.file}:${finding.line ?? ''}:${index}`}
@@ -63,7 +80,9 @@ const FindingRow: React.FC<{ finding: ReportedFinding }> = ({ finding }) => {
       : resolved
         ? ICON.CHECK
         : ICON.CIRCLE_EMPTY;
-  const where = `${finding.file}${finding.line !== undefined ? `:${finding.line}` : ''}`;
+  const where = terminalSafe(
+    `${finding.file}${finding.line !== undefined ? `:${finding.line}` : ''}`,
+  );
 
   return (
     <Box flexDirection="row" minHeight={1}>
@@ -77,11 +96,13 @@ const FindingRow: React.FC<{ finding: ReportedFinding }> = ({ finding }) => {
           <Text color={severityColor} bold={finding.severity === 'Critical'}>
             {finding.severity}
           </Text>
-          <Text color={Colors.Gray}>{finding.id ? ` ${finding.id}` : ''} </Text>
+          <Text color={Colors.Gray}>
+            {finding.id ? ` ${terminalSafe(finding.id)}` : ''}{' '}
+          </Text>
           <Text color={Colors.AccentCyan}>{where}</Text>
           <Text color={Colors.Foreground} strikethrough={resolved}>
             {' '}
-            {finding.shortSummary}
+            {terminalSafe(finding.shortSummary)}
           </Text>
           {finding.confidence === 'low' && (
             <Text color={Colors.Gray}> (low confidence)</Text>
@@ -91,7 +112,7 @@ const FindingRow: React.FC<{ finding: ReportedFinding }> = ({ finding }) => {
               {' '}
               ({OUTCOME_LABELS[finding.outcome]}
               {finding.outcome === 'skipped' && finding.outcomeNote
-                ? `: ${finding.outcomeNote}`
+                ? `: ${terminalSafe(finding.outcomeNote)}`
                 : ''}
               )
             </Text>
