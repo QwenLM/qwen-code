@@ -78,6 +78,16 @@ describe('SessionWorkflowInspector', () => {
     expect(container.textContent).toContain('4 tool calls');
     expect(container.textContent).toContain('1,200 tokens');
     expect(onSelectedTodoIdChange).toHaveBeenCalledWith('ship');
+    const stepList = container.querySelector(
+      '[data-testid="workflow-step-list"]',
+    );
+    const stepDetail = container.querySelector(
+      '[data-testid="workflow-step-detail"]',
+    );
+    expect(
+      stepList?.compareDocumentPosition(stepDetail as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
 
     const expand = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('Expand dependency graph'),

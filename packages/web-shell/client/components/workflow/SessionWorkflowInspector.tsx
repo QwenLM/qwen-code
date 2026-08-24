@@ -247,9 +247,7 @@ export function SessionWorkflowInspector({
         </section>
       )}
 
-      {detail}
-
-      <section className={styles.steps}>
+      <section className={styles.steps} data-testid="workflow-step-list">
         <div className={styles.compactHeading}>
           <h2>{t('workflow.inspector.allSteps')}</h2>
           <span>{todos.length}</span>
@@ -279,6 +277,8 @@ export function SessionWorkflowInspector({
           })}
         </div>
       </section>
+
+      {detail}
 
       <details className={styles.collapsible} open>
         <summary>
