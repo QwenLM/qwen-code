@@ -20,11 +20,22 @@ const observed = vi.hoisted(() => ({
   shouldThrow: false,
 }));
 
-vi.mock('../WebShellContexts', () => ({
-  CompactModeContext: createContext(false),
-  TodoDetailContext: createContext(new Map()),
-  TodoTimelineContext: createContext(new Map()),
-}));
+vi.mock('../WebShellContexts', () => {
+  const TodoTimelineContext = createContext(new Map());
+  const TodoDetailContext = createContext(new Map());
+  return {
+    CompactModeContext: createContext(false),
+    TodoDetailContext,
+    TodoTimelineContext,
+    TodoContextsProvider: ({ children }: { children?: ReactNode }) => (
+      <TodoTimelineContext.Provider value={new Map()}>
+        <TodoDetailContext.Provider value={new Map()}>
+          {children}
+        </TodoDetailContext.Provider>
+      </TodoTimelineContext.Provider>
+    ),
+  };
+});
 
 vi.mock('./MessageList', async () => {
   const React = await import('react');
