@@ -3177,15 +3177,15 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   });
 
   it('vite.config-only packages and root workspaces outside packages/** are RUN, not skipped', () => {
-    // packages/webui's only config is vite.config.ts (vitest resolves it),
-    // and integrations/external-context is a root npm workspace no path
+    // A vite.config-only package (vitest resolves it), and
+    // integrations/external-context is a root npm workspace no path
     // prefix covers — both are CI-tested, so the gate must re-run them
     // through their owning package instead of logging them out of scope.
     const { res, outputs, log } = runGate({
       layout: {
-        'packages/webui/package.json': '{}',
-        'packages/webui/vite.config.ts': '',
-        'packages/webui/src/x.test.ts': '',
+        'packages/vitepkg/package.json': '{}',
+        'packages/vitepkg/vite.config.ts': '',
+        'packages/vitepkg/src/x.test.ts': '',
         'integrations/external-context/package.json': '{}',
         'integrations/external-context/vitest.config.ts': '',
         'integrations/external-context/src/y.test.ts': '',
@@ -3194,7 +3194,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
         'packages/wspkg/src/z.test.ts': '',
       },
       list: [
-        'packages/webui/src/x.test.ts',
+        'packages/vitepkg/src/x.test.ts',
         'integrations/external-context/src/y.test.ts',
         'packages/wspkg/src/z.test.ts',
         '',
@@ -3209,7 +3209,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
     assert.match(
       log,
-      /\(cd packages\/webui\) npx --no-install vitest run \.\/src\/x\.test\.ts/,
+      /\(cd packages\/vitepkg\) npx --no-install vitest run \.\/src\/x\.test\.ts/,
       'a vite.config-only package must be entered and run',
     );
     assert.match(

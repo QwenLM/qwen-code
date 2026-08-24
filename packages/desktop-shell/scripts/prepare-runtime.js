@@ -54,14 +54,6 @@ if (!skipBuild) {
   });
   execFileSync(
     process.execPath,
-    [npm, 'run', 'build', '--workspace=packages/webui'],
-    {
-      cwd: sourceRoot,
-      stdio: 'inherit',
-    },
-  );
-  execFileSync(
-    process.execPath,
     [npm, 'run', 'build', '--workspace=packages/web-shell'],
     {
       cwd: sourceRoot,

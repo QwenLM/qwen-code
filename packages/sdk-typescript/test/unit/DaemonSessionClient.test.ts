@@ -2301,7 +2301,7 @@ describe('DaemonSessionClient', () => {
     expect(thirdUrl.searchParams.has('previousStreamId')).toBe(false);
   });
 
-  it('forwards an explicit WebUI SSE connection reason', async () => {
+  it('forwards an explicit browser SSE connection reason', async () => {
     const { fetch, calls } = recordingFetch(() => sseResponse(''));
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
     const session = new DaemonSessionClient({

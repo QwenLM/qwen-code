@@ -25,11 +25,6 @@ on:
       - 'packages/web-shell/package.json'
       - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/playwright.visuals.config.ts'
-      # The visuals dev server aliases the shared web UI library into the
-      # rendered bundle (see the `resolve.alias` block in
-      # packages/web-shell/vite.config.ts), so a change to its components/hooks
-      # must also refresh the preview.
-      - 'packages/webui/src/**'
       # NOTE: packages/sdk-typescript/src/** is deliberately NOT a trigger.
       # It is aliased in too, but the visuals render against a *mock* daemon, so
       # the SDK's transport/client layer is stubbed at the network boundary and

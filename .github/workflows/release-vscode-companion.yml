@@ -152,12 +152,6 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Build webui dependency'
-        if: |-
-          ${{ github.event.inputs.force_skip_tests != 'true' }}
-        run: |
-          npm run build --workspace=@qwen-code/webui
-
       - name: 'Run Tests'
         if: |-
           ${{ github.event.inputs.force_skip_tests != 'true' }}

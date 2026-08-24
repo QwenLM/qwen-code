@@ -103,9 +103,9 @@ async function waitFor(
   throw new Error(`Timed out waiting for ${description}`);
 }
 
-describe('qwen serve WebUI live journal recovery', () => {
+describe('qwen serve Web Shell live journal recovery', () => {
   it('repairs once after terminal without another model request', async () => {
-    const workspace = makeTempWorkspace('webui-live-journal-recovery');
+    const workspace = makeTempWorkspace('web-shell-live-journal-recovery');
     const originalFetch = globalThis.fetch;
     const requestPaths: string[] = [];
     try {
@@ -142,7 +142,7 @@ describe('qwen serve WebUI live journal recovery', () => {
         }
       })();
       const prompt = activeDaemon.client.prompt(created.sessionId, {
-        prompt: [{ type: 'text', text: 'repair this turn in WebUI' }],
+        prompt: [{ type: 'text', text: 'repair this turn in Web Shell' }],
       });
       await sawLastChunk;
       observerAbort.abort();

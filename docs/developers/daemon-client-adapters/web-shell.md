@@ -1,4 +1,4 @@
-# Daemon Web UI Adapter
+# Daemon Web Shell Adapter
 
 ## Goal
 
@@ -26,7 +26,7 @@ The split is:
 - `normalizeDaemonEvent()` converts daemon wire events into UI events.
 - `createDaemonTranscriptStore()` reduces UI events into transcript blocks.
 
-React clients can use the optional `@qwen-code/webui` binding:
+React clients can use the optional Web Shell binding:
 
 ```tsx
 import {
@@ -35,7 +35,7 @@ import {
   useDaemonConnection,
   useDaemonPendingPermissions,
   useDaemonTranscriptBlocks,
-} from '@qwen-code/webui';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 ```
 
 Minimal React shape:
@@ -105,7 +105,7 @@ Ink rendering.
 - The native `qwen` TUI remains direct and unchanged.
 - `--acp`, channel, and IDE paths remain unchanged by default.
 - The SDK UI core is additive.
-- The WebUI React binding is optional and only runs in clients that import it.
+- The Web Shell React binding is optional and only runs in clients that import it.
 - Removed daemon TUI spike code should not be treated as a product migration.
 
 ## Follow-Ups

@@ -34,7 +34,7 @@ type ExportFormat = {
   displayName: string;
   format: (
     sessionData: ExportSessionData,
-    records?: readonly unknown[],
+    records: readonly unknown[],
   ) => string;
 };
 
@@ -322,7 +322,7 @@ async function exportSessionAction(
 
     const content = exportFormat.format(
       normalizedData,
-      exportFormat.extension === 'html' ? conversation.messages : undefined,
+      conversation.messages,
     );
 
     if (target.outputDirKind === 'custom') {

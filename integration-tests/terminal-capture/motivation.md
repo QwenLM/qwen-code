@@ -7,7 +7,7 @@
 | Unit Tests             | Vitest + ink-testing-library              | Ink components, Core logic, utilities   | Mature, extensive `.test.ts` / `.test.tsx`                |
 | Integration Tests      | Vitest + TestRig / SDKTestHelper          | CLI E2E, SDK multi-turn, MCP, auth      | Mature, supports none/docker/podman sandboxes             |
 | Terminal UI Snapshots  | `toMatchSnapshot()` + ink-testing-library | Ink component render output (ANSI)      | Exists, covers Footer, InputPrompt, MarkdownDisplay, etc. |
-| Web UI Regression      | Chromatic + Storybook                     | `packages/webui` components             | Exists, but only covers Web UI                            |
+| Web Shell Regression   | Playwright visual capture                 | `packages/web-shell` components         | Exists, but only covers Web Shell                         |
 | **Terminal UI Visual** | **terminal-capture**                      | CLI terminal real rendering screenshots | ✅ Implemented                                            |
 
 ## 2. Problems Solved by terminal-capture
@@ -113,7 +113,7 @@ scenarios/screenshots/
 │  Unit Tests (Vitest)                 │  ← Function/Component level
 │  Text Snapshots (ink-testing-lib)    │  ← ANSI string comparison
 │  Integration Tests (TestRig/SDK)     │  ← E2E functionality
-│  Web UI Regression (Chromatic)       │  ← Only covers webui
+│  Web Shell visual regression         │  ← Browser UI only
 ├─────────────────────────────────────┤
 │  terminal-capture                    │  ← Terminal UI visual layer
 │  (xterm.js + Playwright)             │     Fills the gap

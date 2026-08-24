@@ -6,7 +6,7 @@
  * Shared Follow-up Suggestions State Logic
  *
  * Framework-agnostic state management for prompt suggestions,
- * shared between CLI (Ink) and WebUI (React) hooks.
+ * shared between CLI (Ink) and Web Shell (React) hooks.
  */
 
 /**
@@ -102,7 +102,7 @@ export interface FollowupControllerActions {
  * Creates a framework-agnostic followup suggestion controller.
  *
  * Encapsulates timer management, accept debounce, and state transitions so
- * that React hooks (CLI and WebUI) only need thin wrappers around
+ * that React hooks (CLI and Web Shell) only need thin wrappers around
  * `useState` + this controller.
  */
 export function createFollowupController(
