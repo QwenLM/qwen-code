@@ -87,7 +87,11 @@ describe('qwen mcp approve / reject', () => {
       process.env['QWEN_CODE_MCP_APPROVALS_PATH']!,
       'utf-8',
     );
-    return JSON.parse(raw)[dir]?.[name]?.status;
+    // Keys are case-folded on win32 (issue #9775); fold the lookup too, since
+    // the mkdtemp temp path can contain uppercase letters on Windows runners.
+    const storedRoot =
+      os.platform() === 'win32' ? path.resolve(dir).toLowerCase() : dir;
+    return JSON.parse(raw)[storedRoot]?.[name]?.status;
   };
 
   it('reports when there are no gated servers', async () => {
