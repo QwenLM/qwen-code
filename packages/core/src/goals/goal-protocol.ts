@@ -17,17 +17,44 @@ export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 
 /**
+ * Default autonomous spend window armed on a newly created Goal, in model
+ * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
+ * so a call's full input context counts every time it is sent).
+ *
+ * This is an authorization quantum, not a cost estimate: it bounds how much
+ * autonomous continuation one explicit user action (create, or a later
+ * resume) pays for before the Goal stops and asks again. Sized to a few hours
+ * of continuous turn cadence -- the runaway session this bound exists for
+ * burned ~8.6M tokens in half an hour before a human killed it, so a healthy
+ * long run reaches this ceiling late and a stuck loop reaches it unattended.
+ */
+export const GOAL_DEFAULT_TOKEN_BUDGET = 30_000_000;
+
+/** The `lastReason` a Goal stops with when `tokensUsed` reaches its budget. */
+export function goalTokenBudgetReason(tokenBudget: number): string {
+  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} tokens). Resume the Goal to authorize another budget window, or clear it.`;
+}
+
+/**
  * Which bound a `usage_limited` Goal ran into.
  *
- * Only the evidence bounds are enumerated: they are the ones a caller has to
- * branch on, because they are the ones a plain resume cannot clear. Every other
- * route to `usage_limited` is an operational failure that carries prose in
- * `lastReason` and nothing to key off.
+ * Only the enumerated bounds are typed: they are the ones a caller has to
+ * branch on. The evidence kinds mark a window a plain resume cannot simply
+ * re-enter; `token_budget` marks a spent authorization that a resume re-arms.
+ * Every other route to `usage_limited` is an operational failure that carries
+ * prose in `lastReason` and nothing to key off.
  */
-export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+export type GoalLimitKind =
+  | 'evidence_catalog'
+  | 'checkpoint_request'
+  | 'token_budget';
 
 export function isGoalLimitKind(value: unknown): value is GoalLimitKind {
-  return value === 'evidence_catalog' || value === 'checkpoint_request';
+  return (
+    value === 'evidence_catalog' ||
+    value === 'checkpoint_request' ||
+    value === 'token_budget'
+  );
 }
 
 /** The limit a `usage_limited` reason denotes, for reasons that denote one. */
@@ -112,6 +139,14 @@ export interface GoalRecord {
    * Zero on Goals recovered from a transcript written before the field existed.
    */
   tokensUsed: number;
+  /**
+   * The ceiling `tokensUsed` may reach before autonomous continuation stops
+   * and the Goal waits for the user. Armed at creation from the runtime's
+   * grant; a resume of a budget-stopped Goal moves it forward
+   * (`tokensUsed + grant`) -- the spent meter itself is never reset. Absent on
+   * Goals persisted before budgets existed: those stay unbounded.
+   */
+  tokenBudget?: number;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;

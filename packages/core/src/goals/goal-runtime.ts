@@ -22,8 +22,10 @@ import {
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalTokenBudgetReason,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -70,6 +72,14 @@ export interface CreateGoalRuntimeOptions {
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
   tokenLedger?: GoalTurnTokenLedger;
+  /**
+   * The autonomous spend window one user action (create, edit of a spent
+   * Goal, or resume of a budget-stopped Goal) arms, in `tokensUsed` tokens.
+   * Defaults to `GOAL_DEFAULT_TOKEN_BUDGET`; tests shrink it to make the
+   * bound reachable. A non-finite grant (`Infinity`) opts out: Goals are then
+   * created unbounded, exactly like Goals persisted before budgets existed.
+   */
+  tokenBudgetGrant?: number;
 }
 
 /**
@@ -284,6 +294,71 @@ export function createGoalRuntime(
     }
   };
 
+  const tokenBudgetGrant =
+    options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
+
+  const isTokenBudgetSpent = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+  ): boolean =>
+    goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
+
+  /**
+   * Settle a spent budget instead of minting a continuation.
+   *
+   * Runs from `queueContinuation`, the single point every autonomous
+   * continuation passes through, so one gate bounds every continuation loop
+   * at once -- turn cadence, verifier-rejection retries, checkpoint cycles,
+   * and families not yet discovered. User-driven turns never pass through
+   * here and are never blocked by the budget.
+   */
+  const stopForSpentBudget = () => {
+    void enqueue(async () => {
+      const goal = snapshot.goal;
+      if (
+        !goal ||
+        goal.status !== 'active' ||
+        goal.tokenBudget === undefined ||
+        goal.tokensUsed < goal.tokenBudget ||
+        currentPermit ||
+        pendingProposal ||
+        verificationAttempt ||
+        checkpointAttempt
+      ) {
+        return;
+      }
+      const now = Date.now();
+      const limitedSnapshot: GoalSnapshotV2 = {
+        v: GOAL_STATE_VERSION,
+        goal: {
+          ...goal,
+          status: 'usage_limited',
+          activeTimeMs: elapsedActiveTime(goal, now),
+          updatedAt: now,
+          lastReason: goalTokenBudgetReason(goal.tokenBudget),
+          limitKind: 'token_budget',
+        },
+        activity: 'idle',
+      };
+      await options.journal.recordGoalState(randomUUID(), {
+        v: GOAL_STATE_VERSION,
+        cause: 'usage_limited',
+        snapshot: limitedSnapshot,
+      });
+      if (
+        snapshot.goal?.goalId !== goal.goalId ||
+        snapshot.goal.revision !== goal.revision ||
+        snapshot.goal.status !== 'active' ||
+        currentPermit
+      ) {
+        return;
+      }
+      continuationQueued = false;
+      currentTurnFeedback = undefined;
+      snapshot = structuredClone(limitedSnapshot);
+      broadcast('usage_limited');
+    }).catch(() => undefined);
+  };
+
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
   };
@@ -399,6 +474,10 @@ export function createGoalRuntime(
       verificationAttempt ||
       checkpointAttempt
     ) {
+      return;
+    }
+    if (isTokenBudgetSpent(snapshot.goal)) {
+      stopForSpentBudget();
       return;
     }
     continuationQueued = true;
@@ -1448,6 +1527,7 @@ export function createGoalRuntime(
             request.action === 'edit'
               ? { recordId: recordUuid }
               : options.journal.getTranscriptCursor(),
+          tokenBudgetGrant,
         });
         const nextSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,

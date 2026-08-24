@@ -144,6 +144,7 @@ describe('GetGoalTool', () => {
           turnCount: 27,
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
+          tokenBudget: 30_000_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -175,6 +176,7 @@ describe('GetGoalTool', () => {
         turnCount: 27,
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
+        tokenBudget: 30_000_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });

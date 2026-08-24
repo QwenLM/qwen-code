@@ -613,12 +613,14 @@ function getGoalState(
     return undefined;
   }
   const lastReason = getString(source, 'lastReason');
-  // `limitKind` is what tells a client an evidence-limited Goal cannot be
-  // resumed; dropping it here would leave the UI offering a Resume the reducer
-  // always rejects.
+  // `limitKind` tells a client which enumerated bound stopped the Goal.
+  // Unknown kinds are dropped rather than trusted; known ones must cross, or
+  // the wire copy silently narrows the record.
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
-    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
       ? limitKindRaw
       : undefined;
   return {
