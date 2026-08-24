@@ -103,6 +103,10 @@ function harness(opts: {
   logBySession?: Record<string, string>;
   /** Shared sessions whose rc is planted while the session stays alive. */
   plantSharedSentinel?: string[];
+  /** Arm rc values planted WITHOUT ending the session (the leak shape). */
+  plantArmRc?: Record<string, number>;
+  /** A shared instance that keeps serving past kill-session (R7-7 daemon). */
+  sharedSurvivesTeardown?: boolean;
   /** Called when a session starts — the TOCTOU hook. */
   onSession?: (name: string) => void;
 }) {
@@ -112,6 +116,11 @@ function harness(opts: {
   // window closes when its shell exits, so `has-session` fails afterwards —
   // the second half of the completion gate. A hung arm keeps its session.
   const endedSessions = new Set<string>();
+  // Is a shared instance currently serving? The shared-readiness probe
+  // ('SHPROBE') reflects this. A per-arm instance normally stops serving when
+  // its session is killed; `sharedSurvivesTeardown` models a detached daemon
+  // that keeps serving past kill-session (R7-7).
+  let sharedServing = false;
   const sharedDies = (name: string) =>
     opts.deadShared === true ||
     (Array.isArray(opts.deadShared) && opts.deadShared.includes(name));
@@ -128,6 +137,7 @@ function harness(opts: {
           return fail();
         }
       }
+      if (probe.includes('SHPROBE')) return sharedServing ? ok() : fail();
       return ok();
     }
     if (cmd === 'tmux' && args[2] === 'has-session') {
@@ -137,6 +147,13 @@ function harness(opts: {
       // not a sentinel file (which the arm's own code could plant).
       if (target.startsWith('shared-') && sharedDies(target)) return fail();
       return endedSessions.has(target) ? fail() : ok();
+    }
+    if (cmd === 'tmux' && args[2] === 'kill-session') {
+      const target = args[4];
+      if (target.startsWith('shared-') && !opts.sharedSurvivesTeardown) {
+        sharedServing = false;
+      }
+      return ok();
     }
     if (cmd === 'tmux' && args[2] === 'new-session') {
       const name = args[5];
@@ -155,9 +172,20 @@ function harness(opts: {
           writeFileSync(rcPath, `${DRIVE_SENTINEL} rc=${rc}\n`);
           endedSessions.add(name);
         }
+        if (opts.plantArmRc && name in opts.plantArmRc) {
+          // Plant an arm rc while the session stays alive (hung): the leak
+          // the exitCode invariant guards against.
+          writeFileSync(
+            rcPath,
+            `${DRIVE_SENTINEL} rc=${opts.plantArmRc[name]}\n`,
+          );
+        }
         if ((opts.plantSharedSentinel ?? []).includes(name)) {
           // Plant a sentinel WITHOUT ending the session — the forgery shape.
           writeFileSync(rcPath, `${DRIVE_SENTINEL} rc=0\n`);
+        }
+        if (name.startsWith('shared-') && !sharedDies(name)) {
+          sharedServing = true;
         }
         if (name.startsWith('arm-')) {
           writeFileSync(
@@ -560,6 +588,36 @@ describe('runAbDrive, harnessed', () => {
       'kill:arm-b',
       'kill:shared-b',
     ]);
+  });
+
+  it('detects a shared instance that outlived teardown and refuses per-arm arm b', () => {
+    // A cooperative daemon that detaches from its tmux session survives
+    // kill-session; its readiness probe still passes before arm b's own
+    // instance starts, so per-arm isolation is broken — refuse rather than
+    // drive arm b against arm a's leftover.
+    const args = baseArgs({ shared: 'run-daemon', sharedReady: 'SHPROBE' });
+    const h = harness({ server: args.server, sharedSurvivesTeardown: true });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.a?.outcome).toBe('completed');
+    expect(r.b?.outcome).toBe('unavailable');
+    expect(r.observed).toBe(false);
+    expect(r.note).toContain('outlived its teardown');
+    // arm b's own shared instance was never started against the leftover.
+    expect(h.events()).not.toContain('new:arm-b');
+  });
+
+  it('a timed-out arm reports exitCode null even with a planted rc value', () => {
+    // R3-1 invariant: the poll loop reads the rc every iteration, so a
+    // timed-out arm must not leak a late or planted exit code.
+    const args = baseArgs({ timeout: 1 });
+    const h = harness({
+      server: args.server,
+      hang: ['arm-a'],
+      plantArmRc: { 'arm-a': 9 },
+    });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.a?.outcome).toBe('timed-out');
+    expect(r.a?.exitCode).toBeNull();
   });
 
   it('per-arm shared-ready failure bails THAT arm — tearing its instance down — and still drives the other', () => {

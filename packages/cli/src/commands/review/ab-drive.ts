@@ -423,6 +423,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
    * directory the daemon never wrote — an endless poll with a note blaming
    * the shared script.
    */
+  const probeOnce = (
+    probe: string,
+    arm: 'a' | 'b',
+    cdDir: string,
+    envRoot: string,
+  ): boolean => {
+    const cmd = `${envPrefix(arm, envRoot)}cd ${shellQuote(cdDir)} && (${probe})`;
+    return exec('bash', ['-lc', cmd]).status === 0;
+  };
   const pollReady = (
     probe: string,
     arm: 'a' | 'b',
@@ -432,9 +441,8 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   ): number | null => {
     const started = Date.now();
     const deadline = started + timeoutS * 1000;
-    const cmd = `${envPrefix(arm, envRoot)}cd ${shellQuote(cdDir)} && (${probe})`;
     for (;;) {
-      if (exec('bash', ['-lc', cmd]).status === 0) return Date.now() - started;
+      if (probeOnce(probe, arm, cdDir, envRoot)) return Date.now() - started;
       if (Date.now() >= deadline) return null;
       waitMs(POLL_MS);
     }
@@ -540,6 +548,12 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         ) {
           note = `--shared-cwd ${JSON.stringify(args.sharedCwd)} no longer resolves to the validated directory or is no longer searchable — it vanished, was replaced, or lost its search bit mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
           return mode === 'once' ? 'stop' : bail('unavailable', null);
+        }
+        if (mode === 'per-arm' && arm === 'b' && args.sharedReady) {
+          if (probeOnce(args.sharedReady, arm, sharedCwd, root)) {
+            note = `arm a's shared process outlived its teardown — its readiness probe still passes before arm b's own instance has started, so a previous instance (a daemon that detached from its tmux session, which kill-session cannot reap) is still serving. Per-arm isolation is broken; run the shared script in the FOREGROUND so tmux can kill it, or use --shared-once. Nothing was driven for arm b.`;
+            return bail('unavailable', null);
+          }
         }
         const s = start(
           `shared-${arm}`,
