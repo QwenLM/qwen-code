@@ -13,7 +13,7 @@ import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
