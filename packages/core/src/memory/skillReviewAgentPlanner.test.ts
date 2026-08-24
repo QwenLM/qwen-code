@@ -29,9 +29,9 @@ import {
   SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 

@@ -597,9 +597,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 300-minute cap) so an active run is never aged out
+    // job runs up to its 330-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=360');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -4178,7 +4178,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 330-minute
+    // A stranded marker must NOT keep blocking through the 360-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -4228,7 +4228,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 330-minute horizon is aged out...
+    // ...a check stuck past the 360-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -14672,9 +14672,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 55');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '1080000'",
+      "QWEN_TIMEOUT_MS: '2700000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -21332,7 +21332,7 @@ describe('stale sandbox container cleanup', () => {
         '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
       );
       chmodSync(join(bin, 'docker'), 0o755);
-      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // The launcher line exactly as packages/cli/src/serve/sandbox.ts
       // prints it, then the wedge shape: one line, then silence.
       const stub = join(dir, 'qwen');
       writeFileSync(

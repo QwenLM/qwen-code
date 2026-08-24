@@ -290,6 +290,27 @@ describe('parseArguments', () => {
     process.argv = originalArgv;
   });
 
+  it('includes every approval mode description in --help', async () => {
+    process.argv = ['node', 'script.js', '--help'];
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      output.push(args.join(' '));
+    });
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      const help = output.join('');
+      for (const mode of ServerConfig.APPROVAL_MODES) {
+        expect(help).toContain(
+          `${mode} (${ServerConfig.APPROVAL_MODE_INFO[mode].description})`,
+        );
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('should throw an error when both --prompt and --prompt-interactive are used together', async () => {
     process.argv = [
       'node',
@@ -4139,6 +4160,62 @@ describe('loadCliConfig useBuiltinRipgrep', () => {
   });
 });
 
+describe('loadCliConfig workflowsEnabled', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should be disabled by default when workflowsEnabled is not set in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+  });
+
+  // The regression this whole setting exists to prevent: `workflowsEnabled`
+  // was declared on ConfigParameters and read by isWorkflowsEnabled(), but
+  // loadCliConfig never wrote it — so the setting was a dead switch and the
+  // env var was the only way in.
+  it('should be enabled when workflowsEnabled is set to true in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: true } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(true);
+  });
+
+  it('should let the QWEN_CODE_DISABLE_WORKFLOWS kill switch override a true setting', async () => {
+    vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: true } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+  });
+
+  it('should let QWEN_CODE_ENABLE_WORKFLOWS enable workflows when the setting is false', async () => {
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { workflowsEnabled: false } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(true);
+  });
+});
+
 describe('screenReader configuration', () => {
   const originalArgv = process.argv;
 
@@ -4422,9 +4499,19 @@ describe('loadCliConfig approval mode', () => {
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const settings: Settings = {
-      tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
-    };
+    const settings = {
+      tools: { approvalMode: 'auto_edit' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should normalize legacy autoedit approval mode from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'autoedit' },
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });
@@ -4628,6 +4715,18 @@ describe('Output format', () => {
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
   });
 
+  it('should use stream-json format from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.STREAM_JSON);
+  });
+
   it('should prioritize the format from argv', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'json'];
     const argv = await parseArguments();
@@ -4638,6 +4737,18 @@ describe('Output format', () => {
       [],
     );
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
+  });
+
+  it('should prioritize argv over a differing settings format', async () => {
+    process.argv = ['node', 'script.js', '--output-format', 'text'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
   });
 
   it('should error on invalid --output-format argument', async () => {

@@ -490,9 +490,40 @@ Enterprise paragraph.
     the gate #9616's self-PR read passes through: `ensureAoneAuthenticated`
     now returns the whoami account (`--format json`, one spawn), so the
     version floor applies to the presubmit seam as well. Still open:
-    dedup backing for Aone, cleanup audit, the ai_comment marking flag
+    dedup backing for Aone, the ai_comment marking flag
     (a1-side), the render-adjudication carve-out.
+  - **Landed (2026-08-21, #9627): the dedup backing for Aone** —
+    `comment-status` and `presubmit` route an Aone target at the a1 reads
+    (`mr view` author+head, `mr status` gates, `mr comment list`,
+    `auth whoami`) and reuse the SAME pure classification core the GitHub
+    path pins, so the buckets, the downgrade flags, and the report schema
+    stay one contract. The a1 shape differences map onto the GitHub
+    inputs: threads ride `parentNoteId`, a `closed` thread is the engaged
+    (resolved) bucket, an `outdated` thread takes the stale bucket (its
+    line was rewritten — a new finding there still posts), comments carry
+    NO commit anchor (code facts degrade to `unknown`; nothing is stale by
+    commit), and drift has no compare API (anchorsAtRisk fails safe). The
+    context-unavailable cap stays until `pr-context` lands. Still open:
+    pr-context Aone backing, the ai_comment marking flag (a1-side), the
+    render-adjudication carve-out.
 
+- **Phase 3b — Aone `pr-context` backing (this change).** The reader gains
+  `getReviewContext` + `getCurrentUser` (D1's `getContext` + `self`,
+  synchronous). `pr-context` routes through the platform reader; the
+  normalized bundle keeps ALL rendering and security logic platform-neutral.
+  GitHub's implementation EXTRACTS pr-context's existing gh calls
+  unchanged — the existing suite passing unmodified is the no-regression
+  evidence. On Aone: metadata from `mr view` (stats degrade), one flat
+  comment list split by `path`, no verdicts, ledger carriers = the
+  thread-level comments (the posted summaries); refetch commands bake
+  `--pr` (Aone addresses every comment body per-MR) and bake only an
+  explicit `--host` (never the ambient GH_HOST). The forced
+  context-unavailable cap leaves submit (the reads are backed now), so an
+  Aone run that read its context can APPROVE and the wired
+  `a1 repo mr approve` fires. Agent 0 becomes runnable on Aone (its gate
+  is pr-context success; its welded `issue-context` command is already
+  backed). Design: `2026-08-21-review-aone-pr-context.md`. Still open: the
+  Phase-3 open items above, unchanged.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
