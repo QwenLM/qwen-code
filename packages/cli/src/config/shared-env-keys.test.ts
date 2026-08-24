@@ -97,6 +97,21 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  // The workflow gates are user opt-ins: a project `.env` enabling the
+  // runtime — or supplying /review's A/B gate on the user's behalf — would
+  // silently route reviews into the experimental workflow path for any user
+  // who enabled the runtime at user level.
+  it('excludes the workflow gates so a project .env cannot opt reviews in', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_ENABLE_WORKFLOWS',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_DISABLE_WORKFLOWS',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_REVIEW_WORKFLOW');
+    expect(isHardcodedProjectEnvExclusion('qwen_review_workflow')).toBe(true);
+  });
+
   // The non-Node TLS trust-anchor vars reach the same MITM outcome as
   // NODE_EXTRA_CA_CERTS for the curl/git/openssl/python tools a session
   // shells out to; a project .env must not inject an attacker CA.

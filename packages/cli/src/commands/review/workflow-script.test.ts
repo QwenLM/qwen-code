@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   buildReviewWorkflowScript,
   FAN_OUT_BODY,
@@ -119,23 +120,30 @@ describe('the generated Step 3A fan-out script', () => {
   });
 
   it('asks for the same subagent type the hand-launched path requires', async () => {
-    // Without this, workflow dispatch substitutes its own terse subagent
-    // persona and the two paths run different agents over identical prompts —
-    // which would make an A/B between them unreadable.
-    const { dispatched } = await runScript(
+    // The hand-launched path is mandated to set `subagent_type:
+    // "review-agent"` (SKILL.md, TYPE_NOTE, and the registry's explicit tool
+    // list). Dispatching any other type — including the inherit-everything
+    // `general-purpose` default — runs a different agent over identical
+    // prompts and makes the A/B between the two paths unreadable. Both
+    // dispatch branches are exercised: the worktree-pinned shape and the
+    // shape a review without a worktree takes.
+    for (const script of [
       buildReviewWorkflowScript(AGENTS),
-      async (prompt) => `said:${prompt}`,
-    );
-    for (const d of dispatched) {
-      expect((d.opts as { agentType: string }).agentType).toBe(
-        'general-purpose',
+      buildReviewWorkflowScript(AGENTS, '/tmp/review-pr-42'),
+    ]) {
+      const { dispatched } = await runScript(
+        script,
+        async (prompt) => `said:${prompt}`,
       );
+      for (const d of dispatched) {
+        expect((d.opts as { agentType: string }).agentType).toBe(
+          REVIEW_BUILTIN_SUBAGENT_TYPE,
+        );
+      }
+      expect(
+        dispatched.map((d) => (d.opts as { label: string }).label),
+      ).toEqual(['1a', '2', '7']);
     }
-    expect(dispatched.map((d) => (d.opts as { label: string }).label)).toEqual([
-      '1a',
-      '2',
-      '7',
-    ]);
   });
 
   // The pin is the whole reason a worktree review may take this path at all.

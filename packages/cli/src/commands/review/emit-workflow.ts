@@ -23,7 +23,7 @@
 // It is NOT a one-variable change, and the differences that remain are worth
 // naming. Workflow dispatch substitutes its own terse subagent persona unless
 // an `agentType` is given, so the generated script passes
-// `agentType: 'general-purpose'` — the same subagent type SKILL.md requires of
+// `agentType: 'review-agent'` — the same subagent type SKILL.md requires of
 // the hand-launched path — and it passes `workingDir` for the same reason the
 // hand-launched path sets `working_dir`: an unpinned agent reads the user's
 // main checkout. Everything else about the dispatch (turn ceiling, wall clock)

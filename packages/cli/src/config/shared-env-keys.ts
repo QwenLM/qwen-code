@@ -41,8 +41,12 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CODE_MEMORY_PROJECT_SCOPE',
   // Workflow execution is an explicit user opt-in. A project must not enable
   // it or override a user opt-in through settings.env or a project .env.
+  // QWEN_REVIEW_WORKFLOW is /review's own A/B gate and is user-owned for the
+  // same reason: a project `.env` must not supply it on the user's behalf and
+  // silently route reviews into the workflow path.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  'QWEN_REVIEW_WORKFLOW',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

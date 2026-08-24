@@ -3425,6 +3425,25 @@ describe('Settings Loading and Merging', () => {
       }
     });
 
+    it('should ignore workspace env overrides for the review workflow gate', () => {
+      delete process.env['QWEN_REVIEW_WORKFLOW'];
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ env: { QWEN_REVIEW_WORKFLOW: '1' } });
+          return '{}';
+        },
+      );
+
+      try {
+        loadSettings(MOCK_WORKSPACE_DIR);
+        expect(process.env['QWEN_REVIEW_WORKFLOW']).toBeUndefined();
+      } finally {
+        delete process.env['QWEN_REVIEW_WORKFLOW'];
+      }
+    });
+
     it('should warn when workspace settings define workflowsEnabled', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(

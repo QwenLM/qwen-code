@@ -65,10 +65,10 @@ log(AGENTS.length + ' agents required by the plan');
 // CLI computed and wrote into this file; this loop cannot shorten it, and
 // there is no branch in which an agent is skipped.
 //
-// agentType is 'general-purpose' for the same reason the hand-launched path
-// sets subagent_type: workflow dispatch otherwise substitutes its own terse
-// subagent persona, and the two paths would then be running different agents
-// over identical prompts.
+// agentType is the type the hand-launched path sets as subagent_type —
+// 'review-agent' — so workflow dispatch runs the same agent, with the same
+// explicit tool list, over identical prompts; omitting it would substitute
+// the runtime's terse default persona instead.
 //
 // WORKING_DIR is the review's worktree, or null for a review that has none.
 // It is the workflow equivalent of the \`working_dir\` the hand-launched path
@@ -85,13 +85,13 @@ const returns = await parallel(
         ? {
             label: a.key,
             phase: 'Review',
-            agentType: 'general-purpose',
+            agentType: 'review-agent',
             workingDir: WORKING_DIR,
           }
         : {
             label: a.key,
             phase: 'Review',
-            agentType: 'general-purpose',
+            agentType: 'review-agent',
           },
     ),
   ),
