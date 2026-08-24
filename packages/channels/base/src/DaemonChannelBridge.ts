@@ -43,6 +43,12 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  uploadAttachment(
+    data: Blob,
+    name: string,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>>;
   events(opts?: {
     signal?: AbortSignal;
     lastEventId?: number;
@@ -123,6 +129,15 @@ function getTextContent(content: unknown): string | undefined {
     return undefined;
   }
   return getString(content['text']);
+}
+
+function channelImageName(mimeType: string, index = 0): string {
+  const extension =
+    mimeType === 'image/jpeg' ? 'jpeg' : mimeType.slice('image/'.length);
+  if (!['bmp', 'gif', 'jpeg', 'png', 'webp'].includes(extension)) {
+    throw new Error(`Unsupported channel image MIME type: ${mimeType}`);
+  }
+  return index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
 }
 
 function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
@@ -409,12 +424,28 @@ export class DaemonChannelBridge
     const turnBarrier = this.createTurnBarrier(sessionId);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
-      prompt.push({
-        type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
-      });
+    const images =
+      options?.images && options.images.length > 0
+        ? options.images
+        : options?.imageBase64 && options.imageMimeType
+          ? [
+              {
+                data: options.imageBase64,
+                mimeType: options.imageMimeType,
+              },
+            ]
+          : [];
+    for (const [index, image] of images.entries()) {
+      const mimeType = image.mimeType;
+      const attachment = await session.uploadAttachment(
+        new Blob([Buffer.from(image.data, 'base64')], {
+          type: mimeType,
+        }),
+        channelImageName(mimeType, index),
+        mimeType,
+        controller.signal,
+      );
+      prompt.push(attachment);
     }
     prompt.push({ type: 'text', text });
     // Always presented: the daemon validates it for the channel-turn

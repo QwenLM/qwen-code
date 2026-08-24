@@ -79,6 +79,7 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
 
 interface FakeSession extends DaemonChannelSessionClient {
   prompt: ReturnType<typeof vi.fn>;
+  uploadAttachment: ReturnType<typeof vi.fn>;
   events: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
@@ -94,6 +95,7 @@ function createFakeSession(
     workspaceCwd: '/repo',
     lastEventId: undefined,
     prompt: vi.fn().mockImplementation(async () => ({})),
+    uploadAttachment: vi.fn(),
     events: vi.fn((opts?: { signal?: AbortSignal }) => {
       opts?.signal?.addEventListener('abort', () => events.close(), {
         once: true,
@@ -1889,9 +1891,22 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('passes image prompt blocks and aborts prompts when a session dies', async () => {
+  it('stores channel images so the daemon can replay them to Web Shell', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    session.uploadAttachment
+      .mockResolvedValueOnce({
+        type: 'image',
+        attachmentId: 'image.png',
+        mimeType: 'image/png',
+        size: 12,
+      })
+      .mockResolvedValueOnce({
+        type: 'image',
+        attachmentId: 'image-2.jpeg',
+        mimeType: 'image/jpeg',
+        size: 13,
+      });
     session.prompt.mockImplementation(
       (_req: unknown, signal?: AbortSignal) =>
         new Promise((_resolve, reject) => {
@@ -1911,14 +1926,41 @@ describe('DaemonChannelBridge', () => {
     await bridge.newSession('/repo');
 
     const promptPromise = bridge.prompt('session-1', 'describe', {
-      imageBase64: 'base64-image',
-      imageMimeType: 'image/png',
+      images: [
+        { data: 'base64-image', mimeType: 'image/png' },
+        { data: 'second-image', mimeType: 'image/jpeg' },
+      ],
     });
     await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.uploadAttachment).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Blob),
+      'image.png',
+      'image/png',
+      expect.any(AbortSignal),
+    );
+    expect(session.uploadAttachment).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Blob),
+      'image-2.jpeg',
+      'image/jpeg',
+      expect.any(AbortSignal),
+    );
     expect(session.prompt).toHaveBeenCalledWith(
       {
         prompt: [
-          { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+          {
+            type: 'image',
+            attachmentId: 'image.png',
+            mimeType: 'image/png',
+            size: 12,
+          },
+          {
+            type: 'image',
+            attachmentId: 'image-2.jpeg',
+            mimeType: 'image/jpeg',
+            size: 13,
+          },
           { type: 'text', text: 'describe' },
         ],
         _meta: { [CHANNEL_PROMPT_META_KEY]: true },
