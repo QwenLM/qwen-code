@@ -224,7 +224,7 @@ export interface UseDaemonFollowupSuggestionReturn {
 
 /**
  * Wire the daemon's server-pushed `followup_suggestion` event into the
- * webui's `<InputForm>`. Consumers:
+ * Web Shell's composer. Consumers:
  *
  *   1. Render `<InputForm followupState={...} onAcceptFollowup={...}
  *      onDismissFollowup={...} />` with the three values returned here.

@@ -7418,10 +7418,10 @@ describe('Late permission.resolved after sentinel pruned (wenshao R3 qwen3.7-max
   });
 });
 
-// Note: webui transcriptAdapter previewMarkdown/rawOutput preservation
-// test lives in packages/webui/src/daemon/transcriptAdapter.test.ts —
+// The Web Shell transcript adapter previewMarkdown/rawOutput preservation
+// test lives in packages/web-shell/client/adapters/transcriptToMessages.test.ts —
 // keeping it co-located with the adapter ensures path resolution goes
-// through webui's tsconfig path-mapping into source rather than the
+// through Web Shell's tsconfig path-mapping into source rather than the
 // SDK dist (which doesn't exist in CI before this PR builds).
 
 describe('ensureSafeImageUrl tightened to data:image/* (audit follow-up)', () => {

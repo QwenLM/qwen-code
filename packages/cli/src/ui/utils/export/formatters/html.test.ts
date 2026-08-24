@@ -32,13 +32,6 @@ const records = [
 ];
 
 describe('HTML export formatter', () => {
-  it('preserves the legacy formatter when source records are unavailable', () => {
-    const html = toHtml(sessionData);
-
-    expect(html).toContain('id="chat-data"');
-    expect(html).not.toContain('id="transcript-document"');
-  });
-
   it('uses the version-bound document renderer for the product export path', () => {
     const html = toHtml(sessionData, records);
     const secondHtml = toHtml(sessionData, records);

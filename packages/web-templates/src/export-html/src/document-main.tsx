@@ -1,5 +1,5 @@
 import './document-styles.css';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { WebShellTranscript } from '@qwen-code/web-shell';
@@ -19,6 +19,14 @@ interface ExportTranscriptDocument {
     complete: boolean;
     truncated: boolean;
   };
+}
+
+type DocumentTheme = 'light' | 'dark';
+
+function preferredTheme(): DocumentTheme {
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light';
 }
 
 function parseDocument(): ExportTranscriptDocument {
@@ -51,12 +59,18 @@ function parseDocument(): ExportTranscriptDocument {
 }
 
 function DocumentApp({ value }: { value: ExportTranscriptDocument }) {
+  const [theme, setTheme] = useState<DocumentTheme>(preferredTheme);
+
   useEffect(() => {
     document.title = value.metadata.title || 'Qwen Code Chat Export';
     requestAnimationFrame(() => {
       document.body.dataset.renderComplete = 'true';
     });
   }, [value.metadata.title]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   return (
     <main className="document-shell">
@@ -69,15 +83,27 @@ function DocumentApp({ value }: { value: ExportTranscriptDocument }) {
               : `Exported ${value.metadata.exportedAt}`}
           </p>
         </div>
-        {(!value.metadata.complete || value.metadata.truncated) && (
-          <span className="document-warning">Partial export</span>
-        )}
+        <div className="document-actions">
+          {(!value.metadata.complete || value.metadata.truncated) && (
+            <span className="document-warning">Partial export</span>
+          )}
+          <button
+            type="button"
+            className="document-theme-toggle"
+            aria-label={`Use ${theme === 'light' ? 'dark' : 'light'} theme`}
+            onClick={() =>
+              setTheme((current) => (current === 'light' ? 'dark' : 'light'))
+            }
+          >
+            {theme === 'light' ? 'Dark' : 'Light'}
+          </button>
+        </div>
       </header>
       <WebShellTranscript
         blocks={value.blocks}
         renderMode="document"
         compactThinking
-        theme="light"
+        theme={theme}
       />
     </main>
   );

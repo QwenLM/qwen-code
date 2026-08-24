@@ -46,7 +46,7 @@ beforeEach(() => {
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
-  { dir: 'packages/webui', name: '@x/webui', scripts: ['build'], deps: [] },
+  { dir: 'packages/ui-kit', name: '@x/ui-kit', scripts: ['build'], deps: [] },
 ];
 
 describe('unresolvedWorkspaceDeps', () => {
@@ -2277,7 +2277,7 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/webui', { name: '@x/webui', scripts: { build: 'x' } });
+    pkg('packages/ui-kit', { name: '@x/ui-kit', scripts: { build: 'x' } });
     pkg('packages/leaf', {
       name: '@x/leaf',
       scripts: { build: 'x', test: 'x' },

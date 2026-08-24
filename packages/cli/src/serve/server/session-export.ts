@@ -28,7 +28,7 @@ export type SessionExportFormat = (typeof SESSION_EXPORT_FORMATS)[number];
 
 interface ExportFormatDefinition {
   mimeType: string;
-  render: (data: ExportSessionData, records?: readonly unknown[]) => string;
+  render: (data: ExportSessionData, records: readonly unknown[]) => string;
 }
 
 const EXPORT_FORMATS: Record<SessionExportFormat, ExportFormatDefinition> = {
@@ -107,7 +107,7 @@ export async function exportSessionTranscript(params: {
     mimeType: formatDefinition.mimeType,
     content: formatDefinition.render(
       normalized,
-      format === 'html' ? sessionData.conversation.messages : undefined,
+      sessionData.conversation.messages,
     ),
   };
 }

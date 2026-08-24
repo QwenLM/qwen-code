@@ -12052,7 +12052,7 @@ class QwenAgent implements Agent {
       );
     }
     startNonInteractiveOpenAILogHousekeeping(config, settings);
-    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
     void this.surfaceMcpFailuresWhenReady(config);

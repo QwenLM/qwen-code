@@ -1,9 +1,29 @@
+:root {
+  color-scheme: light;
+  --document-background: #fff;
+  --document-foreground: #111827;
+  --document-muted: #6b7280;
+  --document-border: #d1d5db;
+  --document-hover: #f3f4f6;
+  --document-warning: #92400e;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --document-background: #111827;
+  --document-foreground: #f3f4f6;
+  --document-muted: #9ca3af;
+  --document-border: #374151;
+  --document-hover: #1f2937;
+  --document-warning: #fbbf24;
+}
+
 html,
 body {
   margin: 0;
   min-height: 100%;
-  background: #fff;
-  color: #111827;
+  background: var(--document-background);
+  color: var(--document-foreground);
 }
 
 .document-shell {
@@ -29,24 +49,47 @@ body {
 
 .document-header p {
   margin: 6px 0 0;
-  color: #6b7280;
+  color: var(--document-muted);
   font-size: 12px;
+}
+
+.document-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .document-warning {
   border: 1px solid #f59e0b;
   border-radius: 999px;
   padding: 4px 10px;
-  color: #92400e;
+  color: var(--document-warning);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.document-theme-toggle {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--document-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.document-theme-toggle:hover,
+.document-theme-toggle:focus-visible {
+  background: var(--document-hover);
+  outline: none;
 }
 
 .document-error {
   box-sizing: border-box;
   width: min(640px, calc(100% - 40px));
   margin: 80px auto;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--document-border);
   border-radius: 12px;
   padding: 24px;
   font-family: ui-sans-serif, system-ui, sans-serif;
@@ -59,11 +102,15 @@ body {
 
 .document-error p {
   margin: 8px 0 0;
-  color: #6b7280;
+  color: var(--document-muted);
 }
 
 @media print {
   .document-header {
     position: static;
+  }
+
+  .document-theme-toggle {
+    display: none;
   }
 }

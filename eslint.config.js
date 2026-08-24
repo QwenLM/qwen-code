@@ -462,11 +462,6 @@ export default tseslint.config(
     files: ['packages/vscode-ide-companion/**/*.ts', 'packages/vscode-ide-companion/**/*.tsx', 'packages/vscode-ide-companion/**/*.js'],
     rules: { 'no-console': 'off' },
   },
-  // WebUI package - UI component library with Storybook
-  {
-    files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
-    rules: { 'no-console': 'off' },
-  },
   // Chrome extension (chrome-extension) - the MV3 background service
   // worker and content scripts run in the browser with no stdio; console is
   // the only logging / debugging channel available there.
