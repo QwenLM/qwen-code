@@ -4084,6 +4084,23 @@ describe('loadCliConfig registry allowlist wiring (#9827)', () => {
 
     expect(config.getRegistryAllowList()).toEqual([]);
   });
+
+  it('strips the registry allowlist in bare mode', async () => {
+    // Mirror of the safe-mode test: bare mode drops settings
+    // `permissions.allow` from the merged allow rules, so an allowlist
+    // activated from the same settings would run with zero in-force
+    // membership rules and strip the bare registry's minimal toolset.
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getRegistryAllowList()).toEqual([]);
+  });
 });
 
 describe('loadCliConfig chatCompression', () => {
