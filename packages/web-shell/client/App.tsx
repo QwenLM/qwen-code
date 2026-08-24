@@ -175,6 +175,7 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
+import { McpAppHostContext } from './mcpAppHostContext';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -954,6 +955,12 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /**
+   * Called with the initial merged agent task snapshot and when its roster,
+   * status, or stable metadata changes. Poll-only runtime, stats, and activity
+   * updates are suppressed.
+   */
+  onAgentTasksChange?: (tasks: readonly DaemonSessionAgentTaskStatus[]) => void;
   /**
    * Called whenever transcript blocks change. Receives the full blocks array
    * at most once per animation frame during active generation.
@@ -1899,6 +1906,7 @@ export function App({
   virtualScrollThreshold,
   markdown,
   loadingPhrases,
+  onAgentTasksChange,
   onTranscriptChange,
   onToast,
   composerRef,
@@ -4118,6 +4126,27 @@ export function App({
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
   );
+  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!onAgentTasksChange) {
+      lastReportedAgentTasksRef.current = undefined;
+      return;
+    }
+    const snapshot = JSON.stringify(
+      environmentAgentTasks.map(
+        ({
+          runtimeMs: _runtimeMs,
+          stats: _stats,
+          recentActivities: _recentActivities,
+          prompt: _prompt,
+          ...stable
+        }) => stable,
+      ),
+    );
+    if (snapshot === lastReportedAgentTasksRef.current) return;
+    lastReportedAgentTasksRef.current = snapshot;
+    onAgentTasksChange(environmentAgentTasks);
+  }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),
     [sessionTasks],
@@ -6202,6 +6231,16 @@ export function App({
       })),
     [connection.models],
   );
+  const hasAuthoritativeReasoningContext = Boolean(
+    connection.sessionId &&
+      connection.context?.sessionId === connection.sessionId,
+  );
+  const displayedReasoning = hasAuthoritativeReasoningContext
+    ? connection.reasoning
+    : !connection.sessionId && !connection.context
+      ? connection.models?.find((model) => model.id === currentModel)
+          ?.reasoningPreview
+      : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
@@ -11498,8 +11537,9 @@ export function App({
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        {/* prettier-ignore */}
-        <WebShellPortalRootContext.Provider value={portalRoot}>
+        <McpAppHostContext.Provider value={workspace.baseUrl}>
+          {/* prettier-ignore */}
+          <WebShellPortalRootContext.Provider value={portalRoot}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -13104,8 +13144,12 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          reasoning={connection.reasoning}
-                          onSelectReasoningEffort={handleReasoningEffort}
+                          reasoning={displayedReasoning}
+                          onSelectReasoningEffort={
+                            hasAuthoritativeReasoningContext
+                              ? handleReasoningEffort
+                              : undefined
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
@@ -13336,10 +13380,12 @@ export function App({
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      variant="drawer"
-                    />
+                    <CompactModeContext.Provider value={compactMode}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        variant="drawer"
+                      />
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
@@ -13404,12 +13450,14 @@ export function App({
                     />
                   )}
                   <WebShellCustomizationProvider value={customization}>
-                    <div className={styles.artifactPanelClip}>
-                      <ArtifactPanel
-                        {...artifactPanelSharedProps}
-                        panelWidth={artifactPanelWidth}
-                      />
-                    </div>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <div className={styles.artifactPanelClip}>
+                        <ArtifactPanel
+                          {...artifactPanelSharedProps}
+                          panelWidth={artifactPanelWidth}
+                        />
+                      </div>
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
@@ -13417,6 +13465,7 @@ export function App({
           </div>
         </div>
         </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );
