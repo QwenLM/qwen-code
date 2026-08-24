@@ -548,10 +548,50 @@ describe('Goal evidence catalog', () => {
     expect(small?.content).toBe('output 1');
   });
 
+  it('does not start truncated under a full checkpoint of multi-byte claims', () => {
+    // The failure this guards: catalog previews were cut to 240 *characters*
+    // while the catalog budget counts *bytes*. A legal 32-claim checkpoint of
+    // Chinese claims serialized to ~29kB against the 24kB cap, so the window
+    // was truncated before a single new record was scanned — and `truncated`
+    // switches `shouldCheckpoint` off, so compaction could never run again and
+    // the Goal was stopped as `usage_limited` with nothing to salvage.
+    const checkpointGoal: GoalRecord = {
+      ...goal('checkpoint-1'),
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 1,
+        claims: Array.from({ length: 32 }, (_, index) => ({
+          id: `checkpoint-1:${index + 1}`,
+          proofKind: 'external_fact' as const,
+          claim: '\u4e2d'.repeat(2_000),
+          sourceRefs: ['cursor'],
+        })),
+      },
+    };
+
+    const window = buildGoalEvidenceCheckpointWindow({
+      records: [
+        record('checkpoint-1', 'system'),
+        record('evidence-0', 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: '\u4e2d'.repeat(50),
+        }),
+      ],
+      goal: checkpointGoal,
+      permit: permit(),
+    });
+
+    expect(window.truncated).toBe(false);
+  });
+
   it('caps window content on a code point boundary for multi-byte text', () => {
     const records = [
       record('cursor', 'system'),
-      ...Array.from({ length: 26 }, (_, index) =>
+      // Sized against the byte-capped catalog entry (~364 bytes each), not the
+      // ~910 a 240-character CJK preview used to cost: 53 entries reach the
+      // 19,200-byte checkpoint threshold, 66 would reach the 24,000 cap.
+      ...Array.from({ length: 55 }, (_, index) =>
         record(`evidence-${index}`, 'assistant', {
           provenance: 'assistant_output',
           turnId: 'turn-3',
