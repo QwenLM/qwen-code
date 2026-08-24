@@ -268,6 +268,9 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
+  // A plan-mode vouch says "run this binary unattended", so a cloned
+  // repository must not be able to grant itself one.
+  { section: 'permissions', key: 'planMode' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

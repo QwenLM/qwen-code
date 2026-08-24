@@ -136,6 +136,12 @@ const mockExtractCommandRules = vi.hoisted(() => vi.fn());
 vi.mock('../utils/shellAstParser.js', () => ({
   isShellCommandReadOnlyASTInDirectory: mockIsShellCommandReadOnlyAST,
   extractCommandRules: mockExtractCommandRules,
+  // Not mocked away: the confirmation scope depends on the real predicate,
+  // and a stub returning false would hide the very defect it guards.
+  plantsStateForLaterCommands: (command: string) =>
+    /^\s*(?:cd|pushd|popd|export|declare|readonly|typeset|local|set|alias|eval|source|\.)(?:\s|$)/.test(
+      command,
+    ),
 }));
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
@@ -213,6 +219,7 @@ describe('MonitorTool', () => {
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getPlanModeReadOnlyRoots: vi.fn().mockReturnValue(new Set<string>()),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
@@ -300,6 +307,35 @@ describe('MonitorTool', () => {
 
       expect(details.type).toBe('exec');
       expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
+    });
+
+    it('excludes a vouched sub-command from confirmation details (issue #9694)', async () => {
+      // The parser is mocked in this suite, so drive the filter directly:
+      // the vouched sub-command is the one the classifier reports read-only.
+      const roots = new Set(['ib']);
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(roots);
+      mockIsShellCommandReadOnlyAST.mockImplementation(async (sub: string) =>
+        sub.trim().startsWith('ib '),
+      );
+
+      const invocation = createInvocation({
+        command: 'ib domain list && curl example.com',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      expect(details.permissionRules).toEqual(['Monitor(curl example.com *)']);
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        'ib domain list',
+        expect.any(String),
+        { extraReadOnlyRoots: roots },
+      );
     });
 
     it('strips a trailing bare ampersand before building confirmation details', async () => {
@@ -516,6 +552,22 @@ describe('MonitorTool', () => {
       });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    });
+
+    it('forwards user-vouched read-only roots to the classifier (issue #9694)', async () => {
+      const roots = new Set(['ib']);
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(roots);
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({ command: 'ib domain list' });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        'ib domain list',
+        expect.any(String),
+        { extraReadOnlyRoots: roots },
+      );
     });
 
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {

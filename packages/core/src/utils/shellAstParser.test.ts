@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  NEVER_READ_ONLY_ROOT_COMMANDS,
   classifyShellCommandSafety,
   initParser,
   isShellCommandReadOnlyAST,
@@ -127,6 +128,96 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
         true,
       );
+    });
+
+    it('refuses a vouched frontend against any program-executing key', async () => {
+      // The gate modelled only `diff.external`/`core.fsmonitor`, but a wrapper
+      // has no sub-command filter, so every key that makes a read verb run a
+      // program reaches it — including a `!` alias, which git runs through the
+      // shell for a verb it does not recognise.
+      const vouched = { extraReadOnlyRoots: new Set(['gitw']) };
+      for (const [key, value] of [
+        ['alias.pwn', '!./evil.sh'],
+        ['gpg.program', './evil.sh'],
+        ['diff.evil.textconv', './evil.sh'],
+        ['filter.evil.clean', './evil.sh'],
+      ]) {
+        const cwd = createRepo();
+        gitConfig(cwd, key!, value!);
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('gitw show', cwd, vouched),
+        ).toBe(false);
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('gitw pwn', cwd, vouched),
+        ).toBe(false);
+      }
+    });
+
+    it('leaves literal git alone when only a helper key is planted', async () => {
+      // `git lfs install --local` writes `filter.lfs.clean` in a large share
+      // of real checkouts. Keying literal `git diff` to the new flag would
+      // downgrade all of them, so the flag is consumed on the vouched path
+      // only and literal git keeps its two original checks.
+      const cwd = createRepo();
+      gitConfig(cwd, 'filter.lfs.clean', 'git-lfs clean -- %f');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
+    it('gives a vouched git frontend the same planted-config gate', async () => {
+      // The vouch exists for wrapper CLIs, so keying this defence to the
+      // literal name `git` would let `gitw status` run a planted
+      // `core.fsmonitor` that `git status` is stopped from running. A wrapper
+      // is free to spell its verb anywhere in argv, so the gate is not
+      // sub-command filtered for vouched roots.
+      const vouched = { extraReadOnlyRoots: new Set(['gitw']) };
+      const clean = createRepo();
+      // A repository that plants nothing is unaffected: the gate is keyed to
+      // the risk, not to the vouch.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('gitw status', clean, {
+          extraReadOnlyRoots: new Set(['gitw']),
+        }),
+      ).toBe(true);
+
+      const hostile = createRepo();
+      gitConfig(hostile, 'core.fsmonitor', 'example-fsmonitor');
+      gitConfig(hostile, 'diff.external', 'example-external-diff');
+      for (const command of ['gitw status', 'gitw diff', 'gitw repo status']) {
+        expect(
+          await isShellCommandReadOnlyASTInDirectory(command, hostile, vouched),
+        ).toBe(false);
+      }
+      // Without the vouch the wrapper was already prompting, and literal
+      // `git` is unchanged.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('gitw status', hostile),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', hostile),
+      ).toBe(false);
+
+      // The changed-directory branch: once the line has cd'd, the ambient
+      // probe describes the wrong repository, so a vouched frontend after a
+      // `cd` fails closed the way literal `git` does — even from a clean cwd.
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `cd ${JSON.stringify(hostile)} && gitw status`,
+          clean,
+          vouched,
+        ),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `pushd ${JSON.stringify(hostile)} && gitw status`,
+          clean,
+          vouched,
+        ),
+      ).toBe(false);
     });
 
     it('fails closed instead of simulating a changed directory', async () => {
@@ -508,6 +599,263 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 // classifyShellCommandSafety
 // =========================================================================
+
+describe('substitution hidden in an expansion pattern word', () => {
+  // tree-sitter-bash parses the pattern word as a leaf, so the substitution
+  // never becomes a command_substitution node — but bash still runs it.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a command substitution hidden by the operator %s',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}$(rm -rf build)}`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo "\${HOME${operator}$(rm -rf build)}"`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}\`rm -rf build\`}`,
+        ),
+      ).toBe('unknown');
+    },
+  );
+
+  // bash runs `<(…)` and `>(…)` in a pattern word exactly as it runs `$(…)`,
+  // and tree-sitter emits no node for those either.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a process substitution hidden by the operator %s',
+    async (operator) => {
+      for (const opener of ['<(', '>(']) {
+        expect(
+          await classifyShellCommandSafety(
+            `echo \${HOME${operator}${opener}rm -rf build)}`,
+          ),
+        ).toBe('unknown');
+        expect(
+          await classifyShellCommandSafety(
+            `echo "\${HOME${operator}${opener}rm -rf build)}"`,
+          ),
+        ).toBe('unknown');
+      }
+    },
+  );
+
+  // `${v@P}` runs any $(…) held in the variable's value, and in a pattern word
+  // it is a leaf, so the @/P child-adjacency check never sees it either.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a prompt expansion hidden by the operator %s',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}\${v@P}}`),
+      ).toBe('unknown');
+    },
+  );
+
+  // `${var/pat/rep}` has two halves and bash expands both, so each needs its
+  // own pin — the pattern half is where the other operators put their word,
+  // and the replacement half is the one an operator-shaped test never reaches.
+  // A `$(…)` here does become a real command_substitution node, so it is
+  // classified from the command inside it — `write`, which is stronger than
+  // the `unknown` the leaf-parsed spellings get. Both are refusals; they are
+  // pinned apart so that a spelling silently changing category is a failure.
+  it.each([
+    ['pattern', 'echo ${x/$(rm -rf build)/rep}', 'write'],
+    ['pattern', 'echo ${x/`rm -rf build`/rep}', 'unknown'],
+    ['pattern', 'echo ${x/<(rm -rf build)/rep}', 'unknown'],
+    ['pattern', 'echo ${x/${v@P}/rep}', 'unknown'],
+    ['replacement', 'echo ${x/pat/$(rm -rf build)}', 'write'],
+    ['replacement', 'echo ${x/pat/`rm -rf build`}', 'unknown'],
+    ['replacement', 'echo ${x/pat/<(rm -rf build)}', 'unknown'],
+    ['replacement', 'echo ${x//pat/$(rm -rf build)}', 'write'],
+  ])(
+    'refuses a substitution in the %s half of ${var/…/…}',
+    async (_half, command, expected) => {
+      expect(await classifyShellCommandSafety(command)).toBe(expected);
+      expect(await classifyShellCommandSafety(`"${command}"`)).toBe(expected);
+    },
+  );
+
+  it('treats ${var/pat/${v@P}} as unknown', async () => {
+    expect(await classifyShellCommandSafety('echo ${x/pat/${v@P}}')).toBe(
+      'unknown',
+    );
+  });
+
+  // The default/assign/error/alternate operators take a *word* just as the
+  // trim and case operators do, and bash expands it the same way.
+  it.each([':-', '-', ':=', '=', ':?', '?', ':+', '+'])(
+    'refuses a substitution behind the value operator %s',
+    async (operator) => {
+      // `$(…)` becomes a real node and is classified from the command inside
+      // it; the leaf-parsed spellings reach the regex instead.
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}$(rm -rf b)}`),
+      ).toBe('write');
+      for (const payload of ['`rm -rf b`', '<(rm -rf b)', '${v@P}']) {
+        expect(
+          await classifyShellCommandSafety(`echo \${x${operator}${payload}}`),
+        ).toBe('unknown');
+      }
+    },
+  );
+
+  it('refuses a substitution in a substring or subscript position', async () => {
+    expect(await classifyShellCommandSafety('echo ${x:1:$(rm -rf b)}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${x[$(rm -rf b)]}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${!x@P}')).toBe('unknown');
+  });
+
+  it('does not flag expansions without a substitution', async () => {
+    expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
+      'read-only',
+    );
+    expect(await classifyShellCommandSafety('echo ${HOME}')).toBe('read-only');
+  });
+});
+
+describe('substitution hidden in a heredoc body', () => {
+  // The body is one leaf too, and bash expands it before feeding it to stdin.
+  // Expansion there follows double-quote rules, so `$(…)`, backticks and the
+  // `@P` operator run while `<(…)` does not.
+  it('treats an unquoted-delimiter body containing a substitution as unsafe', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+  });
+
+  it('treats $(…) in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the `$(` branch of the body
+    // regex is the only thing that catches this — the AST walk sees no
+    // command_substitution node to classify.
+    // Only the tab-indented `<<-` spelling is the always-leaf case the body
+    // regex has to catch; the others parse into a real command_substitution
+    // node and are classified from the command inside it. Pinned apart so a
+    // spelling silently changing category is a failure, not a pass.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t$(rm -rf build)\n\tEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('write');
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('write');
+    // Nested one level deep, where the closing paren is not the last
+    // character of the line.
+    expect(
+      await classifyShellCommandSafety(
+        'cat <<-EOF\n\tprefix $(rm -rf build) suffix\n\tEOF',
+      ),
+    ).toBe('write');
+  });
+
+  it('treats ${v@P} in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the expansion never becomes a
+    // child node the walk above could see.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t${v@P}\n\tEOF'),
+    ).toBe('unknown');
+    expect(await classifyShellCommandSafety('cat <<EOF\n${v@P}\nEOF')).toBe(
+      'unknown',
+    );
+  });
+
+  it('does not flag a process substitution in a body, which bash never runs', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n<(rm -rf build)\nEOF'),
+    ).toBe('read-only');
+  });
+
+  it('leaves a quoted delimiter alone, which makes the body inert', async () => {
+    expect(
+      await classifyShellCommandSafety("cat <<'EOF'\n`rm -rf build`\nEOF"),
+    ).toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('cat <<"EOF"\n`rm -rf build`\nEOF'),
+    ).toBe('read-only');
+    // `<<\EOF` quotes the delimiter just as surely.
+    expect(
+      await classifyShellCommandSafety('cat <<\\EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('read-only');
+  });
+
+  // A pipeline written after the heredoc opener is parsed *inside* the
+  // `heredoc_redirect` node, next to the body — so the arm that filters
+  // redirects out of a `redirected_statement` used to drop the whole segment.
+  it.each([
+    'vtool <<EOF | rm -rf build\nhello\nEOF',
+    'vtool <<EOF | mkdir -p build\nhello\nEOF',
+    'vtool <<EOF | tee out.txt\nhello\nEOF',
+    // The same command with the pipeline after the body, which parses as an
+    // ordinary sibling and was already classified.
+    'vtool <<EOF\nhello\nEOF | rm -rf build',
+    // The shape predates the vouch for built-in roots, so it is pinned there
+    // too — the vouch only turned the prompt into an unattended auto-run.
+    'cat <<EOF | rm -rf build\nhello\nEOF',
+    // Not just pipelines: whatever follows `&&`, `||` or `;` on the opener
+    // line is a direct named child of the redirect too, across every
+    // statement shape tree-sitter has.
+    'vtool <<EOF && ! rm x\nhello\nEOF',
+    'vtool <<EOF && if true; then rm x; fi\nhello\nEOF',
+    'vtool <<EOF && for i in 1; do rm x; done\nhello\nEOF',
+    'vtool <<EOF && while true; do rm x; done\nhello\nEOF',
+    'vtool <<EOF && until false; do rm x; done\nhello\nEOF',
+    'vtool <<EOF || rm -rf build\nhello\nEOF',
+    // These two need no vouch at all — `cat` is a built-in read-only root.
+    'cat <<EOF && for ((i=0;i<1;i++)); do rm -rf build; done\nhello\nEOF',
+    'cat <<EOF && select x in a; do rm -rf build; done\nhello\nEOF',
+  ])('evaluates the write segment of %s', async (command) => {
+    expect(
+      await classifyShellCommandSafety(command, {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
+    ).toBe('write');
+  });
+
+  it('refuses a semicolon-separated segment after a heredoc opener', async () => {
+    // `;` puts the segment in the redirect too, but tree-sitter gives it a
+    // shape the classifier reads as `unknown` rather than `write`. Both are
+    // refusals; pinned at its real category so a change of category fails.
+    expect(
+      await classifyShellCommandSafety(
+        'vtool <<EOF; rm -rf build\nhello\nEOF',
+        {
+          extraReadOnlyRoots: new Set(['vtool']),
+        },
+      ),
+    ).toBe('unknown');
+  });
+
+  it('still reads a heredoc with no pipeline as read-only', async () => {
+    expect(
+      await classifyShellCommandSafety('vtool <<EOF\nhello\nEOF', {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
+    ).toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('vtool <<EOF | wc -l\nhello\nEOF', {
+        extraReadOnlyRoots: new Set(['vtool']),
+      }),
+    ).toBe('read-only');
+  });
+
+  it('does not flag a body without a substitution', async () => {
+    expect(await classifyShellCommandSafety('cat <<EOF\nplain\nEOF')).toBe(
+      'read-only',
+    );
+  });
+});
 
 describe('classifyShellCommandSafety', () => {
   it.each([
@@ -916,7 +1264,9 @@ describe('classifyShellCommandSafety', () => {
     }
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(
+        commands.map((command) => classifyShellCommandSafety(command)),
+      ),
     ).resolves.toEqual(['unknown', 'unknown']);
     expect(performance.now() - startedAt).toBeLessThan(1000);
   });
@@ -937,7 +1287,9 @@ describe('classifyShellCommandSafety', () => {
     ];
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(
+        commands.map((command) => classifyShellCommandSafety(command)),
+      ),
     ).resolves.toEqual([
       'unknown',
       'read-only',
@@ -947,6 +1299,595 @@ describe('classifyShellCommandSafety', () => {
       'read-only',
     ]);
     expect(performance.now() - startedAt).toBeLessThan(1000);
+  });
+});
+
+// =========================================================================
+// extraReadOnlyRoots (issue #9694)
+// =========================================================================
+
+describe('extraReadOnlyRoots', () => {
+  const withIb = { extraReadOnlyRoots: new Set(['ib']) };
+
+  it('classifies a vouched root as read-only', async () => {
+    expect(await classifyShellCommandSafety('ib domain list', withIb)).toBe(
+      'read-only',
+    );
+    expect(await isShellCommandReadOnlyAST('ib domain list', withIb)).toBe(
+      true,
+    );
+  });
+
+  it('leaves an unvouched root unknown', async () => {
+    expect(await classifyShellCommandSafety('ib domain list')).toBe('unknown');
+    expect(await classifyShellCommandSafety('other list', withIb)).toBe(
+      'unknown',
+    );
+  });
+
+  it('still blocks redirections from a vouched root', async () => {
+    expect(await classifyShellCommandSafety('ib list > out.txt', withIb)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('ib list >> out.txt', withIb)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('ib list &> out.txt', withIb)).toBe(
+      'write',
+    );
+  });
+
+  it('still flags command substitution and env prefixes', async () => {
+    expect(await classifyShellCommandSafety('ib list $(whoami)', withIb)).toBe(
+      'unknown',
+    );
+    expect(await classifyShellCommandSafety('IB_TOKEN=x ib list', withIb)).toBe(
+      'unknown',
+    );
+  });
+
+  it('still flags a pipe into an unknown command', async () => {
+    expect(await classifyShellCommandSafety('ib list | badcmd', withIb)).toBe(
+      'unknown',
+    );
+    expect(await classifyShellCommandSafety('ib list | wc -l', withIb)).toBe(
+      'read-only',
+    );
+  });
+
+  it('cannot override a built-in write classification', async () => {
+    const vouched = {
+      extraReadOnlyRoots: new Set(['rm', 'git', 'tee', 'mv', 'dd']),
+    };
+    expect(await classifyShellCommandSafety('rm -rf build', vouched)).toBe(
+      'write',
+    );
+    expect(
+      await classifyShellCommandSafety('git push origin main', vouched),
+    ).toBe('write');
+    expect(await classifyShellCommandSafety('tee out.txt', vouched)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('mv a b', vouched)).toBe('write');
+    expect(await classifyShellCommandSafety('dd of=disk.img', vouched)).toBe(
+      'write',
+    );
+  });
+
+  // Every entry, driven off the exported set so a future edit to the list
+  // cannot silently leave a name untested.
+  it.each([...NEVER_READ_ONLY_ROOT_COMMANDS])(
+    'refuses to vouch %s whatever the caller supplies',
+    async (root) => {
+      const vouched = { extraReadOnlyRoots: new Set([root]) };
+      expect(
+        await classifyShellCommandSafety(`${root} --version`, vouched),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(`${root} rm -rf build`, vouched),
+      ).toBe('unknown');
+    },
+  );
+
+  it('refuses a vouched root that wraps a command the classifier knows', async () => {
+    // The list above cannot enumerate every launcher, so an unrecognised root
+    // handing off to a recognised command must fail closed on shape alone.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher rm -rf build',
+      'obscurelauncher /bin/rm -rf build',
+      'obscurelauncher bash -c "rm -rf build"',
+      'obscurelauncher git push',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+    expect(
+      await classifyShellCommandSafety(
+        'obscurelauncher --json report',
+        vouched,
+      ),
+    ).toBe('read-only');
+  });
+
+  it('refuses a vouched root whose arguments are not plain literal words', async () => {
+    // Quoting, escaping, expansion and globbing are each an open-ended way to
+    // spell a word bash rewrites before the binary sees it, so the vouch is
+    // honoured only for arguments whose text is what actually runs.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      String.raw`obscurelauncher r\m -rf build`,
+      `obscurelauncher r'm' -rf build`,
+      `obscurelauncher r"m" -rf build`,
+      `obscurelauncher "r"m -rf build`,
+      'obscurelauncher $cmd -rf build',
+      'obscurelauncher ${cmd} -rf build',
+      'obscurelauncher * -rf build',
+      'obscurelauncher {rm,ls}',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+    // Plain words, including paths and option syntax, still classify.
+    expect(
+      await classifyShellCommandSafety(
+        'obscurelauncher --format=json get src/a.txt',
+        vouched,
+      ),
+    ).toBe('read-only');
+  });
+
+  it('refuses a vouched root that wraps a specially handled command', async () => {
+    // dd, kill, killall, pkill and tee have their own evaluators, so they are
+    // in none of the three sets namesAKnownCommand otherwise consults.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher dd of=disk.img',
+      'obscurelauncher kill -9 1',
+      'obscurelauncher killall node',
+      'obscurelauncher pkill -f test',
+      'obscurelauncher tee out.txt',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+  });
+
+  it('sees through a Windows .exe spelling of a known command', async () => {
+    // `.exe` names reach the terminal branch without matching any dispatch
+    // arm, so both the root and the argument check strip one trailing suffix.
+    expect(
+      await classifyShellCommandSafety('git.exe push origin main', {
+        extraReadOnlyRoots: new Set(['git.exe']),
+      }),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('rm.exe -rf build', {
+        extraReadOnlyRoots: new Set(['rm.exe']),
+      }),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('ib rm.exe -rf build', withIb),
+    ).toBe('unknown');
+  });
+
+  it('sees a command name in an =-separated argument', async () => {
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher --exec=rm -rf build',
+      'obscurelauncher --exec=/bin/rm -rf build',
+      'obscurelauncher --exec=rm.exe -rf build',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+  });
+
+  // Listing every release of every interpreter is not a finite job, so the
+  // versioned spellings are matched by shape.
+  it.each([
+    'python3.12',
+    'python2.7',
+    'ruby3.1',
+    'perl5',
+    'php8.3',
+    'lua5.4',
+    'tclsh8.6',
+    'node20',
+    'java17',
+    'python3.13t',
+    // One spelling per regex family, so a family dropped from the alternation
+    // fails here rather than silently un-refusing its releases.
+    'wish8.6',
+    'expect5.45',
+    'javac11',
+    'pip3.11',
+    'rustc-1.75',
+    'g++-12',
+    'cc-11',
+    'clang++-17',
+    // `go install golang.org/dl/go1.22.0@latest` installs a binary literally
+    // named `go1.22`, so vouching one is routine setup rather than evasion.
+    'go1.22',
+    'go1.22.0',
+    'go-1.22',
+    'nodejs18',
+    // Upstream tarball, Debian hyphen, and the historical ABI suffix.
+    'luajit-2.1.0-beta3',
+    'gcc-13',
+    'clang-15',
+    'c++-14',
+    'python3.7m',
+  ])('refuses to vouch the versioned interpreter %s', async (root) => {
+    expect(
+      await classifyShellCommandSafety(`${root} verify.py`, {
+        extraReadOnlyRoots: new Set([root]),
+      }),
+    ).toBe('unknown');
+    // And as a wrapped argument of some other vouched root.
+    expect(
+      await classifyShellCommandSafety(`obscurelauncher ${root} verify.py`, {
+        extraReadOnlyRoots: new Set(['obscurelauncher']),
+      }),
+    ).toBe('unknown');
+  });
+
+  // The it.each above iterates the very constant it guards, so a deletion
+  // would delete its own test. Every entry is spelled out here instead, and
+  // the count is asserted both ways: removing a name fails the containment
+  // loop, adding one without a deliberate edit here fails the size check.
+  const REFUSAL_FLOOR = [
+    'ash',
+    'bash',
+    'busybox',
+    'cmd',
+    'cmd.exe',
+    'csh',
+    'dash',
+    'fish',
+    'ksh',
+    'mksh',
+    'osh',
+    'posh',
+    'powershell',
+    'pwsh',
+    'sh',
+    'tcsh',
+    'toybox',
+    'yash',
+    'zsh',
+    'bun',
+    'bunx',
+    'clojure',
+    'crystal',
+    'dart',
+    'deno',
+    'dmd',
+    'elixir',
+    'escript',
+    'expect',
+    'ghc',
+    'groovy',
+    'lua',
+    'luajit',
+    'java',
+    'jshell',
+    'julia',
+    'kotlin',
+    'nim',
+    'node',
+    'nodejs',
+    'ocaml',
+    'osascript',
+    'perl',
+    'pnpx',
+    'php',
+    'python',
+    'python3',
+    'racket',
+    'rscript',
+    'ruby',
+    'runghc',
+    'scala',
+    'swift',
+    'tclsh',
+    'ts-node',
+    'tsx',
+    'wish',
+    'zig',
+    'ant',
+    'bazel',
+    'buck',
+    'buck2',
+    'bundle',
+    'bundler',
+    'cargo',
+    'cc',
+    'c++',
+    'clang',
+    'guile',
+    'tcc',
+    'clang++',
+    'cmake',
+    'conda',
+    'go',
+    'g++',
+    'gcc',
+    'composer',
+    'dotnet',
+    'gem',
+    'gradle',
+    'grunt',
+    'gulp',
+    'hatch',
+    'javac',
+    'just',
+    'lein',
+    'make',
+    'meson',
+    'mvn',
+    'ninja',
+    'nix',
+    'nix-build',
+    'nix-shell',
+    'nox',
+    'nx',
+    'pants',
+    'pdm',
+    'pip',
+    'pip3',
+    'pipenv',
+    'pipx',
+    'poetry',
+    'rake',
+    'rustc',
+    'rye',
+    'sbt',
+    'scons',
+    'task',
+    'tox',
+    'turbo',
+    'uv',
+    'uvx',
+    'docker',
+    'podman',
+    'npm',
+    'npx',
+    'pnpm',
+    'yarn',
+    'at',
+    'batch',
+    'bwrap',
+    'crontab',
+    'caffeinate',
+    'chroot',
+    'doas',
+    'env',
+    'fakeroot',
+    'flock',
+    'ionice',
+    'linux32',
+    'linux64',
+    'newgrp',
+    'nice',
+    'nohup',
+    'nsenter',
+    'parallel',
+    'pkexec',
+    'run0',
+    'runuser',
+    'setarch',
+    'script',
+    'rsh',
+    'setsid',
+    'sg',
+    'ssh',
+    'stdbuf',
+    'su',
+    'sudo',
+    'sudoedit',
+    'systemd-nspawn',
+    'systemd-run',
+    'time',
+    'timeout',
+    'unshare',
+    'watch',
+    'wine',
+    'wsl',
+    'wsl.exe',
+    'xargs',
+    'alias',
+    'bind',
+    'builtin',
+    'command',
+    'compgen',
+    'complete',
+    'coproc',
+    'enable',
+    'eval',
+    'exec',
+    'fc',
+    'hash',
+    'history',
+    'getopts',
+    'let',
+    'mapfile',
+    'read',
+    'readarray',
+    'set',
+    'shopt',
+    'source',
+    '.',
+    'trap',
+    'unalias',
+  ];
+
+  it('pins every entry of the refusal floor against deletion', () => {
+    for (const root of REFUSAL_FLOOR) {
+      expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
+    }
+    expect(new Set(REFUSAL_FLOOR).size).toBe(REFUSAL_FLOOR.length);
+    expect(NEVER_READ_ONLY_ROOT_COMMANDS.size).toBe(REFUSAL_FLOOR.length);
+  });
+
+  // A refusal list built by family is only as good as its edges: each pair
+  // below is one listed name beside the differently-spelled sibling that does
+  // the same thing, which is where every round of this review found a gap.
+  it.each([
+    ['sg', 'newgrp'],
+    ['sudo', 'run0'],
+    ['cc', 'c++'],
+    ['g++', 'clang++'],
+    ['chroot', 'bwrap'],
+    ['systemd-run', 'systemd-nspawn'],
+    ['nsenter', 'setarch'],
+    ['npm', 'pip'],
+    ['cmake', 'ninja'],
+  ])('refuses %s and its sibling %s alike', async (listed, sibling) => {
+    for (const root of [listed, sibling]) {
+      expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
+      expect(
+        await classifyShellCommandSafety(`${root} ./payload`, {
+          extraReadOnlyRoots: new Set([root]),
+        }),
+      ).toBe('unknown');
+    }
+  });
+
+  it('accepts ordinary path and non-ASCII arguments', async () => {
+    // These are the reads the setting exists to stop prompting on. A path
+    // segment that happens to match a command name must not refuse the vouch,
+    // and neither must a character outside ASCII — every shell metacharacter
+    // is ASCII, so a bare word containing one is still literal.
+    for (const command of [
+      'ib get ./report.json',
+      'ib get docs/history/x.md',
+      'ib get /abs/report.json',
+      'ib get ../up/report.json',
+      'ib get 报告.md',
+      'ib get café.txt',
+      'ib get 文档/报告.md',
+      // `.` is the POSIX spelling of `source`, but only in root position —
+      // as an argument it is the directory a read-only CLI is pointed at.
+      'ib list .',
+      'ib list ..',
+      'ib list ./',
+    ]) {
+      expect(await classifyShellCommandSafety(command, withIb)).toBe(
+        'read-only',
+      );
+    }
+  });
+
+  it('matches a vouched root spelled with a .exe suffix', async () => {
+    // The refusal side strips one `.exe`; the acceptance side has to agree, or
+    // the vouch is dead on Windows. A known command under an `.exe` spelling
+    // is still refused first — see the test above.
+    expect(
+      await classifyShellCommandSafety('mytool.exe list', {
+        extraReadOnlyRoots: new Set(['mytool']),
+      }),
+    ).toBe('read-only');
+  });
+
+  // A vouched wrapper is treated as a possible git frontend, so it must not
+  // be able to carry the global options that redirect which repository git
+  // reads, which config it applies, or where it resolves its executables —
+  // options literal git refuses wholesale via its leading-dash screen.
+  it.each([
+    'gitw -C attacker status',
+    'gitw --git-dir=attacker/.git --work-tree=attacker status',
+    'gitw --namespace=x status',
+    // No hostile checkout needed: the config arrives through argv.
+    'gitw -c core.fsmonitor=./evil.sh status',
+    'gitw -c diff.external=./evil.sh diff',
+    'gitw --config-env=core.fsmonitor=EVIL status',
+    // Redirects where git resolves every non-builtin sub-command, and a clone
+    // preserves the executable bit, so the payload ships in the repository.
+    'gitw --exec-path=./evil request-pull',
+    'gitw --exec-path ./evil request-pull',
+    // Flags that make a read verb run a helper program.
+    'gitw diff --textconv',
+    'gitw cat-file --filters',
+    'gitw log --show-signature',
+    'gitw diff --ext-diff',
+    // Write verbs. The wrapper had no sub-command filter at all, so every
+    // one of these ran unattended while its literal twin classified `write`.
+    'gitw push origin main',
+    'gitw reset --hard',
+    'gitw checkout main',
+    'gitw rebase main',
+    'gitw merge feature',
+    'gitw stash',
+    'gitw tag v1.0',
+    'gitw apply --index p.diff',
+    'gitw branch -D feature',
+    'gitw worktree add ../evil',
+    'gitw format-patch -o dir master',
+    'gitw archive -o out.tar master',
+    // Output redirection on a read verb.
+    'gitw diff --output=f',
+    'gitw log --output=f',
+    'gitw show --output=f',
+    // The gpg-helper format specifier, which runs the configured gpg program.
+    'gitw log --format=%GG',
+    'gitw show --format=%G?',
+    'gitw log --format=%GK',
+  ])('refuses the vouched git frontend invocation %s', async (command) => {
+    expect(
+      await classifyShellCommandSafety(command, {
+        extraReadOnlyRoots: new Set(['gitw']),
+      }),
+    ).toBe('unknown');
+  });
+
+  it('still accepts a git read verb through a vouched wrapper', async () => {
+    // The screen fires on git-shaped invocations, not on every vouched one:
+    // the read verbs literal git allows are still allowed here.
+    for (const command of [
+      'gitw status',
+      'gitw diff',
+      'gitw log --oneline -10',
+      'gitw branch -a',
+      'gitw --json status',
+    ]) {
+      expect(
+        await classifyShellCommandSafety(command, {
+          extraReadOnlyRoots: new Set(['gitw']),
+        }),
+      ).toBe('read-only');
+    }
+  });
+
+  it('leaves an ordinary flag on a vouched root alone', async () => {
+    // The rule above names git's redirecting options rather than refusing
+    // every leading-dash argument, so a CLI's own flags still pass.
+    for (const command of [
+      'ib --json list',
+      'ib list --format=json',
+      'ib list -l',
+      'ib list --no-color',
+    ]) {
+      expect(await classifyShellCommandSafety(command, withIb)).toBe(
+        'read-only',
+      );
+    }
+  });
+
+  it('applies inside compound statements and subshells', async () => {
+    expect(await classifyShellCommandSafety('cd /tmp && ib list', withIb)).toBe(
+      'read-only',
+    );
+    expect(
+      await classifyShellCommandSafety('(ib list; ib show 1)', withIb),
+    ).toBe('read-only');
+    expect(await classifyShellCommandSafety('echo $(ib list)', withIb)).toBe(
+      'unknown',
+    );
   });
 });
 

@@ -102,6 +102,131 @@ How should we handle database migration?
 }
 ```
 
+### Vouching for a custom read-only CLI
+
+Plan Mode decides whether a shell command is read-only by analysing it against
+a built-in set of known-safe root commands (`cat`, `ls`, `grep`, `find`,
+`git status`, …). A binary outside that set — typically a project-specific CLI
+— cannot be judged, so Plan Mode asks for approval, and that approval is
+deliberately good for one exact invocation only.
+
+If you have a CLI you know is read-only, list its root command name under
+`permissions.planMode.extraReadOnlyCommands`.
+
+In `~/.qwen/settings.json` (root command names only, the same shape as the
+built-in set):
+
+```json
+{
+  "permissions": {
+    "planMode": {
+      "extraReadOnlyCommands": ["ib"]
+    }
+  }
+}
+```
+
+**Where it can be set.** User (`~/.qwen/settings.json`), System, and
+SystemDefaults settings only, merged across those scopes. A vouch is a standing instruction to run a
+binary unattended, so a project's own `.qwen/settings.json` cannot grant one —
+otherwise cloning a repository would be enough to arrange it. Qwen Code warns
+if it finds the key in workspace settings, the same way it treats other
+security-relevant keys.
+
+**What an entry means.** It vouches for the _entire binary_. Qwen Code cannot
+see inside a custom CLI, so if `ib` has mutating sub-commands, listing `ib`
+silences the prompt for those too. Only list a command you would be comfortable
+letting the model run unattended.
+
+**What still applies.** Everything else about Plan Mode's analysis is unchanged
+— a vouched root only replaces the "is this binary known-safe?" question:
+
+| Command with `"ib"` listed  | Result                                                |
+| --------------------------- | ----------------------------------------------------- |
+| `ib domain list`            | runs without a prompt                                 |
+| `ib domain list > out.txt`  | blocked — output redirection is state-modifying       |
+| `ib domain list $(whoami)`  | prompts — command substitution stays unknown          |
+| `IB_TOKEN=x ib domain list` | prompts — environment-assignment prefix stays unknown |
+| `ib domain list \| badcmd`  | prompts — the pipe target is still unknown            |
+| `ib exec rm -rf build`      | prompts — see "how a vouch is applied" below          |
+
+**What has no effect.** Four kinds of entry are ignored:
+
+- Commands Qwen Code already understands keep their built-in classification.
+  Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
+  `git push` read-only.
+- **Launchers** — shell interpreters, language interpreters, multi-call
+  binaries, and wrappers whose job is to run a command taken from their
+  arguments (`bash`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
+  `nohup`, `timeout`, `time`, `setsid`, `powershell`, `python3`, `python3.12`,
+  `node`, `perl`, `ruby`, `ssh`, and similar). Vouching one of these is not a
+  statement about that binary, it is a statement about whatever it is handed:
+  `time rm -rf build` and `python3 -c "…"` would launder a write past the
+  analysis.
+- **Build and package tools** (`make`, `npm`, `npx`, `pnpm`, `yarn`, `cargo`,
+  `cmake`, `gcc`, `c++`, `clang`, `rustc`, `javac`, `ninja`, `scons`, `pip`,
+  `uv`, `uvx`, `poetry`, `conda`, `gradle`, `mvn`, `docker`, and similar).
+  Their payload is a Makefile recipe, a build manifest, a package downloaded
+  mid-command, or a plugin the compiler loads — it never appears in the command
+  line, so nothing about `make` on its own says what `make` will do.
+- **Shell builtins that rebind name resolution or assign variables** (`hash`,
+  `alias`, `unalias`, `bind`, `complete`, `enable`, `set`, `shopt`, `read`,
+  `getopts`, `mapfile`, and similar). One of these can change what a _later_
+  command in the same line resolves to — `hash` would quietly vouch for
+  whatever it points `git` at, and `read PATH` for everything after it.
+
+**How a vouch is applied.** Qwen Code cannot recognise every launcher by name,
+so the vouch is honoured only for an invocation it can read literally:
+
+- every argument must be a plain word — quoting, escaping, variables, and
+  globs are each an open-ended way to spell something else (`r\m`, `r'm'`,
+  `$cmd` and `*` all reach the binary as `rm`), so `ib $cmd` prompts;
+- no argument may name a command Qwen Code knows, which is why
+  `ib exec rm -rf build` prompts even though `ib` is vouched and `ib exec` is
+  not otherwise special. `.` and `..` are the exception: as arguments they name
+  a directory, not the POSIX spelling of `source`, so `ib list .` is fine.
+
+- no argument may be one of `git`'s redirecting global options (`-C`, `-c`,
+  `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path`) or
+  a flag that makes a `git` read verb run a helper program (`--textconv`,
+  `--filters`, `--show-signature`, `--ext-diff`). A vouched command is treated
+  as a possible `git` frontend (see below), and these options change which
+  repository, which configuration, or which executables `git` uses. The cost is
+  a prompt for a CLI that spells its own config flag `-c` or `-C`; ordinary
+  flags such as `--json` or `--format=…` are unaffected.
+
+- when the first non-flag argument is a `git` sub-command, the whole
+  invocation is screened by `git`'s own evaluator — the write-verb list, the
+  `branch -D` flags, `--output`, and the `%G…` signature formats. A wrapper for
+  `git` is a case this setting explicitly supports, so it gets exactly what
+  literal `git` gets. The cost is a prompt for a vouched CLI whose own verb
+  collides with one of `git`'s, such as `ib add` or `ib tag`.
+
+A vouched command is also treated as a possible `git` frontend. `git diff` and
+`git status` are downgraded to a prompt when the repository's own
+`.git/config` sets `diff.external` or `core.fsmonitor`, because git then runs a
+script the command line never names; a wrapper you vouched for gets the same
+treatment, since Qwen Code cannot know which of its verbs reach git. The same applies to any other repository-local
+setting that makes a read verb run a program — a `textconv` diff driver, a
+clean/smudge filter, the gpg program, or a `!`-prefixed shell alias. In a
+repository that plants none of them — the ordinary case — nothing changes.
+
+The cost is an occasional extra prompt — when a CLI's own sub-command shares a
+name with a real command, or when an argument needs quoting. Prompting costs a
+keystroke; accepting wrongly costs the write.
+
+Anything that is not a bare command name (a path, a command with arguments, or
+a string containing shell metacharacters) is also ignored, and so is the whole
+setting if it is not a list of strings. Entries are lowercased, and a command
+is matched by its exact lowercase name — `MyTool` and `mytool` are different
+binaries on Linux, so an invocation spelled with capitals still prompts. A
+trailing `.exe` is stripped from the _invocation_, so listing `mytool` covers
+both `mytool` and `mytool.exe`. It is not stripped from the entry: listing
+`mytool.exe` covers only `mytool.exe`. List the bare name.
+
+**Scope.** This setting applies only in Plan Mode. In every other mode, use
+`permissions.allow` (e.g. `"Bash(ib *)"`) to auto-approve a command.
+
 ## 2. Use Ask Permissions Mode for Controlled Interaction
 
 Ask Permissions Mode is the standard way to work with Qwen Code. In this mode, you maintain full control over all potentially risky operations - Qwen Code will ask for your approval before making any file changes or executing shell commands.

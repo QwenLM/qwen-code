@@ -3252,6 +3252,92 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('permissions.planMode scope handling', () => {
+    it('should honor permissions.planMode from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              permissions: { planMode: { extraReadOnlyCommands: ['ib'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(
+        settings.merged.permissions?.planMode?.extraReadOnlyCommands,
+      ).toEqual(['ib']);
+    });
+
+    it('should strip permissions.planMode from workspace scope even when trusted', () => {
+      // A vouch says "run this binary unattended", so a cloned repository must
+      // not be able to grant itself one.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              permissions: {
+                planMode: { extraReadOnlyCommands: ['make'] },
+                allow: ['Bash(ls *)'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.permissions?.planMode).toBeUndefined();
+      // ...but the rest of the workspace permissions block still merges.
+      expect(settings.merged.permissions?.allow).toEqual(['Bash(ls *)']);
+    });
+
+    it('should warn when workspace settings define permissions.planMode', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              permissions: { planMode: { extraReadOnlyCommands: ['make'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(warnings.some((w) => w.includes('permissions.planMode'))).toBe(
+        true,
+      );
+    });
+
+    it('should keep the user vouch when a workspace tries to add to it', () => {
+      // The key merges as a union, so the workspace entry would otherwise be
+      // added rather than replaced.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              permissions: { planMode: { extraReadOnlyCommands: ['ib'] } },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              permissions: { planMode: { extraReadOnlyCommands: ['make'] } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(
+        settings.merged.permissions?.planMode?.extraReadOnlyCommands,
+      ).toEqual(['ib']);
+    });
+  });
+
   describe('allowPrivateNetworkHooks scope handling', () => {
     it('should honor security.allowPrivateNetworkHooks from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
