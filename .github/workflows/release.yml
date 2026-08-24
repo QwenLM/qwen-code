@@ -516,6 +516,38 @@ jobs:
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
+      - name: 'Package npm platform packages'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: 'npm run package:npm-platform -- --version "${RELEASE_VERSION}"'
+
+      - name: 'Publish platform runtime packages'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' }}
+        run: |-
+          for pkg_dir in dist/npm-platform/*/; do
+            [[ -f "${pkg_dir}package.json" ]] || continue
+            echo "::group::Publishing ${pkg_dir}"
+            (
+              cd "${pkg_dir}"
+              PACKAGE_NAME="$(node -p "require('./package.json').name")"
+              PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+              if [[ "${IS_DRY_RUN}" == "true" ]]; then
+                PUBLISH_ARGS+=(--dry-run)
+              elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+                echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+                exit 0
+              fi
+              npm publish "${PUBLISH_ARGS[@]}"
+            )
+            echo "::endgroup::"
+          done
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+
       - name: 'Publish @qwen-code/audio-capture'
         if: |-
           ${{ github.repository == 'QwenLM/qwen-code' }}
