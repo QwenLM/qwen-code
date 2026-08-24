@@ -314,6 +314,56 @@ describe('buildThreadStatuses — signals', () => {
   });
 });
 
+describe('buildThreadStatuses — own pathless summary', () => {
+  it('does not promote a pathless own-account summary to a blocker', () => {
+    // Aone posts the review body as a pathless global comment, and compose
+    // renders body-listed Criticals with the literal **[Critical]** prefix.
+    // carriesBlockerSignal's ungated channel would promote it — but a
+    // pathless thread never goes outdated and gives Step 6 no location to
+    // re-read, so the re-check can never rule it fixed: the pipeline would
+    // manufacture a permanent blocker every round. Pathless roots authored
+    // by the reviewing account must stay out of blocker promotion.
+    const [summary] = buildThreadStatuses(
+      [
+        comment({
+          id: 500,
+          user: { login: 'qwen-code-ci-bot' },
+          body: '**[Critical]** R1-1: the guard dereferences null',
+          path: undefined,
+          line: null,
+          subject_type: 'file',
+        }),
+      ],
+      'author',
+      noChange,
+      'qwen-code-ci-bot',
+    );
+    expect(summary.isBlocker).toBe(false);
+    expect(summary.path).toBe('');
+  });
+
+  it('still promotes a pathless blocker from a different account', () => {
+    // The exclusion targets the pipeline's own summary only; a human's
+    // pathless blocker is a genuine concern and keeps its promotion.
+    const [human] = buildThreadStatuses(
+      [
+        comment({
+          id: 1,
+          user: { login: 'a-human' },
+          body: 'This is a blocking defect.',
+          path: undefined,
+          line: null,
+          subject_type: 'file',
+        }),
+      ],
+      'author',
+      noChange,
+      'qwen-code-ci-bot',
+    );
+    expect(human.isBlocker).toBe(true);
+  });
+});
+
 describe('summarizeThreads', () => {
   it('counts each status dimension once per thread', () => {
     const probe: CodeChangeProbe = (path) =>
