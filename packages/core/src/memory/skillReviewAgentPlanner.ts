@@ -7,7 +7,7 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
@@ -256,10 +256,9 @@ export function createSkillScopedAgentConfig(
     },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted
