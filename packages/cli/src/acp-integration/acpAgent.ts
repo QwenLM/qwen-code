@@ -5691,6 +5691,27 @@ class QwenAgent implements Agent {
     };
   }
 
+  private resolveCoreSettingsCwd(
+    params: Record<string, unknown>,
+    requestedCwd: string | undefined,
+  ): string {
+    if (requestedCwd) {
+      return requestedCwd;
+    }
+    const sessionId =
+      typeof params['sessionId'] === 'string' ? params['sessionId'] : undefined;
+    if (sessionId) {
+      const sessionTargetDir = this.sessions
+        .get(sessionId)
+        ?.getConfig()
+        .getTargetDir();
+      if (sessionTargetDir) {
+        return sessionTargetDir;
+      }
+    }
+    return this.config.getTargetDir();
+  }
+
   private syncLivePermissionManagers(
     before: PermissionRuleSet,
     after: PermissionRuleSet,
@@ -11138,7 +11159,10 @@ class QwenAgent implements Agent {
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
-        const coreSettingsCwd = requestedCwd || this.config.getTargetDir();
+        const coreSettingsCwd = this.resolveCoreSettingsCwd(
+          params,
+          requestedCwd,
+        );
         const settings = loadSettings(coreSettingsCwd);
         this.settings = settings;
         return this.buildCoreSettings(settings, coreSettingsCwd);
@@ -11154,7 +11178,10 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
-        const coreSettingsCwd = requestedCwd || this.config.getTargetDir();
+        const coreSettingsCwd = this.resolveCoreSettingsCwd(
+          params,
+          requestedCwd,
+        );
         const settings = loadSettings(coreSettingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(

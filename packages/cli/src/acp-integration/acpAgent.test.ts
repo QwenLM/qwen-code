@@ -986,6 +986,7 @@ import {
   GoalConflictError,
   GoalInvalidTransitionError,
   sessionIdContext,
+  ExtensionManager,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -11104,6 +11105,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/getCore prefers explicit cwd over config target dir', async () => {
+    mockConfig.getTargetDir = vi.fn().mockReturnValue('/worktree/project');
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit/dir' });
+
+    expect(loadSettings).toHaveBeenCalledWith('/explicit/dir');
+    expect(vi.mocked(ExtensionManager)).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceDir: '/explicit/dir' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore uses the session target dir when cwd is omitted', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = '/relocated/worktree';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/launch/dir', mcpServers: [] });
+    await agent.extMethod('qwen/settings/getCore', { sessionId });
+
+    expect(loadSettings).toHaveBeenLastCalledWith(targetDir);
+    expect(vi.mocked(ExtensionManager)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceDir: targetDir }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/setCoreValue falls back to config target dir when cwd is omitted', async () => {
     const targetDir = '/worktree/.qwen';
     mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
@@ -11121,6 +11159,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'Workspace',
       'general.outputLanguage',
       'Japanese',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setCoreValue prefers explicit cwd over config target dir', async () => {
+    mockConfig.getTargetDir = vi.fn().mockReturnValue('/worktree/project');
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      cwd: '/explicit/dir',
+      scope: 'workspace',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    expect(loadSettings).toHaveBeenCalledWith('/explicit/dir');
+    expect(vi.mocked(ExtensionManager)).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceDir: '/explicit/dir' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setCoreValue uses the session target dir when cwd is omitted', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = '/relocated/worktree';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/launch/dir', mcpServers: [] });
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      sessionId,
+      scope: 'workspace',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    expect(loadSettings).toHaveBeenLastCalledWith(targetDir);
+    expect(vi.mocked(ExtensionManager)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceDir: targetDir }),
     );
 
     mockConnectionState.resolve();
