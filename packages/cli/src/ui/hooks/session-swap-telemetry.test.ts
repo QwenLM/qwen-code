@@ -171,6 +171,30 @@ function makeFakeEnv() {
     setLastPromptTokenCount: vi.fn(),
   };
 
+  // One shared session-service object: every getSessionService() call sees
+  // the same fake, and tests can inspect its mocks afterwards (e.g. derive
+  // the fork id from forkSession's call args) (#9844 review).
+  const sessionService = {
+    forkSession: vi
+      .fn()
+      .mockImplementation(async (from: string, to: string) => {
+        const source = sessionServiceMocks.sessions.get(from);
+        if (source) sessionServiceMocks.sessions.set(to, source);
+        return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
+      }),
+    loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
+    // Realistic like SessionService.removeSession (deletes the fork JSONL):
+    // the branch hook calls it in exactly the failure path these tests
+    // drive (forkCreated && !uiSwapped), so the fork must not survive in
+    // the store afterwards (#9844 review).
+    removeSession: vi.fn().mockImplementation(async (id: string) => {
+      sessionServiceMocks.sessions.delete(id);
+      return true;
+    }),
+    renameSession: vi.fn().mockResolvedValue(true),
+    findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+  };
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const config: any = {
     getSessionId: () => currentSessionId,
@@ -186,19 +210,7 @@ function makeFakeEnv() {
       flush: vi.fn().mockResolvedValue(undefined),
       rebuildTurnBoundaries: vi.fn(),
     }),
-    getSessionService: () => ({
-      forkSession: vi
-        .fn()
-        .mockImplementation(async (from: string, to: string) => {
-          const source = sessionServiceMocks.sessions.get(from);
-          if (source) sessionServiceMocks.sessions.set(to, source);
-          return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
-        }),
-      loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
-      removeSession: vi.fn().mockResolvedValue(true),
-      renameSession: vi.fn().mockResolvedValue(true),
-      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
-    }),
+    getSessionService: () => sessionService,
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
     loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
     getBackgroundAgentResumeService: () => ({
@@ -251,7 +263,7 @@ function makeFakeEnv() {
     return fakeChat as any;
   });
 
-  return { config, client };
+  return { config, client, sessionService };
 }
 
 describe('session swap telemetry accounting (#9833)', () => {
@@ -271,7 +283,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     sessionServiceMocks.sessions.set(SESSION_A, {
       conversation: conversationWith(historyTokens),
     });
-    const { config, client } = makeFakeEnv();
+    const { config, client, sessionService } = makeFakeEnv();
 
     // Process-startup resume of A (`qwen --resume`): Config hands the client
     // the resumed session data, then initialize() replays it. Replay is
@@ -282,11 +294,11 @@ describe('session swap telemetry accounting (#9833)', () => {
     await client.initialize();
     // Live usage accrued after startup.
     uiTelemetryService.addEvent(storedApiEvent(5), SESSION_A);
-    return { config, client };
+    return { config, client, sessionService };
   }
 
   it('a failed /branch restores the process-wide aggregate', async () => {
-    const { config } = await establishLiveSessionA(100);
+    const { config, sessionService } = await establishLiveSessionA(100);
     const preSwap = structuredClone(uiTelemetryService.getMetrics());
     expect(totalRequests()).toBe(2); // 1 replayed + 1 live
 
@@ -331,19 +343,21 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(totalRequests()).toBe(2);
     // The fork's replay-created bucket must be gone; A's bucket intact.
     // Assert on the fork's actual id — the randomUUID() the branch hook
-    // derived and the replay keyed its events by. getMetricsForSession
-    // returns fresh empty metrics for ANY unknown id, so a missing or
-    // unrelated forkId would pass the bucket assertion vacuously: require
-    // the fork key to actually exist in the session store before asserting
-    // on it (e.g. a realistic removeSession that deleted the fork from the
-    // store must fail this test loudly, not silently) (#9844).
-    const forkIds = [...sessionServiceMocks.sessions.keys()].filter(
-      (id) => id !== SESSION_A,
-    );
-    expect(forkIds).toHaveLength(1);
-    const forkId = forkIds[0];
+    // derived, swapped core to, and the replay keyed its events by. Derive
+    // it from the fork call itself, not post-cleanup store membership:
+    // production deletes the fork from the store in this exact failure
+    // branch (forkCreated && !uiSwapped → removeSession), and the fake
+    // removeSession now does the same, so the fork must NOT survive here
+    // (#9844). getMetricsForSession returns fresh empty metrics for ANY
+    // unknown id, so deriving a wrong forkId would pass vacuously — the
+    // fork-call derivation is the id the replay actually keyed by.
+    expect(sessionService.forkSession).toHaveBeenCalledTimes(1);
+    const forkId = sessionService.forkSession.mock.calls[0][1];
     expect(typeof forkId).toBe('string');
     expect(uiTelemetryService.getMetricsForSession(forkId).models).toEqual({});
+    // Post-cleanup shape: the fork was removed, only the parent remains.
+    expect([...sessionServiceMocks.sessions.keys()]).toEqual([SESSION_A]);
+    expect(sessionService.removeSession).toHaveBeenCalledWith(forkId);
     expect(
       uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
         ?.api.totalRequests,
