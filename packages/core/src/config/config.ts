@@ -1182,9 +1182,6 @@ export interface ConfigParameters {
    * even when unset it fires at most once per process.
    */
   skipWorkflowUsageWarning?: boolean;
-  computerUseEnabled?: boolean;
-  computerUseMaxImageDimension?: number;
-  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2371,9 +2368,6 @@ export class Config {
   private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
-  private readonly computerUseEnabled: boolean = true;
-  private readonly computerUseMaxImageDimension?: number;
-  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -2660,9 +2654,6 @@ export class Config {
     this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
-    this.computerUseEnabled = params.computerUseEnabled ?? true;
-    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
-    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -7469,24 +7460,6 @@ export class Config {
     return this.skipWorkflowUsageWarning;
   }
 
-  isComputerUseEnabled(): boolean {
-    return this.computerUseEnabled;
-  }
-
-  /**
-   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
-   * to leave cua-driver's built-in default (1568) in place. Resolved together
-   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
-   * the driver connects (see `resolveMaxImageDimension`).
-   */
-  getComputerUseMaxImageDimension(): number | undefined {
-    return this.computerUseMaxImageDimension;
-  }
-
-  getComputerUseIdleTimeoutMs(): number | undefined {
-    return this.computerUseIdleTimeoutMs;
-  }
-
   /**
    * Whether the turn loop should fire a fast-model call after each tool batch
    * to emit a `tool_use_summary` message. Mirrors Claude Code's
@@ -9239,21 +9212,6 @@ export class Config {
         const { WorkflowTool } = await import('../tools/workflow/workflow.js');
         return new WorkflowTool(this);
       });
-    }
-
-    // Register computer-use tools unless disabled. All 9 are deferred —
-    // they surface only via ToolSearch keyword match
-    // (see packages/core/src/tools/computer-use/).
-    //
-    // Pass `registerLazy` (not the bare `registry`) so the same
-    // PermissionManager.isToolEnabled() check that gates every other
-    // built-in also gates these. Direct registry.registerFactory() would
-    // bypass coreTools allowlist + whole-tool deny rules.
-    if (this.isComputerUseEnabled()) {
-      const { registerComputerUseTools } = await import(
-        '../tools/computer-use/index.js'
-      );
-      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

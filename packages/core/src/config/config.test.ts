@@ -10152,29 +10152,6 @@ describe('visibleTools', () => {
   });
 });
 
-describe('computer use settings', () => {
-  const baseParams: ConfigParameters = {
-    targetDir: '.',
-    debugMode: false,
-    model: 'test-model',
-    cwd: '.',
-    chatRecording: false,
-  };
-
-  it('exposes the configured idle timeout', () => {
-    const config = new Config({
-      ...baseParams,
-      computerUseIdleTimeoutMs: 12_345,
-    });
-    expect(config.getComputerUseIdleTimeoutMs()).toBe(12_345);
-  });
-
-  it('leaves the idle timeout undefined when not configured', () => {
-    const config = new Config(baseParams);
-    expect(config.getComputerUseIdleTimeoutMs()).toBeUndefined();
-  });
-});
-
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
