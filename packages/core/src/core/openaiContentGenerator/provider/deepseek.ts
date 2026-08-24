@@ -100,12 +100,14 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   /**
-   * DeepSeek's API requires message content to be a plain string, not an
-   * array of content parts. Flatten any text-part arrays into joined
+   * Text-only DeepSeek-compatible APIs require message content to be a plain
+   * string, not an array of content parts. Flatten those arrays into joined
    * strings; non-text parts (image_url, audio, …) are replaced with a
    * `[Unsupported content type: <type>]` placeholder so the request still
    * goes through with a textual breadcrumb rather than silently dropping
-   * the part or raising mid-conversation. Also translate the standard
+   * the part or raising mid-conversation. When the resolved model declares
+   * image support, preserve content parts so vision models can receive
+   * images. Also translate the standard
    * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
    * body parameter — but only on actual DeepSeek hostnames, since the
    * model-name fallback above can match self-hosted/strict OpenAI-compat
@@ -124,10 +126,10 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       return reshaped;
     }
 
-    const preservesContentParts =
+    const supportsImageContent =
       this.contentGeneratorConfig.modalities?.image === true;
     const messages = reshaped.messages.map((message) => {
-      const contentMessage = preservesContentParts
+      const contentMessage = supportsImageContent
         ? message
         : flattenContentParts(message);
       return ensureReasoningContentOnAssistantMessage(contentMessage);
