@@ -161,12 +161,15 @@ export async function readManyFiles(
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
       if (validatedPathIdentities && !validatedIdentity) continue;
       if (validatedIdentity && !hasVerifiableInode(validatedIdentity.ino)) {
-        const { contentParts: errorParts, info } = createFileReadErrorResult(
-          displayPath,
-          'Validated file identity is unavailable on this filesystem (inode is 0).',
-        );
-        contentParts.push(...errorParts);
-        files.push(info);
+        if (!seenFiles.has(fullPath)) {
+          seenFiles.add(fullPath);
+          const { contentParts: errorParts, info } = createFileReadErrorResult(
+            displayPath,
+            'Validated file identity is unavailable on this filesystem (inode is 0).',
+          );
+          contentParts.push(...errorParts);
+          files.push(info);
+        }
         continue;
       }
       if (
@@ -233,18 +236,7 @@ export async function readManyFiles(
           } catch (error) {
             if (signal?.aborted || isAbortError(error)) throw error;
             const errorMessage = getErrorMessage(error);
-            readResult = {
-              contentParts: [
-                { text: `\nContent from ${displayPath}:\n` },
-                { text: `Error reading ${displayPath}: ${errorMessage}` },
-              ],
-              info: {
-                filePath: displayPath,
-                content: `Error reading ${displayPath}: ${errorMessage}`,
-                isDirectory: false,
-                error: errorMessage,
-              },
-            };
+            readResult = createFileReadErrorResult(displayPath, errorMessage);
           }
         } else {
           try {

@@ -237,6 +237,59 @@ describe('readManyFiles', () => {
       }
     });
 
+    it('deduplicates unverifiable validated inode errors for repeated paths', async () => {
+      const { relativePath, absolutePath } = await createTestFile(
+        'zero-inode-duplicate.txt',
+      );
+      const approvedStats = await fs.stat(absolutePath);
+      const originalStat = fs.stat.bind(fs);
+      const originalOpen = fs.open.bind(fs);
+      const statSpy = vi
+        .spyOn(fs, 'stat')
+        .mockImplementation(async (...args) => {
+          const stats = await originalStat(...args);
+          if (String(args[0]) === absolutePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await originalOpen(...args);
+          const originalHandleStat = handle.stat.bind(handle);
+          vi.spyOn(handle, 'stat').mockImplementation(async () => {
+            const stats = await originalHandleStat();
+            Object.defineProperty(stats, 'ino', { value: 0 });
+            return stats;
+          });
+          return handle;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath, relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: 0 }],
+          ]),
+        });
+        const content = contentToString(result.contentParts);
+
+        expect(content).not.toContain('Content of zero-inode-duplicate.txt');
+        expect(
+          content.match(/Validated file identity is unavailable/g),
+        ).toHaveLength(1);
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.error).toContain(
+          'Validated file identity is unavailable',
+        );
+      } finally {
+        statSpy.mockRestore();
+        openSpy.mockRestore();
+      }
+    });
+
     it('drops a validated read when the identity map has no matching path key', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
