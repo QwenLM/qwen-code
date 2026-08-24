@@ -53,7 +53,14 @@ local changes were already discarded. The merge passes `--no-edit
 branches merge instead of fataling on git builds without a `pull.rebase`
 / `pull.ff` policy, and ambient `merge.autostash`/`rebase.autostash`
 config cannot silently move the user's changes through a stash the
-caller never learns about. Pulls are serialized per workspace cwd so
+caller never learns about. A configured `pull.rebase` or `pull.ff`
+policy is deliberately overridden by this pinned shape: the resolution
+flow must behave the same on every host, honoring `pull.ff = only`
+would recreate the exact dead-end this feature exists to eliminate (the
+update refuses instead of resolving), and ambient policy is what makes
+a bare `git pull` fatal on policy-less git builds; users who want
+rebase-on-pull semantics get them through the explicit `rebase` option
+instead. Pulls are serialized per workspace cwd so
 overlapping pulls cannot cross-apply each other's auto-stashes (one
 shared `refs/stash`) or abort each other's in-progress merge.
 
@@ -69,8 +76,13 @@ so even a plain pull reads clean), and neither the auto-stash
 protects it. The incoming-addition set is computed relative to the
 merge base from the repository toplevel with `--no-renames -z` (rename
 destinations count as additions, non-ASCII names are not C-quoted, and
-unpushed local deletions are not counted as incoming additions), then
-matched against the ignore rules with `git check-ignore --stdin -z`.
+unpushed local deletions are not counted as incoming additions); for a
+rebase, the additions the replayed local commits introduce join the set
+(the replay checks them out over the worktree the same way). The set is
+compared byte-for-byte against the ignored files present in the
+worktree (`ls-files --others --ignored --exclude-standard -z`), with no
+pathspec parsing and no filesystem walk: a collision is an exact match
+or a segment-boundary prefix in either direction.
 
 Failures are classified from repository state (`MERGE_HEAD`, rebase
 state, unmerged index entries, ahead/behind counts, dirtiness) into

@@ -16,6 +16,7 @@ import {
   GitPullFailure,
   isValidRefName,
   isValidCheckoutRef,
+  STASH_RESTORE_NOTE,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
@@ -33,6 +34,30 @@ import {
 } from '../workspace-route-runtime.js';
 
 const GIT_ERROR_MESSAGE_MAX = 512;
+
+// The pointer to unrestored auto-stashed changes must survive the cap:
+// it is the only hint that the user's edits sit in a stash entry, and it
+// rides the very responses whose long conflict output triggers capping.
+function capGitErrorMessage(
+  message: string,
+  stashRestoreFailed: boolean,
+): string {
+  const note = ` ${STASH_RESTORE_NOTE}`;
+  // Typed failures carry the flag (core leaves their message unappended),
+  // so the note is added here in every case; untyped ones already carry
+  // it in the text and only need it preserved across the cap.
+  if (stashRestoreFailed) {
+    const budget = GIT_ERROR_MESSAGE_MAX - note.length;
+    return (
+      message.length > budget ? message.slice(0, budget) : message
+    ).concat(note);
+  }
+  if (message.length <= GIT_ERROR_MESSAGE_MAX) return message;
+  if (message.endsWith(note)) {
+    return message.slice(0, GIT_ERROR_MESSAGE_MAX - note.length) + note;
+  }
+  return message.slice(0, GIT_ERROR_MESSAGE_MAX);
+}
 
 function resolveTrustedRuntime(
   registry: WorkspaceRegistry,
@@ -85,7 +110,7 @@ function sendGitError(
   if (typed) {
     res.status(409).json({
       error: typed.code,
-      message: message.slice(0, GIT_ERROR_MESSAGE_MAX),
+      message: capGitErrorMessage(message, typed.stashRestoreFailed),
       ...(typed.unmerged ? { unmerged: true } : {}),
     });
     return;
@@ -98,7 +123,7 @@ function sendGitError(
     /not a git repository/i.test(message) ||
     /invalid reference/i.test(message)
   ) {
-    message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
+    message = capGitErrorMessage(message, false);
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
@@ -107,14 +132,14 @@ function sendGitError(
       message,
     )
   ) {
-    message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
+    message = capGitErrorMessage(message, false);
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
   // Cap every remaining response, including the unclassified 500
   // fall-through. Raw git output embeds absolute paths (e.g. a wedged
   // `.git/index.lock`) that must never reach the client.
-  message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
+  message = capGitErrorMessage(message, false);
   if (/already exists/i.test(message)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;

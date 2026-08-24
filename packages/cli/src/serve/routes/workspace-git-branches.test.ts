@@ -385,6 +385,22 @@ afterEach(() => {
   }
 });
 
+function installGitShim(script: string): string {
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitshim-'));
+  tmpRoots.push(shimDir);
+  fs.writeFileSync(path.join(shimDir, 'git'), script, { mode: 0o755 });
+  return shimDir;
+}
+
+function withPathPrefix<T>(dir: string, fn: () => PromiseLike<T>): Promise<T> {
+  const saved = process.env['PATH'] ?? '';
+  process.env['PATH'] = `${dir}${path.delimiter}${saved}`;
+  // supertest requests are thenables, not Promises.
+  return Promise.resolve(fn()).finally(() => {
+    process.env['PATH'] = saved;
+  });
+}
+
 describe('workspace Git branch routes against a real repo (R10 #2)', () => {
   it('rejects a commit --all when write-tree cannot snapshot the index', async () => {
     const dir = makeRepo();
@@ -580,6 +596,85 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       'line 1 local',
     );
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps the stash-restore pointer in the 409 message at both cap shapes',
+    async () => {
+      // One conflicting file keeps the detail under the cap; eight push it
+      // past — the pointer must survive both shapes.
+      for (const fileCount of [1, 8]) {
+        const dir = makeRepo();
+        for (let i = 1; i <= fileCount; i += 1) {
+          fs.writeFileSync(path.join(dir, `f${i}.txt`), `base ${i}\n`);
+        }
+        git(dir, 'add', '.');
+        git(dir, 'commit', '-q', '-m', 'add files');
+        const remote = fs.realpathSync(
+          fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+        );
+        tmpRoots.push(remote);
+        git(remote, 'init', '-q', '--bare');
+        git(dir, 'remote', 'add', 'origin', remote);
+        git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+        const clone = fs.realpathSync(
+          fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+        );
+        tmpRoots.push(clone);
+        git(clone, 'clone', '-q', remote, '.');
+        git(clone, 'config', 'user.email', 'other@example.com');
+        git(clone, 'config', 'user.name', 'Other');
+        git(clone, 'config', 'commit.gpgsign', 'false');
+        for (let i = 1; i <= fileCount; i += 1) {
+          fs.writeFileSync(path.join(clone, `f${i}.txt`), `remote ${i}\n`);
+        }
+        git(clone, 'add', '.');
+        git(clone, 'commit', '-q', '-m', 'remote edits');
+        git(clone, 'push', '-q', 'origin', 'HEAD');
+
+        // Divergent local edits on the same files plus a dirty edit: the
+        // post-stash merge conflicts on every file.
+        for (let i = 1; i <= fileCount; i += 1) {
+          fs.writeFileSync(path.join(dir, `f${i}.txt`), `local ${i}\n`);
+        }
+        git(dir, 'add', '.');
+        git(dir, 'commit', '-q', '-m', 'local edits');
+        fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // Fail the recovery's merge --abort so the restore pop fails too:
+        // the 409 then carries the stash-restore pointer.
+        const shimDir = installGitShim(
+          `#!/bin/sh\n` +
+            `if [ "$1" = "merge" ] && [ "$2" = "--abort" ]; then\n` +
+            `  exit 128\n` +
+            `fi\n` +
+            `exec "${realGit}" "$@"\n`,
+        );
+
+        const response = await withPathPrefix(shimDir, () =>
+          request(appWithWorkspace(dir)).post('/workspace/git/pull').send({
+            stash: true,
+          }),
+        );
+
+        expect(response.status).toBe(409);
+        expect(response.body.error).toBe('merge_in_progress');
+        expect(response.body.message.length).toBeLessThanOrEqual(512);
+        // The pointer to the kept stash is present — and for the long
+        // detail it survived by capping around it.
+        expect(response.body.message.endsWith('(git stash list).')).toBe(true);
+        if (fileCount > 1) {
+          expect(response.body.message.length).toBe(512);
+        }
+        expect(git(dir, 'stash', 'list', '--oneline')).toContain(
+          'auto-stash before pull',
+        );
+      }
+    },
+  );
 
   it('classifies a pull blocked by an in-progress merge as merge_in_progress', async () => {
     const dir = makeUnmergedRepo();
