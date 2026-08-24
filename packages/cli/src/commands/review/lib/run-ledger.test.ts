@@ -686,14 +686,15 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses to append over a ledger it could not read',
     () => {
       // A present-but-unreadable REGULAR file holds every recorded entry, and
       // this append rewrites the whole file from what it read — proceeding on
       // a transient fault would clobber attempt 1's address exactly when a
-      // resume needs it. Skipped under root: root bypasses permission bits,
-      // so chmod 000 stays readable and the premise is untestable.
+      // resume needs it. chmod 0o000 is a POSIX-only fault: on Windows it
+      // toggles the read-only attribute and the file stays readable, and root
+      // bypasses the mode entirely — the repo convention for this shape.
       appendRunSession(plan, envOf('S1'));
       const before = readFileSync(runSessionsPath(plan), 'utf8');
       chmodSync(runSessionsPath(plan), 0o000);
