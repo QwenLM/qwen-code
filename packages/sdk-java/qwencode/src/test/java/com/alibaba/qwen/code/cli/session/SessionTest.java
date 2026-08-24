@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.cli.session;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutionException;
@@ -197,6 +198,23 @@ class SessionTest {
         assertThrows(SessionControlException.class, session::interrupt);
         assertThrows(SessionControlException.class, () -> session.setModel("qwen3-coder-flash"));
         assertThrows(SessionControlException.class, () -> session.setPermissionMode(PermissionMode.DEFAULT));
+    }
+
+    @Test
+    void unavailableTransportConstructorThrowsSessionControlException() {
+        TestTransport transport = new TestTransport();
+        transport.setAvailable(false);
+
+        assertThrows(SessionControlException.class, () -> new Session(transport));
+    }
+
+    @Test
+    void newSessionWrapsCreationFailuresInRuntimeException() {
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> QwenCodeCli.newSession(
+                        new TransportOptions().setPathToQwenExecutable("/nonexistent/qwen-code")));
+
+        assertTrue(failure.getMessage().startsWith("initialized "));
     }
 
     @Test
