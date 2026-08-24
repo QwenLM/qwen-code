@@ -640,6 +640,45 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('extracts file attachments from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'explain this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['explain this'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 5,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'explain this',
+        source: 'mid_turn_message_injected',
+        files: [
+          {
+            name: 'notes.txt',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      }),
+    ]);
+  });
+
   it('shows the degraded-media notice when the echo text is empty', () => {
     // When the stored media is gone at drain, the daemon echoes an empty
     // messages array whose items carry only the placeholder text block; the
@@ -790,7 +829,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps each TodoWrite call as a distinct tool entry with its own todos', () => {
+  it('merges adjacent TodoWrite calls into one tool group like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
         title: 'Update Todos',
@@ -820,9 +859,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Each TodoWrite update stands alone in its own group (it renders as a
-    // self-contained collapsible checklist), rather than merging with adjacent
-    // tool calls.
+    // TodoWrite is an ordinary tool: adjacent calls share one group box.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -833,13 +870,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
-        ],
-      },
-      {
-        id: 'tg-todo-2',
-        role: 'tool_group',
-        timestamp: 2,
-        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -989,7 +1019,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('never merges todo_write updates into or after a regular tool_group', () => {
+  it('merges todo_write updates with adjacent tool calls like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
       toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
@@ -1001,9 +1031,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
-      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      {
+        role: 'tool_group',
+        tools: [
+          { callId: 'tc1' },
+          { callId: 'todo-call-1' },
+          { callId: 'tc2' },
+        ],
+      },
     ]);
   });
 

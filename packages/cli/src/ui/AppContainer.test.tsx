@@ -184,7 +184,7 @@ vi.mock('../services/prompt-stash.js');
 
 // Mock external utilities
 vi.mock('../utils/events.js');
-vi.mock('../utils/handleAutoUpdate.js');
+vi.mock('./handleAutoUpdate.js');
 vi.mock('../utils/cleanup.js');
 
 const mockLoadHierarchicalGeminiMemory = vi.hoisted(() => vi.fn());
@@ -5080,9 +5080,9 @@ describe('AppContainer State Management', () => {
         lastCompletedUuid: 'a1',
       };
 
-      vi.spyOn(mockConfig, 'getContentGenerator').mockReturnValue({
-        useSummarizedThinking: vi.fn(() => false),
-      } as unknown as ReturnType<typeof mockConfig.getContentGenerator>);
+      vi.spyOn(mockConfig, 'getContentGenerator').mockReturnValue(
+        {} as unknown as ReturnType<typeof mockConfig.getContentGenerator>,
+      );
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue(
         resumeSessionData as ReturnType<

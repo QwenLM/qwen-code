@@ -27,15 +27,48 @@ describe('detectPlatformKind', () => {
     execFileSyncMock.mockReset();
   });
 
-  it('detects Aone from an Aone --host (trimmed, port-bearing, cased)', () => {
+  it('detects Aone from a CANONICAL Aone --host (trimmed, port-bearing, cased)', () => {
     expect(detectPlatformKind({ host: 'gitlab.alibaba-inc.com' })).toBe('aone');
     expect(detectPlatformKind({ host: 'code.alibaba-inc.com' })).toBe('aone');
-    expect(detectPlatformKind({ host: 'GHE.Alibaba-Inc.com:8443' })).toBe(
+    expect(detectPlatformKind({ host: 'GITLAB.Alibaba-Inc.com:443' })).toBe(
+      'aone',
+    );
+    // A NON-default port on the canonical pair still names Aone.
+    expect(detectPlatformKind({ host: 'code.alibaba-inc.com:8443' })).toBe(
       'aone',
     );
     expect(detectPlatformKind({ host: ' gitlab.alibaba-inc.com ' })).toBe(
       'aone',
     );
+  });
+
+  it('an EXPLICIT family-but-not-canonical host stays GitHub — it is a GHE instance', () => {
+    // The review skill always passes --host; a `*.alibaba-inc.com` host
+    // that is NOT the canonical pair (`ghe.alibaba-inc.com` is the live
+    // example) is a GitHub Enterprise instance — selecting Aone there
+    // would authenticate against the wrong platform and read an unrelated
+    // same-numbered Aone MR. The family predicate stands only for the
+    // no-explicit-signal cwd fallback (pinned below).
+    expect(detectPlatformKind({ host: 'GHE.Alibaba-Inc.com:8443' })).toBe(
+      'github',
+    );
+    // The explicit-remote arm follows the same rule.
+    expect(
+      detectPlatformKind({
+        remoteUrl: 'git@ghe.alibaba-inc.com:group/repo.git',
+      }),
+    ).toBe('github');
+  });
+
+  it('the cwd origin probe keeps the FAMILY predicate', () => {
+    // An origin the caller did not name explicitly is the one place a
+    // non-canonical Aone-family host still reads as Aone.
+    execFileSyncMock.mockReturnValue('git@ghe.alibaba-inc.com:group/repo.git');
+    expect(detectPlatformKind({})).toBe('aone');
+    execFileSyncMock.mockReturnValue(
+      'git@gitlab.alibaba-inc.com:maxcompute/odps_src.git',
+    );
+    expect(detectPlatformKind({})).toBe('aone');
   });
 
   it('detects Aone from the trailing-dot FQDN spelling of the same host', () => {

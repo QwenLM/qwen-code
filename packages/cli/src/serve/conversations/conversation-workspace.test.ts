@@ -27,6 +27,7 @@ import {
 import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
 
 const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
+const enoentOnInspect = vi.hoisted(() => ({ armed: false }));
 
 vi.mock(
   '../../utils/conversation-directory-identity.js',
@@ -40,6 +41,14 @@ vi.mock(
       inspectConversationDirectoryIdentity: async (
         ...args: Parameters<typeof actual.inspectConversationDirectoryIdentity>
       ) => {
+        if (enoentOnInspect.armed) {
+          enoentOnInspect.armed = false;
+          throw new actual.ConversationDirectoryIdentityError(
+            'root',
+            'io_error',
+            Object.assign(new Error('root vanished'), { code: 'ENOENT' }),
+          );
+        }
         const identity = await actual.inspectConversationDirectoryIdentity(
           ...args,
         );
@@ -272,6 +281,21 @@ describe('Live conversation workspace root', () => {
     expect((await lstat(occupied)).isDirectory()).toBe(true);
   });
 
+  it('treats a root that vanishes mid-inspection as already discarded', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    await workspace.materializeConversationDirectory('empty-racy');
+
+    enoentOnInspect.armed = true;
+    try {
+      await expect(
+        workspace.discardEmptyConversationDirectory('empty-racy'),
+      ).resolves.toBe(false);
+    } finally {
+      enoentOnInspect.armed = false;
+    }
+  });
+
   it('prepares only a new or reusable empty standalone child', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
@@ -345,29 +369,29 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('inspects, recreates, and rejects replaced standalone child identities', async () => {
+  it('inspects, creates, and rejects replaced standalone child identities', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
 
     await expect(
       workspace.inspectStandaloneDirectory('standalone'),
     ).resolves.toEqual({ status: 'missing' });
-    const recreated = await workspace.ensureStandaloneDirectory('standalone');
-    expect(recreated.status).toBe('recreated');
-    if (recreated.status !== 'recreated') throw new Error('expected recreate');
+    const created = await workspace.ensureStandaloneDirectory('standalone');
+    expect(created.status).toBe('created');
+    if (created.status !== 'created') throw new Error('expected creation');
 
     await expect(
-      workspace.inspectStandaloneDirectory('standalone', recreated.identity),
+      workspace.inspectStandaloneDirectory('standalone', created.identity),
     ).resolves.toMatchObject({ status: 'ready' });
 
     // Keep the original inode alive under a sibling name so the replacement
     // cannot reuse it (ext4/overlayfs recycle freed inodes immediately).
-    const preserved = `${recreated.identity.canonicalPath}.preserved`;
-    await rename(recreated.identity.canonicalPath, preserved);
-    await mkdir(recreated.identity.canonicalPath, { mode: 0o700 });
+    const preserved = `${created.identity.canonicalPath}.preserved`;
+    await rename(created.identity.canonicalPath, preserved);
+    await mkdir(created.identity.canonicalPath, { mode: 0o700 });
     const compromised = await workspace.inspectStandaloneDirectory(
       'standalone',
-      recreated.identity,
+      created.identity,
     );
     expect(compromised.status).toBe('compromised');
     if (compromised.status !== 'compromised') {
@@ -377,6 +401,29 @@ describe('Live conversation workspace root', () => {
       ConversationDirectoryIdentityError,
     );
     expect(compromised.error.reason).toBe('unexpected_identity');
+  });
+
+  it('reports recreated only when a known identity vanished', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    // Keep the original inode alive under a sibling name so the replacement
+    // cannot reuse it and accidentally satisfy the expected identity.
+    await rename(
+      prepared.identity.canonicalPath,
+      `${prepared.identity.canonicalPath}.preserved`,
+    );
+
+    const ensured = await workspace.ensureStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(ensured.status).toBe('recreated');
+    if (ensured.status !== 'recreated') throw new Error('expected recreate');
+    expect(ensured.identity.canonicalPath).toBe(
+      prepared.identity.canonicalPath,
+    );
+    expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
   });
 
   it('returns the raced inspection when a concurrent creator wins the ensure race', async () => {
@@ -443,6 +490,44 @@ describe('Live conversation workspace root', () => {
     }
     // A narrowed `raced.status === 'ready'` pass-through would instead
     // surface a fresh identity_changed here; the raced reason must survive.
+    expect(ensured.error).toBe(racedError);
+  });
+
+  it('re-inspects a raced standalone directory even without an expected identity', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    const inspect = vi.spyOn(workspace, 'inspectStandaloneDirectory');
+    inspect.mockResolvedValueOnce({ status: 'missing' });
+
+    const ensured = await workspace.ensureStandaloneDirectory('standalone');
+    expect(ensured).toMatchObject({
+      status: 'ready',
+      identity: prepared.identity,
+    });
+    expect(inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates a raced compromised verdict when no identity is expected', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    await workspace.prepareStandaloneDirectory('standalone');
+
+    const racedError = new ConversationDirectoryIdentityError(
+      'child',
+      'wrong_mode',
+    );
+    const inspect = vi.spyOn(workspace, 'inspectStandaloneDirectory');
+    inspect
+      .mockResolvedValueOnce({ status: 'missing' })
+      .mockResolvedValueOnce({ status: 'compromised', error: racedError });
+
+    const ensured = await workspace.ensureStandaloneDirectory('standalone');
+    expect(ensured.status).toBe('compromised');
+    if (ensured.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
     expect(ensured.error).toBe(racedError);
   });
 });

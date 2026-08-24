@@ -1,8 +1,7 @@
-# Windows Sandbox Runner
+# Legacy Windows Sandbox runner
 
-Legacy Windows Sandbox runner for local smoke checks. It predates the Azure/RDP
-GUI validation flow and should not be treated as the canonical Windows desktop
-test entrypoint.
+This runner exists only for local smoke checks and must not be treated as the
+canonical Windows desktop test entrypoint.
 
 Run it from `packages/cua-driver` on a Windows host with Windows Sandbox enabled:
 
@@ -15,5 +14,6 @@ The host script builds selected Rust test binaries and Windows fixtures, maps
 `packages/cua-driver` into the sandbox as `C:\cua-driver`, and streams logs from the
 inside-sandbox runner.
 
-For current GUI validation, prefer a real user desktop session such as the
-Azure RDP/scheduled-task runner described in the Rust test README.
+For current GUI validation, use the interactive Azure RDP/scheduled-task runner
+described by the Windows Rust test runner. Keep this sandbox path as a local
+smoke check only.

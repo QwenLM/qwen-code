@@ -79,7 +79,7 @@ import { languageCommand } from './languageCommand.js';
 import {
   initializeLlmOutputLanguage,
   writeOutputLanguageFile,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
