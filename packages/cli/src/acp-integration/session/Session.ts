@@ -1919,6 +1919,7 @@ export class Session implements SessionContext {
     sourceCallId: string;
   };
   private activeTodoPlanStructure?: string;
+  private todoPlanRevisionGeneration = 0;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -2692,6 +2693,7 @@ export class Session implements SessionContext {
   }
 
   clearActiveTodoPlanRevision(): void {
+    this.todoPlanRevisionGeneration++;
     this.activeTodoPlanRevision = undefined;
     this.activeTodoPlanStructure = undefined;
     this.config.clearSessionWorkflowPlanRevision?.();
@@ -6561,6 +6563,13 @@ export class Session implements SessionContext {
       this.config.getApprovalMode() === ApprovalMode.PLAN &&
       todoPlanRevision?.allPending
     ) {
+      if (
+        this.activeTodoPlanRevision?.planId !== todoPlanRevision.planId ||
+        this.activeTodoPlanRevision?.sourceCallId !==
+          todoPlanRevision.sourceCallId
+      ) {
+        this.todoPlanRevisionGeneration++;
+      }
       this.activeTodoPlanRevision = {
         planId: todoPlanRevision.planId,
         sourceCallId: todoPlanRevision.sourceCallId,
@@ -10047,6 +10056,10 @@ export class Session implements SessionContext {
     let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let todoPlanApprovalGeneration: number | undefined;
+    let todoPlanApprovalRevision:
+      | { planId: string; sourceCallId: string }
+      | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupAgentToolResources = () => {
@@ -10672,6 +10685,46 @@ export class Session implements SessionContext {
 
           let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const cancelStaleTodoPlanApproval = async () => {
+            const configRevision =
+              this.config.getSessionWorkflowPlanRevision?.();
+            if (
+              todoPlanApprovalGeneration === undefined ||
+              !todoPlanApprovalRevision ||
+              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
+                this.activeTodoPlanRevision?.planId ===
+                  todoPlanApprovalRevision.planId &&
+                this.activeTodoPlanRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId &&
+                configRevision?.planId === todoPlanApprovalRevision.planId &&
+                configRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId)
+            ) {
+              return undefined;
+            }
+            try {
+              await confirmationDetails?.onConfirm(
+                ToolConfirmationOutcome.Cancel,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
+              );
+            }
+            onStopAfterPermissionCancel?.();
+            return earlyErrorResponse(
+              new Error(
+                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
+              ),
+              toolName,
+              {
+                status: 'cancelled',
+                errorType: undefined,
+                executionStatus: 'not_started',
+                stopAfterPermissionCancel: true,
+              },
+            );
+          };
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
@@ -10978,6 +11031,19 @@ export class Session implements SessionContext {
               const workflowPlanRevision = isExitPlanModeTool
                 ? this.config.getSessionWorkflowPlanRevision?.()
                 : undefined;
+              const qwenTodoApproval =
+                isExitPlanModeTool &&
+                this.activeTodoPlanRevision &&
+                workflowPlanRevision?.planId ===
+                  this.activeTodoPlanRevision.planId &&
+                workflowPlanRevision.sourceCallId ===
+                  this.activeTodoPlanRevision.sourceCallId
+                  ? this.activeTodoPlanRevision
+                  : undefined;
+              if (qwenTodoApproval) {
+                todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
+                todoPlanApprovalRevision = qwenTodoApproval;
+              }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 options: permissionOptions,
@@ -10996,16 +11062,7 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
-                    ...(isExitPlanModeTool &&
-                    this.activeTodoPlanRevision &&
-                    workflowPlanRevision?.planId ===
-                      this.activeTodoPlanRevision.planId &&
-                    workflowPlanRevision.sourceCallId ===
-                      this.activeTodoPlanRevision.sourceCallId
-                      ? {
-                          qwenTodoApproval: this.activeTodoPlanRevision,
-                        }
-                      : {}),
+                    ...(qwenTodoApproval ? { qwenTodoApproval } : {}),
                   },
                 },
               };
@@ -11047,6 +11104,9 @@ export class Session implements SessionContext {
                 if (permissionRequestCancellation) {
                   return permissionRequestCancellation;
                 }
+                const staleTodoPlanApproval =
+                  await cancelStaleTodoPlanApproval();
+                if (staleTodoPlanApproval) return staleTodoPlanApproval;
                 outcome = resolvePermissionOutcome(
                   output,
                   offeredPermissionOptions,
@@ -11377,6 +11437,8 @@ export class Session implements SessionContext {
           if (executionBoundaryCancellation) {
             return executionBoundaryCancellation;
           }
+          const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
+          if (staleTodoPlanApproval) return staleTodoPlanApproval;
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&

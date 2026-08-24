@@ -22473,6 +22473,178 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      [
+        'Session revision is cleared',
+        async () => session.clearActiveTodoPlanRevision(),
+      ],
+      [
+        'Config revision is cleared',
+        async () => mockConfig.clearSessionWorkflowPlanRevision?.(),
+      ],
+      [
+        'revision identity is replaced',
+        async () =>
+          session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: [
+              {
+                content: 'Ship',
+                priority: 'medium',
+                status: 'pending',
+                _meta: { qwenTodo: { id: 'ship' } },
+              },
+            ],
+            _meta: {
+              qwenSessionWorkflow: true,
+              qwenTodoPlan: { id: 'plan-1' },
+              qwenTranscript: { planToolCallId: 'todo-call-2' },
+            },
+          }),
+      ],
+    ] as const)(
+      'cancels a revision-bound plan exit when the %s',
+      async (_label, invalidateRevision) => {
+        enableSessionWorkflowRevisionContext();
+        let resolvePermission!: (
+          response: Awaited<
+            ReturnType<AgentSideConnection['requestPermission']>
+          >,
+        ) => void;
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise((resolve) => {
+            resolvePermission = resolve;
+          }),
+        );
+        await session.sendUpdate({
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
+            },
+          ],
+          _meta: {
+            qwenSessionWorkflow: true,
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        });
+
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(
+          vi.mocked(mockClient.requestPermission).mock.calls[0]?.[0].toolCall
+            ._meta,
+        ).toEqual(
+          expect.objectContaining({
+            qwenTodoApproval: {
+              planId: 'plan-1',
+              sourceCallId: 'todo-call-1',
+            },
+          }),
+        );
+
+        await invalidateRevision();
+        resolvePermission({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        await prompt;
+
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            ),
+        ).toHaveLength(0);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                response: {
+                  error: expect.stringContaining('Workflow revision changed'),
+                },
+              }),
+            }),
+          ]),
+          expect.objectContaining({
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      },
+    );
+
+    it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {
+      enableSessionWorkflowRevisionContext();
+      let resolvePreToolUse!: (result: { shouldProceed: boolean }) => void;
+      const preToolUseSpy = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolvePreToolUse = resolve;
+          }),
+        );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      try {
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() => expect(preToolUseSpy).toHaveBeenCalledOnce());
+        session.clearActiveTodoPlanRevision();
+        resolvePreToolUse({ shouldProceed: true });
+        await prompt;
+      } finally {
+        preToolUseSpy.mockRestore();
+      }
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) => params.update.sessionUpdate === 'current_mode_update',
+          ),
+      ).toHaveLength(0);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              response: {
+                error: expect.stringContaining('Workflow revision changed'),
+              },
+            }),
+          }),
+        ]),
+        expect.objectContaining({
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+    });
+
     it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
       let mode = ApprovalMode.DEFAULT;
       const executeSpy = vi.fn().mockImplementation(async () => {
