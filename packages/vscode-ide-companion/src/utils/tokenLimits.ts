@@ -48,6 +48,7 @@ const LIMITS = {
   '200k': 200_000,
   '256k': 262_144,
   '272k': 272_000,
+  '384k': 384_000,
   '400k': 400_000,
   '512k': 524_288,
   '1m': 1_000_000,
@@ -137,13 +138,16 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['256k']],
 
   // DeepSeek
+  [/^deepseek-v4/, LIMITS['1m']],
   [/^deepseek/, LIMITS['128k']],
 
   // Zhipu GLM
-  [/^glm-5/, 202_752 as TokenCount],
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount],
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']],
   [/^glm-/, 202_752 as TokenCount],
 
   // MiniMax
+  [/^minimax-m3/i, LIMITS['1m']],
   [/^minimax-m2\.5/i, LIMITS['192k']],
   [/^minimax-/i, LIMITS['200k']],
 
@@ -177,11 +181,12 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen/, LIMITS['32k']],
 
+  [/^deepseek-v4/, LIMITS['384k']],
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   [/^minimax-m2\.5/i, LIMITS['64k']],

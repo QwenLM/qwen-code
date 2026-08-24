@@ -92,4 +92,41 @@ describe('vscode-ide-companion tokenLimit (browser-safe mirror)', () => {
       expect(tokenLimit('some-unknown-model', 'output')).toBe(32_000);
     });
   });
+
+  describe('DeepSeek limits', () => {
+    it('returns 1M input and 384K output for DeepSeek V4 models', () => {
+      expect(tokenLimit('deepseek-v4-flash')).toBe(1_000_000);
+      expect(tokenLimit('deepseek-v4-pro')).toBe(1_000_000);
+      expect(tokenLimit('deepseek-v4-flash', 'output')).toBe(384_000);
+      expect(tokenLimit('deepseek-v4-pro', 'output')).toBe(384_000);
+    });
+  });
+
+  describe('Zhipu GLM limits', () => {
+    it('returns 1M input for GLM-5.2+ while preserving 200K for GLM-5.1 and earlier', () => {
+      expect(tokenLimit('glm-5.2')).toBe(1_000_000);
+      expect(tokenLimit('GLM-5.2')).toBe(1_000_000);
+      expect(tokenLimit('zai/GLM-5.2')).toBe(1_000_000);
+      expect(tokenLimit('glm-6')).toBe(1_000_000);
+      expect(tokenLimit('glm-10')).toBe(1_000_000);
+      expect(tokenLimit('glm-5.1')).toBe(202_752);
+      expect(tokenLimit('glm-4.7')).toBe(202_752);
+    });
+
+    it('returns 128K output for GLM-5.x and 16K for GLM-4.7', () => {
+      expect(tokenLimit('glm-5.2', 'output')).toBe(131_072);
+      expect(tokenLimit('GLM-5.2', 'output')).toBe(131_072);
+      expect(tokenLimit('glm-5.1', 'output')).toBe(131_072);
+      expect(tokenLimit('glm-5', 'output')).toBe(131_072);
+      expect(tokenLimit('glm-4.7', 'output')).toBe(16_384);
+    });
+  });
+
+  describe('MiniMax limits', () => {
+    it('returns 1M input for MiniMax-M3 while preserving existing MiniMax limits', () => {
+      expect(tokenLimit('MiniMax-M3')).toBe(1_000_000);
+      expect(tokenLimit('MiniMax-M2.5')).toBe(196_608);
+      expect(tokenLimit('MiniMax-M2.1')).toBe(200_000);
+    });
+  });
 });
