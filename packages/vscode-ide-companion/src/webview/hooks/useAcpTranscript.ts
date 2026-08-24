@@ -85,13 +85,15 @@ export function useAcpTranscript() {
       if (
         message?.type === 'qwenSessionSwitched' ||
         message?.type === 'conversationCleared' ||
-        message?.type === 'conversationLoaded'
+        message?.type === 'conversationLoaded' ||
+        message?.type === 'conversationRewound'
       ) {
         resetTranscript();
         const data = message.data as
           | {
               sessionId?: unknown;
               liveSessionId?: unknown;
+              restoreTranscript?: unknown;
               messages?: Array<Record<string, unknown>>;
             }
           | undefined;
@@ -110,7 +112,12 @@ export function useAcpTranscript() {
         } else if (typeof data?.sessionId === 'string' && data.sessionId) {
           activeSessionIdRef.current = data.sessionId;
         }
-        if (message.type === 'qwenSessionSwitched') {
+        if (
+          message.type === 'qwenSessionSwitched' ||
+          message.type === 'conversationRewound' ||
+          (message.type === 'conversationLoaded' &&
+            data?.restoreTranscript === true)
+        ) {
           // Offline restores and load-failure fallbacks deliver cached
           // history here and never replay it through `transcriptUpdate`,
           // so seed the transcript from the cached rows directly.

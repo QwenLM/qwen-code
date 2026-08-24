@@ -128,6 +128,7 @@ export interface EmbeddedWebShellProps {
   pendingPermission?: EmbeddedWebShellPermissionRequest | null;
   pendingQuestion?: EmbeddedWebShellPermissionRequest | null;
   notices?: readonly EmbeddedWebShellNotice[];
+  editingMessage?: { content: string } | null;
   onSubmit: (submission: EmbeddedWebShellSubmit) => boolean | void;
   onCancel?: () => void;
   onAuthenticate?: () => void;
@@ -143,6 +144,8 @@ export interface EmbeddedWebShellProps {
   onAttachFile?: () => void;
   onFocusActiveFile?: () => void;
   onActiveFileIncludedChange?: (included: boolean) => void;
+  onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
+  onCancelEdit?: () => void;
   onPermissionResponse?: (requestId: string, optionId: string) => void;
   onQuestionResponse?: (
     requestId: string,
@@ -208,6 +211,7 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
     pendingPermission,
     pendingQuestion,
     notices = [],
+    editingMessage,
     onSubmit,
     onCancel,
     onAuthenticate,
@@ -223,6 +227,8 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
     onAttachFile,
     onFocusActiveFile,
     onActiveFileIncludedChange,
+    onEditUserMessage,
+    onCancelEdit,
     onPermissionResponse,
     onQuestionResponse,
     onNoticeAction,
@@ -493,6 +499,7 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
               pendingApproval={pendingPermission ?? null}
               isResponding={isResponding}
               workspaceCwd={workspaceCwd}
+              onEditUserMessage={onEditUserMessage}
             />
           </div>
         )}
@@ -541,6 +548,20 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
                   onConfirm={handleQuestionResponse}
                   onError={(error) => onError?.(error)}
                 />
+              </div>
+            )}
+            {editingMessage && (
+              <div className={styles.editingBar} role="status">
+                <span>Editing message</span>
+                <button
+                  type="button"
+                  className={styles.editingCancel}
+                  onClick={onCancelEdit}
+                  aria-label="Cancel editing"
+                  title="Cancel editing"
+                >
+                  <XIcon aria-hidden="true" />
+                </button>
               </div>
             )}
             <div
