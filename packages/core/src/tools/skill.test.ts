@@ -1270,6 +1270,34 @@ describe('SkillTool', () => {
       expect(result).toBeNull();
     });
 
+    it('should fall back to cached commands when the live provider throws', () => {
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => {
+          throw new Error('boom');
+        },
+      );
+
+      const result = skillTool.validateToolParams({ skill: 'mcp-prompt-a' });
+      expect(result).toBeNull();
+    });
+
+    it('should accept a command with the same name as a hidden file skill', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'mcp-prompt-a',
+          description: 'Hidden file-based skill',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+          body: 'Hidden body',
+          disableModelInvocation: true,
+        },
+      ]);
+      await skillTool.refreshSkills();
+
+      const result = skillTool.validateToolParams({ skill: 'mcp-prompt-a' });
+      expect(result).toBeNull();
+    });
+
     it('should reject a name not in skills or commands, listing both in error', () => {
       const result = skillTool.validateToolParams({ skill: 'unknown' });
       expect(result).toContain('"unknown" not found');
@@ -1494,6 +1522,43 @@ describe('SkillTool', () => {
   });
 
   describe('disabled-skill execute guard', () => {
+    it('runs the same-named MCP prompt instead of loading a hidden skill', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'mcp-prompt-a',
+          description: 'Hidden file-based skill',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+          body: 'HIDDEN skill body must not execute',
+          disableModelInvocation: true,
+        },
+      ]);
+      const hiddenAwareTool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+      const executor = vi.fn().mockResolvedValue('MCP prompt body');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        name: 'mcp-prompt-a',
+        description: 'Hidden file-based skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+        body: 'HIDDEN skill body must not execute',
+        disableModelInvocation: true,
+      });
+
+      const invocation = (
+        hiddenAwareTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
+      expect(partToString(result.llmContent)).toBe('MCP prompt body');
+      expect(result.returnDisplay).toBe('Delegated to command: mcp-prompt-a');
+    });
+
     it('runs the same-named MCP prompt instead of loading a disabled skill', async () => {
       // Regression: without the execute-side guard,
       // `loadSkillForRuntime` resolves the disabled skill from disk and

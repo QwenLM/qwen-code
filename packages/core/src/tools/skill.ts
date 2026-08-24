@@ -97,6 +97,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     name: string;
     description: string;
   }> = [];
+  private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
@@ -184,11 +185,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
       this.modelInvocableCommands = collected.modelInvocableCommands;
+      this.hiddenSkillNames = collected.hiddenSkillNames;
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
+      this.hiddenSkillNames = new Set();
     }
   }
 
@@ -301,6 +304,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
+      (name: string) => this.hiddenSkillNames.has(name),
     );
   }
 
@@ -363,6 +367,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
+    private readonly isSkillHidden: (name: string) => boolean = () => false,
   ) {
     super(params);
   }
@@ -405,6 +410,33 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (this.isSkillHidden(this.params.skill)) {
+      if (this.commandExecutor) {
+        try {
+          const content = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
+          if (content && typeof content === 'object' && 'error' in content) {
+            return {
+              llmContent: content.error,
+              returnDisplay: content.error,
+            };
+          }
+          if (typeof content === 'string') {
+            return {
+              llmContent: [{ text: content }],
+              returnDisplay: `Delegated to command: ${this.params.skill}`,
+            };
+          }
+        } catch {
+          // Fall through to the generic not-found message.
+        }
+      }
+      const msg = `Skill "${this.params.skill}" not found.`;
+      return { llmContent: msg, returnDisplay: msg };
+    }
+
     // Disabled-skill guard. Mirrors validateToolParams's commandExists →
     // disabled ordering at the execution layer: when a skill is disabled
     // but a same-named non-skill command (MCP prompt, file command)
