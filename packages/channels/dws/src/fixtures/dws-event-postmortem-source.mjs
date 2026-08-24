@@ -8,7 +8,7 @@ import process from 'node:process';
 
 process.stderr.write('[event] ready\n');
 process.stdout.write('{"sequence":1}\n');
-setTimeout(() => {
+globalThis.setTimeout(() => {
   process.stdout.write('{"sequence":2}\n');
   process.stderr.write(
     '{"message":"subscription denied","retryable":false}\n',
