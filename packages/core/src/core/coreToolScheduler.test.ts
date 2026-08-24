@@ -3547,6 +3547,7 @@ describe('CoreToolScheduler', () => {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
       isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -3581,6 +3582,64 @@ describe('CoreToolScheduler', () => {
       expect(message).toContain(ToolNames.SEND_MESSAGE);
       expect(message).not.toContain('declined');
       expect(message).not.toContain('deny rule');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy declined message when a covered tool is rejected by another gate under an active allowlist (#9827)', async () => {
+    // While the allowlist is active, a COVERED tool can still fail
+    // isToolEnabled through a different gate — the witness is the legacy
+    // coreTools allowlist (`allow: ['Edit']` + `coreTools: ['read_file']`:
+    // `edit` passes the allowlist gate but fails the coreTools check).
+    // There "not covered by any permissions.allow rule" is factually wrong
+    // and its remediation a no-op, so the message must fall back to the
+    // generic declined one instead of citing the allowlist.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'covered-other-gate',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-covered-other-gate',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "edit", but that permission was declined.',
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).not.toContain('permissions.allow');
     }
     expect(execute).not.toHaveBeenCalled();
   });
