@@ -530,6 +530,19 @@ function auditPrWrites(target: string, prNumber: string): void {
  * NOT hold the target-scoped worktree lease: the sweep is host-wide, and
  * an unrelated review's orphan would otherwise wedge this review's lease
  * with nothing connecting the two in the output.
+ *
+ * The orphan test is NAME plus a dead launcher pid, and that is sound only
+ * for the model capture-tui states (see its header): absent an active
+ * same-uid adversary, nothing but a crashed capture leaves a capture-named
+ * socket whose launcher pid is dead. A same-uid process that RENAMES a live
+ * foreign socket into a capture-shaped name with a chosen-dead pid defeats
+ * it — the entry is then a plain socket indistinguishable from a real
+ * orphan by every signal a name-addressed sweep can read, and no signal it
+ * could add is out of that adversary's reach (an on-disk pid record is
+ * same-uid writable; a live server's shape is same-uid craftable). That is
+ * the stated non-goal, hardened in #9274, not a defect this sweep can close
+ * from here. The type guard below rejects the redirections that arise
+ * WITHOUT such a rename; it does not pretend to more.
  */
 function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const uid = process.getuid?.();
@@ -621,10 +634,23 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     // inode-addressed, so the kill lands on the foreign server race-free
     // (measured on Linux) — and any non-socket entry. A tmux-created
     // socket has exactly one link, so nlink > 1 is never an orphan. A
-    // gone entry is nothing to reap. The rename race between this lstat
-    // and tmux's connect() after the fork+exec has no portable close —
-    // the post-kill identity re-check below makes a won swap loud
-    // instead of printing "Reaped".
+    // gone entry is nothing to reap.
+    //
+    // What these checks do NOT catch, and cannot: a same-uid process that
+    // RENAMEs a live foreign socket into a capture-shaped name BEFORE the
+    // scan. The result is a plain socket, one link, sitting stably at the
+    // name — nothing here distinguishes it from a real orphan, and nothing
+    // could, because every identity signal is within that adversary's
+    // reach (an on-disk server-pid record is same-uid writable; the
+    // answering server's own shape is same-uid craftable). This is the
+    // active-same-uid boundary capture-tui's header states as a non-goal
+    // (#9274), not a hole these type checks leak: they close the
+    // redirections that need no rename, which is all a name-addressed
+    // sweep can close. The post-kill re-check below is for the narrower
+    // TOCTOU where a swap WINS the race between this lstat and tmux's
+    // connect() after the fork+exec — a rename already in place at scan
+    // time changes nothing between the two reads, so that re-check is
+    // silent on it by design, not by oversight.
     let entryStat: Stats;
     try {
       entryStat = lstatSync(join(dir, name));
