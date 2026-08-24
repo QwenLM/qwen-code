@@ -1675,6 +1675,7 @@ describe('useGeminiStream', () => {
         rerenderWithToolCalls: utils.rerenderWithToolCalls,
         leaderCallback,
         completeToolRound: utils.completeToolRound,
+        client,
       };
     }
 
@@ -1882,12 +1883,18 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    it('does not re-send the journaled envelope when retrying an accepted-then-failed round (Ctrl+Y)', async () => {
-      // Regression pin: the accept branch journals the delivery but must
-      // ALSO strip the envelope parts from the stored retry payload —
-      // otherwise Ctrl+Y resubmits an already-delivered envelope verbatim
-      // (the leader sees the identical report twice while the journal
-      // records one delivery).
+    it('re-attaches the journaled envelope when retrying an accepted round that failed terminally before content (Ctrl+Y)', async () => {
+      // Regression pin for the accepted-then-failed-BEFORE-content corner:
+      // the accept branch strips the envelope parts from the stored retry
+      // payload (the push put them in the session history), but the round
+      // can still fail terminally before any content (a 503 after
+      // exhausted retries — the exact shape modeled below). The pushed
+      // entry is then the trailing orphan the Retry path pops before
+      // re-pushing the payload, and a landing push suppresses the
+      // restore. A payload still missing the envelope would silently lose
+      // it while the delivery journal claims delivered — so the retry
+      // must re-attach it, leaving exactly one envelope copy after the
+      // pop+push replacement.
       const recordNotification = vi.fn();
       mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
         recordThought: vi.fn(),
@@ -1904,6 +1911,7 @@ describe('useGeminiStream', () => {
         rerenderWithToolCalls,
         leaderCallback,
         completeToolRound,
+        client,
       } = renderBusyMultiRoundTask([createExecutingToolCall()]);
 
       act(() => {
@@ -1955,9 +1963,120 @@ describe('useGeminiStream', () => {
       });
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
 
-      // Ctrl+Y retry of the failed round: the payload must be the
-      // tool-response parts only — the envelope is already in the session
-      // history from the accepted push.
+      // The accepted push landed but the round produced no content, so
+      // the session history ends with the pushed entry as a trailing
+      // orphan — exactly the entry the Retry path pops.
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'run_shell_command', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            ...completed.response.responseParts,
+            { text: teammateModelText },
+          ],
+        },
+      ]);
+
+      // Ctrl+Y retry of the failed round: the payload must carry the
+      // envelope again — the orphan pop drops the only history copy, so
+      // the re-pushed payload is the replacement that keeps exactly one.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual([
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+      ]);
+      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      // Still exactly one journaled delivery.
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+    });
+
+    it('still strips the journaled envelope when retrying an accepted round that failed after content (Ctrl+Y)', async () => {
+      // Paired pin: when the accepted round produced content before
+      // failing, its entry is NOT a trailing orphan — the Retry path pops
+      // nothing, so the payload must stay stripped or the leader would see
+      // the identical report twice.
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+        client,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The round streams content first, then fails terminally — the
+      // shim accepted after the first event either way.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // Content landed after the pushed entry, so it is not a trailing
+      // orphan and the Retry path pops nothing.
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            ...completed.response.responseParts,
+            { text: teammateModelText },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'partial answer' }] },
+      ]);
+
+      // Ctrl+Y retry: tool-response parts only — re-sending the envelope
+      // would hand the leader the identical report twice.
       await act(async () => {
         await result.current.retryLastPrompt();
       });
@@ -1970,7 +2089,6 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
         expect.objectContaining({ type: SendMessageType.Retry }),
       );
-      // Still exactly one journaled delivery.
       expect(recordNotification).toHaveBeenCalledTimes(1);
     });
 

@@ -737,6 +737,16 @@ export const useGeminiStream = (
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
+  // Envelope parts stripped from `lastPromptRef` when their drained
+  // teammate batch was ACCEPTED (the push landed, so the envelopes are in
+  // the session history and a retry must not re-send them). The debt is
+  // re-attached in `retryLastPrompt` when — and only when — the pushed
+  // entry is a trailing orphan at retry time, i.e. the accepted round
+  // failed terminally BEFORE producing content: the Retry path pops that
+  // orphan entry before re-pushing the stored payload, so a payload still
+  // missing its envelopes would silently lose them while the delivery
+  // journal claims delivered. Evaluated and cleared on every retry.
+  const boundaryEnvelopeRetryDebtRef = useRef<Part[][]>([]);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -4211,6 +4221,85 @@ export const useGeminiStream = (
   );
 
   /**
+   * Re-attach accepted-boundary envelope parts to a Ctrl+Y retry payload
+   * when the history entry carrying them is about to be popped by the
+   * Retry path.
+   *
+   * Settlement stripped those parts from `lastPromptRef` on accept because
+   * the push put them in the session history. But an accepted round can
+   * still fail terminally BEFORE producing content (e.g. a 503 after
+   * exhausted retries), leaving the pushed entry as a trailing orphan that
+   * `sendMessageStream` pops for a Retry before re-pushing the stored
+   * payload — and a landing push suppresses `restoreStrippedRetryEntries`.
+   * Re-sending the payload without the envelopes would then silently lose
+   * them while the delivery journal claims delivered.
+   *
+   * Mirror the pop's walk (`GeminiChat.stripOrphanedUserEntriesFromHistory`):
+   * trailing user entries, stopping at the first model entry or a *pure*
+   * system-reminder entry (which the pop preserves). A debt batch is
+   * re-appended only when every one of its parts appears in that region —
+   * exactly the case where the pop is about to drop it. If the accepted
+   * round produced content instead, the entry is not a trailing orphan,
+   * nothing matches, and the payload stays stripped so the leader does not
+   * see the same report twice.
+   */
+  const reattachOrphanedRetryEnvelopes = useCallback(
+    (query: PartListUnion): PartListUnion => {
+      const debt = boundaryEnvelopeRetryDebtRef.current;
+      boundaryEnvelopeRetryDebtRef.current = [];
+      if (debt.length === 0 || !Array.isArray(query)) {
+        return query;
+      }
+      const orphanedTexts = new Set<string>();
+      try {
+        const history = geminiClient?.getHistoryShallow?.() ?? [];
+        for (let i = history.length - 1; i >= 0; i--) {
+          const entry = history[i];
+          if (!entry || entry.role !== 'user') break;
+          const parts = entry.parts ?? [];
+          // Structural-guard mirror of core's `isSystemReminderContent`:
+          // a pure system-reminder entry terminates the pop, so nothing
+          // behind it is orphaned.
+          const pureSystemReminder =
+            parts.length > 0 &&
+            parts.every(
+              (part) =>
+                typeof part.text === 'string' &&
+                part.text.startsWith('<system-reminder>') &&
+                part.text.trimEnd().endsWith('</system-reminder>'),
+            );
+          if (pureSystemReminder) break;
+          for (const part of parts) {
+            if (typeof part.text === 'string') {
+              orphanedTexts.add(part.text);
+            }
+          }
+        }
+      } catch (error) {
+        // History unavailable: keep the stripped payload rather than fail
+        // the retry.
+        debugLogger.warn(
+          `Failed to scan history for orphaned teammate envelopes: ${error}`,
+        );
+        return query;
+      }
+      const reattach: Part[] = [];
+      for (const parts of debt) {
+        if (
+          parts.every(
+            (part) =>
+              typeof part.text === 'string' && orphanedTexts.has(part.text),
+          )
+        ) {
+          reattach.push(...parts);
+        }
+      }
+      return reattach.length > 0 ? [...query, ...reattach] : query;
+    },
+    [geminiClient],
+  );
+
+  /**
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
@@ -4261,8 +4350,17 @@ export const useGeminiStream = (
 
     clearRetryCountdown();
 
-    await submitQuery(lastPrompt, SendMessageType.Retry);
-  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
+    await submitQuery(
+      reattachOrphanedRetryEnvelopes(lastPrompt),
+      SendMessageType.Retry,
+    );
+  }, [
+    streamingState,
+    addItem,
+    clearRetryCountdown,
+    submitQuery,
+    reattachOrphanedRetryEnvelopes,
+  ]);
 
   const preemptGoalTurn = useCallback((reason: string) => {
     const active = activeGoalAdmissionRef.current;
@@ -5305,11 +5403,21 @@ export const useGeminiStream = (
         // or retry + Idle drain after a restore). The trailing-match guard
         // keeps this a no-op when settlement fires before `submitQuery`
         // stored the payload (cancel and preempt paths below) or after a
-        // later submission overwrote it.
-        const stripEnvelopeFromLastPrompt = () => {
+        // later submission overwrote it. One exception to "already in the
+        // session history": an accepted round can still fail terminally
+        // BEFORE any content, leaving the pushed entry as a trailing orphan
+        // that the Retry path pops before re-pushing the payload. The
+        // accept branch records the stripped parts as retry debt
+        // (`boundaryEnvelopeRetryDebtRef`) so `retryLastPrompt` re-attaches
+        // them exactly when that orphan pop would drop them.
+        //
+        // Returns true only when the trailing envelope parts were found
+        // and removed; false means `lastPromptRef` no longer holds this
+        // payload, so there is nothing to strip and no debt to record.
+        const stripEnvelopeFromLastPrompt = (): boolean => {
           const lastPrompt = lastPromptRef.current;
           if (!Array.isArray(lastPrompt)) {
-            return;
+            return false;
           }
           const cut = lastPrompt.length - entries.length;
           if (
@@ -5325,7 +5433,9 @@ export const useGeminiStream = (
             })
           ) {
             lastPromptRef.current = cut > 0 ? lastPrompt.slice(0, cut) : null;
+            return true;
           }
+          return false;
         };
         if (accepted) {
           // The envelopes are in the session history; requeueing them
@@ -5343,7 +5453,16 @@ export const useGeminiStream = (
             undefined,
             toolGoalBinding?.permit,
           );
-          stripEnvelopeFromLastPrompt();
+          const stripped = stripEnvelopeFromLastPrompt();
+          if (stripped) {
+            // See `boundaryEnvelopeRetryDebtRef`: if this accepted round
+            // still fails terminally before any content, the pushed entry
+            // becomes the trailing orphan the Retry path pops, and the
+            // stripped payload alone would lose these envelopes.
+            boundaryEnvelopeRetryDebtRef.current.push(
+              entries.map((entry) => ({ text: entry.modelText })),
+            );
+          }
           return;
         }
         // The submission never reached the model (cancelled/preempted
