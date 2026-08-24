@@ -943,7 +943,17 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
-          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
+          # Truncate the runner command files on the way out, success or
+          # failure: the agent below runs no-sandbox and can append to
+          # $GITHUB_PATH / $GITHUB_ENV, and the runner PREPENDS the path
+          # file for every later step (resolving the step's own shell
+          # through it) — a planted shim `find`/`cp`/`rm` would own the
+          # stage step's guards, and a planted env var would ride every
+          # later step. Nothing after this step needs anything appended
+          # here: later steps use base-PATH tools only (gh/git/find), the
+          # capture-tools prepend is consumed inside this step, and the
+          # workflow never writes GITHUB_ENV intentionally.
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; : > "$GITHUB_PATH" 2>/dev/null || true; : > "$GITHUB_ENV" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1862,7 +1872,10 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
         run: |-
           set -uo pipefail
-          STAGE="${RUNNER_TEMP:?}/qwen-review-upload"
+          # Runner-context interpolation, not the env var: the value is
+          # resolved from RunnerContext, which nothing the agent writes
+          # (GITHUB_ENV, GITHUB_PATH) can reshape on any runner version.
+          STAGE='${{ runner.temp }}/qwen-review-upload'
           # Wipe BEFORE the guard: the upload step runs unconditionally
           # (`if: always()`) and reads this exact directory, and on this
           # persistent pool the previous job's successful stage still

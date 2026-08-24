@@ -95,17 +95,54 @@ const findingsTemplate = 'qwen-review-{target}-findings.json';
 const findingsName = findingsTemplate.replace('{target}', 'pr-42');
 
 const bashAvailable = spawnSync('bash', ['--version']).status === 0;
+// The fixture-driven tests create filenames only the POSIX lanes allow
+// (LF, `:`) and symlinks — both un-creatable on the Windows lane, where
+// this suite still runs (the Windows runner image puts Git Bash on PATH,
+// so `bashAvailable` alone does not gate them out). Gate on the CAPABILITY,
+// not the platform: the production step is Linux-only, so the tests probe
+// what they need instead of naming an OS.
+const newlineNamesWork = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'probe-nl-'));
+  try {
+    writeFileSync(join(d, 'a\nb'), '');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+})();
+const symlinksWork = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'probe-sl-'));
+  try {
+    const target = join(d, 't');
+    writeFileSync(target, '');
+    symlinkSync(target, join(d, 'l'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+})();
 /** Run the stage step's extracted script against a fixture tree. */
 const runStageStep = (cwd, runnerTemp, prNumber) =>
-  spawnSync('bash', ['-c', stageStep.run], {
-    cwd,
-    env: {
-      PATH: process.env.PATH,
-      RUNNER_TEMP: runnerTemp,
-      PR_NUMBER: prNumber,
+  spawnSync(
+    'bash',
+    // The run block spells the staging dir with the runner CONTEXT, so the
+    // extracted script needs the expression bound before bash can run it —
+    // the same value the runner would interpolate from RunnerContext.
+    ['-c', stageStep.run.replaceAll('${{ runner.temp }}', runnerTemp)],
+    {
+      cwd,
+      env: {
+        PATH: process.env.PATH,
+        RUNNER_TEMP: runnerTemp,
+        PR_NUMBER: prNumber,
+      },
+      encoding: 'utf8',
     },
-    encoding: 'utf8',
-  });
+  );
 
 describe('review artifact upload — naming contract', () => {
   it('extracts the stage patterns from the workflow', () => {
@@ -188,7 +225,7 @@ describe('review artifact upload — naming contract', () => {
     // the tree. Compare the extracted names — a substring check ships
     // green when one side is renamed to a SUPERSTRING of the other.
     const stageDirName =
-      stageBlock.match(/STAGE="\$\{RUNNER_TEMP:\?\}\/([^"/]+)"/)?.[1] ?? '';
+      stageBlock.match(/STAGE='\$\{\{ runner\.temp \}\}\/([^'"]+)'/)?.[1] ?? '';
     const uploadDirName =
       uploadBlock.match(/path: '\$\{\{ runner\.temp \}\}\/([^'"]+)\/'/)?.[1] ??
       '';
@@ -237,6 +274,20 @@ describe('review artifact upload — naming contract', () => {
     expect(stageStep.if).toBe('always()');
     expect(uploadStep.if).toBe('always()');
   });
+
+  it('keeps the runner command files truncated after the agent runs', () => {
+    // The stage step's guards all assume a trusted PATH, but the
+    // no-sandbox review agent can append to $GITHUB_PATH (prepended for
+    // every later step, shell lookup included) and $GITHUB_ENV — a shim
+    // `cp`/`rm` would own the staging guardrails outright. 'Run review'
+    // must therefore truncate both command files on its EXIT trap, the
+    // failure paths included, and nothing later may rely on an append.
+    const runStep = reviewSteps.find((s) => s.name === 'Run review');
+    expect(runStep).toBeDefined();
+    expect(runStep.run).toContain(': > "$GITHUB_PATH"');
+    expect(runStep.run).toContain(': > "$GITHUB_ENV"');
+    expect(runStep.run).toMatch(/trap '[^']*GITHUB_PATH/);
+  });
 });
 
 describe('review artifact upload — the stage step, extracted and run', () => {
@@ -265,7 +316,7 @@ describe('review artifact upload — the stage step, extracted and run', () => {
     },
   );
 
-  it.skipIf(!bashAvailable)(
+  it.skipIf(!bashAvailable || !newlineNamesWork || !symlinksWork)(
     "stages only this PR's regular files from the trusted trees",
     () => {
       const runnerTemp = mkdtempSync(join(tmpdir(), 'review-stage-temp-'));
