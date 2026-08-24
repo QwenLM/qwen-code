@@ -11,7 +11,7 @@ import type {
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 
 export { GeminiContentGenerator } from './geminiContentGenerator.js';
 
