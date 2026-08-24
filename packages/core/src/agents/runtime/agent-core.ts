@@ -54,17 +54,17 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../../utils/tool-response-finalizer.js';
+} from '../../tools/tool-response-finalizer.js';
 import {
   isToolResultBoundaryDiagnosticsEnabled,
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../../utils/tool-result-boundary-diagnostics.js';
+} from '../../tools/tool-result-boundary-diagnostics.js';
 import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
@@ -207,6 +207,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
@@ -241,7 +242,8 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
+          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
+          | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -271,6 +273,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
   ToolNames.TODO_WRITE,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
@@ -1537,7 +1540,8 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      { serverName?: unknown; serverToolName?: unknown } | undefined;
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'
