@@ -378,6 +378,31 @@ function createStreamWithChunks(
   })();
 }
 
+/**
+ * Builds a sendMessageStream mock for the #9529 session-token-limit tests:
+ * the first send streams usage metadata over the 100-token limit those tests
+ * configure (so the count lands in the session's route-scoped cache), and
+ * the second send returns an empty stream.
+ */
+function createOverLimitUsageSendStream() {
+  return vi
+    .fn()
+    .mockResolvedValueOnce(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            usageMetadata: {
+              totalTokenCount: 101,
+              promptTokenCount: 101,
+            },
+          },
+        },
+      ]),
+    )
+    .mockResolvedValueOnce(createEmptyStream());
+}
+
 /** Builds provider preparation metadata that arrives before complete arguments. */
 function createPreparationResponse(
   callId: string,
@@ -12004,22 +12029,7 @@ describe('Session', () => {
           newTokenCount: 50,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12060,22 +12070,7 @@ describe('Session', () => {
           newTokenCount: 50,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12115,22 +12110,7 @@ describe('Session', () => {
           newTokenCount: 50,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12177,22 +12157,7 @@ describe('Session', () => {
             compressionStatus: core.CompressionStatus.NOOP,
           })
           .mockRejectedValueOnce(new Error('compression rate limited'));
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12292,22 +12257,7 @@ describe('Session', () => {
           newTokenCount: 50,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(session.prompt(visionPrompt)).resolves.toEqual({
           stopReason: 'end_turn',
@@ -12344,22 +12294,7 @@ describe('Session', () => {
           newTokenCount: 50,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12536,22 +12471,7 @@ describe('Session', () => {
           newTokenCount: 0,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -12582,22 +12502,7 @@ describe('Session', () => {
             newTokenCount: 0,
             compressionStatus: core.CompressionStatus.COMPRESSED,
           });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
