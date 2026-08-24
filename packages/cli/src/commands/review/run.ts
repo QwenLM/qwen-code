@@ -209,6 +209,14 @@ const SIGNAL_EXIT_CODES: Record<string, number> = {
   SIGHUP: 129,
   SIGINT: 130,
   SIGTERM: 143,
+  // A terminal Ctrl-\\ reaches the wrapper ALONE — the review child spawns
+  // detached, outside the terminal's foreground group — so the default
+  // action kills the wrapper and nothing forwards the signal: the child
+  // burned the full timeout (and with --comment could still post after the
+  // cancellation), the exact harm the three forwards above close. 131 =
+  // 128 + SIGQUIT; test-efficacy's child-side arm covers a SIGQUIT
+  // delivered to the child directly.
+  SIGQUIT: 131,
 };
 const PARENT_SIGNALS = Object.keys(SIGNAL_EXIT_CODES) as NodeJS.Signals[];
 

@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PARSE_ARGS_REPORT } from './paths.js';
 import { DIGEST_FILE } from './stale-bundle.js';
@@ -45,6 +45,20 @@ export function isolateHostGitConfig(): {
       rmSync(home, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * The spelling a path needs inside hand-written git CONFIG text: forward
+ * slashes. On Windows `join()` builds backslash paths that git's config
+ * lexer rejects as invalid escape sequences (`fatal: bad config line`,
+ * exit 128) — the plant the fixture proves becomes an unreadable-config
+ * refusal, and a test asserting the CERTIFIED shape hard-fails (measured
+ * on git 2.47.3). Forward slashes parse and resolve on every platform.
+ * Plants written THROUGH `git config` need no help — git escapes its own
+ * output.
+ */
+export function gitConfigPath(p: string, separator: string = sep): string {
+  return p.split(separator).join('/');
 }
 
 /** Seed the report `parse-args` tees, so the effort fallback has something to read. */

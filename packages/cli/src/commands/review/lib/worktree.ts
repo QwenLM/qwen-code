@@ -634,12 +634,40 @@ function nameScreenKeys(
 
 // The destination a fetch refspec writes into, or null when it has none —
 // a refspec without a destination fetches into FETCH_HEAD alone and
-// rewrites no ref, so it cannot orphan a branch the way a destination
-// under `refs/heads/` can.
+// rewrites no ref.
 function fetchRefspecDst(value: string): string | null {
   const srcDst = value.startsWith('+') ? value.slice(1) : value;
   const sep = srcDst.indexOf(':');
   return sep === -1 ? null : srcDst.slice(sep + 1);
+}
+
+// Whether that destination fails the screen. `refs/remotes/` and
+// `refs/pull/` certify in any shape: the clone-default refspec maps into
+// the first — wildcard destination included — and PR-mirror clones carry
+// the second, so refusing either value would refuse every clone. Every
+// other destination can rewrite a ref the user owns, each shape measured
+// live certifying before this closure: a wildcard rewrites every ref under
+// a namespace, an unqualified name resolves into `refs/heads/`,
+// `refs/heads/` itself is the user's branches, `refs/tags/`,
+// `refs/notes/`, `refs/replace/` and exact `refs/stash` name the user's
+// own refs — and git resolves all of them case-insensitively, so the
+// compare is too.
+function fetchRefspecDstRefuses(dst: string): boolean {
+  const d = dst.toLowerCase();
+  if (d.startsWith('refs/remotes/') || d.startsWith('refs/pull/')) {
+    return false;
+  }
+  if (d.includes('*')) return true;
+  if (!d.startsWith('refs/')) return true;
+  if (d.startsWith('refs/heads/')) return true;
+  if (
+    d.startsWith('refs/tags/') ||
+    d.startsWith('refs/notes/') ||
+    d.startsWith('refs/replace/')
+  ) {
+    return true;
+  }
+  return d === 'refs/stash';
 }
 
 /**
@@ -689,12 +717,16 @@ function fetchRefspecDst(value: string): string | null {
  * hits refuse fail-closed, the trigger keys included (measured live through
  * all three pipeline spawn shapes). Two keys ride the screen on their own
  * terms: a planted `remote.<name>.fetch` refspec is applied beside the
- * command-line one on every fetch and a destination outside
- * `refs/remotes/` force-updates the user's own branches (measured:
- * unpushed work orphaned; a glob aimed at the checked-out branch wedges
- * every fetch), but the clone-default refspec has exactly that key in
- * every clone's local config — so it is judged by VALUE, refusing only a
- * destination under `refs/heads/`, never the key itself.
+ * command-line one on every fetch and a destination that rewrites a ref
+ * the user owns moves it (measured: unpushed work orphaned; a glob aimed
+ * at the checked-out branch wedges every fetch), but the clone-default
+ * refspec has exactly that key in every clone's local config — so it is
+ * judged by VALUE (see `fetchRefspecDstRefuses`), never by the key
+ * itself. The `url.<base>.insteadOf` / `pushInsteadOf` rewrites ride the
+ * transport refusal: one plant redirected the guarded fetches to an
+ * attacker-controlled repository while the screen certified (measured
+ * live), and a fresh pipeline clone never carries them — refusal cannot
+ * break a legitimate one, the same posture as include directives.
  */
 // A screen spawn must still END against a config that blocks in open(): a
 // FIFO planted at a candidate path — one mkfifo+rename into the never-wiped
@@ -731,13 +763,23 @@ export function localFilterRefusal(
             `git rev-parse exited ${files.status}`,
     )}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
   }
-  const lines = files.stdout.trim().split('\n');
-  // A newline in a directory component (legal in a path) splits one answer
-  // across two stdout lines: both destructured fragments misresolve, every
-  // candidate misses `existsSync`, and the screen would certify a checkout
-  // it read nothing of. Every other ambiguous state below fails closed.
-  if (lines.length !== 2) {
-    return `the repository's git directory layout could not be parsed (a repository path containing a newline), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
+  // Parse the raw stdout UNTRIMMED: a directory path legally ENDS IN
+  // WHITESPACE (`git clone --separate-git-dir '/x/sep '`), and trimming
+  // silently truncated the final answer — the config.worktree candidate
+  // misresolved, missed existsSync, and the screen certified a checkout it
+  // never read that file (measured live: a planted uploadpack executed on
+  // the authorised fetch). The shape is exactly two answers and one
+  // trailing newline; anything else — a newline inside a path component
+  // splitting one answer across lines, an answer that differs from its
+  // trimmed self — fails closed like every other ambiguous state below.
+  const lines = files.stdout.split('\n');
+  if (
+    lines.length !== 3 ||
+    lines[2] !== '' ||
+    lines[0] !== lines[0].trim() ||
+    lines[1] !== lines[1].trim()
+  ) {
+    return `the repository's git directory layout could not be parsed (a repository path containing a newline or leading/trailing whitespace), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
   }
   const [commonDir, gitDir] = lines;
   const common = resolve(worktree, commonDir);
@@ -779,6 +821,30 @@ export function localFilterRefusal(
   // loop tens of thousands of keys.
   const seen = new Set<string>();
   const unreadable: Array<{ file: string; detail: string }> = [];
+  // The checkout this screen authorises ALSO opens the common dir's
+  // info/attributes and info/exclude (and the per-worktree copies): a FIFO
+  // planted at either holds it in open() while this screen certifies —
+  // neither is a config candidate (measured live: the restore checkout
+  // blocked until externally killed). They are data, not config — the
+  // regular-file + readable gate the candidates carry is the whole screen
+  // they need, and anything else fails closed the same way.
+  for (const dir of new Set([common, resolve(worktree, gitDir)])) {
+    for (const name of ['attributes', 'exclude']) {
+      const infoFile = join(dir, 'info', name);
+      if (!existsSync(infoFile)) continue;
+      try {
+        accessSync(infoFile, constants.R_OK);
+        if (!lstatSync(infoFile).isFile()) {
+          unreadable.push({ file: infoFile, detail: 'not a regular file' });
+        }
+      } catch (e) {
+        unreadable.push({
+          file: infoFile,
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
   for (const file of candidates) {
     if (!existsSync(file)) continue;
     // An unreadable file fails the screen CLOSED, asked directly: git answers
@@ -828,11 +894,14 @@ export function localFilterRefusal(
         // promisor-configured repo fetches through whatever command these
         // name, and a plain fetch runs `core.alternateRefsCommand` against
         // every registered alternate (measured live on all three pipeline
-        // spawn shapes, and on the fetch shapes). `remote.<name>.fetch`
-        // matches here too, but only a destination under refs/heads/
-        // fails the screen — the key itself is in every clone's local
-        // config (see the value read below the candidate loop).
-        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|remote\\..+\\.promisor|core\\.sshcommand|core\\.gitproxy|core\\.askpass|credential(\\..+)?\\.helper|remote\\..+\\.uploadpack|protocol\\.(ext\\.)?allow|remote\\..+\\.fetch|core\\.alternaterefscommand)$',
+        // spawn shapes, and on the fetch shapes). The `url.<base>.insteadOf`
+        // rewrites join them: one plant redirected the guarded head/base
+        // fetches to an attacker-controlled repository while the screen
+        // certified (measured live). `remote.<name>.fetch` matches here too,
+        // but only a destination that rewrites a ref the user owns fails
+        // the screen — the key itself is in every clone's local config (see
+        // the value read below the candidate loop).
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|remote\\..+\\.promisor|core\\.sshcommand|core\\.gitproxy|core\\.askpass|credential(\\..+)?\\.helper|remote\\..+\\.uploadpack|protocol\\.(ext\\.)?allow|remote\\..+\\.fetch|core\\.alternaterefscommand|url\\..+\\.insteadof|url\\..+\\.pushinsteadof)$',
       ],
       {
         cwd: worktree,
@@ -887,20 +956,35 @@ export function localFilterRefusal(
     }
   }
   // The VALUE read for any `remote.<name>.fetch` the loop matched, asked of
-  // the same files: a destination under `refs/heads/` rewrites the user's
-  // own branches on any fetch that applies the configured refspec — a
-  // planted `+refs/heads/*:refs/heads/*` force-updated local branches and
-  // orphaned unpushed work; aimed at the checked-out branch it wedges every
-  // fetch forever (both measured live). The clone-default refspec lives
-  // under the same key in every clone and maps into `refs/remotes/`, and
+  // the same files: a destination that rewrites a ref the user owns moves
+  // it on any fetch that applies the configured refspec — a planted
+  // `+refs/heads/*:refs/heads/*` force-updated local branches and orphaned
+  // unpushed work; aimed at the checked-out branch it wedges every fetch
+  // forever; the tag, stash, unqualified and wildcard shapes each moved a
+  // user ref too (all measured live). The clone-default refspec lives under
+  // the same key in every clone and maps into `refs/remotes/`, and
   // PR-checkout mirrors (`refs/pull/*`) are ordinary in user clones, so
-  // the KEY can never refuse — only a destination under `refs/heads/`
-  // does.
+  // the KEY can never refuse — only a destination that fails
+  // `fetchRefspecDstRefuses` does.
   const refspecSeen = new Set<string>();
   for (const file of new Set(fetchRefCandidates.map((c) => c.file))) {
     const v = spawnSync(
       'git',
-      ['config', '--file', file, '--get-regexp', '^remote\\..+\\.fetch$'],
+      [
+        'config',
+        '--file',
+        file,
+        // `--null`: one NUL-terminated `key\nvalue` record per hit. A
+        // config key carries neither newline nor NUL, so the first newline
+        // ends the key whatever whitespace or colons the remote's
+        // subsection holds — the line-shape read this replaces split at the
+        // FIRST space, landed inside such a key, and judged a fabricated
+        // value (measured live: the screen certified the very refspec the
+        // judgment exists to refuse).
+        '--null',
+        '--get-regexp',
+        '^remote\\..+\\.fetch$',
+      ],
       {
         cwd: worktree,
         encoding: 'utf8',
@@ -925,17 +1009,16 @@ export function localFilterRefusal(
       });
       continue;
     }
-    for (const line of v.stdout.split('\n')) {
-      if (!line) continue;
-      // A refspec carries no whitespace, so the first space ends the key.
-      const sep = line.indexOf(' ');
-      const key = sep === -1 ? line : line.slice(0, sep);
-      const value = sep === -1 ? '' : line.slice(sep + 1);
+    for (const record of v.stdout.split('\0')) {
+      if (!record) continue;
+      const nl = record.indexOf('\n');
+      const key = nl === -1 ? record : record.slice(0, nl);
+      const value = nl === -1 ? '' : record.slice(nl + 1);
       const dst = fetchRefspecDst(value);
       const pair = `${file}\u0000${key}\u0000${value}`;
       if (
         dst !== null &&
-        dst.startsWith('refs/heads/') &&
+        fetchRefspecDstRefuses(dst) &&
         !refspecSeen.has(pair)
       ) {
         refspecSeen.add(pair);
@@ -988,7 +1071,7 @@ export function localFilterRefusal(
         fetchRefspecs,
         'fetch refspec',
       )} — a fetch that applies the configured refspec writes these ` +
-        `destinations into the user's own branches, so the screen cannot ` +
+        `destinations into refs the user owns, so the screen cannot ` +
         `certify that ${checkout} would not destroy local refs`,
     );
   }

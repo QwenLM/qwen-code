@@ -43,7 +43,7 @@ import {
   type ScratchTreeArgs,
 } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import { gitConfigPath, isolateHostGitConfig } from './lib/test-utils.js';
 
 describe('runScratchTree', () => {
   let repo: string;
@@ -150,11 +150,11 @@ describe('runScratchTree', () => {
     const behind = join(repo, 'behind-include.config');
     writeFileSync(
       behind,
-      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED-include')}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED-include'))}\n`,
     );
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[include]\n\tpath = ${behind}\n`,
+      `[include]\n\tpath = ${gitConfigPath(behind)}\n`,
     );
 
     const r = run();
@@ -176,7 +176,7 @@ describe('runScratchTree', () => {
     writeFileSync(behind, '[core]\n');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[includeIf "gitdir:/x/ defines content filter(s) /"]\n\tpath = ${behind}\n`,
+      `[includeIf "gitdir:/x/ defines content filter(s) /"]\n\tpath = ${gitConfigPath(behind)}\n`,
     );
 
     const r = run();
@@ -311,7 +311,7 @@ describe('runScratchTree', () => {
     const pwned = join(repo, 'PWNED-scratch-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
     );
 
     const first = run();
@@ -355,7 +355,7 @@ describe('runScratchTree', () => {
     });
     writeFileSync(
       scratchAdmin,
-      `[filter "planted"]\n\tsmudge = touch ${join(repo, 'planted-never-ran')}\n`,
+      `[filter "planted"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'planted-never-ran'))}\n`,
     );
 
     const r = run();
@@ -378,7 +378,7 @@ describe('runScratchTree', () => {
     ).join('\n');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `${padding}\n[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `${padding}\n[filter "evil"]\n\tsmudge = touch ${gitConfigPath(pwned)}\n`,
     );
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
     writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');

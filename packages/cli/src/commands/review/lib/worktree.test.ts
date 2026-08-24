@@ -30,7 +30,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { isolateHostGitConfig } from './test-utils.js';
+import { gitConfigPath, isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1946,11 +1946,11 @@ describe('localFilterRefusal', () => {
     const behind = join(repo, 'behind-include.config');
     writeFileSync(
       behind,
-      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
     );
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[include]\n\tpath = ${behind}\n`,
+      `[include]\n\tpath = ${gitConfigPath(behind)}\n`,
     );
 
     const r = localFilterRefusal(tree, 'the probe checkout');
@@ -1970,11 +1970,11 @@ describe('localFilterRefusal', () => {
     const behind = join(repo, 'behind-includeif.config');
     writeFileSync(
       behind,
-      `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
     );
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[includeIf "gitdir:${repo}/"]\n\tpath = ${behind}\n`,
+      `[includeIf "gitdir:${gitConfigPath(repo)}/"]\n\tpath = ${gitConfigPath(behind)}\n`,
     );
 
     const r = localFilterRefusal(tree, 'the probe checkout');
@@ -1991,7 +1991,7 @@ describe('localFilterRefusal', () => {
     // one bare key per line, so the whole line is the key.
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[filter "my lfs"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+      `[filter "my lfs"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
     );
 
     const r = localFilterRefusal(tree, 'the probe checkout');
@@ -2007,7 +2007,7 @@ describe('localFilterRefusal', () => {
     // refusal reaches the terminal and the report.
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[filter "evil\u001b[31m"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+      `[filter "evil\u001b[31m"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
     );
 
     const r = localFilterRefusal(tree, 'the probe checkout');
@@ -2084,7 +2084,7 @@ describe('localFilterRefusal', () => {
       mkdirSync(sibling, { recursive: true });
       writeFileSync(
         join(sibling, 'config.worktree'),
-        `[filter "evil"]\n\tsmudge = touch ${join(repo, 'PWNED')}\n`,
+        `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
       );
       chmodSync(admin, 0o100);
       try {
@@ -2292,6 +2292,141 @@ describe('localFilterRefusal', () => {
       // The bound, not the writer: the refusal arrives before the
       // pulses start, which would unblock an unbounded spawn.
       expect(Date.now() - started).toBeLessThan(7_500);
+    },
+  );
+
+  it('refuses a planted refspec under a remote name carrying whitespace and colons — judged on its real value', () => {
+    // The value read used to re-split `key value` lines at the FIRST
+    // space: a remote subsection legally carries whitespace and colons,
+    // the split landed inside the key, and the judgment ran on a
+    // fabricated value — certifying the very refspec it exists to refuse
+    // (measured live: `git fetch 'a b:c'` applied the planted refspec and
+    // force-updated a local branch). `--null` records end the key at the
+    // first newline, which a config key cannot carry.
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      '[remote "a b:c"]\n\tfetch = +refs/heads/*:refs/heads/*\n',
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('fetch refspec');
+    expect(r).toContain('remote.a b:c.fetch');
+  });
+
+  it.each([
+    ['a refs/stash destination', '+refs/heads/main:refs/stash'],
+    ['a refs/tags destination', '+refs/heads/main:refs/tags/v1.0'],
+    [
+      'an unqualified destination (resolves into refs/heads/)',
+      '+refs/heads/main:main',
+    ],
+    ['a wildcard destination outside remotes/pull', '+refs/*:refs/*'],
+    ['a case-folded refs/heads destination', '+refs/heads/*:refs/Heads/*'],
+  ])('refuses a planted fetch refspec with %s', (_shape, refspec) => {
+    // Bypass shapes of the old `startsWith('refs/heads/')` predicate,
+    // each measured live certifying a refspec that moved a user ref: a
+    // tag update, a forced branch update, the permanent fetch wedge, and
+    // the case-fold git resolves case-insensitively.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.evil.url', 'https://example.invalid/y');
+    g('config', 'remote.evil.fetch', refspec);
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('fetch refspec');
+    expect(r).toContain('remote.evil.fetch');
+  });
+
+  it('refuses url-rewrite keys — an insteadOf plant redirects the guarded fetches', () => {
+    // `url.<base>.insteadOf` rewrote the URL the pipeline's fetches run
+    // against: one plant in the never-wiped common dir sent the guarded
+    // head fetch to an attacker-controlled repository while the screen
+    // certified (measured live). A fresh pipeline clone never carries
+    // these keys, so refusal breaks nothing legitimate — the same posture
+    // as include directives. pushInsteadOf is the push-side twin.
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      '[url "/tmp/qwen-evil/"]\n\tinsteadOf = https://github.com/x/y\n' +
+        '\tpushInsteadOf = https://github.com/x/z\n',
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('command-execution key(s)');
+    expect(r).toContain('url./tmp/qwen-evil/.insteadof');
+    expect(r).toContain('url./tmp/qwen-evil/.pushinsteadof');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED when the git-dir path ends in whitespace — never a truncated parse',
+    () => {
+      // `stdout.trim()` silently cut the trailing whitespace off the final
+      // rev-parse answer: the config.worktree candidate misresolved,
+      // missed existsSync, and the screen certified a checkout it never
+      // read that file — the fail-open twin of the newline case (measured
+      // live: a planted uploadpack executed on the authorised fetch).
+      // `git init --separate-git-dir` legally creates such a repository;
+      // Windows forbids trailing spaces in directory names, hence the
+      // skip. Separate fixture: the shared one cannot carry the space.
+      const base = mkdtempSync(join(tmpdir(), 'qwen-filter-ws-'));
+      const wc = join(base, 'wc');
+      mkdirSync(wc, { recursive: true });
+      try {
+        execFileSync(
+          'git',
+          [
+            'init',
+            '-q',
+            '-b',
+            'main',
+            '--template=',
+            '--separate-git-dir',
+            join(base, 'sep '),
+            wc,
+          ],
+          { encoding: 'utf8' },
+        );
+
+        const r = localFilterRefusal(wc, 'the probe checkout');
+
+        expect(r).not.toBeNull();
+        expect(r).toContain('could not be parsed');
+        expect(r).toContain('the probe checkout');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED on a non-regular info/attributes or info/exclude — the checkout opens them too',
+    () => {
+      // The authorised checkout reads the common dir's info/attributes and
+      // info/exclude: a FIFO planted at either held it in open() while the
+      // screen certified — neither was a config candidate (measured live:
+      // the restore checkout blocked until externally killed). The
+      // regular-file gate the config candidates carry now covers both; a
+      // symlink to /dev/null exercises that gate without hanging the suite
+      // the way a real FIFO hangs the checkout.
+      const info = join(repo, '.git', 'info');
+      mkdirSync(info, { recursive: true });
+      // git init ships a regular info/exclude; the plant replaces it.
+      rmSync(join(info, 'exclude'), { force: true });
+      symlinkSync('/dev/null', join(info, 'attributes'));
+      symlinkSync('/dev/null', join(info, 'exclude'));
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('not a regular file');
+      expect(r).toContain(join(info, 'attributes'));
+      expect(r).toContain(join(info, 'exclude'));
+      expect(r).toContain('the probe checkout');
     },
   );
 });

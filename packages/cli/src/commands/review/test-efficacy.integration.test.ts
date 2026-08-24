@@ -35,7 +35,7 @@ import {
   splitDiffIntoHunks,
   testEfficacyCommand,
 } from './test-efficacy.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import { gitConfigPath, isolateHostGitConfig } from './lib/test-utils.js';
 
 type Handler = (args: {
   report: string;
@@ -323,7 +323,7 @@ describe('test-efficacy probe isolation (#6832)', () => {
     const pwned = join(outside, 'PWNED-create');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(pwned)}\n`,
     );
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
     writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
@@ -361,7 +361,7 @@ import path from 'node:path';
 const common = execSync('git rev-parse --path-format=absolute --git-common-dir', { encoding: 'utf8' }).trim();
 const config = path.join(common, 'config');
 if (!fs.readFileSync(config, 'utf8').includes('[filter "evil"]')) {
-  fs.appendFileSync(config, '[filter "evil"]\n\tsmudge = touch ${pwned}\n');
+  fs.appendFileSync(config, '[filter "evil"]\n\tsmudge = touch ${gitConfigPath(pwned)}\n');
 }
 fs.mkdirSync(path.join(common, 'info'), { recursive: true });
 fs.writeFileSync(path.join(common, 'info', 'attributes'), '* filter=evil\n');
@@ -508,7 +508,7 @@ process.stdout.write(JSON.stringify({
     const pwned = join(outside, 'PWNED-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
     );
 
     await runHandler({

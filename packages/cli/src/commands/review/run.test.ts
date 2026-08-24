@@ -1002,8 +1002,10 @@ describe('review run (handler)', () => {
     // The detached child sits outside the foreground group a terminal's
     // Ctrl+C signals, and a cancelled CI job sends the parent SIGTERM.
     // Without forwarding, the parent dies and the review is reparented to
-    // PID 1, burning API calls for the full timeout. Pin the registration
-    // and the 128+signum mapping so a refactor cannot silently drop them.
+    // PID 1, burning API calls for the full timeout — and a Ctrl-\\ kills
+    // ONLY the wrapper unless SIGQUIT rides the same forwarding. Pin the
+    // registration and the 128+signum mapping so a refactor cannot
+    // silently drop them.
     vi.useFakeTimers();
     const child = new FakeChild();
     spawnMock.mockImplementation(() => child);
@@ -1014,12 +1016,14 @@ describe('review run (handler)', () => {
 
     const done = runHandler({ 'timeout-minutes': 1 });
 
-    // All three signals must be registered.
+    // All four signals must be registered.
     const registered = onSpy.mock.calls
       .map(([sig]) => sig)
-      .filter((sig) => ['SIGHUP', 'SIGINT', 'SIGTERM'].includes(sig as string));
+      .filter((sig) =>
+        ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGQUIT'].includes(sig as string),
+      );
     expect(registered).toEqual(
-      expect.arrayContaining(['SIGHUP', 'SIGINT', 'SIGTERM']),
+      expect.arrayContaining(['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGQUIT']),
     );
 
     const handler = onSpy.mock.calls.find(
@@ -1028,12 +1032,14 @@ describe('review run (handler)', () => {
     handler('SIGHUP');
     handler('SIGINT');
     handler('SIGTERM');
+    handler('SIGQUIT');
 
     // The group is killed and each signal maps onto 128+signum.
     expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
     expect(exitSpy).toHaveBeenNthCalledWith(1, 129);
     expect(exitSpy).toHaveBeenNthCalledWith(2, 130);
     expect(exitSpy).toHaveBeenNthCalledWith(3, 143);
+    expect(exitSpy).toHaveBeenNthCalledWith(4, 131);
 
     // The handler cleared the timeout timer: crossing it must not fire the
     // timeout path (which would write its own stderr notice).

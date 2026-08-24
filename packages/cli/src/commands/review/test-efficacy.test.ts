@@ -2903,6 +2903,130 @@ describe('the probe tree identity gate, through runOneMutant', () => {
     }
   });
 
+  it('refuses discovery that resolves into ANOTHER repository — the round-trip is not identity', () => {
+    // A rogue repo borrowing the pipeline's object store via alternates,
+    // its admin entry fabricated to point back at this tree, its HEAD
+    // carrying the public creation sha: toplevel compare, backpointer
+    // round-trip and HEAD check all pass — while discovery resolves into
+    // the ROGUE's config and index (measured live: the certified restore
+    // rewrote a committed LF file as CRLF under the rogue's
+    // `core.autocrlf`). The pipeline records the common dir `worktree
+    // add` created the tree under; the gate requires discovery to still
+    // resolve into it.
+    const iso = isolateHostGitConfig();
+    const { host, tree, headSha } = fixture();
+    const rogue = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-idgate-rogue-')),
+    );
+    try {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          'init',
+          '-q',
+          '-b',
+          'main',
+          '--template=',
+          '.',
+        ],
+        { cwd: rogue, encoding: 'utf8' },
+      );
+      // Borrow the pipeline's object store so the creation sha resolves.
+      mkdirSync(join(rogue, '.git', 'objects', 'info'), { recursive: true });
+      writeFileSync(
+        join(rogue, '.git', 'objects', 'info', 'alternates'),
+        `${join(host, '.git', 'objects')}\n`,
+      );
+      // Fabricate the admin entry: commondir makes git treat it as a
+      // linked-worktree admin dir, the gitdir backpointer names this
+      // tree, HEAD carries the creation sha.
+      const admin = join(rogue, '.git', 'worktrees', 'x');
+      mkdirSync(admin, { recursive: true });
+      writeFileSync(join(admin, 'commondir'), '../..\n');
+      writeFileSync(join(admin, 'gitdir'), `${join(tree, '.git')}\n`);
+      writeFileSync(join(admin, 'HEAD'), `${headSha}\n`);
+      // The payload: a key the screen does not enumerate.
+      execFileSync('git', ['config', 'core.autocrlf', 'true'], {
+        cwd: rogue,
+        encoding: 'utf8',
+      });
+      // Repoint the tree's gitfile at the rogue admin entry — still a
+      // regular file, so every shape check above stays green.
+      writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+
+      const r = runOneMutant(
+        tree,
+        mutant,
+        ['a.test.ts'],
+        undefined,
+        Date.now,
+        tree,
+        headSha,
+        realpathSync(join(host, '.git')),
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain(
+        'not the repository the pipeline created it under',
+      );
+      // The refused restore never checked anything out.
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const a = 1;\n',
+      );
+    } finally {
+      iso.dispose();
+      rmSync(host, { recursive: true, force: true });
+      rmSync(rogue, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'bounds the restore checkout against a blocking surface the screen does not enumerate',
+    { timeout: 30_000 },
+    () => {
+      // The screen's regular-file gate closes info/attributes and
+      // info/exclude; `core.attributesFile` is the next surface of the
+      // same class — a config key pointing at a FIFO, opened by the
+      // checkout, invisible to the screen's candidates (measured live:
+      // the UNBOUNDED checkout blocked until externally killed). The
+      // spawn's bound turns the hang into the named error the restore
+      // reports, at the gate's timeout rather than never.
+      const { host, tree, headSha } = fixture();
+      try {
+        const fifo = join(host, 'attrs.fifo');
+        execFileSync('mkfifo', [fifo]);
+        execFileSync(
+          'git',
+          ['-C', host, 'config', 'core.attributesFile', fifo],
+          { encoding: 'utf8' },
+        );
+        const started = Date.now();
+
+        const r = runOneMutant(
+          tree,
+          mutant,
+          ['a.test.ts'],
+          undefined,
+          Date.now,
+          tree,
+          headSha,
+        );
+
+        expect(r.verdict).toBe('inconclusive');
+        expect(r.detail).toContain('ETIMEDOUT');
+        expect(Date.now() - started).toBeLessThan(7_500);
+      } finally {
+        rmSync(host, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'refuses when the gate spawn is held in a planted FIFO — bounded, not hung',
     { timeout: 30_000 },

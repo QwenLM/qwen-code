@@ -31,6 +31,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
+import { gitConfigPath } from './lib/test-utils.js';
 import type { BuildTestReport } from './build-test.js';
 
 // The race witness needs a writer landing BETWEEN the opening screen and the
@@ -146,7 +147,7 @@ describe('runBaseTree', () => {
     const pwned = join(repo, 'PWNED-base-create');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(pwned)}\n`,
     );
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
     writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
@@ -193,7 +194,7 @@ describe('runBaseTree', () => {
     const pwned = join(repo, 'PWNED-base-fsmonitor');
     appendFileSync(
       join(repo, '.git', 'config'),
-      `[core]\n\tfsmonitor = touch ${pwned}\n`,
+      `[core]\n\tfsmonitor = touch ${gitConfigPath(pwned)}\n`,
     );
 
     const r = run();
@@ -212,7 +213,7 @@ describe('runBaseTree', () => {
     seam.beforeDiscard = () => {
       appendFileSync(
         join(repo, '.git', 'config'),
-        `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+        `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(pwned)}\n`,
       );
       mkdirSync(join(repo, '.git', 'info'), { recursive: true });
       writeFileSync(
