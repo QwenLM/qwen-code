@@ -8119,6 +8119,42 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    // The leader-only property of request_shutdown is "enforced by absence":
+    // a teammate's registry never contains it, so the call cannot be formed.
+    // That only holds if the skip actually fires, which nothing asserted.
+    it('registers request_shutdown for a leader but not for a subagent', async () => {
+      const config = new Config({
+        ...baseParams,
+        agentTeamEnabled: true,
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const leaderNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(leaderNames).toContain(ToolNames.REQUEST_SHUTDOWN);
+
+      (registerToolMock as Mock).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const subagentNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(subagentNames).not.toContain(ToolNames.REQUEST_SHUTDOWN);
+      // The rest of the team surface still registers — only the leader-only
+      // control tool is withheld.
+      expect(subagentNames).toContain(ToolNames.SEND_MESSAGE);
+    });
+
     it('registers web_search when enabled with a usable env-declared backend', async () => {
       process.env['WEB_SEARCH_GATE_TEST_KEY'] = 'sk-test';
       try {

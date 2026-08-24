@@ -1690,6 +1690,7 @@ describe('extractParentToolNames', () => {
           functionDeclarations: [
             { name: ToolNames.WORKFLOW },
             { name: ToolNames.AGENT },
+            { name: ToolNames.REQUEST_SHUTDOWN },
             { name: ToolNames.READ_FILE },
           ],
         },
@@ -1698,6 +1699,9 @@ describe('extractParentToolNames', () => {
     expect(names).toEqual([ToolNames.READ_FILE]);
     expect(names).not.toContain(ToolNames.WORKFLOW);
     expect(names).not.toContain(ToolNames.AGENT);
+    // Leader-only team control: a subagent must never impersonate the
+    // leader by requesting a teammate shutdown (#9401).
+    expect(names).not.toContain(ToolNames.REQUEST_SHUTDOWN);
   });
 
   it('filters out empty and non-string declaration names', () => {

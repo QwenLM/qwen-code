@@ -8884,6 +8884,20 @@ export class Config {
         );
         return new TeamPlanApprovalTool(this);
       });
+      // Leader-only, enforced by absence. `requestShutdown` writes the target's
+      // mailbox entry as `from: LEADER_NAME`, so a teammate calling it would be
+      // impersonating the leader. Skipping registration in subagent-context
+      // registries means a teammate has no declaration for it and cannot emit
+      // the call — rather than emitting one and being rejected, which is how
+      // #9276 lost teammate reports when this was a `send_message` field.
+      if (!options?.forSubAgent) {
+        await registerLazy(ToolNames.REQUEST_SHUTDOWN, async () => {
+          const { RequestShutdownTool } = await import(
+            '../tools/request-shutdown.js'
+          );
+          return new RequestShutdownTool(this);
+        });
+      }
       await registerLazy(ToolNames.TASK_CREATE, async () => {
         const { TaskCreateTool } = await import('../tools/task-create.js');
         return new TaskCreateTool(this);
