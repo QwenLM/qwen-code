@@ -3965,6 +3965,12 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      // Aligned boundaries for the two positional turns (the strict gate
+      // refuses any divergence, zero included).
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
@@ -4002,6 +4008,10 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
         {
           promptId: 'p1',
@@ -4041,6 +4051,10 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
       mockFileHistoryService.isEnabled.mockReturnValue(true);
       const snap = (promptId: string, minutes: number) => ({
         promptId,
@@ -4070,11 +4084,14 @@ describe('Session', () => {
         [snap('snap-0', 0)],
       );
 
-      // Terminal state: 1 snapshot <-> 1 surviving turn — the next rewind
-      // is reachable again instead of failing closed forever.
+      // Terminal state: 1 snapshot <-> 1 surviving turn <-> 1 boundary —
+      // the next rewind is reachable again instead of failing closed forever.
       const truncatedHistory = history.slice(0, 2);
       vi.mocked(mockChat.getHistory).mockReturnValue(truncatedHistory);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(truncatedHistory);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+      ]);
       mockFileHistoryService.getSnapshots.mockReturnValue([snap('snap-0', 0)]);
 
       expect(session.getRewindableSnapshotTargets()).toEqual([
@@ -4102,6 +4119,9 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+      ]);
 
       const result = session.rewindToTurn(0);
 
@@ -4164,6 +4184,10 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
 
       const result = session.rewindToTurn(1);
 
@@ -4195,6 +4219,10 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
 
       expect(session.getRewindableUserTurnCount()).toBe(2);
       expect(session.rewindToTurn(1)).toEqual({
@@ -4767,6 +4795,73 @@ describe('Session', () => {
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when positional turns exist but no recording boundaries were ever pushed', () => {
+      // A session whose positional turns are ALL automatic subtypes
+      // (cron/loop, notification, goal-runtime) has full transcript data
+      // and aligned snapshots but ZERO recording boundaries — none of
+      // those subtypes pushes a turnParentUuids entry. The zero-boundary
+      // escape used to treat that as "no turn data to pair against" and
+      // let the rewind through, re-rooting the transcript chain at a
+      // null parent: success reported, and the next resume loses every
+      // surviving turn. Zero boundaries with turns present is a
+      // divergence like any other; fail closed.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'cron tick one' }] },
+        { role: 'model', parts: [{ text: 'cron reply one' }] },
+        { role: 'user', parts: [{ text: 'cron tick two' }] },
+        { role: 'model', parts: [{ text: 'cron reply two' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+      ]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
+      );
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
+      );
+      expect(() => session.rewindToPrompt('snap-1')).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+    });
+
+    it('still rewinds with zero boundaries when recording is disabled', () => {
+      // The zero-boundary escape exists for recordings that carry no turn
+      // data at all (recording disabled): there is nothing to mispair and
+      // no rewindRecording to re-root, so the rewind proceeds. Only a
+      // PRESENT recording with zero boundaries fails closed.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockConfig.getChatRecordingService).mockImplementation(
+        () => undefined as never,
+      );
+      mockFileHistoryService.isEnabled.mockReturnValue(false);
+
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
     });
 
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
@@ -35972,6 +36067,9 @@ describe('Session', () => {
         { role: 'model', parts: [{ text: 'working' }] },
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+      ]);
       session.rewindToTurn(0);
 
       mockBackgroundTaskRegistry.getAll.mockReturnValue([

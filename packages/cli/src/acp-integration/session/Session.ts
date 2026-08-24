@@ -3686,16 +3686,21 @@ export class Session implements SessionContext {
     //   turns.
     // Neither direction is recoverable from the API history alone, so fail
     // closed on ANY count mismatch instead of rewinding to a mispaired
-    // boundary. A zero-length boundary list means the recording carries no
-    // turn data to pair against (e.g. recording disabled); there is nothing
-    // to mispair, so the rewind proceeds.
+    // boundary. A zero-length boundary list with positional turns present
+    // is a mismatch too: every turn is an automatic subtype (cron/loop,
+    // notification, goal-runtime) that counts positionally but pushes no
+    // boundary, and rewindRecording would re-root the transcript chain at
+    // a null parent — the rewind reports success while the next resume
+    // loses the surviving turns. Only a missing recording (disabled —
+    // nothing to pair against or re-root) proceeds with zero boundaries.
     const recordingBoundaryCount = recording
       ? recording.getRewindableTurnPromptIds().length
       : 0;
     if (
       mode === 'legacy' &&
       legacyTurnCount !== undefined &&
-      recordingBoundaryCount > 0 &&
+      legacyTurnCount > 0 &&
+      recording !== undefined &&
       recordingBoundaryCount !== legacyTurnCount
     ) {
       throw RequestError.invalidParams(
@@ -4016,12 +4021,14 @@ export class Session implements SessionContext {
       // (automatic turns push no boundary; locally-handled slash commands
       // and hook-blocked prompts push one without a positional turn)
       // shifts every boundary lookup, so the rewind refuses every target —
-      // advertise nothing rather than mispaired slots.
-      const recordingBoundaryCount = this.config
-        .getChatRecordingService()
-        ?.getRewindableTurnPromptIds().length;
+      // advertise nothing rather than mispaired slots. Zero boundaries
+      // with turns present (an all-automatic session) diverges too; only
+      // a missing recording (disabled) is exempt.
+      const recording = this.config.getChatRecordingService();
+      const recordingBoundaryCount =
+        recording?.getRewindableTurnPromptIds().length ?? 0;
       if (
-        recordingBoundaryCount &&
+        recording !== undefined &&
         recordingBoundaryCount !== projection.turns.length
       ) {
         return [];
