@@ -16,7 +16,7 @@ import { Kind } from './tools.js';
 const mockRunForkedAgent = vi.hoisted(() => vi.fn());
 const mockTokenLimit = vi.hoisted(() => vi.fn(() => 1_000_000));
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: mockRunForkedAgent,
 }));
 

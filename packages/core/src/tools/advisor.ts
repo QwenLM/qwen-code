@@ -6,11 +6,11 @@
 
 import { readFile } from 'node:fs/promises';
 import type { Content, Part } from '@google/genai';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
