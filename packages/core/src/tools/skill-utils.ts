@@ -51,7 +51,7 @@ export interface CollectedAvailableSkills {
   /** Model-invocable commands, deduped against file-based skill names. */
   modelInvocableCommands: ReadonlyArray<{ name: string; description: string }>;
   /** File-based skills hidden from model invocation. */
-  hiddenSkillNames: Set<string>;
+  hiddenSkillNames?: Set<string>;
   /** Normalized entries, ready for `renderAvailableSkillsBlock`. */
   entries: AvailableSkillEntry[];
 }

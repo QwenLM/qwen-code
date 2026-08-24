@@ -185,7 +185,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
       this.modelInvocableCommands = collected.modelInvocableCommands;
-      this.hiddenSkillNames = collected.hiddenSkillNames;
+      this.hiddenSkillNames = collected.hiddenSkillNames ?? new Set();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
