@@ -12,11 +12,13 @@ const {
   mockShowErrorMessage,
   mockExportSessionToFile,
   mockReadFile,
+  mockStat,
 } = vi.hoisted(() => ({
   mockProcessImageAttachments: vi.fn(),
   mockShowErrorMessage: vi.fn(),
   mockExportSessionToFile: vi.fn(),
   mockReadFile: vi.fn(),
+  mockStat: vi.fn(),
 }));
 const { mockExecuteCommand } = vi.hoisted(() => ({
   mockExecuteCommand: vi.fn(),
@@ -24,7 +26,8 @@ const { mockExecuteCommand } = vi.hoisted(() => ({
 
 vi.mock('fs/promises', () => ({
   readFile: mockReadFile,
-  default: { readFile: mockReadFile },
+  stat: mockStat,
+  default: { readFile: mockReadFile, stat: mockStat },
 }));
 
 vi.mock('vscode', () => ({
@@ -92,6 +95,7 @@ vi.mock('@qwen-code/webui', () => ({
 }));
 
 import { SessionMessageHandler } from './SessionMessageHandler.js';
+import { MAX_IMAGE_SIZE } from '../../utils/imageSupport.js';
 
 describe('SessionMessageHandler', () => {
   beforeEach(() => {
@@ -106,6 +110,7 @@ describe('SessionMessageHandler', () => {
       filename: 'export.html',
       uri: { fsPath: '/workspace/export.html' },
     });
+    mockStat.mockResolvedValue({ size: 3 });
   });
 
   it('forwards the active model when opening a new chat tab', async () => {
@@ -453,6 +458,60 @@ describe('SessionMessageHandler', () => {
       },
     });
     expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips oversized context images without reading them into memory', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'inspect image',
+      displayText: 'inspect image',
+      savedImageCount: 0,
+      promptImages: [
+        {
+          path: '/workspace/huge.tiff',
+          name: 'huge.tiff',
+          mimeType: 'image/tiff',
+        },
+      ],
+    });
+    mockStat.mockResolvedValue({ size: MAX_IMAGE_SIZE + 1 });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'inspect image' },
+    });
+
+    expect(mockStat).toHaveBeenCalledWith('/workspace/huge.tiff');
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendToWebView).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'transcriptUpdate',
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({ type: 'image' }),
+          }),
+        }),
+      }),
+    );
   });
 
   it('sends image file context as prompt image blocks', async () => {

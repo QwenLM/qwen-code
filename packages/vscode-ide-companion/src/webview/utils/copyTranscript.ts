@@ -79,7 +79,9 @@ export function formatBlocksForCopyAll(
       block.kind === 'tool' ||
       block.kind === 'shell' ||
       block.kind === 'user_shell' ||
-      block.kind === 'status'
+      block.kind === 'status' ||
+      block.kind === 'error' ||
+      block.kind === 'debug'
     ) {
       const content = getBlockCopyText(block);
       if (!content) {
@@ -92,6 +94,10 @@ export function formatBlocksForCopyAll(
         parts.push(`**Status:** ${content}`);
       } else if (block.kind === 'user_shell') {
         parts.push(`**User Shell:** ${content}`);
+      } else if (block.kind === 'error') {
+        parts.push(`**Error:** ${content}`);
+      } else if (block.kind === 'debug') {
+        parts.push(`**Debug:** ${content}`);
       } else {
         parts.push(`**Shell:** ${content}`);
       }

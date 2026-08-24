@@ -13,7 +13,7 @@ import {
   getBlockCopyText,
 } from './copyTranscript.js';
 
-type TextKind = 'user' | 'assistant' | 'thought';
+type TextKind = 'user' | 'assistant' | 'thought' | 'error' | 'debug';
 
 function textBlock(kind: TextKind, id: string, text: string) {
   return {
@@ -147,6 +147,8 @@ describe('formatBlocksForCopyAll', () => {
       shellBlock('s-1', 'agent shell output'),
       userShellBlock('us-1', 'ls -la', 'user shell output'),
       statusBlock('st-1', 'Compacting context'),
+      textBlock('error', 'e-1', 'Model stream interrupted'),
+      textBlock('debug', 'd-1', 'retrying request'),
       textBlock('thought', 'th-1', 'pondering'),
       textBlock('assistant', 'a-1', 'answer'),
     ];
@@ -157,6 +159,8 @@ describe('formatBlocksForCopyAll', () => {
         '**Shell:** agent shell output',
         '**User Shell:** ls -la\nuser shell output',
         '**Status:** Compacting context',
+        '**Error:** Model stream interrupted',
+        '**Debug:** retrying request',
         '**Thinking:** pondering',
         '**Qwen Code:** answer',
       ].join('\n\n---\n\n'),

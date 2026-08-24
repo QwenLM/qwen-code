@@ -12,6 +12,7 @@ import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import {
   getDisplayableImageMimeType,
+  MAX_IMAGE_SIZE,
   type ImageAttachment,
 } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
@@ -843,6 +844,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
     imagePath: string,
   ): Promise<string | null> {
     try {
+      const { size } = await fsp.stat(imagePath);
+      if (size > MAX_IMAGE_SIZE) {
+        logger.warn(
+          '[SessionMessageHandler] Skipping oversized image for transcript echo:',
+          imagePath,
+          size,
+        );
+        return null;
+      }
       const buffer = await fsp.readFile(imagePath);
       return buffer.toString('base64');
     } catch (error) {

@@ -82,6 +82,13 @@ describe('WebViewContent', () => {
     expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
   });
 
+  it('allows the WebShell transcript to use its inlined fonts', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('font-src data:;');
+  });
+
   it('does not set data-web-shell-transcript on the body', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);

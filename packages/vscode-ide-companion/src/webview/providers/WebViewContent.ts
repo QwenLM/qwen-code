@@ -46,8 +46,9 @@ export class WebViewContent {
     const safeScriptUri = escapeHtml(scriptUri.toString());
 
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
-    // WASM at runtime, so script-src grants 'wasm-unsafe-eval'.
-    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
+    // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
+    // grants both wasm-unsafe-eval and data: fonts.
+    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="en">
