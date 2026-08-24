@@ -18,13 +18,15 @@ import { readSessionTitleInfoFromFileSync } from '../utils/sessionStorageUtils.j
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import type {
-  AttributionSnapshotPayload,
-  ChatRecord,
-  ParentSessionRecordPayload,
-  SessionSourceRecordPayload,
-  TitleSource,
-  UiTelemetryRecordPayload,
+import {
+  isValidSessionModelPayload,
+  type AttributionSnapshotPayload,
+  type ChatRecord,
+  type ParentSessionRecordPayload,
+  type SessionModelRecordPayload,
+  type SessionSourceRecordPayload,
+  type TitleSource,
+  type UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import {
   isApiHistoryCompressionCandidate,
@@ -210,6 +212,8 @@ export interface SessionRuntimeResumeState {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
+    sessionModel?: SessionModelRecordPayload;
+    lastAssistantModel?: string;
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
@@ -2148,6 +2152,20 @@ export class SessionTranscriptReader {
       index,
       (entry) => entry.type === 'system' && entry.subtype === 'session_source',
     );
+    const sessionModelUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return entry?.type === 'system' && entry.subtype === 'session_model';
+    });
+    const sessionModelSet = new Set(sessionModelUuids);
+    // The legacy-model fallback reads the last assistant record's `model`.
+    // Without an explicit selection it is only dispatched when it happens to
+    // land in the replay/model read sets, so on a resume whose tail is a
+    // chat_compression candidate the record is excluded and the fallback
+    // silently never fires.
+    const lastAssistantUuid = lastUuidMatching(
+      index,
+      (entry) => entry.type === 'assistant',
+    );
     const uiTelemetrySet = new Set(
       index.runtimeUuids.filter((uuid) => {
         const entry = index.byUuid.get(uuid);
@@ -2177,9 +2195,12 @@ export class SessionTranscriptReader {
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
-      [parentSessionUuid, sessionSourceUuid].filter(
-        (uuid): uuid is string => uuid !== undefined,
-      ),
+      [
+        parentSessionUuid,
+        sessionSourceUuid,
+        ...sessionModelUuids,
+        lastAssistantUuid,
+      ].filter((uuid): uuid is string => uuid !== undefined),
     );
     const apiHistory = new SessionApiHistoryAccumulator();
     const resumeTokenCounts = new ResumeTokenCountsAccumulator();
@@ -2201,6 +2222,8 @@ export class SessionTranscriptReader {
     let parentSessionId: string | undefined;
     let sourceType: string | undefined;
     let sourceId: string | undefined;
+    let sessionModel: SessionModelRecordPayload | undefined;
+    let lastAssistantModel: string | undefined;
     let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
     let goalCheckpointAccumulator:
@@ -2235,6 +2258,17 @@ export class SessionTranscriptReader {
           | undefined;
         sourceType = payload?.sourceType;
         sourceId = payload?.sourceId;
+      } else if (sessionModelSet.has(record.uuid)) {
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          sessionModel = record.systemPayload;
+        }
+      }
+      if (
+        record.type === 'assistant' &&
+        typeof record.model === 'string' &&
+        record.model.trim()
+      ) {
+        lastAssistantModel = record.model;
       }
       if (fileHistorySet.has(record.uuid)) {
         try {
@@ -2484,6 +2518,8 @@ export class SessionTranscriptReader {
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(sourceId !== undefined ? { sourceId } : {}),
+        ...(sessionModel !== undefined ? { sessionModel } : {}),
+        ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
       },
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }

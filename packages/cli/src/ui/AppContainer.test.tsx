@@ -185,7 +185,7 @@ vi.mock('../services/prompt-stash.js');
 
 // Mock external utilities
 vi.mock('../utils/events.js');
-vi.mock('../utils/handleAutoUpdate.js');
+vi.mock('./handleAutoUpdate.js');
 vi.mock('../utils/cleanup.js');
 
 const mockLoadHierarchicalGeminiMemory = vi.hoisted(() => vi.fn());

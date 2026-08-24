@@ -107,6 +107,7 @@ export const CLIMcpServerConfigSchema = z.object({
   tcp: z.string().optional(),
   // Common
   timeout: z.number().optional(),
+  versionNegotiation: z.enum(['auto', 'legacy']).optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),

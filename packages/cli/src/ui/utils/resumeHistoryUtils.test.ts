@@ -55,6 +55,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -155,6 +156,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -181,12 +183,14 @@ describe('resumeHistoryUtils', () => {
       ...goal,
       turnCount: 1,
       activeTimeMs: 10,
+      tokensUsed: 0,
       updatedAt: 2,
     };
     const rejected = {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 20,
+      tokensUsed: 0,
       updatedAt: 3,
     };
     const checkpointed = {
@@ -205,6 +209,7 @@ describe('resumeHistoryUtils', () => {
         ],
       },
       activeTimeMs: 30,
+      tokensUsed: 0,
       updatedAt: 4,
     };
     const limited = {
@@ -212,6 +217,7 @@ describe('resumeHistoryUtils', () => {
       status: 'usage_limited' as const,
       lastReason: 'provider failed',
       activeTimeMs: 40,
+      tokensUsed: 0,
       updatedAt: 5,
     };
     const conversation = {
@@ -363,6 +369,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };

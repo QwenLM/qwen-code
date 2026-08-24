@@ -230,7 +230,7 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
+export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * TODO: Align with `ToolCallConfirmationDetails`
@@ -283,6 +283,7 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];

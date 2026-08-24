@@ -123,7 +123,6 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
