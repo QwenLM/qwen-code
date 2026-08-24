@@ -624,6 +624,34 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(neither.why).toContain('`--topology minimal`');
   });
 
+  it('a minimal record names the topology only when it is the sole blocker', () => {
+    // The topology refusal's remedy is "re-run the review without it" — a
+    // remedy that cannot lift the refusal while the record ALSO fails to
+    // bind this write. Lead with the binding refusal there: a non-PR record
+    // falls through to the target-shape wording, and a PR record naming
+    // another number or repo leads with the binding mismatch — the
+    // topology refusal still fires, correctly, once the binding stops
+    // being a blocker.
+    const fileTarget = authFor('src/foo.ts --topology minimal --comment');
+    expect(fileTarget.ok).toBe(false);
+    expect(fileTarget.why).toContain('do not name a');
+    expect(fileTarget.why).not.toContain('`--topology minimal`');
+
+    const wrongPr = authFor('456 --topology minimal --comment');
+    expect(wrongPr.ok).toBe(false);
+    expect(wrongPr.why).toContain('authorise pull request #456');
+    expect(wrongPr.why).toContain('targets #123');
+    expect(wrongPr.why).not.toContain('`--topology minimal`');
+
+    const wrongRepo = authFor(
+      'https://github.com/x/y/pull/123 --topology minimal --comment',
+    );
+    expect(wrongRepo.ok).toBe(false);
+    expect(wrongRepo.why).toContain('authorise x/y');
+    expect(wrongRepo.why).toContain('targets o/r');
+    expect(wrongRepo.why).not.toContain('`--topology minimal`');
+  });
+
   it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
     // With `review.comment` on, telling the operator to re-run with
     // `--comment` misdirects: the blocker is that no recorded invocation

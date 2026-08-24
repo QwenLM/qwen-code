@@ -354,20 +354,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   }
 
   const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
-  if (!verdict.comment.effective) {
-    // The refusal must name the REAL blocker. A minimal-topology record can
-    // name its PR perfectly and still refuse here — the arm is terminal-only
-    // — so the topology is the blocker, and the target-shape wording below
-    // would send the operator to fix a target problem that does not exist.
-    if (verdict.topology === 'minimal') {
-      return {
-        ok: false,
-        why:
-          `the review arguments (${JSON.stringify(raw.trim())}) ran with ` +
-          '`--topology minimal`, which is terminal-only and cannot authorise ' +
-          'posting — re-run the review without it',
-      };
-    }
+  if (!verdict.comment.effective && verdict.topology !== 'minimal') {
     // When comment was requested — by the flag or the standing
     // `review.comment` setting — but the target is not a PR, effective is
     // false because the arguments name no pull request to bind the write to;
@@ -384,6 +371,12 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
           `(${JSON.stringify(raw.trim())})`,
     };
   }
+  // A minimal record falls through to the binding checks below: the refusal
+  // must name the REAL blocker, and the topology is it only when it is the
+  // SOLE one — "re-run the review without it" cannot lift a refusal that a
+  // non-PR target, or another PR's number, repo, or host, still holds, and
+  // leading with the topology sends the operator to re-run into the same
+  // refusal with the binding blocker still unnamed.
 
   const t = verdict.target;
   const authorisedPr =
@@ -441,6 +434,19 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
           `targets ${req.host ?? 'github.com'}`,
       };
     }
+  }
+
+  if (!verdict.comment.effective) {
+    // Minimal, and bound to this write on every axis above — the parser
+    // forced effective false, so the topology is now the sole blocker, and
+    // its remedy lifts the refusal.
+    return {
+      ok: false,
+      why:
+        `the review arguments (${JSON.stringify(raw.trim())}) ran with ` +
+        '`--topology minimal`, which is terminal-only and cannot authorise ' +
+        'posting — re-run the review without it',
+    };
   }
 
   return {

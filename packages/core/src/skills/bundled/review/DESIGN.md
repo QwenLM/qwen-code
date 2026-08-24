@@ -682,7 +682,7 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 **Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low and `--topology minimal` alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
 
 - Labeled **unverified**; no Approve/Request-changes verdict is emitted. A verdict is a claim the pipeline earns in Steps 4–5; a quick pass claims findings, not absence of findings.
-- Never posts to the PR: `--comment` forces high, and a "post comments" follow-up after a quick pass is declined.
+- Never posts to the PR: `--comment` forces high at low effort, and the parser forces `comment.effective` to false on the minimal arm (terminal-only); a "post comments" follow-up is declined in both.
 - Never consults or writes the incremental cache — otherwise a medium run's SHA would make a later high run report "No new changes since last review", silently converting a quick pass into a full-review verdict.
 - Scope handling (worktree, diff capture, chunk plan) is identical at all levels. The levels change who reads the diff and what runs afterwards, never how the diff is obtained — the base-resolution and truncation traps do not care how fast the user wants the answer.
 

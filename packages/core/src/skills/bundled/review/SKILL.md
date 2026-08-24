@@ -1028,7 +1028,7 @@ Append a follow-up tip after the verdict (high and medium effort — only a **lo
 - **PR review, zero findings** (only if `comment.effective` is false): "Tip: type `post comments` to approve this PR on GitHub."
 - **Local review, all clear** (Approve or all issues fixed): "Tip: type `commit` to commit your changes."
 
-If the user responds with "fix these issues" (local review only), use the `edit` tool to fix each remaining finding interactively based on the suggested fixes from the review — do NOT re-run Steps 1-6. This is the same work Step 6B does; when the review has a findings artifact, record the outcomes into it the same way (`review findings --outcomes`) rather than leaving the list and the tree disagreeing about what was applied.
+If the user responds with "fix these issues" (local review only), use the `edit` tool to fix each remaining finding interactively based on the suggested fixes from the review — do NOT re-run Steps 1-6. This is the same work Step 6B does; when the review has a findings artifact, record the outcomes into it the same way (`review findings --outcomes`) rather than leaving the list and the tree disagreeing about what was applied. Under `--topology minimal`, decline per Step 3M instead — the findings are unverified; point at `/review --fix`, which re-runs at medium with verified findings.
 
 If the user responds with "post comments" (or similar intent like "yes post them", "publish comments"), proceed directly to Step 7 using the findings already collected — do NOT re-run Steps 1-6. Under `--topology minimal`, decline per Step 3M instead — the findings are unverified, and the `--user-authorized` fast path would post them on the ask alone.
 
