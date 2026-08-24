@@ -5,14 +5,11 @@
  */
 
 /**
- * `PermissionMediator` — type-only interface contract for daemon
- * permission flow. **No implementation lives here.** Permission voting
- * still runs inside `BridgeClient.requestPermission`
- * (`@qwen-code/acp-bridge/bridgeClient`) and
- * `respondToPermission` (inside `createHttpAcpBridge` factory closure
- * at `@qwen-code/acp-bridge/bridge` after F1 step 3), hard-coded to
- * `first-responder`. A future change will move that code behind this
- * interface and add the other three policies.
+ * `PermissionMediator` — interface contract for daemon permission flow.
+ * `MultiClientPermissionMediator` in `permissionMediator.ts` implements
+ * the supported policies, owns pending/resolved permission state, and
+ * is wired through `BridgeClient.requestPermission` plus the
+ * `respondToPermission` route in `createHttpAcpBridge`.
  *
  * The four policies are ordered from cheapest to strongest:
  *
@@ -32,9 +29,7 @@
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `bridgeClient.ts BridgeClient.requestPermission` for the
- * current first-responder implementation; the `FIXME(stage-1.5)`
- * block above that method scoped this contract.
+ * See `permissionMediator.ts` for the production implementation.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -148,9 +143,7 @@ export type PermissionResolution =
 
 /**
  * The contract `qwen serve`'s permission route layer talks to.
- * Today there is one implementation (first-responder) wired
- * inline in `BridgeClient`; The implementation will provide all four behind
- * this surface plus pair-token authentication and an audit log.
+ * `MultiClientPermissionMediator` provides the production implementation.
  */
 export interface PermissionMediator {
   /** Active policy. May be reconfigured per session in future
