@@ -258,6 +258,24 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
+  // A heavy INTERACTION file keeps its invariant agents, even though its
+  // chunk agent is briefed for the seam only.
+  //
+  // Skipping them was tempting and wrong. The premise was that an interaction
+  // file's full-range slice is code the previous round already cleared — true
+  // only while the MERGE BASE holds still between rounds, and nothing
+  // enforces that. The anchor gate validates `--since` against head history;
+  // neither the round cache nor the posted ledger carries a base identity, so
+  // a BACKWARD base move — the author retargets the PR to an older base, an
+  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
+  // hunks no round has read, they arrive inside a heavy interaction file's
+  // full-range slice, and these three agents are the only ones that would
+  // have walked them. A clean verdict re-anchors past them for good.
+  //
+  // So the skip is off until the anchor can prove base continuity. It costs
+  // three agents on a rare shape — heavy, unchanged since the anchor, and
+  // importing something that moved — and it buys back the one direction this
+  // whole design refuses to lose in.
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
       add('invariant-a', file);

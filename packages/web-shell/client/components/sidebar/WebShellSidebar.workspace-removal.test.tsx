@@ -226,6 +226,9 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         renameSessionCatalog(workspaceCwd, sessionId, displayName);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
+      // These tests render pages straight from listWorkspaceSessions, so the
+      // store-owned pin toggle has no loaded catalog pages to patch.
+      toggleSessionPinned: vi.fn(),
     }),
     useSessionCatalogPolling: useSessionCatalogPollingSpy,
     useSessionCatalogQuery: (
@@ -1550,6 +1553,21 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('shows a native tooltip for the workspace create-group action', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    await expandWorkspace('other');
+
+    const createGroupButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Create group"]',
+    );
+    expect(createGroupButton).not.toBeNull();
+    expect(createGroupButton?.getAttribute('title')).toBe('Create group');
   });
 
   it('applies items and inlineItems consistently to locked normal, pinned, and archived rows', async () => {
