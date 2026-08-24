@@ -140,14 +140,43 @@ function getTextContent(content: unknown): string | undefined {
   return getString(content['text']);
 }
 
+// Mirrors the daemon attachment store's SUPPORTED_IMAGE_MIME_TYPES
+// (packages/acp-bridge/src/sessionAttachments.ts): the store rejects uploads
+// outside that set, and channels/base keeps no acp-bridge dependency, so the
+// set is repeated here and checked before uploading.
 const CHANNEL_IMAGE_EXTENSIONS = ['bmp', 'gif', 'jpeg', 'png', 'webp'];
 
 function channelImageName(mimeType: string, index = 0): string | undefined {
+  if (!mimeType.startsWith('image/')) {
+    return undefined;
+  }
   const extension = mimeType.slice('image/'.length);
   if (!CHANNEL_IMAGE_EXTENSIONS.includes(extension)) {
     return undefined;
   }
   return index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
+}
+
+/**
+ * Structural match for the daemon SDK's definite prompt-admission
+ * rejections: `DaemonHttpError` from the admission request itself, or
+ * `DaemonPendingPromptLimitError` raised before any request. channels/base
+ * keeps no dependency on the SDK, so match by shape; post-admission turn
+ * errors carry `_daemonTurnError` and must NOT match — by then the daemon
+ * may already have resolved the uploaded attachments.
+ */
+function isDefinitePromptAdmissionRejection(error: unknown): boolean {
+  if (!isRecord(error)) {
+    return false;
+  }
+  if (error['name'] === 'DaemonPendingPromptLimitError') {
+    return true;
+  }
+  return (
+    error['name'] === 'DaemonHttpError' &&
+    typeof error['status'] === 'number' &&
+    error['_daemonTurnError'] !== true
+  );
 }
 
 function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
@@ -440,27 +469,44 @@ export class DaemonChannelBridge
       const images = resolvePromptImages(options);
       if (this.options.sessionAttachments) {
         try {
-          for (const [index, image] of images.entries()) {
-            const name = channelImageName(image.mimeType, index);
-            if (!name) {
-              // One unrecognized subtype must not fail the whole turn;
-              // degrade by omission like the core read path.
-              process.stderr.write(
-                `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)}\n`,
+          // Fan the uploads out like the webui's attachment path: names are
+          // index-disambiguated and prompt order comes from the array order,
+          // so nothing serializes the uploads themselves.
+          const uploads = await Promise.allSettled(
+            images.map(async (image, index) => {
+              const name = channelImageName(image.mimeType, index);
+              if (!name) {
+                // One unrecognized subtype must not fail the whole turn;
+                // degrade by omission.
+                process.stderr.write(
+                  `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)}\n`,
+                );
+                return undefined;
+              }
+              const attachment = await session.uploadAttachment(
+                new Blob([Buffer.from(image.data, 'base64')], {
+                  type: image.mimeType,
+                }),
+                name,
+                image.mimeType,
+                controller.signal,
               );
-              continue;
+              const attachmentId = getString(attachment['attachmentId']);
+              if (attachmentId) uploadedAttachmentIds.push(attachmentId);
+              return attachment;
+            }),
+          );
+          const failure = uploads.find(
+            (upload): upload is PromiseRejectedResult =>
+              upload.status === 'rejected',
+          );
+          if (failure) {
+            throw failure.reason;
+          }
+          for (const upload of uploads) {
+            if (upload.status === 'fulfilled' && upload.value) {
+              prompt.push(upload.value);
             }
-            const attachment = await session.uploadAttachment(
-              new Blob([Buffer.from(image.data, 'base64')], {
-                type: image.mimeType,
-              }),
-              name,
-              image.mimeType,
-              controller.signal,
-            );
-            prompt.push(attachment);
-            const attachmentId = getString(attachment['attachmentId']);
-            if (attachmentId) uploadedAttachmentIds.push(attachmentId);
           }
         } catch (error) {
           rollbackUploadedAttachments = true;
@@ -482,25 +528,36 @@ export class DaemonChannelBridge
       // prompts without display text still need the classification.
       const promptAuthorization = this.options.promptAuthorization;
 
-      const result = await session.prompt(
-        {
-          prompt,
-          _meta: {
-            [CHANNEL_PROMPT_META_KEY]: true,
-            ...(promptAuthorization
-              ? {
-                  [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization,
-                }
-              : {}),
-            ...(options?.displayText !== undefined
-              ? {
-                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
-                }
-              : {}),
+      let result: { stopReason?: string; [key: string]: unknown };
+      try {
+        result = await session.prompt(
+          {
+            prompt,
+            _meta: {
+              [CHANNEL_PROMPT_META_KEY]: true,
+              ...(promptAuthorization
+                ? {
+                    [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]:
+                      promptAuthorization,
+                  }
+                : {}),
+              ...(options?.displayText !== undefined
+                ? {
+                    [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                  }
+                : {}),
+            },
           },
-        },
-        controller.signal,
-      );
+          controller.signal,
+        );
+      } catch (error) {
+        // Roll back only when the turn was never admitted; once admitted the
+        // daemon may already have resolved the uploads.
+        if (isDefinitePromptAdmissionRejection(error)) {
+          rollbackUploadedAttachments = true;
+        }
+        throw error;
+      }
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.
@@ -530,11 +587,22 @@ export class DaemonChannelBridge
         this.activePromptControllers.delete(sessionId);
       }
       if (rollbackUploadedAttachments) {
-        await Promise.allSettled(
+        const removals = await Promise.allSettled(
           uploadedAttachmentIds.map((attachmentId) =>
             session.removeAttachment(attachmentId),
           ),
         );
+        for (const removal of removals) {
+          if (removal.status === 'rejected') {
+            const reason =
+              removal.reason instanceof Error
+                ? removal.reason.message
+                : String(removal.reason);
+            process.stderr.write(
+              `[DaemonChannelBridge] failed to remove channel image during rollback: ${sanitizeLogText(reason, 256)}\n`,
+            );
+          }
+        }
       }
     }
   }

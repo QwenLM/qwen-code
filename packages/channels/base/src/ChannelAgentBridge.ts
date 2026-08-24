@@ -126,7 +126,9 @@ export interface ChannelAgentBridgePromptOptions {
  * single-image pair, and normalizes MIME types in one place: channel
  * adapters forward CDN `content-type` headers verbatim, so values arrive
  * with parameters and mixed case (e.g. `image/png; charset=binary`), and
- * the non-standard `image/jpg` alias rides them too.
+ * the non-standard `image/jpg` alias rides them too. Entries missing
+ * `data` or `mimeType` are dropped so one malformed attachment degrades
+ * to a prompt without that image, like the legacy field guards did.
  */
 export function resolvePromptImages(
   options?: ChannelAgentBridgePromptOptions,
@@ -137,14 +139,24 @@ export function resolvePromptImages(
       : options?.imageBase64 && options.imageMimeType
         ? [{ data: options.imageBase64, mimeType: options.imageMimeType }]
         : [];
-  return images.map((image) => {
-    const cleaned = image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-    return {
-      data: image.data,
-      // Normalize the alias like the daemon attachment store's own naming.
-      mimeType: cleaned === 'image/jpg' ? 'image/jpeg' : cleaned,
-    };
-  });
+  return images
+    .filter(
+      (image) =>
+        !!image &&
+        typeof image.data === 'string' &&
+        image.data.length > 0 &&
+        typeof image.mimeType === 'string' &&
+        image.mimeType.length > 0,
+    )
+    .map((image) => {
+      const cleaned =
+        image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+      return {
+        data: image.data,
+        // Normalize the alias like the daemon attachment store's own naming.
+        mimeType: cleaned === 'image/jpg' ? 'image/jpeg' : cleaned,
+      };
+    });
 }
 
 export interface ChannelAgentBridge {
