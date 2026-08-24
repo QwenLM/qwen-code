@@ -5,6 +5,7 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   artifactKindLabel,
   downloadWorkspaceFile,
+  getArtifactFreshnessKey,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   getReviewDownloadMimeType,
@@ -18,6 +19,23 @@ import {
 describe('artifactUtils', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('builds a preview freshness key from status, updatedAt, and content hash', () => {
+    expect(
+      getArtifactFreshnessKey({
+        status: 'changed',
+        updatedAt: '2026-08-24T00:00:00.000Z',
+        metadata: { 'qwen.workspace.sha256': 'abc' },
+      }),
+    ).toBe('changed:2026-08-24T00:00:00.000Z:abc');
+    expect(
+      getArtifactFreshnessKey({
+        status: 'available',
+        updatedAt: '2026-08-24T00:00:01.000Z',
+        metadata: { 'qwen.published.sha256': 'def' },
+      }),
+    ).toBe('available:2026-08-24T00:00:01.000Z:def');
   });
 
   it('labels office documents from path or kind', () => {

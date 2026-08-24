@@ -13,6 +13,7 @@ import {
   isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
+  isAdoptableContentFingerprintKey,
   isReservedWorkspaceMetadataKey,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
@@ -22,6 +23,7 @@ import {
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
+  WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY,
 } from '@qwen-code/qwen-code-core';
 import type {
   PersistedSessionArtifact,
@@ -422,7 +424,7 @@ export class SessionArtifactStore {
               const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
-                artifact: toPublicArtifact(existing),
+                artifact: toRemovedPublicArtifact(existing),
                 reason: 'explicit',
                 durableTombstoneRequired:
                   existing.durableTombstoneRequired ||
@@ -435,7 +437,7 @@ export class SessionArtifactStore {
               changes.push({
                 action: 'removed',
                 artifactId: existing.id,
-                artifact: toPublicArtifact(existing),
+                artifact: toRemovedPublicArtifact(existing),
                 reason: 'unpin_to_ephemeral',
                 durableTombstoneRequired: true,
               });
@@ -612,10 +614,11 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
+      const removedAt = new Date().toISOString();
       const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
-        artifact: toPublicArtifact(existing),
+        artifact: toRemovedPublicArtifact(existing, removedAt),
         reason: 'explicit',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
@@ -1701,27 +1704,36 @@ export class SessionArtifactStore {
     if (!artifact.workspacePath) {
       return;
     }
+    const previousStatus = artifact.status;
+    const previousSizeBytes = artifact.sizeBytes;
     try {
       const status = await getWorkspaceStatus(
         artifact.workspacePath,
         this.getRealWorkspaceCwd(),
         {
-          sizeBytes: artifact.sizeBytes,
+          sizeBytes: recordedWorkspaceSizeBytes(artifact),
           mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
           sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
         },
       );
-      const changed = isWorkspaceContentChanged(artifact, status);
-      artifact.status = changed ? 'changed' : status.status;
-      if (!changed) {
-        artifact.sizeBytes = status.sizeBytes;
-      }
+      const contentChanged = isWorkspaceContentChanged(artifact, status);
+      artifact.status = contentChanged ? 'changed' : status.status;
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
         artifact.hideWorkspacePath = true;
+      } else if (status.status === 'missing') {
+        artifact.sizeBytes = undefined;
+      } else if (status.sizeBytes !== undefined) {
+        artifact.sizeBytes = status.sizeBytes;
       }
       artifact.lastStatAt = options.now ?? Date.now();
+      if (
+        artifact.status !== previousStatus ||
+        artifact.sizeBytes !== previousSizeBytes
+      ) {
+        artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
+      }
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=status_refresh_failed artifactId=${artifact.id} reason=${JSON.stringify(
@@ -1732,6 +1744,9 @@ export class SessionArtifactStore {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
         artifact.lastStatAt = options.now ?? Date.now();
+        if (previousStatus !== 'missing' || previousSizeBytes !== undefined) {
+          artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
+        }
       }
       return;
     }
@@ -1798,7 +1813,7 @@ export class SessionArtifactStore {
       removed.push({
         action: 'removed',
         artifactId: artifact.id,
-        artifact: toPublicArtifact(artifact),
+        artifact: toRemovedPublicArtifact(artifact),
         durableTombstoneRequired: artifact.durableTombstoneRequired,
         reason: 'eviction',
       });
@@ -2167,11 +2182,7 @@ function mergeMetadata(
   const merged = { ...(existing.metadata ?? {}) };
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
-    if (
-      (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-        key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) &&
-      merged[key] !== value
-    ) {
+    if (isAdoptableContentFingerprintKey(key) && merged[key] !== value) {
       merged[key] = value;
       changed = true;
     } else if (!Object.hasOwn(merged, key)) {
@@ -2331,6 +2342,13 @@ function toPublicArtifact(
   };
 }
 
+function toRemovedPublicArtifact(
+  artifact: StoredArtifact,
+  removedAt: string = new Date().toISOString(),
+): DaemonSessionArtifact {
+  return { ...toPublicArtifact(artifact), updatedAt: removedAt };
+}
+
 function persistedArtifactToInput(
   artifact: PersistedSessionArtifact,
 ): RestoreSessionArtifactInput {
@@ -2361,7 +2379,7 @@ function workspaceExpectedFromArtifact(
     return undefined;
   }
   return {
-    sizeBytes: artifact.sizeBytes,
+    sizeBytes: recordedWorkspaceSizeBytes(artifact),
     mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
     sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
   };
@@ -3206,6 +3224,7 @@ function withWorkspaceContentHashMetadata(
         status: DaemonSessionArtifactStatus;
         sha256?: string;
         mtimeMs?: number;
+        sizeBytes?: number;
       }
     | undefined,
 ): Record<string, string | number | boolean | null> | undefined {
@@ -3218,8 +3237,25 @@ function withWorkspaceContentHashMetadata(
     ...(workspaceStatus.mtimeMs !== undefined
       ? { [WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY]: workspaceStatus.mtimeMs }
       : {}),
+    ...(workspaceStatus.sizeBytes !== undefined
+      ? {
+          [WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY]:
+            workspaceStatus.sizeBytes,
+        }
+      : {}),
   };
   return next;
+}
+
+function recordedWorkspaceSizeBytes(
+  artifact: Pick<DaemonSessionArtifact, 'sizeBytes' | 'metadata'>,
+): number | undefined {
+  const recorded =
+    artifact.metadata?.[WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY];
+  if (typeof recorded === 'number' && Number.isFinite(recorded)) {
+    return recorded;
+  }
+  return artifact.sizeBytes;
 }
 
 function isWorkspaceContentChanged(
@@ -3235,10 +3271,11 @@ function isWorkspaceContentChanged(
   }
   const expectedSha256 =
     artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  const expectedSize = recordedWorkspaceSizeBytes(artifact);
   if (
-    artifact.sizeBytes !== undefined &&
+    expectedSize !== undefined &&
     status.sizeBytes !== undefined &&
-    status.sizeBytes !== artifact.sizeBytes
+    status.sizeBytes !== expectedSize
   ) {
     return true;
   }

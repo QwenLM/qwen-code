@@ -124,6 +124,20 @@ function pathExtension(workspacePath?: string): string {
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
 
+export function getArtifactFreshnessKey(
+  artifact: Pick<DaemonSessionArtifact, 'status' | 'updatedAt' | 'metadata'>,
+): string {
+  const workspaceHash = artifact.metadata?.['qwen.workspace.sha256'];
+  const publishedHash = artifact.metadata?.['qwen.published.sha256'];
+  const hash =
+    typeof workspaceHash === 'string'
+      ? workspaceHash
+      : typeof publishedHash === 'string'
+        ? publishedHash
+        : '';
+  return `${artifact.status}:${artifact.updatedAt}:${hash}`;
+}
+
 export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType

@@ -78,9 +78,13 @@ describe('SessionArtifactStore', () => {
       ],
     });
 
-    await expect(store.remove(artifactId!)).resolves.toMatchObject({
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    const removed = await store.remove(artifactId!);
+    expect(removed).toMatchObject({
       changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
     });
+    expect(removed.changes[0]?.artifact?.createdAt).toBe(createdAt);
+    expect(removed.changes[0]?.artifact?.updatedAt).not.toBe(createdAt);
     await expect(store.remove(artifactId!)).resolves.toMatchObject({
       changes: [],
     });
@@ -159,15 +163,52 @@ describe('SessionArtifactStore', () => {
     );
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    const recordedSha = createHash('sha256').update('hello').digest('hex');
     const changed = await store.get(artifactId);
     expect(changed).toMatchObject({ id: artifactId, status: 'changed' });
     expect(changed).toMatchObject({ sizeBytes: 5 });
+    expect(changed?.updatedAt).not.toBe(createdAt);
+    expect(changed?.metadata).toMatchObject({
+      'qwen.workspace.sha256': recordedSha,
+      'qwen.workspace.sizeBytes': 5,
+    });
 
     await fs.rm(path.join(workspace, 'report.txt'));
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const missing = await store.get(artifactId);
     expect(missing).toMatchObject({ id: artifactId, status: 'missing' });
     expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
+  it('exposes the live size after a workspace file grows without re-registering', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get-grown',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    const recordedSha = createHash('sha256').update('hello').digest('hex');
+
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello world');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const grown = await store.get(artifactId);
+
+    expect(grown).toMatchObject({
+      id: artifactId,
+      status: 'changed',
+      sizeBytes: 11,
+      metadata: {
+        'qwen.workspace.sha256': recordedSha,
+        'qwen.workspace.sizeBytes': 5,
+      },
+    });
+    expect(grown?.updatedAt).not.toBe(createdAt);
   });
 
   it('does not count injected workspace hash metadata against the user metadata limit', async () => {
@@ -210,6 +251,7 @@ describe('SessionArtifactStore', () => {
         metadata: {
           'qwen.workspace.sha256': 'a'.repeat(64),
           'qwen.workspace.mtimeMs': 123,
+          'qwen.workspace.sizeBytes': 12,
           keep: true,
         },
       },
@@ -759,6 +801,61 @@ describe('SessionArtifactStore', () => {
       },
     });
     expect((await store.list()).artifacts).toHaveLength(1);
+  });
+
+  it('updates a republished artifact when only the content hash changes', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-hash-refresh',
+      workspaceCwd: workspace,
+    });
+    const firstHash = 'a'.repeat(64);
+    const secondHash = 'b'.repeat(64);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Dashboard',
+          storage: 'published',
+          managedId: 'managed-hash',
+          url: 'https://example.com/dashboard',
+          mimeType: 'text/html',
+          sizeBytes: 20,
+          metadata: { 'qwen.published.sha256': firstHash },
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    vi.setSystemTime(new Date('2026-08-24T00:00:01.000Z'));
+
+    const republished = await store.upsertMany(
+      [
+        {
+          title: 'Dashboard',
+          storage: 'published',
+          managedId: 'managed-hash',
+          url: 'https://example.com/dashboard',
+          mimeType: 'text/html',
+          sizeBytes: 20,
+          metadata: { 'qwen.published.sha256': secondHash },
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(republished.changes).toHaveLength(1);
+    expect(republished.changes[0]).toMatchObject({
+      action: 'updated',
+      artifact: {
+        title: 'Dashboard',
+        sizeBytes: 20,
+        metadata: { 'qwen.published.sha256': secondHash },
+      },
+    });
+    expect(republished.changes[0]?.artifact?.updatedAt).not.toBe(createdAt);
+    expect(republished.changes[0]?.artifact?.createdAt).toBe(createdAt);
   });
 
   it('upgrades a workspace artifact when the artifact tool publishes the same path', async () => {
