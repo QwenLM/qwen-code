@@ -50,7 +50,6 @@ import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { parseLooseJsonObject } from '../utils/json-parsing.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -76,6 +75,26 @@ const debugLogger = createDebugLogger('FORKED_AGENT');
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseLooseJsonObject(text: string): Record<string, unknown> | null {
+  let value = text.trim();
+  if (value.startsWith('```')) {
+    value = value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  }
+  const firstStructuredChar = value.search(/[[{]/);
+  if (firstStructuredChar !== -1 && value[firstStructuredChar] === '[') {
+    return null;
+  }
+  const first = value.indexOf('{');
+  const last = value.lastIndexOf('}');
+  if (first === -1 || last <= first) return null;
+  try {
+    const parsed: unknown = JSON.parse(value.slice(first, last + 1));
+    return isObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

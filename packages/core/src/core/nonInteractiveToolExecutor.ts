@@ -34,32 +34,6 @@ export async function executeToolCall(
   options: ExecuteToolCallOptions = {},
 ): Promise<ToolCallResponseInfo> {
   return new Promise<ToolCallResponseInfo>((resolve, reject) => {
-    let settled = false;
-    const settleResolve = (value: ToolCallResponseInfo) => {
-      if (settled) return;
-      settled = true;
-      abortSignal.removeEventListener('abort', onAbort);
-      resolve(value);
-    };
-    const settleReject = (reason: unknown) => {
-      if (settled) return;
-      settled = true;
-      abortSignal.removeEventListener('abort', onAbort);
-      reject(reason);
-    };
-    const onAbort = () => {
-      settleReject(
-        abortSignal.reason instanceof Error
-          ? abortSignal.reason
-          : new Error('Operation cancelled.'),
-      );
-    };
-    abortSignal.addEventListener('abort', onAbort, { once: true });
-    if (abortSignal.aborted) {
-      onAbort();
-      return;
-    }
-
     new CoreToolScheduler({
       config,
       chatRecordingService:
@@ -71,7 +45,7 @@ export async function executeToolCall(
         if (options.onAllToolCallsComplete) {
           await options.onAllToolCallsComplete(completedToolCalls);
         }
-        settleResolve(completedToolCalls[0].response);
+        resolve(completedToolCalls[0].response);
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,
@@ -79,6 +53,6 @@ export async function executeToolCall(
       onEditorClose: () => {},
     })
       .schedule(toolCallRequest, abortSignal, options.runtimeView)
-      .catch(settleReject);
+      .catch(reject);
   });
 }
