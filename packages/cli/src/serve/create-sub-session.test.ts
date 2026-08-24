@@ -22,9 +22,10 @@ const {
   MAX_TRACKED_SPAWNED_SESSIONS,
 } = await import('./create-sub-session.js');
 
-type FakeEvent = { type: string; data: unknown };
+type FakeEvent = { v: 1; type: string; data: unknown };
 
 const chunk = (text: string): FakeEvent => ({
+  v: 1,
   type: 'session_update',
   data: { update: { sessionUpdate: 'agent_message_chunk', content: { text } } },
 });
@@ -32,10 +33,12 @@ const turnComplete = (
   promptId: string,
   stopReason = 'end_turn',
 ): FakeEvent => ({
+  v: 1,
   type: 'turn_complete',
   data: { sessionId: '', stopReason, promptId },
 });
 const turnError = (promptId: string, message: string): FakeEvent => ({
+  v: 1,
   type: 'turn_error',
   data: { sessionId: '', message, promptId },
 });
@@ -68,6 +71,7 @@ function makeFakeBridge(opts?: {
   notificationAcks?: boolean[];
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
+  callerSourceTypes?: Readonly<Record<string, string>>;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -110,6 +114,7 @@ function makeFakeBridge(opts?: {
     getSessionSummary: (sessionId: string) => ({
       sessionId,
       parentSessionId: opts?.restoredCallerParents?.[sessionId],
+      sourceType: opts?.callerSourceTypes?.[sessionId],
     }),
     spawnOrAttach: async (req: {
       workspaceCwd: string;
@@ -345,6 +350,171 @@ describe('sub-session launcher', () => {
     });
 
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
+  });
+
+  it('routes a standalone caller through the managed standalone child service', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (
+        request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+          modelServiceId?: string;
+        },
+        prompt: string,
+      ) => ({
+        session: {
+          sessionId: request.sessionId,
+          workspaceCwd: WS,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: true,
+          parentSessionPersisted: true,
+        },
+        projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+        workingDirectory: { state: 'ready' as const },
+        initialPrompt: {
+          promptId: request.promptId,
+          lastEventId: 0,
+          turn: new Promise<never>(() => {}),
+        },
+        prompt,
+      }),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(async (_sessionId, dispatch) =>
+          dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
+        ),
+      }),
+      boundWorkspace: WS,
+    });
+
+    const result = await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      model: 'model-x',
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(result).toMatchObject({
+      sessionId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      parentSessionPersisted: true,
+    });
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: result.sessionId,
+        parentSessionId: 'caller-standalone',
+        modelServiceId: 'model-x',
+        promptId: expect.any(String),
+      }),
+      'standalone child task',
+    );
+    expect(fake.spawns).toEqual([]);
+    expect(fake.relocations).toEqual([]);
+    expect(fake.prompts).toEqual([]);
+  });
+
+  it('observes recovered standalone completion with the canonical parent id', async () => {
+    const parentSessionId = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+    const canonicalParentSessionId = parentSessionId.toLowerCase();
+    const fake = makeFakeBridge({
+      callerSourceTypes: { [parentSessionId]: 'standalone' },
+      reapedParentSessionId: parentSessionId,
+    });
+    let childPromptId = '';
+    (
+      fake.bridge as unknown as {
+        subscribeEvents: AcpSessionBridge['subscribeEvents'];
+      }
+    ).subscribeEvents = async function* () {
+      yield chunk('completed');
+      yield turnComplete(childPromptId);
+    };
+    const observedSessionIds: string[] = [];
+    const ownerBridge = {
+      ...fake.bridge,
+      getSessionLastEventId: (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return 0;
+      },
+      getSessionEventEpoch: (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return 'owner-epoch';
+      },
+      enqueueBackgroundNotification: async (sessionId: string) => {
+        observedSessionIds.push(sessionId);
+        return { sessionId, accepted: true };
+      },
+      async *subscribeEvents(sessionId: string) {
+        observedSessionIds.push(sessionId);
+        yield Promise.reject(new Error('observer failed'));
+      },
+    } as unknown as AcpSessionBridge;
+    const resume = vi.fn();
+    const continueSession = vi.fn(async (_sessionId, dispatch) =>
+      dispatch({ bridge: ownerBridge } as never, canonicalParentSessionId),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt: async (request) => {
+          childPromptId = request.promptId;
+          return {
+            session: {
+              sessionId: request.sessionId,
+              workspaceCwd: WS,
+              attached: false,
+              sourceType: 'standalone',
+              sourcePersisted: true,
+              parentSessionPersisted: true,
+            },
+            projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+            workingDirectory: { state: 'ready' as const },
+            initialPrompt: {
+              promptId: request.promptId,
+              lastEventId: 0,
+              turn: new Promise<never>(() => {}),
+            },
+          };
+        },
+        resume,
+        continueSession,
+      }),
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+
+    const launched = await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      callerSessionId: parentSessionId,
+    });
+
+    await vi.waitFor(() =>
+      expect(stderrLines).toEqual([
+        expect.stringContaining('could not be observed: observer failed'),
+      ]),
+    );
+    expect(resume).toHaveBeenCalledWith(parentSessionId);
+    expect(continueSession).toHaveBeenCalledWith(
+      parentSessionId,
+      expect.any(Function),
+    );
+    expect(observedSessionIds).toEqual([
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+      canonicalParentSessionId,
+    ]);
+    expect(stderrLines[0]).toContain(launched.sessionId);
+    launcher.stop();
   });
 
   it('first-turn: accumulates chunk text until turn_complete and returns it', async () => {

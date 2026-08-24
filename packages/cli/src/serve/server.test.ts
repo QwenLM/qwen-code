@@ -1339,6 +1339,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     .toString(36)
     .slice(2)}`;
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
+  const sessionCwds = new Map<string, string>();
   const setSessionWorktreeCalls: Array<{
     sessionId: string;
     worktree: { slug: string; path: string; branch: string };
@@ -2127,6 +2128,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
+    async restoreStandaloneSession(action, req) {
+      const restoreRequest = { ...req, sourceType: 'standalone' };
+      if (action === 'load') {
+        const result = await loadImpl(restoreRequest);
+        loadCalls.push(restoreRequest);
+        return { ...result, sourceType: 'standalone' };
+      }
+      const result = await resumeImpl(restoreRequest);
+      resumeCalls.push(restoreRequest);
+      return { ...result, sourceType: 'standalone' };
+    },
     // Keep non-async so prompt admission failures can throw synchronously.
     sendPrompt(sessionId, req, signal, context) {
       promptCalls.push({
@@ -2587,8 +2599,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async changeSessionCwd(sessionId, req) {
       changeSessionCwdCalls.push({ sessionId, path: req.path });
       if (opts.changeSessionCwdImpl) {
-        return opts.changeSessionCwdImpl(sessionId, req);
+        const result = await opts.changeSessionCwdImpl(sessionId, req);
+        sessionCwds.set(sessionId, result.newCwd);
+        return result;
       }
+      sessionCwds.set(sessionId, req.path);
       return {
         sessionId,
         previousCwd: '/fake/previous',
@@ -2596,6 +2611,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         warnings: [],
       };
     },
+    getSessionCurrentCwd(sessionId) {
+      return sessionCwds.get(sessionId) ?? '/fake/current';
+    },
+    async commitManagedConversationBinding() {},
+    async releaseManagedConversationBinding() {},
     setSessionWorktree(sessionId, worktree) {
       setSessionWorktreeCalls.push({ sessionId, worktree });
     },
@@ -33924,6 +33944,39 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
+      prepareStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        created: true,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
+      inspectStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        status: 'ready' as const,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
+      ensureStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        status: 'recreated' as const,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
     } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
@@ -34731,6 +34784,203 @@ describe('Live conversation runtime lifecycle', () => {
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
       readCreationMetadataIfReadable.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('adopts a UUID legacy Conversations restore through the standalone service', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+    let restored = false;
+    const setup = setupLiveRuntime({
+      loadImpl: async (req) => {
+        restored = true;
+        return {
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          currentCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-legacy-adoption',
+          sourceType: req.sourceType,
+          state: {},
+          hasActivePrompt: false,
+        };
+      },
+      summaryImpl: (id) => {
+        if (!restored) throw new SessionNotFoundError(id);
+        return {
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-08-24T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        };
+      },
+    });
+    setup.registry.add(setup.liveRuntime);
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(sessionId);
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValue({ sourceType: 'default' });
+    try {
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        sessionId,
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: `${setup.root.canonicalRoot}/conversation-${sessionId}`,
+      });
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({
+          sessionId,
+          sourceType: 'standalone',
+          historyReplay: 'response',
+        }),
+      );
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId,
+        path: `${setup.root.canonicalRoot}/conversation-${sessionId}`,
+      });
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).not.toHaveBeenCalled();
+
+      const branchSession = vi.fn();
+      const createSideTaskSession = vi.fn();
+      setup.liveBridge.branchSession = branchSession;
+      setup.liveBridge.createSideTaskSession = createSideTaskSession;
+      const genericActions = [
+        {
+          route: 'branch',
+          body: { name: 'branch' },
+          callCount: () => branchSession.mock.calls.length,
+        },
+        {
+          route: 'side-task',
+          body: { name: 'side task' },
+          callCount: () => createSideTaskSession.mock.calls.length,
+        },
+        {
+          route: 'cd',
+          body: { path: setup.root.canonicalRoot },
+          callCount: () => setup.liveBridge.changeSessionCwdCalls.length,
+        },
+      ] as const;
+      for (const action of genericActions) {
+        const callsBefore = action.callCount();
+        const rejected = await request(setup.app)
+          .post(`/session/${sessionId}/${action.route}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(action.body);
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.code).toBe('unsupported_action');
+        expect(action.callCount()).toBe(callsBefore);
+      }
+
+      setup.conversationWorkspace.inspectStandaloneDirectory.mockResolvedValue({
+        status: 'missing',
+      });
+      const fork = await request(setup.app)
+        .post(`/session/${sessionId}/fork`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+      expect(fork.status).toBe(409);
+      expect(fork.body.code).toBe('working_directory_missing');
+      expect(setup.liveBridge.forkCalls).toHaveLength(0);
+
+      const syncLanguage = await request(setup.app)
+        .post(`/session/${sessionId}/language`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh', syncOutputLanguage: true });
+      expect(syncLanguage.status).toBe(409);
+      expect(syncLanguage.body.code).toBe('working_directory_missing');
+      expect(setup.liveBridge.setLanguageCalls).toHaveLength(0);
+
+      const userLanguageOnly = await request(setup.app)
+        .post(`/session/${sessionId}/language`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+      expect(userLanguageOnly.status).toBe(200);
+      expect(setup.liveBridge.setLanguageCalls).toHaveLength(1);
+      expect(setup.liveBridge.setLanguageCalls[0]).toMatchObject({
+        sessionId,
+        params: { language: 'zh', syncOutputLanguage: false },
+      });
+
+      const activity = setup.app.locals['conversationRuntimeActivity'] as {
+        sealAndWait(): Promise<void>;
+      };
+      await activity.sealAndWait();
+      const virtualSessionId = createVirtualSubagentSessionId(
+        sessionId,
+        'agent-1',
+      );
+      const blocked = await Promise.all([
+        request(setup.app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/mid-turn-messages`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/pending-prompts`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/turns/current`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${sessionId}/permission/request-1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ outcome: { outcome: 'cancelled' } }),
+        request(setup.app)
+          .get(`/session/${sessionId}/events`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .get(`/session/${sessionId}/subagents/agent-1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${sessionId}/subagents/agent-1/cancel`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .get(`/session/${virtualSessionId}/context`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${virtualSessionId}/supported-commands`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/heartbeat`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/detach`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+      ]);
+      for (const response of blocked) {
+        expect(response.status).toBe(503);
+        expect(response.body.code).toBe('daemon_draining');
+      }
+    } finally {
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();
