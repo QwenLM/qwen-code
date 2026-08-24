@@ -1522,6 +1522,38 @@ describe('SkillTool', () => {
   });
 
   describe('disabled-skill execute guard', () => {
+    const createHiddenSkillInvocation = async (
+      executor: ReturnType<Config['getModelInvocableCommandsExecutor']>,
+    ) => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'mcp-prompt-a',
+          description: 'Hidden file-based skill',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+          body: 'HIDDEN skill body must not execute',
+          disableModelInvocation: true,
+        },
+      ]);
+      const hiddenAwareTool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        name: 'mcp-prompt-a',
+        description: 'Hidden file-based skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/mcp-prompt-a/SKILL.md',
+        body: 'HIDDEN skill body must not execute',
+        disableModelInvocation: true,
+      });
+
+      return (
+        hiddenAwareTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+    };
+
     it('runs the same-named MCP prompt instead of loading a hidden skill', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
         {
@@ -1557,6 +1589,69 @@ describe('SkillTool', () => {
       expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
       expect(partToString(result.llmContent)).toBe('MCP prompt body');
       expect(result.returnDisplay).toBe('Delegated to command: mcp-prompt-a');
+    });
+
+    it('returns command executor errors for hidden skill command alternatives', async () => {
+      const executor = vi
+        .fn()
+        .mockResolvedValue({ error: 'MCP prompt failed' });
+      const invocation = await createHiddenSkillInvocation(executor);
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(partToString(result.llmContent)).toBe('MCP prompt failed');
+      expect(result.returnDisplay).toBe('MCP prompt failed');
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
+    });
+
+    it('falls through to not-found when hidden skill commandExecutor throws', async () => {
+      const executor = vi.fn().mockRejectedValue(new Error('MCP timeout'));
+      const invocation = await createHiddenSkillInvocation(executor);
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(partToString(result.llmContent)).toBe(
+        'Skill "mcp-prompt-a" not found.',
+      );
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
+    });
+
+    it('returns not-found when a hidden skill command alternative returns null', async () => {
+      const executor = vi.fn().mockResolvedValue(null);
+      const invocation = await createHiddenSkillInvocation(executor);
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(partToString(result.llmContent)).toBe(
+        'Skill "mcp-prompt-a" not found.',
+      );
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
+    });
+
+    it('returns not-found and records failure when no hidden skill command alternative exists', async () => {
+      const invocation = await createHiddenSkillInvocation(null);
+      invocation.setPromptId('prompt-123');
+      const result = await invocation.execute();
+
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(partToString(result.llmContent)).toBe(
+        'Skill "mcp-prompt-a" not found.',
+      );
+      expect(logSkillLaunch).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: false,
+          prompt_id: 'prompt-123',
+        }),
+      );
+      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
+        skillName: 'mcp-prompt-a',
+        success: false,
+      });
     });
 
     it('runs the same-named MCP prompt instead of loading a disabled skill', async () => {

@@ -411,7 +411,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     if (this.isSkillHidden(this.params.skill)) {
+      let hiddenCommandFallbackAttempted = false;
       if (this.commandExecutor) {
+        hiddenCommandFallbackAttempted = true;
         try {
           const content = await this.commandExecutor(
             this.params.skill,
@@ -429,9 +431,23 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
               returnDisplay: `Delegated to command: ${this.params.skill}`,
             };
           }
-        } catch {
+        } catch (error) {
+          debugLogger.warn(
+            `Hidden-skill command fallback failed for "${this.params.skill}":`,
+            error,
+          );
           // Fall through to the generic not-found message.
         }
+      }
+      logSkillLaunch(
+        this.config,
+        new SkillLaunchEvent(this.params.skill, false, this.promptId),
+      );
+      if (!hiddenCommandFallbackAttempted) {
+        recordSkillInvocation(this.config, {
+          skillName: this.params.skill,
+          success: false,
+        });
       }
       const msg = `Skill "${this.params.skill}" not found.`;
       return { llmContent: msg, returnDisplay: msg };
