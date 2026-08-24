@@ -44,7 +44,9 @@ export default defineConfig(({ command }) => ({
   ],
   build: {
     lib: {
-      entry: resolve(__dirname, 'src/index.ts'),
+      entry: {
+        index: resolve(__dirname, 'src/index.ts'),
+      },
       formats: ['es', 'cjs'],
     },
     rollupOptions: {
