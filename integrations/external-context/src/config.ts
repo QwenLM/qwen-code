@@ -7,9 +7,11 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
+import { validateProviderBaseUrl } from './http-client.js';
 import type {
   ExternalContextConfig,
   GenericHttpProviderConfig,
+  Mem0OssProviderConfig,
   Mem0ProviderConfig,
 } from './types.js';
 
@@ -22,6 +24,16 @@ const providerSchema = z.discriminatedUnion('type', [
       type: z.literal('mem0-platform-v3'),
       apiKeyEnv: z.string().regex(ENV_NAME),
       appId: z.string().trim().min(1).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('mem0'),
+      baseUrl: z.string().url(),
+      apiKeyEnv: z.string().regex(ENV_NAME),
+      userId: z.string().trim().min(1).max(256),
+      appId: z.string().trim().min(1).max(256).optional(),
+      allowInsecureHttp: z.boolean().optional(),
     })
     .strict(),
   z
@@ -114,7 +126,8 @@ export async function loadConfig(
   if (result.data.version === 1) {
     if (
       result.data.write !== undefined &&
-      result.data.provider.type !== 'mem0-platform-v3'
+      result.data.provider.type !== 'mem0-platform-v3' &&
+      result.data.provider.type !== 'mem0'
     ) {
       throw new ConfigurationError(
         'External context memory writes require a Mem0 provider.',
@@ -146,10 +159,23 @@ export async function loadConfig(
 function resolveProvider(
   provider: z.infer<typeof providerSchema>,
   env: NodeJS.ProcessEnv,
-): Mem0ProviderConfig | GenericHttpProviderConfig {
+): Mem0ProviderConfig | Mem0OssProviderConfig | GenericHttpProviderConfig {
   switch (provider.type) {
     case 'mem0-platform-v3': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
+      return { ...provider, apiKey };
+    }
+    case 'mem0': {
+      const apiKey = readCredential(env, provider.apiKeyEnv);
+      try {
+        validateProviderBaseUrl(provider.baseUrl, {
+          allowInsecureHttp: provider.allowInsecureHttp ?? false,
+        });
+      } catch (error) {
+        throw new ConfigurationError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       return { ...provider, apiKey };
     }
     case 'generic-http-search-v1': {

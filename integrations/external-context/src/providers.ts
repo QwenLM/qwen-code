@@ -15,6 +15,7 @@ import type {
   ExternalContextProvider,
   ExternalMemoryWriter,
   GenericHttpProviderConfig,
+  Mem0OssProviderConfig,
   Mem0ProviderConfig,
   ProviderConfig,
   RememberResult,
@@ -32,6 +33,8 @@ export function createProvider(
   switch (config.type) {
     case 'mem0-platform-v3':
       return new Mem0PlatformV3Adapter(config);
+    case 'mem0':
+      return new Mem0OssAdapter(config);
     case 'generic-http-search-v1':
       return new GenericHttpSearchV1Adapter(config);
     // no default
@@ -44,6 +47,8 @@ export function createMemoryWriter(
   switch (config.type) {
     case 'mem0-platform-v3':
       return new Mem0PlatformV3Adapter(config);
+    case 'mem0':
+      return new Mem0OssAdapter(config);
     case 'generic-http-search-v1':
       return undefined;
     // no default
@@ -166,6 +171,93 @@ function parseOperationId(value: unknown): string | undefined {
     : undefined;
 }
 
+export class Mem0OssAdapter
+  implements ExternalContextProvider, ExternalMemoryWriter
+{
+  private readonly baseUrl: URL;
+
+  constructor(private readonly config: Mem0OssProviderConfig) {
+    this.baseUrl = validateConfiguredBaseUrl(config.baseUrl, {
+      allowInsecureHttp: config.allowInsecureHttp,
+    });
+  }
+
+  async search(input: {
+    query: string;
+    limit: number;
+    signal: AbortSignal;
+  }): Promise<readonly ExternalContextItem[]> {
+    const filters: Record<string, string> = { user_id: this.config.userId };
+    if (this.config.appId !== undefined) {
+      filters['app_id'] = this.config.appId;
+    }
+    const response = await postJson({
+      url: new URL('/v2/memories/search', this.baseUrl),
+      authorization: `Token ${this.config.apiKey}`,
+      body: { query: input.query, limit: input.limit, filters },
+      signal: input.signal,
+    });
+    return parseMem0Items(response);
+  }
+
+  async remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult> {
+    const body: Record<string, unknown> = {
+      messages: [{ role: 'user', content: input.content }],
+      user_id: this.config.userId,
+      infer: false,
+    };
+    if (this.config.appId !== undefined) {
+      body['app_id'] = this.config.appId;
+    }
+    let response: unknown;
+    try {
+      response = await postJson({
+        url: new URL('/v1/memories', this.baseUrl),
+        authorization: `Token ${this.config.apiKey}`,
+        body,
+        signal: input.signal,
+      });
+    } catch (error) {
+      if (
+        error instanceof ProviderHttpStatusError &&
+        DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
+      ) {
+        return { status: 'failed' };
+      }
+      return { status: 'unknown' };
+    }
+    return parseOssRememberResult(response);
+  }
+}
+
+function parseOssRememberResult(response: unknown): RememberResult {
+  const items: readonly unknown[] = Array.isArray(response)
+    ? response
+    : isRecord(response)
+      ? Array.isArray(response['results'])
+        ? response['results']
+        : [response]
+      : [];
+  if (items.length === 0) {
+    return { status: 'unknown' };
+  }
+  for (const item of items) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const id = parseOperationId(
+      item['id'] ?? item['memory_id'] ?? item['event_id'],
+    );
+    if (id !== undefined) {
+      return { status: 'stored', providerOperationId: id };
+    }
+  }
+  return { status: 'unknown' };
+}
+
 function parseGenericItems(response: unknown): readonly ExternalContextItem[] {
   if (!isRecord(response) || !Array.isArray(response['items'])) {
     throw new Error('External context provider returned an invalid response.');
@@ -248,9 +340,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function validateConfiguredBaseUrl(value: string): URL {
+function validateConfiguredBaseUrl(
+  value: string,
+  options?: { allowInsecureHttp?: boolean },
+): URL {
   try {
-    return validateProviderBaseUrl(value);
+    return validateProviderBaseUrl(value, options);
   } catch (error) {
     throw new ConfigurationError(
       error instanceof Error

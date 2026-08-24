@@ -79,6 +79,129 @@ describe('loadConfig', () => {
     });
   });
 
+  describe('mem0 OSS provider', () => {
+    const provider = {
+      type: 'mem0',
+      baseUrl: 'https://mem0.example.com:8443',
+      apiKeyEnv: 'MEM0_API_KEY',
+      userId: 'fixed-user',
+    };
+
+    it('resolves the credential and fixed user binding', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, { version: 1, provider });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        version: 1,
+        provider: {
+          type: 'mem0',
+          baseUrl: 'https://mem0.example.com:8443',
+          apiKey: 'secret-value',
+          userId: 'fixed-user',
+        },
+      });
+    });
+
+    it('enables writes for a v1 mem0 provider', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        write: { enabled: true },
+        provider,
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        version: 1,
+        write: { enabled: true },
+        provider: { type: 'mem0' },
+      });
+    });
+
+    it('accepts a plain-HTTP baseUrl only with allowInsecureHttp', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          baseUrl: 'http://192.0.2.1:8080',
+          allowInsecureHttp: true,
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        provider: { type: 'mem0', allowInsecureHttp: true },
+      });
+
+      const rejected = await createFixture();
+      await writeConfig(rejected, {
+        version: 1,
+        provider: { ...provider, baseUrl: 'http://192.0.2.1:8080' },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: rejected.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow('Provider URL must use HTTPS or loopback HTTP.');
+    });
+
+    it('rejects a credentialed baseUrl even with allowInsecureHttp', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          baseUrl: 'http://key@192.0.2.1:8080',
+          allowInsecureHttp: true,
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow(
+        'Provider URL must not contain credentials, path, query, or fragment.',
+      );
+    });
+
+    it('rejects a mem0 provider without userId', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          type: 'mem0',
+          baseUrl: 'https://mem0.example.com:8443',
+          apiKeyEnv: 'MEM0_API_KEY',
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow('External context config is invalid.');
+    });
+  });
+
   it('rejects writes for Generic HTTP and v2 configurations', async () => {
     const fixture = await createFixture();
     await writeConfig(fixture, {

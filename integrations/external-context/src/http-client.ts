@@ -20,7 +20,10 @@ export class ProviderHttpStatusError extends Error {
   }
 }
 
-export function validateProviderBaseUrl(value: string): URL {
+export function validateProviderBaseUrl(
+  value: string,
+  options?: { allowInsecureHttp?: boolean },
+): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -38,20 +41,18 @@ export function validateProviderBaseUrl(value: string): URL {
       'Provider URL must not contain credentials, path, query, or fragment.',
     );
   }
-  if (url.protocol === 'https:') {
-    return url;
-  }
   if (
-    url.protocol === 'http:' &&
-    (url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1' ||
-      url.hostname === '[::1]')
+    url.protocol === 'https:' ||
+    (url.protocol === 'http:' &&
+      (url.hostname === 'localhost' ||
+        url.hostname === '127.0.0.1' ||
+        url.hostname === '[::1]' ||
+        options?.allowInsecureHttp === true))
   ) {
     return url;
   }
   throw new Error('Provider URL must use HTTPS or loopback HTTP.');
 }
-
 export async function postJson(input: {
   url: URL;
   authorization: string;

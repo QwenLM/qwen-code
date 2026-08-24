@@ -5,7 +5,11 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MAX_RESPONSE_BYTES, postJson } from './http-client.js';
+import {
+  MAX_RESPONSE_BYTES,
+  postJson,
+  validateProviderBaseUrl,
+} from './http-client.js';
 
 // Behavioral net for readBoundedBody's reader loop. The loop was rewritten
 // from `for await (const chunk of response.body)` to an explicit getReader()
@@ -218,5 +222,40 @@ describe('postJson bounded body reading', () => {
     await expect(postJson(requestArgs())).rejects.toThrow(
       'External context provider returned an invalid response.',
     );
+  });
+});
+
+describe('validateProviderBaseUrl', () => {
+  it('accepts HTTPS and loopback HTTP by default', () => {
+    expect(validateProviderBaseUrl('https://mem0.example.com').protocol).toBe(
+      'https:',
+    );
+    expect(validateProviderBaseUrl('http://127.0.0.1:8080').hostname).toBe(
+      '127.0.0.1',
+    );
+  });
+
+  it('rejects non-loopback HTTP unless explicitly allowed', () => {
+    expect(() => validateProviderBaseUrl('http://192.0.2.1:8080')).toThrow(
+      'Provider URL must use HTTPS or loopback HTTP.',
+    );
+    expect(
+      validateProviderBaseUrl('http://192.0.2.1:8080', {
+        allowInsecureHttp: true,
+      }).hostname,
+    ).toBe('192.0.2.1');
+  });
+
+  it('still rejects credentialed and pathed URLs when HTTP is allowed', () => {
+    expect(() =>
+      validateProviderBaseUrl('http://key@192.0.2.1:8080', {
+        allowInsecureHttp: true,
+      }),
+    ).toThrow('Provider URL must not contain credentials');
+    expect(() =>
+      validateProviderBaseUrl('http://192.0.2.1:8080/prefix', {
+        allowInsecureHttp: true,
+      }),
+    ).toThrow('Provider URL must not contain credentials, path');
   });
 });

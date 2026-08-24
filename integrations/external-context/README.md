@@ -377,6 +377,26 @@ it disabled when search must have no semantic provider-side state change.
 Provider audit or access logs may still be retained. See
 [Mem0 Memory Decay](https://docs.mem0.ai/platform/features/memory-decay).
 
+## Mem0 (open-source protocol)
+
+The `mem0` provider type targets services that expose the open-source Mem0
+REST API, such as a self-hosted mem0 server or Aliyun PolarDB Mem0. Search
+calls `POST {baseUrl}/v2/memories/search` with the configured `user_id` (and
+optional `app_id`) under `filters`; writes call `POST {baseUrl}/v1/memories`
+with one exact user message and `infer: false`. Both paths are fixed by the
+open-source Mem0 protocol; the `baseUrl` (scheme, host, and port only) is the
+operator's switch for choosing the vendor — moving from one managed mem0
+service to another is a config change, not a code change.
+
+These services commonly expose plain HTTP on an IP whitelist. Because the
+credential travels in cleartext on HTTP, keep `allowInsecureHttp` off unless
+the whitelist is the intended network control, and prefer HTTPS or a loopback
+relay (for example `ssh -L` or a VPC-side proxy) when one is available.
+
+`userId` selects the tenant whose memories are read and written. It is fixed
+in the configuration and is never supplied by the model. See
+`examples/mem0-oss.json` for a complete configuration.
+
 ## Rollout and rollback
 
 Start with the pinned read-only on-demand MCP for one workspace and validate

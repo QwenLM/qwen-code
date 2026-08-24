@@ -15,6 +15,7 @@ import { renderExternalContext } from './context.js';
 import {
   createMemoryWriter,
   GenericHttpSearchV1Adapter,
+  Mem0OssAdapter,
   Mem0PlatformV3Adapter,
 } from './providers.js';
 
@@ -592,6 +593,212 @@ describe('Mem0PlatformV3Adapter', () => {
     );
   });
 });
+
+describe('Mem0OssAdapter', () => {
+  const memoryId = '123e4567-e89b-12d3-a456-426614174000';
+
+  it('creates a writer for the mem0 provider type', () => {
+    expect(
+      createMemoryWriter({
+        type: 'mem0',
+        baseUrl: 'https://mem0.example.com',
+        apiKeyEnv: 'MEM0_API_KEY',
+        apiKey: 'project-key',
+        userId: 'fixed-user',
+      }),
+    ).toBeInstanceOf(Mem0OssAdapter);
+  });
+
+  it('requires HTTPS or loopback HTTP unless explicitly allowed', () => {
+    const config = {
+      type: 'mem0' as const,
+      baseUrl: 'http://192.0.2.1:8080',
+      apiKeyEnv: 'MEM0_API_KEY',
+      apiKey: 'project-key',
+      userId: 'fixed-user',
+    };
+    expect(() => new Mem0OssAdapter(config)).toThrow(
+      'Provider URL must use HTTPS or loopback HTTP.',
+    );
+    expect(
+      () => new Mem0OssAdapter({ ...config, allowInsecureHttp: true }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new Mem0OssAdapter({
+          ...config,
+          baseUrl: 'http://key@192.0.2.1:8080',
+          allowInsecureHttp: true,
+        }),
+    ).toThrow('Provider URL must not contain credentials');
+  });
+
+  it('binds user_id and app_id into the fixed OSS search request', async () => {
+    let requestBody: unknown;
+    let requestPath: string | undefined;
+    let authorization: string | undefined;
+    const baseUrl = await startServer(async (request, response) => {
+      requestPath = request.url;
+      requestBody = JSON.parse(await readBody(request));
+      authorization = request.headers.authorization;
+      json(response, {
+        results: [{ id: 'memory-1', memory: 'repository policy', score: 0.9 }],
+      });
+    });
+    const adapter = ossAdapter(baseUrl, 'fixed-repository');
+
+    const items = await adapter.search({
+      query: 'deployment',
+      limit: 3,
+      signal: AbortSignal.timeout(1000),
+    });
+
+    expect(requestPath).toBe('/v2/memories/search');
+    expect(authorization).toBe('Token project-key');
+    expect(requestBody).toEqual({
+      query: 'deployment',
+      limit: 3,
+      filters: { user_id: 'fixed-user', app_id: 'fixed-repository' },
+    });
+    expect(items).toEqual([
+      { id: 'memory-1', content: 'repository policy', score: 0.9 },
+    ]);
+  });
+
+  it('omits app_id from search filters when not configured', async () => {
+    let requestBody: unknown;
+    const baseUrl = await startServer(async (request, response) => {
+      requestBody = JSON.parse(await readBody(request));
+      json(response, { results: [] });
+    });
+
+    await ossAdapter(baseUrl).search({
+      query: 'deployment',
+      limit: 3,
+      signal: AbortSignal.timeout(1000),
+    });
+
+    expect(requestBody).toEqual({
+      query: 'deployment',
+      limit: 3,
+      filters: { user_id: 'fixed-user' },
+    });
+  });
+
+  it('sends one exact direct-import write with user binding and infer false', async () => {
+    const content = '  Keep 🙂 this\nexactly.  ';
+    let requestCount = 0;
+    let requestBody: unknown;
+    let requestPath: string | undefined;
+    let authorization: string | undefined;
+    const baseUrl = await startServer(async (request, response) => {
+      requestCount += 1;
+      requestPath = request.url;
+      authorization = request.headers.authorization;
+      requestBody = JSON.parse(await readBody(request));
+      json(response, { results: [{ id: memoryId, event: 'ADD' }] });
+    });
+
+    await expect(
+      ossAdapter(baseUrl, 'fixed-repository').remember({
+        content,
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'stored', providerOperationId: memoryId });
+    expect(requestCount).toBe(1);
+    expect(requestPath).toBe('/v1/memories');
+    expect(authorization).toBe('Token project-key');
+    expect(requestBody).toEqual({
+      messages: [{ role: 'user', content }],
+      user_id: 'fixed-user',
+      app_id: 'fixed-repository',
+      infer: false,
+    });
+  });
+
+  it.each([
+    [
+      { results: [{ id: memoryId, event: 'ADD' }] },
+      { status: 'stored', providerOperationId: memoryId },
+    ],
+    [{ id: memoryId }, { status: 'stored', providerOperationId: memoryId }],
+    [
+      { memory_id: memoryId },
+      { status: 'stored', providerOperationId: memoryId },
+    ],
+    [
+      { event_id: memoryId },
+      { status: 'stored', providerOperationId: memoryId },
+    ],
+    [[{ id: memoryId }], { status: 'stored', providerOperationId: memoryId }],
+    [{ results: [{ id: 'not-a-uuid' }] }, { status: 'unknown' }],
+    [{ results: [] }, { status: 'unknown' }],
+    [{}, { status: 'unknown' }],
+    [[], { status: 'unknown' }],
+  ])('maps OSS Mem0 write response %#', async (responseBody, expected) => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, responseBody);
+    });
+
+    await expect(
+      ossAdapter(baseUrl).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual(expected);
+  });
+
+  it.each([400, 401, 403, 404])(
+    'returns failed for definitive HTTP %s rejections',
+    async (status) => {
+      let requestCount = 0;
+      const baseUrl = await startServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(status);
+        response.end('private upstream detail');
+      });
+
+      await expect(
+        ossAdapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(requestCount).toBe(1);
+    },
+  );
+
+  it.each([429, 500])(
+    'returns unknown for HTTP %s without retrying',
+    async (status) => {
+      let requestCount = 0;
+      const baseUrl = await startServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(status);
+        response.end('private upstream detail');
+      });
+
+      await expect(
+        ossAdapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'unknown' });
+      expect(requestCount).toBe(1);
+    },
+  );
+});
+
+function ossAdapter(baseUrl: string, appId?: string) {
+  return new Mem0OssAdapter({
+    type: 'mem0',
+    baseUrl,
+    apiKeyEnv: 'MEM0_API_KEY',
+    apiKey: 'project-key',
+    userId: 'fixed-user',
+    ...(appId === undefined ? {} : { appId }),
+  });
+}
 
 function mem0Adapter(baseUrl: string) {
   return new Mem0PlatformV3Adapter(

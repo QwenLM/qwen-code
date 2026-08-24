@@ -59,13 +59,26 @@ export interface AutoRecallConfig {
   timeoutMs: number;
 }
 
-export type ProviderConfig = Mem0ProviderConfig | GenericHttpProviderConfig;
+export type ProviderConfig =
+  | Mem0ProviderConfig
+  | Mem0OssProviderConfig
+  | GenericHttpProviderConfig;
 
 export interface Mem0ProviderConfig {
   type: 'mem0-platform-v3';
   apiKeyEnv: string;
   apiKey: string;
   appId: string;
+}
+
+export interface Mem0OssProviderConfig {
+  type: 'mem0';
+  baseUrl: string;
+  apiKeyEnv: string;
+  apiKey: string;
+  userId: string;
+  appId?: string;
+  allowInsecureHttp?: boolean;
 }
 
 export interface GenericHttpProviderConfig {
