@@ -2773,6 +2773,23 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('send_message')).toBe(false);
     });
 
+    it('ask-only rules never activate the allowlist (#9827)', async () => {
+      // Complementary activation boundary to the membership test above:
+      // `permissions.ask: ["Shell"]` with NO allow rules is a natural
+      // "always confirm shell" posture. Ask rules count toward membership
+      // under an ACTIVE allowlist, but they must never ACTIVATE it —
+      // otherwise that posture would flip isPermissionsAllowListActive()
+      // to true and deregister every unlisted built-in: "always confirm"
+      // silently becomes "most tools vanish from the model".
+      pm = new PermissionManager(makeConfig({ permissionsAsk: ['Shell'] }));
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
+      // The ask rule still governs the runtime decision.
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('ask');
+    });
+
     it('removing a startup ask rule mid-session keeps its tools registered (#9827)', async () => {
       // Same monotonic-membership contract as allow rules: removing an ask
       // rule live must not deregister a running tool.
