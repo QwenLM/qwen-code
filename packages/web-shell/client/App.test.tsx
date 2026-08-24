@@ -595,8 +595,13 @@ vi.mock('./hooks/useMessages', () => ({
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({
-    blocks: testState.liveBlocks ?? testState.blocks,
+  useAnimationFrameTranscriptSnapshot: (options?: {
+    structuralOnly?: boolean;
+  }) => ({
+    blocks:
+      options?.structuralOnly === true
+        ? testState.blocks
+        : (testState.liveBlocks ?? testState.blocks),
   }),
 }));
 
@@ -5225,7 +5230,10 @@ describe('App live transcript boundary', () => {
       .mockResolvedValue();
     testState.prompt = '/copy';
     testState.blocks = [{ id: 'assistant', text: 'a' }];
-    testState.liveBlocks = [{ id: 'assistant', text: 'ab' }];
+    testState.liveBlocks = [
+      { id: 'assistant', text: 'ab' },
+      { id: 'tool', kind: 'tool' },
+    ];
     testState.messages = [{ id: 'assistant', role: 'assistant', content: 'a' }];
     testState.streamingTailMessages = [
       { id: 'assistant', role: 'assistant', content: 'ab' },
@@ -5237,7 +5245,7 @@ describe('App live transcript boundary', () => {
     expect(testState.latestMessageListProps?.messages).toMatchObject([
       { id: 'assistant', role: 'assistant', content: 'ab' },
     ]);
-    expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(1);
+    expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
 
     await clickSubmit(document.body);
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('ab'));

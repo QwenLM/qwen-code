@@ -742,9 +742,11 @@ describe('background agent task reconciliation', () => {
     const t = (key: string) => key;
     const source = {};
     const agent = backgroundAgentBlock('agent-call');
+    // An empty assistant block projects no message (unlike thought), so the
+    // insight append below hits the "no matching projected message" fallback.
     const tail = baseBlock({
-      id: 'empty-thought',
-      kind: 'thought',
+      id: 'empty-assistant',
+      kind: 'assistant',
       text: '',
       streaming: true,
     });

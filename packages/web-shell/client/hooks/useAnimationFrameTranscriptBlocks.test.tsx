@@ -130,6 +130,11 @@ afterEach(() => {
 
 describe('useAnimationFrameTranscriptSnapshot', () => {
   it('caches structural snapshots when the store has no change summary', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
     testStore.disableBlockChangeSummary();
     container = document.createElement('div');
     document.body.append(container);
@@ -139,6 +144,14 @@ describe('useAnimationFrameTranscriptSnapshot', () => {
 
     expect(renderCount).toBe(1);
     expect(latestBlocks).toEqual([]);
+
+    // Without a change summary every notification may be structural, so the
+    // consumer must keep the pre-change update behavior and wake.
+    act(() => testStore.update([{ id: 'a' } as DaemonTranscriptBlock]));
+    act(() => pendingFrame?.(1_000));
+
+    expect(renderCount).toBeGreaterThan(1);
+    expect(latestBlocks).toHaveLength(1);
   });
 
   it('keeps structural consumers asleep for pure tail appends', () => {

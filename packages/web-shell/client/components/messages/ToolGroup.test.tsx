@@ -535,6 +535,7 @@ describe('tool group summary logic', () => {
     act(() => container.querySelector('button')?.click());
     expect(container.querySelector('iframe')).toBe(iframe);
     expect(iframe?.dataset['testState']).toBe('preserved');
+    expect((content as HTMLElement | null)?.style.display).toBe('');
   });
 
   it('keeps an MCP App open when multiple tools share a summary', () => {
