@@ -170,6 +170,19 @@ describe('autofix-status-heartbeat body', () => {
     assert.ok(body.includes('已运行 0 分钟'));
   });
 
+  it('ignores a non-numeric NOW_EPOCH plant instead of evaluating it', () => {
+    // NOW_EPOCH is the test-only clock override — no production launcher
+    // sets it, so a value can only arrive through an env plant. Bash
+    // arithmetic expansion recursively evaluates the variable's value, so
+    // a planted value's embedded command substitution would EXECUTE inside
+    // the PAT-holding body subcommand; the numeric guard must drop it and
+    // fall back to the real clock.
+    const probe = join(freshTmp(), 'pwned');
+    const body = runBody(bodyEnv({ NOW_EPOCH: `HOME[$(touch "${probe}")]` }));
+    assert.ok(!existsSync(probe), 'a planted NOW_EPOCH must not execute');
+    assert.match(body, /Running for \d+ min/);
+  });
+
   it('refuses to run without its required environment', () => {
     const res = spawnSync('bash', [script, 'body'], {
       env: { ...process.env, HB_ROUND: '3' },

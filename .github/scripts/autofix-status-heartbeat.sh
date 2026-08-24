@@ -64,7 +64,14 @@ require() {
 emit_body() {
   require HB_ROUND HB_CAP HB_URL HB_WORKDIR HB_START_EPOCH
   local now elapsed_min mtime active_min line_en line_zh
-  now="${NOW_EPOCH:-$(date +%s)}"
+  # NOW_EPOCH is the test-only clock override — no production launcher
+  # sets it, so a value can only arrive through an env plant. Bash
+  # arithmetic expansion recursively evaluates the variable's value, so a
+  # planted value's embedded command substitution would EXECUTE inside
+  # this PAT-holding process. Accept a numeric override only; anything
+  # else falls back to the real clock.
+  now="${NOW_EPOCH:-}"
+  [[ "${now}" =~ ^[0-9]+$ ]] || now="$(date +%s)"
   elapsed_min=$(( (now - HB_START_EPOCH) / 60 ))
   (( elapsed_min < 0 )) && elapsed_min=0
   if [[ -f "${HB_WORKDIR}/agent.log" ]]; then

@@ -4762,7 +4762,17 @@ jobs:
           # Full rationale → qwen-autofix.md#af-112
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+          # Fail CLOSED: a declaration builtin does not propagate a failing
+          # command substitution, so the bare-export shape would mask a
+          # failing mktemp and continue with an EMPTY GH_CONFIG_DIR — gh
+          # treats that exactly as unset and falls back to the shared
+          # attacker-writable ~/.config/gh this pin exists to close off.
+          # The shape mirrors the upsert child and the loop's own mint.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::autofix heartbeat: could not create hermetic gh config dir; refusing gh calls with the PAT"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
           # ROUND counts rounds already DONE; every other message numbers the
@@ -6133,6 +6143,22 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
+          # Startup-channel pins, the gate steps' doctrine: BASH_ENV is
+          # sourced by bash at process STARTUP, before line 1 of the body
+          # below, and SHELLOPTS is the sibling option-import channel — a
+          # body-side unset is one hop late, so both are pinned empty at
+          # step level, which outranks any $GITHUB_ENV plant. The LD_*
+          # family is mapped by ld.so at startup the same way (an in-body
+          # unset cannot unload a library already mapped into THIS step's
+          # bash; ld.so ignores empty values). This step holds the PAT, so
+          # a plant sourced at startup runs with it.
+          # Full rationale → qwen-autofix.md#af-148
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
@@ -6150,6 +6176,10 @@ jobs:
           PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
         run: |-
           set -uo pipefail
+          # This step holds the PAT: pin PATH from the stage-time capture
+          # BEFORE the bare gh below resolves (the R6-3 doctrine the
+          # sibling PAT steps apply). Full rationale → qwen-autofix.md#af-148
+          export PATH="${TRUSTED_PATH}"
           # Stop the round heartbeat BEFORE flipping this comment to its
           # terminal text: a tick landing after the finalize would
           # overwrite it with a live-looking "working" line. The gate

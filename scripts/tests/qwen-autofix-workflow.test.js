@@ -10665,13 +10665,75 @@ exit 1
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
       expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
-      // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
-      // back to the attacker-writable ~/.config/gh with http_unix_socket).
+      expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
+      expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
+    // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
+    // back to the attacker-writable ~/.config/gh with http_unix_socket).
+    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
       expect(step).toContain(
         'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
       );
-      expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
-      expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
+    // post_status mints fail-CLOSED (R8-1): a declaration builtin does not
+    // propagate a failing command substitution, so the bare-export shape
+    // would mask a failing mktemp and continue with an EMPTY GH_CONFIG_DIR
+    // — gh treats that exactly as unset and falls back to the shared
+    // attacker-writable ~/.config/gh the pin exists to close off. The
+    // shape mirrors the upsert child and the loop's own mint.
+    expect(postStatusCommentStep).toContain(
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
+    );
+    expect(postStatusCommentStep).toContain('refusing gh calls with the PAT');
+    expect(postStatusCommentStep).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
+    // Witness (R8-1): run the step's opening block verbatim with a mktemp
+    // that fails (a shim first on the TRUSTED_PATH the block pins itself
+    // to) — the step must REFUSE the PAT-carrying gh calls instead of
+    // continuing with an empty GH_CONFIG_DIR; the intact arm mints a real
+    // dir under RUNNER_TEMP.
+    const ghcfgOpenBlock =
+      postStatusCommentStep
+        .slice(
+          postStatusCommentStep.indexOf('run: |-') + 'run: |-'.length,
+          postStatusCommentStep.indexOf("MARKER='<!-- autofix-status -->'"),
+        )
+        .replace(/^ {10}/gm, '') +
+      '\nprintf \'GH_CONFIG_DIR=%s\\n\' "${GH_CONFIG_DIR}"\n';
+    const ghcfgTemp = mkdtempSync(join(tmpdir(), 'hb-ghcfg-temp-'));
+    const ghcfgShimDir = mkdtempSync(join(tmpdir(), 'hb-ghcfg-shim-'));
+    try {
+      writeFileSync(
+        join(ghcfgShimDir, 'mktemp'),
+        '#!/usr/bin/env bash\nexit 1\n',
+      );
+      chmodSync(join(ghcfgShimDir, 'mktemp'), 0o755);
+      const mktempFailing = spawnSync('bash', ['-c', ghcfgOpenBlock], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TRUSTED_PATH: `${ghcfgShimDir}:/usr/bin:/bin`,
+          RUNNER_TEMP: ghcfgTemp,
+        },
+      });
+      expect(mktempFailing.status).toBe(1);
+      expect(mktempFailing.stdout).toContain(
+        '::error::autofix heartbeat: could not create hermetic gh config dir',
+      );
+      const mktempIntact = spawnSync('bash', ['-c', ghcfgOpenBlock], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TRUSTED_PATH: '/usr/bin:/bin',
+          RUNNER_TEMP: ghcfgTemp,
+        },
+      });
+      expect(mktempIntact.status).toBe(0);
+      const minted = mktempIntact.stdout.match(/GH_CONFIG_DIR=(.*)/)?.[1] ?? '';
+      expect(minted.startsWith(ghcfgTemp)).toBe(true);
+      expect(existsSync(minted)).toBe(true);
+    } finally {
+      rmSync(ghcfgTemp, { recursive: true, force: true });
+      rmSync(ghcfgShimDir, { recursive: true, force: true });
     }
     // post_status pins PATH BEFORE its first external resolves (the
     // mktemp minting the gh config dir): every command word after it —
@@ -16164,6 +16226,26 @@ exit 1
     // server-side after the terminal text: finalize sleeps past one PATCH
     // round-trip before its own PATCH.
     expect(finalizeStatusCommentStep).toContain('/usr/bin/sleep 2');
+    // Finalize holds the PAT too, so it takes the gate steps'
+    // startup-channel pins at step level — BASH_ENV is sourced at process
+    // STARTUP before line 1 of the body (an in-body unset is one hop
+    // late), SHELLOPTS is the sibling option-import channel, and the LD_*
+    // family is mapped by ld.so at startup the same way — plus the PATH
+    // pin before its bare terminal gh call (af-148, R8-3).
+    expect(finalizeStatusCommentStep).toContain("BASH_ENV: ''");
+    expect(finalizeStatusCommentStep).toContain("SHELLOPTS: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_PRELOAD: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_AUDIT: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_LIBRARY_PATH: ''");
+    expect(finalizeStatusCommentStep).toContain(
+      "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      'export PATH="${TRUSTED_PATH}"',
+    );
+    expect(
+      finalizeStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
     const cleanupStep =
       reviewAddressJob.match(
         /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
