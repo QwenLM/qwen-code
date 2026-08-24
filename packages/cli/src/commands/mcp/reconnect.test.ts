@@ -65,6 +65,9 @@ describe('mcp reconnect command', () => {
     getToolRegistry: vi.Mock;
     shutdown: vi.Mock;
     initialize: vi.Mock;
+    isMcpServerDisabled: vi.Mock;
+    isMcpServerPendingApproval: vi.Mock;
+    isTrustedFolder: vi.Mock;
   };
   let mockToolRegistry: {
     discoverToolsForServer: vi.Mock;
@@ -87,6 +90,11 @@ describe('mcp reconnect command', () => {
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       shutdown: vi.fn().mockResolvedValue(undefined),
       initialize: vi.fn().mockResolvedValue(undefined),
+      // Default: nothing is skipped, so verification failures report the
+      // generic connection message.
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      isMcpServerPendingApproval: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
     };
 
     mockExtensionManager = {
@@ -474,6 +482,68 @@ describe('mcp reconnect command', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '✗ server-two: Failed - connection attempt finished without a live connection (status: disconnected)',
       );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('skip-vs-failure reporting (issue #9944)', () => {
+    // Discovery skips disabled / pending-approval / untrusted-folder servers
+    // BEFORE any connection attempt, and the status registry defaults
+    // never-seen servers to DISCONNECTED. Reporting those as failed
+    // connection attempts would send debugging in the wrong direction —
+    // the client never tried to connect.
+    it.each([
+      ['disabled', 'isMcpServerDisabled', 'server is disabled in settings'],
+      [
+        'pending approval',
+        'isMcpServerPendingApproval',
+        'server is pending approval (.mcp.json)',
+      ],
+    ] as const)(
+      'reports a %s server as skipped instead of a failed connection',
+      async (_label, predicate, reason) => {
+        mockedLoadSettings.mockReturnValue({
+          merged: {
+            mcpServers: {
+              'test-server': { command: '/path/to/server' },
+            },
+          },
+        });
+        mockGetMCPServerStatus.mockReturnValue('disconnected');
+        mockConfig[predicate].mockReturnValue(true);
+
+        const handler = reconnectCommand.handler as (
+          argv: Record<string, unknown>,
+        ) => Promise<void>;
+        await handler({ 'server-name': 'test-server', all: false });
+
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          `Failed to reconnect to server "test-server": no connection attempt was made: ${reason}`,
+        );
+        expect(mockProcessExit).toHaveBeenCalledWith(1);
+      },
+    );
+
+    it('reports an untrusted workspace as the skip reason', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockConfig.isTrustedFolder.mockReturnValue(false);
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect to server "test-server": no connection attempt was made: workspace folder is not trusted',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
     });
   });
 });

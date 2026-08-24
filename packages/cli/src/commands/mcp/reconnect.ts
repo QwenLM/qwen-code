@@ -114,6 +114,32 @@ function createReconnectError(
 }
 
 /**
+ * Discovery skips some servers deliberately BEFORE any connection attempt —
+ * disabled servers, `.mcp.json` servers pending approval, untrusted
+ * workspaces — and `getMCPServerStatus` defaults never-seen servers to
+ * DISCONNECTED. Without this check every skip would be reported as a failed
+ * connection attempt, sending whoever is debugging to chase networking for a
+ * server the client never tried to contact. The skip reasons are cheap and
+ * knowable, so report them instead. (Budget-refused slots are decided inside
+ * the client manager and stay on the generic failure message.)
+ */
+function describeSkippedConnectionReason(
+  config: Config,
+  serverName: string,
+): string | undefined {
+  if (config.isMcpServerDisabled(serverName)) {
+    return 'server is disabled in settings';
+  }
+  if (config.isMcpServerPendingApproval(serverName)) {
+    return 'server is pending approval (.mcp.json)';
+  }
+  if (config.isTrustedFolder() === false) {
+    return 'workspace folder is not trusted';
+  }
+  return undefined;
+}
+
+/**
  * Runs discovery for one server and verifies that it actually produced a
  * live connection. `discoverToolsForServer` is best-effort and swallows
  * connect errors, so without the status check this command would print
@@ -129,8 +155,11 @@ async function discoverAndVerifyConnection(
   await toolRegistry.discoverToolsForServer(serverName);
   const status = getMCPServerStatus(serverName);
   if (status !== MCPServerStatus.CONNECTED) {
+    const skippedReason = describeSkippedConnectionReason(config, serverName);
     throw new Error(
-      `connection attempt finished without a live connection (status: ${status})`,
+      skippedReason
+        ? `no connection attempt was made: ${skippedReason}`
+        : `connection attempt finished without a live connection (status: ${status})`,
     );
   }
 }
