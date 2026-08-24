@@ -22,6 +22,8 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
+import { isTaskExecutionRaw } from './toolClassification.js';
+import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -355,29 +357,6 @@ function getBackgroundNotificationData(
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
   return block.text.length === 0;
-}
-
-function parseDaemonTodoItemsFromEntries(
-  entries: readonly unknown[],
-): DaemonMessageTodoItem[] | undefined {
-  const todos = entries.flatMap((entry, index): DaemonMessageTodoItem[] => {
-    const item = getRecord(entry);
-    const content = getString(item, 'content');
-    if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
-    return [
-      {
-        id,
-        content,
-        status: getTodoStatus(getString(item, 'status')),
-        ...(() => {
-          const priority = getTodoPriority(getString(item, 'priority'));
-          return priority ? { priority } : {};
-        })(),
-      },
-    ];
-  });
-  return todos.length > 0 ? todos : undefined;
 }
 
 /**
@@ -1074,14 +1053,6 @@ function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
   return Boolean(tool.args?.subagent_type);
 }
 
-function isTaskExecutionRaw(raw: unknown): boolean {
-  return (
-    !!raw &&
-    typeof raw === 'object' &&
-    (raw as Record<string, unknown>).type === 'task_execution'
-  );
-}
-
 function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
   const rawJson = text.startsWith('plan: ')
     ? text.slice('plan: '.length)
@@ -1099,7 +1070,8 @@ function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
     ) {
       return undefined;
     }
-    return parseDaemonTodoItemsFromEntries(record['entries']);
+    const todos = parseTodoItemsFromEntries(record['entries']);
+    return todos.length > 0 ? todos : undefined;
   } catch {
     return undefined;
   }
@@ -1118,22 +1090,6 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function getTodoStatus(
-  value: string | undefined,
-): DaemonMessageTodoItem['status'] {
-  return value === 'completed' || value === 'in_progress' || value === 'pending'
-    ? value
-    : 'pending';
-}
-
-function getTodoPriority(
-  value: string | undefined,
-): DaemonMessageTodoItem['priority'] | undefined {
-  return value === 'high' || value === 'medium' || value === 'low'
-    ? value
-    : undefined;
 }
 
 function daemonToolBlockToToolCall(
