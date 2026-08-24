@@ -25,6 +25,11 @@ jobs:
     permissions:
       contents: 'read'
       packages: 'write'
+    env:
+      # Whether this run publishes. Defined once at the job level so the
+      # login gate and both build steps cannot drift apart.
+      PUSH_IMAGE: |-
+        ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
 
     steps:
       - name: 'Checkout repository'
@@ -97,23 +102,131 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ steps.version.outputs.clean == '' }}
 
       - name: 'Log in to the Container registry'
-        if: |-
-          ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
+        if: "${{ env.PUSH_IMAGE == 'true' }}"
         uses: 'docker/login-action@v4' # ratchet:exclude
         with:
           registry: '${{ env.REGISTRY }}'
           username: '${{ github.actor }}'
           password: '${{ secrets.GITHUB_TOKEN }}'
 
+      # continue-on-error is load-bearing: a failed first attempt must not
+      # pre-fail the job, or a successful retry below would still leave the
+      # job red and file-failure-issue would report an image that WAS
+      # published. The job only fails when the retry fails too.
       - name: 'Build and push Docker image'
         id: 'build-and-push'
+        continue-on-error: true
         uses: 'docker/build-push-action@v7' # ratchet:exclude
         with:
           context: '.'
           platforms: 'linux/amd64,linux/arm64'
-          push: |-
-            ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
+          push: '${{ env.PUSH_IMAGE }}'
           tags: '${{ steps.meta.outputs.tags }}'
           labels: '${{ steps.meta.outputs.labels }}'
           build-args: |
             CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}
+
+      # One bounded retry: the docker build hits transient buildx races such as
+      # ETXTBSY during `npm ci` (the v0.22.0 tag build died this way and the
+      # image was never published, breaking every sandbox-based CI lane — see
+      # issue #9898). A retry reuses the build cache and almost always passes;
+      # a genuine failure fails this step and with it the job.
+      - name: 'Build and push Docker image (retry)'
+        id: 'build-and-push-retry'
+        if: "${{ steps.build-and-push.outcome == 'failure' }}"
+        uses: 'docker/build-push-action@v7' # ratchet:exclude
+        with:
+          context: '.'
+          platforms: 'linux/amd64,linux/arm64'
+          push: '${{ env.PUSH_IMAGE }}'
+          tags: '${{ steps.meta.outputs.tags }}'
+          labels: '${{ steps.meta.outputs.labels }}'
+          build-args: |
+            CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}
+
+  # A released npm version without a matching sandbox image breaks every
+  # sandbox-based CI lane (/resolve, sandboxed review, autofix) until the image
+  # exists, and nothing else surfaces that state. File (or update) one issue
+  # per version so the failed build gets retried instead of silently missing —
+  # including a failed manual recovery dispatch, which is exactly the remedy
+  # the issue body recommends.
+  file-failure-issue:
+    needs: ['build-and-push-to-ghcr']
+    if: |-
+      ${{ failure() && github.repository == 'QwenLM/qwen-code' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')) }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      issues: 'write'
+    steps:
+      - name: 'File or update the image-build failure issue'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          TAG_NAME: '${{ github.ref_name }}'
+          INPUT_VERSION: '${{ github.event.inputs.version }}'
+          DEDUP_LABEL: 'scope/ci-cd'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+
+          # Tag pushes name the version through the tag; manual recovery
+          # dispatches carry it in the version input.
+          if [[ "${EVENT_NAME}" == 'push' ]]; then
+            version="${TAG_NAME#v}"
+          else
+            version="${INPUT_VERSION}"
+          fi
+          if [[ -z "${version}" ]]; then
+            echo "::error::No version resolved for the image-build failure issue."
+            exit 1
+          fi
+          marker="image-build-failure:${version}"
+          marker_html="<!-- ${marker} -->"
+
+          # Dedup by an exact body marker, matched CLIENT-side: GitHub search
+          # tokenizes the colon out of the marker, so a search-based lookup
+          # never finds the issues this job files.
+          issues_file="${RUNNER_TEMP}/open-issues.json"
+          gh issue list \
+            --repo "${REPO}" \
+            --state open \
+            --label "${DEDUP_LABEL}" \
+            --json number,body \
+            --limit 200 \
+            > "${issues_file}"
+          existing="$(
+            jq -r --arg marker_html "${marker_html}" \
+              '.[] | select(.body | contains($marker_html)) | .number' \
+              "${issues_file}" \
+            | head -n 1
+          )"
+
+          body_file="${RUNNER_TEMP}/image-build-failure.md"
+          {
+            printf '%s\n' "${marker_html}"
+            printf '\n'
+            printf 'The sandbox image build for release `%s` failed, so `ghcr.io/qwenlm/qwen-code:%s` was **not published**.\n' "${version}" "${version}"
+            printf '\n'
+            printf 'Until the image exists, every sandbox-based CI lane (`/resolve`, sandboxed review, autofix) crashes with `manifest unknown` when it installs the matching npm version.\n'
+            printf '\n'
+            printf 'Failed run: %s\n' "${RUN_URL}"
+            printf '\n'
+            printf 'Fix: rerun the failed jobs of the run above (transient buildx races such as `ETXTBSY` usually pass on retry), or dispatch `Build and Publish Docker Image` with `version=%s`, `publish=true`.\n' "${version}"
+          } > "${body_file}"
+
+          if [[ -n "${existing}" ]]; then
+            gh issue edit "${existing}" \
+              --repo "${REPO}" \
+              --body-file "${body_file}"
+            echo "Recorded this failure on issue #${existing}."
+            exit 0
+          fi
+
+          gh issue create \
+            --repo "${REPO}" \
+            --title "Sandbox image for ${version} not published: image build failed" \
+            --body-file "${body_file}" \
+            --label 'type/bug' \
+            --label "${DEDUP_LABEL}"
