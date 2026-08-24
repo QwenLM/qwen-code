@@ -7700,10 +7700,13 @@ exit 1
       /echo '--- feedback\.md ---'[\s\S]*?cat "\$\{WORKDIR\}\/feedback\.md" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/,
     );
     // The full census of the workflow's sites: prepare's feedback echo, the
-    // two dump loops, the repair merge-warning head, and the issue-lane
-    // gate's two failure notes. An exact count so a new un-neutralized echo
-    // (or a dropped site) fails here instead of in a future round.
-    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(6);
+    // two dump loops, the repair merge-warning head, the issue-lane gate's
+    // two failure notes, and the upsert re-emit loop. An exact count so a
+    // dropped or weakened KNOWN site fails here instead of in a future
+    // round; a NEW echo site is NOT auto-detected — it must be added to
+    // this census deliberately, using the canonical two-expression sed
+    // (both single-syntax spellings are banned below).
+    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(7);
     // The issue lane's gate echoes the agent's failure notes.
     expect(issueAutofixJob).toMatch(
       /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/failure\.md"/,
@@ -7721,15 +7724,18 @@ exit 1
     // The deferred-findings upsert neutralizes its own stdout at the source
     // (the API-error reason and the LOST dump).
     expect(upsertDeferredScript.match(bothSyntaxes) ?? []).toHaveLength(2);
-    // Both upsert wrapper loops neutralize `##[` on the re-emit (`::` is
-    // handled by the bash substitution on the same line).
-    for (const src of [reviewAddressReportStep, pushAndReportScript]) {
-      expect(src).toMatch(
-        /printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}" \| sed 's\/##\\\[\/##［\/g'/,
-      );
-    }
-    // No single-syntax echo may survive anywhere in the family — the old
-    // form covered only `::` and is exactly what #9761 slipped through.
+    // The push-and-report script's re-emit loop uses the SAME canonical
+    // neutralizer (the family keeps one spelling, so a syntax change cannot
+    // drift across two implementations and re-create the half-guard that let
+    // #9761 through). Its workflow twin rides the workflow census above.
+    expect(pushAndReportScript.match(bothSyntaxes) ?? []).toHaveLength(1);
+    // No single-syntax neutralizer may survive anywhere in the family: the
+    // old `::`-only sed is exactly what #9761 slipped through, a `##[`-only
+    // sed is the mirror blind spot (and the natural half-copy of the
+    // canonical form), and a bare bash `//::/;;` expansion is the third
+    // half-guard shape (the census cannot see syntax coverage inside an
+    // expansion, so the family keeps ONE spelling — the canonical sed).
+    // New echo sites must use both expressions.
     for (const src of [
       workflow,
       reviewVerificationRunner,
@@ -7737,6 +7743,8 @@ exit 1
       pushAndReportScript,
     ]) {
       expect(src).not.toContain("sed 's/::/;;/g'");
+      expect(src).not.toContain("sed 's/##\\[/##［/g'");
+      expect(src).not.toContain('//::/;;');
     }
   });
 
@@ -13253,9 +13261,9 @@ exit 1
       // R8-5: the captured output is re-emitted, so the child's warnings
       // actually reach the log (deleting both loops was invisible). The
       // re-emit neutralizes BOTH command syntaxes (`##[` parses mid-line
-      // too — #9761).
+      // too — #9761) with the family's canonical two-expression sed.
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}" \| sed 's\/##\\\[\/##［\/g'[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\}" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the script executes INSIDE the clean child, after the
       // launch — a relocation outside it must fail here.

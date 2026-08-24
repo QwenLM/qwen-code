@@ -336,7 +336,10 @@ run_deferred_upsert() {
     elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
       printf '%s\n' "${_upsert_line#__upsert_trusted__}"
     else
-      printf '%s\n' "${_upsert_line//::/;;}" | sed 's/##\[/##［/g'
+      # The canonical two-expression neutralizer, identical to every other
+      # echo site — one spelling for the whole family, so a syntax change
+      # cannot drift across two implementations.
+      printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
     fi
   done <<< "${UPSERT_OUT}"
 }
