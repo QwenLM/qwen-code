@@ -518,6 +518,46 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
   });
 
+  it('rejects the branch when another session switch holds the swap latch', async () => {
+    // Another /resume or /branch holds the single telemetry-swap slot, so
+    // beginTelemetrySwap returns false. The hook must surface the error,
+    // create no fork, and settle NOTHING: the slot belongs to the in-flight
+    // swap — committing or aborting it here would discard that swap's armed
+    // undo and reintroduce the #9833 double-count (#9844). The latch also
+    // runs BEFORE any outgoing-session work, so nothing is finalized or
+    // forked on a rejection.
+    const beginTelemetrySwap = vi.fn().mockReturnValue(false);
+    const commitTelemetrySwap = vi.fn();
+    const abortTelemetrySwap = vi.fn();
+    config.getGeminiClient = () => ({
+      initialize: vi.fn(),
+      beginTelemetrySwap,
+      commitTelemetrySwap,
+      abortTelemetrySwap,
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(beginTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(finalize).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(commitTelemetrySwap).not.toHaveBeenCalled();
+    expect(abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it.each([
     ['returns false', () => renameSession.mockResolvedValue(false)],
     [

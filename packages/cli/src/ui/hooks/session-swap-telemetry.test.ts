@@ -330,9 +330,14 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(promptTokens()).toBe(preSwap.models['test-model']!.tokens.prompt);
     expect(totalRequests()).toBe(2);
     // The fork's replay-created bucket must be gone; A's bucket intact.
-    expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
-      {},
-    );
+    // Assert on the fork's actual id — the randomUUID() the branch hook
+    // derived and the replay keyed its events by. (An unrelated session id
+    // would pass unconditionally: getMetricsForSession returns fresh empty
+    // metrics for any unknown id.)
+    const forkId = [...sessionServiceMocks.sessions.keys()].find(
+      (id) => id !== SESSION_A,
+    )!;
+    expect(uiTelemetryService.getMetricsForSession(forkId).models).toEqual({});
     expect(
       uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
         ?.api.totalRequests,
@@ -619,6 +624,238 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(uiTelemetryService.getMetricsForSession(SESSION_B).models).toEqual(
       {},
     );
+  });
+
+  it('rejects a /branch submitted while a swap is in flight', async () => {
+    // Mirror of the /resume-into-/resume rejection for the branch hook:
+    // its rejection throws inside the try, so the catch must skip settling
+    // (the slot belongs to the in-flight swap) while still surfacing the
+    // failure. Before the fix the catch's unguarded settle committed the
+    // in-flight swap's transaction, discarding its armed undo — the later
+    // failure then had nothing to restore and the abandoned replay stayed
+    // double-counted (#9844).
+    const { config } = await establishLiveSessionA(100);
+    expect(promptTokens()).toBe(105);
+
+    sessionServiceMocks.sessions.set(SESSION_B, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_B },
+    });
+
+    // B's swap hangs on a deferred loadPausedBackgroundAgents AFTER its
+    // replay committed (transaction open), so /branch lands in exactly
+    // that window.
+    let failB!: (err: Error) => void;
+    config.loadPausedBackgroundAgents = vi.fn((id: string) =>
+      id === SESSION_B
+        ? new Promise<never>((_resolve, reject) => {
+            failB = reject;
+          })
+        : Promise.resolve([]),
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const renderResume = (addItemMock: any) =>
+      renderHook(() =>
+        useResumeCommand({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          config: config as any,
+          settings: mockSettings,
+          historyManager: {
+            addItem: addItemMock,
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+          },
+          startNewSession: vi.fn(),
+          clearPendingState: vi.fn(),
+          setSessionName: vi.fn(),
+          remount: vi.fn(),
+        }),
+      ).result;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const renderBranch = (addItemMock: any) =>
+      renderHook(() =>
+        useBranchCommand({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          config: config as any,
+          settings: mockSettings,
+          historyManager: {
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+            addItem: addItemMock,
+          },
+          startNewSession: vi.fn(),
+          clearPendingState: vi.fn(),
+          setSessionName: vi.fn(),
+          remount: vi.fn(),
+        }),
+      ).result;
+
+    const addItemB = vi.fn();
+    const resultB = renderResume(addItemB);
+
+    // Fire-and-forget B, exactly like the resume dialog fires it.
+    let pendingB!: Promise<void>;
+    await act(async () => {
+      pendingB = resultB.current.handleResume(SESSION_B);
+      for (let i = 0; i < 100 && totalRequests() < 3; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(totalRequests()).toBe(3); // B's replay is in the aggregate
+
+    const addItemBranch = vi.fn();
+    const resultBranch = renderBranch(addItemBranch);
+    await act(async () => {
+      await resultBranch.current.handleBranch();
+    });
+
+    // Rejected at the latch before any fork work: error item, no fork
+    // created, core untouched — and, the load-bearing bit, the in-flight
+    // transaction untouched.
+    expect(addItemBranch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(
+      [...sessionServiceMocks.sessions.keys()].filter(
+        (id) => id !== SESSION_A && id !== SESSION_B,
+      ),
+    ).toEqual([]); // the rejected attempt created no fork
+    expect(config.getSessionId()).toBe(SESSION_B); // branch swapped nothing
+    expect(promptTokens()).toBe(205); // branch settled nothing
+
+    // B's later failure still settles through its own transaction.
+    await act(async () => {
+      failB(new Error('late failure'));
+      await pendingB;
+    });
+    expect(config.getSessionId()).toBe(SESSION_A);
+    expect(promptTokens()).toBe(105);
+    expect(totalRequests()).toBe(2);
+  });
+
+  it('rejects a /resume before its session load when a swap is in flight', async () => {
+    // The latch opens BEFORE the outgoing-session capture and the incoming
+    // loadSession await: a concurrent attempt is rejected at the latch and
+    // its pre-swap work can never settle the in-flight swap's transaction.
+    // Before the fix, loadSession ran first, and its failure during an
+    // in-flight swap reached the catch's unguarded settle and committed the
+    // OTHER swap's transaction (#9844).
+    const SESSION_C = 'session-C'; // never stored: loadSession finds nothing
+    const { config } = await establishLiveSessionA(100);
+
+    sessionServiceMocks.sessions.set(SESSION_B, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_B },
+    });
+
+    let failB!: (err: Error) => void;
+    config.loadPausedBackgroundAgents = vi.fn((id: string) =>
+      id === SESSION_B
+        ? new Promise<never>((_resolve, reject) => {
+            failB = reject;
+          })
+        : Promise.resolve([]),
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const renderResume = (addItemMock: any) =>
+      renderHook(() =>
+        useResumeCommand({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          config: config as any,
+          settings: mockSettings,
+          historyManager: {
+            addItem: addItemMock,
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+          },
+          startNewSession: vi.fn(),
+          clearPendingState: vi.fn(),
+          setSessionName: vi.fn(),
+          remount: vi.fn(),
+        }),
+      ).result;
+
+    const addItemB = vi.fn();
+    const addItemC = vi.fn();
+    const resultB = renderResume(addItemB);
+    const resultC = renderResume(addItemC);
+
+    let pendingB!: Promise<void>;
+    await act(async () => {
+      pendingB = resultB.current.handleResume(SESSION_B);
+      for (let i = 0; i < 100 && totalRequests() < 3; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(totalRequests()).toBe(3);
+
+    await act(async () => {
+      await resultC.current.handleResume(SESSION_C);
+    });
+    // Rejected at the latch BEFORE loadSession (which would have found
+    // nothing and returned silently — the pre-fix shape that then settled
+    // B's transaction through the catch's unguarded commit).
+    expect(addItemC).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(promptTokens()).toBe(205); // C settled nothing
+
+    await act(async () => {
+      failB(new Error('late failure'));
+      await pendingB;
+    });
+    expect(config.getSessionId()).toBe(SESSION_A);
+    expect(promptTokens()).toBe(105);
+    expect(totalRequests()).toBe(2);
+  });
+
+  it('resuming a missing session frees the swap slot for the next swap', async () => {
+    // The latch now opens BEFORE the incoming session is loaded, so the
+    // missing-session early return must settle the transaction it opened;
+    // forgetting that would leave the single slot occupied and every later
+    // swap rejected (#9844).
+    const { config } = await establishLiveSessionA(100);
+
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        config: config as any,
+        settings: mockSettings,
+        historyManager: {
+          addItem,
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+        clearPendingState: vi.fn(),
+        setSessionName: vi.fn(),
+        remount: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('missing-session');
+    });
+    // Silent no-op, as before — no session, no error.
+    expect(addItem).not.toHaveBeenCalled();
+    expect(config.getSessionId()).toBe(SESSION_A);
+
+    sessionServiceMocks.sessions.set(SESSION_B, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_B },
+    });
+    await act(async () => {
+      await result.current.handleResume(SESSION_B);
+    });
+    // The second swap ran (was not rejected by a stuck slot) and committed.
+    expect(config.getSessionId()).toBe(SESSION_B);
+    expect(promptTokens()).toBe(205);
   });
 
   it('an undo committed by an earlier swap is never restored later', async () => {
