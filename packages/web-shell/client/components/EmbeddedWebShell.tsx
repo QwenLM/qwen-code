@@ -11,8 +11,12 @@ import {
 } from 'react';
 import {
   CircleUserRoundIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FileTextIcon,
   HistoryIcon,
   LoaderCircleIcon,
+  PaperclipIcon,
   PlusIcon,
   XIcon,
 } from 'lucide-react';
@@ -68,6 +72,14 @@ export interface EmbeddedWebShellSession {
   messageCount?: number;
 }
 
+export interface EmbeddedWebShellActiveFile {
+  name: string;
+  path: string;
+  startLine?: number;
+  endLine?: number;
+  included: boolean;
+}
+
 export interface EmbeddedWebShellNotice {
   id: string;
   message: string;
@@ -110,7 +122,9 @@ export interface EmbeddedWebShellProps {
   contextWindow?: number;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  onComposerTextChange?: (text: string) => void;
   atProviders?: readonly WebShellAtProvider[];
+  activeFile?: EmbeddedWebShellActiveFile | null;
   pendingPermission?: EmbeddedWebShellPermissionRequest | null;
   pendingQuestion?: EmbeddedWebShellPermissionRequest | null;
   notices?: readonly EmbeddedWebShellNotice[];
@@ -126,6 +140,9 @@ export interface EmbeddedWebShellProps {
   onSelectModel?: (modelId: string) => void;
   onSelectMode?: (modeId: string) => void;
   onShowContextUsage?: () => void;
+  onAttachFile?: () => void;
+  onFocusActiveFile?: () => void;
+  onActiveFileIncludedChange?: (included: boolean) => void;
   onPermissionResponse?: (requestId: string, optionId: string) => void;
   onQuestionResponse?: (
     requestId: string,
@@ -185,7 +202,9 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
     contextWindow = 0,
     composerInput,
     composerInputVersion,
+    onComposerTextChange,
     atProviders,
+    activeFile,
     pendingPermission,
     pendingQuestion,
     notices = [],
@@ -201,6 +220,9 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
     onSelectModel,
     onSelectMode,
     onShowContextUsage,
+    onAttachFile,
+    onFocusActiveFile,
+    onActiveFileIncludedChange,
     onPermissionResponse,
     onQuestionResponse,
     onNoticeAction,
@@ -220,6 +242,73 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
   const portalVariableNamesRef = useRef<Set<string>>(new Set());
   const hasConversation = blocks.length > 0 || isResponding;
   const approvalOpen = Boolean(pendingPermission || pendingQuestion);
+  const renderComposerToolbarStart = useMemo(() => {
+    if (!activeFile && !onAttachFile) return undefined;
+    return function EmbeddedComposerToolbarStart({
+      disabled,
+    }: {
+      disabled: boolean;
+    }) {
+      const selection = activeFile?.startLine
+        ? activeFile.endLine && activeFile.endLine !== activeFile.startLine
+          ? `:${activeFile.startLine}-${activeFile.endLine}`
+          : `:${activeFile.startLine}`
+        : '';
+      return (
+        <div className={styles.hostToolbar}>
+          {onAttachFile && (
+            <button
+              type="button"
+              className={styles.hostToolbarButton}
+              aria-label="Attach file"
+              title="Attach file"
+              disabled={disabled}
+              onClick={onAttachFile}
+            >
+              <PaperclipIcon />
+            </button>
+          )}
+          {activeFile && (
+            <div className={styles.activeFileChip}>
+              <button
+                type="button"
+                className={styles.activeFileName}
+                title={activeFile.path}
+                disabled={disabled}
+                onClick={onFocusActiveFile}
+              >
+                <FileTextIcon />
+                <span>{`${activeFile.name}${selection}`}</span>
+              </button>
+              {onActiveFileIncludedChange && (
+                <button
+                  type="button"
+                  className={styles.activeFileToggle}
+                  aria-label={
+                    activeFile.included
+                      ? 'Exclude active editor context'
+                      : 'Include active editor context'
+                  }
+                  aria-pressed={activeFile.included}
+                  title={
+                    activeFile.included
+                      ? 'Active editor context included'
+                      : 'Active editor context excluded'
+                  }
+                  disabled={disabled}
+                  onClick={() =>
+                    onActiveFileIncludedChange(!activeFile.included)
+                  }
+                >
+                  {activeFile.included ? <EyeIcon /> : <EyeOffIcon />}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+  }, [activeFile, onActiveFileIncludedChange, onAttachFile, onFocusActiveFile]);
   const widthStyle = {
     '--chat-regular-content-width': `${DEFAULT_CHAT_WIDTH}px`,
     '--chat-regular-shell-width': `${DEFAULT_CHAT_WIDTH + CHAT_SHELL_PADDING}px`,
@@ -459,6 +548,7 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
             >
               <ChatEditor
                 onSubmit={handleSubmit}
+                onInputTextChange={onComposerTextChange}
                 onCancel={onCancel}
                 isRunning={isResponding}
                 isPreparing={isPreparing}
@@ -580,7 +670,10 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
             <WebShellPortalRootContext.Provider value={portalRoot}>
               <TranscriptRenderModeProvider value="interactive">
                 <WebShellCustomizationProvider
-                  value={{ collapseCompletedTurns: false }}
+                  value={{
+                    collapseCompletedTurns: false,
+                    renderComposerToolbarStart,
+                  }}
                 >
                   <TodoTimelineContext.Provider value={todoTimeline}>
                     <TodoDetailContext.Provider value={todoDetails}>
