@@ -487,7 +487,11 @@ interface Plan {
     startLine: number;
     endLine: number;
     files?: Array<{ path: string }>;
-    /** Longest single line in the range; absent on older plans. */
+    /**
+     * Longest single line in the range. Every plan the planner has ever
+     * written carries it; the read stays loose for hand-edited plans, and
+     * the refutation guard below fails closed on the absence.
+     */
     maxLineChars?: number;
   }>;
 }
@@ -785,14 +789,34 @@ export function coverageFromTranscripts(
    */
   const chunkAgents = new Map<number, string[]>();
   const chunkCauses = new Map<number, Set<ChunkFailureClass>>();
-  const noteChunkAgent = (c: number | null, name: string): void => {
-    if (c === null) return;
+  // The plan identity a `chunk N of M` launch was written against — the
+  // same seal the declaration branch applies below. A stale record's id can
+  // collide with a planned chunk's, and a cause or agent keyed through the
+  // collision writes an old plan's diagnosis into this plan's ledger:
+  // `classify()` then hands the operator a repair for a failure this run
+  // never had, and a stale cause can outrank the chunk's genuine current
+  // one. Stale records still feed the prose arrays — those name the RECORD
+  // — but may not key causes or agents into a chunk they were never
+  // assigned under this plan.
+  const sealedToThisPlan = (rec: AgentRecord, chunkId: number): boolean =>
+    plan.chunks.some((c) => c.id === chunkId) &&
+    assignedChunkTotal(rec) === plan.chunks.length;
+  const noteChunkAgent = (
+    rec: AgentRecord,
+    c: number | null,
+    name: string,
+  ): void => {
+    if (c === null || !sealedToThisPlan(rec, c)) return;
     const seen = chunkAgents.get(c);
     if (seen === undefined) chunkAgents.set(c, [name]);
     else if (!seen.includes(name)) seen.push(name);
   };
-  const noteChunkCause = (c: number | null, cls: ChunkFailureClass): void => {
-    if (c === null) return;
+  const noteChunkCause = (
+    rec: AgentRecord,
+    c: number | null,
+    cls: ChunkFailureClass,
+  ): void => {
+    if (c === null || !sealedToThisPlan(rec, c)) return;
     const seen = chunkCauses.get(c);
     if (seen === undefined) chunkCauses.set(c, new Set([cls]));
     else seen.add(cls);
@@ -948,7 +972,41 @@ export function coverageFromTranscripts(
   ): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
     if (c === undefined) return false;
+    // Exact, not containment: a re-plan that shrinks a chunk's tail leaves
+    // the old window a strict SUPERSET of the new one, and containment
+    // would pass membership, count and territory alike for a declaration
+    // written against the old lines.
     return merge([...told]).some(
+      ([s, e]) => s === c.startLine && e === c.endLine,
+    );
+  };
+
+  /**
+   * Did the declarer's own reads reach the chunk it declares?
+   *
+   * The told-range seal asks which plan the LAUNCH was written against;
+   * this asks whether the agent ever went to the chunk's lines at all. An
+   * agent told the right window that read elsewhere and returned
+   * `Uncoverable:` is a repairable prompt failure wearing an
+   * impossible-chunk verdict — admitting it pins `declared-uncoverable`
+   * ("nothing is repaired by relaunching") over a chunk a relaunch could
+   * cover, steering every classification-routing consumer away from the
+   * one repair that works.
+   *
+   * Only RANGED reads can counter-prove: a `read_file` without a positive
+   * `limit` returns a character budget, not a line range (`rangeOf`), so
+   * its reach is unproven either way — it may have returned the chunk's
+   * lines, and refusing the declaration on its presence would punish the
+   * honest declarer whose only read was the capped one that showed it the
+   * over-long line. A record with no ranged reads therefore keeps the told
+   * presumption it already rides; one whose ranged reads demonstrably
+   * avoid the chunk loses it.
+   */
+  const declarerReadItsChunk = (rec: AgentRecord, chunkId: number): boolean => {
+    if (rec.diffReads.length === 0) return true;
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    if (c === undefined) return false;
+    return merge(rec.diffReads).some(
       ([s, e]) => s <= c.startLine && e >= c.endLine,
     );
   };
@@ -960,8 +1018,13 @@ export function coverageFromTranscripts(
     // a line boundary, so no read returns the tail of that line — and a
     // spanning read recorded for such a chunk is a truncated view by
     // construction. It demonstrably spanned nothing, so it refutes nothing;
-    // `maxLineChars` is the planner's own pre-detection of this shape.
-    if ((c.maxLineChars ?? 0) > READ_FILE_CHAR_CAP) return false;
+    // `maxLineChars` is the planner's own pre-detection of this shape. A
+    // plan that carries NO metadata leaves the truncation question
+    // unanswered — the spanning read may have been the truncated kind, and
+    // a refutation the metadata cannot clear would delete an honest
+    // declaration on a guess. Fail closed: no metadata, no refutation.
+    if (c.maxLineChars === undefined || c.maxLineChars > READ_FILE_CHAR_CAP)
+      return false;
     return records.some(
       (r) =>
         r.returned &&
@@ -1049,7 +1112,7 @@ export function coverageFromTranscripts(
     // record of what was asked of it. 23 of 23 real chunk agents were launched
     // without one, and every one of them then said the sentence its prompt had
     // handed it.
-    noteChunkAgent(chunk, name);
+    noteChunkAgent(rec, chunk, name);
 
     const given = wasGivenTheDiff(rec, plan.diffPathAbsolute);
     if (chunk !== null && !given) {
@@ -1061,7 +1124,7 @@ export function coverageFromTranscripts(
       // unreachable.
       if (!superseded(rec, chunk)) {
         blindAgents.push(name);
-        noteChunkCause(chunk, 'blind-prompt');
+        noteChunkCause(rec, chunk, 'blind-prompt');
       }
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
@@ -1076,7 +1139,7 @@ export function coverageFromTranscripts(
       // Same supersession gate as the blind arm above.
       if (!superseded(rec, chunk)) {
         idleAgents.push(name);
-        noteChunkCause(chunk, 'idle');
+        noteChunkCause(rec, chunk, 'idle');
       }
       continue;
     }
@@ -1151,7 +1214,7 @@ export function coverageFromTranscripts(
     // the prompt, and a cause that outlives its suppression makes
     // `classify()` diagnose the chunk with a repaired problem.
     if (rewrittenThisRecord && !superseded(rec, chunk))
-      noteChunkCause(chunk, 'rewritten-prompt');
+      noteChunkCause(rec, chunk, 'rewritten-prompt');
 
     const told = pointedAt(rec.launchPrompt, plan);
 
@@ -1171,6 +1234,7 @@ export function coverageFromTranscripts(
       // superseding relaunch already reopened the diff or rebuilt the prompt.
       if (!superseded(rec, chunk)) {
         noteChunkCause(
+          rec,
           chunk,
           rewrittenThisRecord ? 'rewritten-prompt' : 'unopened',
         );
@@ -1243,16 +1307,19 @@ export function coverageFromTranscripts(
       // written against; a declaration whose count contradicts this plan
       // describes different lines even when its id exists in it, and
       // admitting it classified a chunk a relaunch could cover as
-      // `declared-uncoverable` and erased its live coverage.
+      // `declared-uncoverable` and erased its live coverage. The
+      // declarer's own reads are the last seal: told the right window but
+      // demonstrably reading elsewhere is a repairable failure wearing an
+      // impossible verdict — see `declarerReadItsChunk`.
       if (
-        plan.chunks.some((c) => c.id === chunk) &&
-        assignedChunkTotal(rec) === plan.chunks.length &&
+        sealedToThisPlan(rec, chunk) &&
         declarationStillOnTerritory(told, chunk) &&
+        declarerReadItsChunk(rec, chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
         !refutedByReturnedSpanningRead(chunk)
       ) {
         uncoverable.add(chunk);
-        noteChunkCause(chunk, 'declared-uncoverable');
+        noteChunkCause(rec, chunk, 'declared-uncoverable');
       }
       continue;
     }

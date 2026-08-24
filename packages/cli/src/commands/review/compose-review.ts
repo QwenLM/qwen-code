@@ -3350,12 +3350,20 @@ function composeReviewBody(
   // opened it, a chunk with no receipt, a plan or transcript set that could
   // not be read, a context fetch that failed. `budgetEntry` is excluded on
   // purpose — a disclosed budget gap is the ceiling working, and it says
-  // something about DEPTH, not about which lines were read.
+  // something about DEPTH, not about which lines were read. The by-design
+  // floor entries are excluded for the same reason: the medium tier
+  // skipping the reverse audit is a posture fact no repair lifts, and it
+  // says nothing about which lines were read — counting it as scope doubt
+  // withheld the anchor from every clean balanced-medium run, regenerating
+  // the closed full-diff re-review loop `ledgerMarkerFor`'s own docstring
+  // measures.
   const scopeUnproven =
     missingReceipts.length > 0 ||
     uncoverable.length > 0 ||
     contextUnavailable ||
-    coverageEntries.some((entry) => entry !== budgetEntry);
+    coverageEntries.some(
+      (entry) => entry !== budgetEntry && !byDesignFloorEntries.has(entry),
+    );
 
   // Is every dimension gap the orchestrator disclosed about DEPTH rather than
   // about which lines were read?
@@ -3403,18 +3411,25 @@ function composeReviewBody(
   // is the safe direction).
   const isRelayedStopEntry = (entry: string): boolean =>
     canonicalStopEntries?.has(entry.trim()) ?? false;
-  // The same subject-echo dedup the render path applies below (#7188's
-  // prefix match): a Step 4/5 floor gap the orchestrator relays into
-  // `unreviewedDimensions` is an echo of a structural coverage entry, not an
-  // independent line-coverage claim. Unfiltered it fails both exemptions
-  // here and flips `dimensionGapsAreDepthOnly` false — routing the cap onto
-  // the coverage axis for a run whose only doubt is the verification floor,
-  // the exact misrouting this derivation exists to remove.
+  // The same subject-echo dedup the render path applies below: a Step 4/5
+  // floor gap the orchestrator relays into `unreviewedDimensions` is an
+  // echo of a structural coverage entry, not an independent line-coverage
+  // claim. Unfiltered it fails both exemptions here and flips
+  // `dimensionGapsAreDepthOnly` false — routing the cap onto the coverage
+  // axis for a run whose only doubt is the verification floor, the exact
+  // misrouting this derivation exists to remove. The match is anchored on
+  // the structural REASON as well as the subject: a same-subject entry
+  // carrying its own reason is a DISTINCT claim — `reverse audit — chunk
+  // 2's auditor returned nothing substantive twice` beside the floor's own
+  // sentence — and swallowing it routed a whiffed audit scope to the
+  // verification axis. `includes`, not equality, so a prefix-reshaped
+  // relay ("step 5 — …") still dedupes; the budget entry's relays ride
+  // the canonical-entry splice and never match here.
   const echoesCoverageEntry = (entry: string): boolean =>
     coverageEntries.some(
       (e) =>
         entry === e.subject ||
-        (e !== budgetEntry && entry.startsWith(`${e.subject} — `)),
+        (e !== budgetEntry && entry.includes(`${e.subject} — ${e.reason}`)),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,
@@ -3450,7 +3465,12 @@ function composeReviewBody(
   // it as a verification gap would send an automated caller to relaunch
   // verification against a permanently uncleared axis. A repairable floor
   // gap beside the skip keeps the verification axis: the axis names what a
-  // repair can lift. The fixed map sent every backing fact to coverage,
+  // repair can lift — whichever channel names the gap: the orchestrator's
+  // prose entries back the same cap, and a repairable one there
+  // (`build-and-test — the integration tests did not run`) is verification
+  // work exactly as a structural verify-floor gap is, so posture fires only
+  // when the skip is the cap's SOLE backing fact. The fixed map sent every
+  // backing fact to coverage,
   // and an automated caller routing repairs by axis was told to relaunch
   // Step 3 agents that had read everything. Coverage doubt wins when both
   // hold: its repair subsumes the other's, the same precedence
@@ -3468,6 +3488,11 @@ function composeReviewBody(
       : nonBudgetCoverageEntries.length > 0 &&
           nonBudgetCoverageEntries.every((entry) =>
             byDesignFloorEntries.has(entry),
+          ) &&
+          nonEchoedDimensionGaps.every(
+            (entry) =>
+              splicedForBudgetPhrase.includes(entry) ||
+              isRelayedStopEntry(entry),
           )
         ? 'posture'
         : 'verification',
@@ -4249,9 +4274,10 @@ function composeReviewBody(
   // can carry anything, and a boundary guessed wrong regroups the entries it
   // garbles. Coverage now hands the entries over as `{subject, reason}`
   // pairs; only the CALLER\'s entries are prose, and those are never parsed —
-  // they are matched against known coverage subjects by prefix (exactly how
-  // the chunk list above dedupes), and rendered verbatim when nothing
-  // matches. A run that pasted the gate\'s own gap lines into its input
+  // they are matched against known coverage entries by subject AND reason
+  // (a verbatim or prefix-reshaped relay of a structural sentence dedupes;
+  // a same-subject entry carrying its own reason is a distinct claim and
+  // renders verbatim). A run that pasted the gate\'s own gap lines into its input
   // posted every disclosure twice — 22 clauses for 11 roles on a public PR
   // (#7188) — and the coverage-derived text wins the collision: it is the
   // evidence-bounded register this body is written in.
@@ -4261,15 +4287,15 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
-    // The budget-stop entry never prefix-matches: its relays are already
+    // The budget-stop entry never reason-matches: its relays are already
     // deduped by the marker phrase above, and letting its `reverse audit`
-    // subject claim the prefix swallowed unrelated reverse-audit scopes the
+    // subject claim the match swallowed unrelated reverse-audit scopes the
     // caller disclosed with their own reasons (a bare subject echo still
     // dedups).
     const echoesCoverage = covEntries.some(
       (e) =>
         d === e.subject ||
-        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
+        (e !== budgetEntry && d.includes(`${e.subject} — ${e.reason}`)),
     );
     if (!echoesCoverage) callerLeft.push(d);
   }

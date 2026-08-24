@@ -99,10 +99,11 @@ function plan(
         id: i + 1,
         startLine: i * 100 + 1,
         endLine: (i + 1) * 100,
-        // The planner's own pre-detection of a chunk no read can span.
-        ...(opts.longLineChunk === i + 1
-          ? { maxLineChars: READ_FILE_CHAR_CAP + 1 }
-          : {}),
+        // The planner's own pre-detection of a chunk no read can span —
+        // written unconditionally (the field has shipped with every plan
+        // since the format's first release), so the fixtures carry it too.
+        // A plan WITHOUT it models a hand-edited plan, not a legacy one.
+        maxLineChars: opts.longLineChunk === i + 1 ? READ_FILE_CHAR_CAP + 1 : 0,
       })),
     }),
   );
@@ -183,6 +184,11 @@ function transcript(
      */
     range?: [number, number];
     /**
+     * Several ranged diff reads, one call each — the paging shape.
+     * Overrides `range` and sizes the call count.
+     */
+    ranges?: Array<[number, number]>;
+    /**
      * The path the reads target. Defaults to the module's diff constant;
      * the drift fixture binds its plan to a real file of its own.
      */
@@ -196,7 +202,8 @@ function transcript(
   // An agent that did nothing opened nothing — not even its brief. The default
   // models a *working* agent, which is the only kind that reads what it is pointed
   // at; a whiff and a failed run leave the briefs unread, as they do the diff.
-  const working = (opts.calls ?? 0) > 0 && !opts.failed;
+  const callCount = opts.ranges ? opts.ranges.length : (opts.calls ?? 0);
+  const working = callCount > 0 && !opts.failed;
   const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const lines = [
     JSON.stringify({
@@ -205,7 +212,8 @@ function transcript(
       message: { role: 'user', parts: [{ text: launchPrompt }] },
     }),
   ];
-  for (let i = 0; i < (opts.calls ?? 0); i++) {
+  for (let i = 0; i < callCount; i++) {
+    const rg = opts.ranges ? opts.ranges[i] : opts.range;
     lines.push(
       JSON.stringify({
         ...base,
@@ -216,11 +224,11 @@ function transcript(
             {
               functionCall: {
                 name: 'read_file',
-                args: opts.range
+                args: rg
                   ? {
                       file_path: opts.toolPath ?? DIFF,
-                      offset: opts.range[0],
-                      limit: opts.range[1],
+                      offset: rg[0],
+                      limit: rg[1],
                     }
                   : { file_path: opts.toolPath ?? DIFF },
               },
@@ -3003,6 +3011,33 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     expect(r.ok).toBe(false);
   });
 
+  it('a plan without maxLineChars cannot refute a declaration either', () => {
+    // The planner has written `maxLineChars` unconditionally since the plan
+    // format's first release, so a plan without it is hand-edited or
+    // degraded, not legacy. Its absence leaves the truncation question
+    // unanswered — the spanning read may have been the truncated kind —
+    // and a refutation the metadata cannot clear would delete an honest
+    // declaration on a guess. Fail closed: no metadata, no refutation.
+    const p = plan();
+    const stripped = JSON.parse(readFileSync(p, 'utf8'));
+    for (const c of stripped.chunks) delete c.maxLineChars;
+    writeFileSync(p, JSON.stringify(stripped));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', good(1), {
+      calls: 1,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('w1', wholeDiff(), { calls: 2, range: [0, 100] });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(false);
+  });
+
   it('a superseded rewritten record leaves no cause behind', () => {
     // The supersession gate suppresses the blind/idle/rewritten PROSE for a
     // record a verbatim relaunch superseded — but the rewritten arm's
@@ -3219,6 +3254,204 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
 
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.uncoverableChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+  });
+
+  it('drops a stale declaration whose old window is a superset of the re-planned chunk', () => {
+    // The containment edge of the territory seal. A re-plan kept two chunks
+    // but shrank chunk 2's tail — [101,200] became [101,185] — and the old
+    // launch's told [101,200] still CONTAINS the new window, so a
+    // containment test would pass membership, count and territory alike for
+    // a declaration written against the old lines, and `uncoverable.add`
+    // would erase the chunk's live coverage. An honest declarer's
+    // told-range spans its chunk EXACTLY (the launch spells the chunk's own
+    // window); exactness is what tells the plans apart.
+    const p = join(dir, 'plan.json');
+    const shrunk =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=100, limit=85)`;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100, maxLineChars: 0 },
+          { id: 2, startLine: 101, endLine: 185, maxLineChars: 0 },
+        ],
+      }),
+    );
+    built(p, 1);
+    built(p, 2, shrunk);
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', good(1), { calls: 2 });
+    // Chunk 2's live agent: launched verbatim, made a diff call, died
+    // before returning — told-credit covers the shrunken window, and the
+    // unreturned shape leaves no superseder and no refuting read.
+    transcript('a2', shrunk, { calls: 1, text: '' });
+    transcript(
+      'stale',
+      `You are reviewing chunk 2 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        range: [100, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('covered');
+  });
+
+  it('still admits a declaration whose told-range is the shrunken window itself', () => {
+    // The positive control for the exact-span seal: the same shrunken plan,
+    // but the declarer's launch spells the window it declares. A mutant
+    // that flipped the seal to refuse everything would ship green on the
+    // drop test alone.
+    const p = join(dir, 'plan.json');
+    const shrunk =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=100, limit=85)`;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100, maxLineChars: 0 },
+          { id: 2, startLine: 101, endLine: 185, maxLineChars: 0 },
+        ],
+      }),
+    );
+    built(p, 1);
+    built(p, 2, shrunk);
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', shrunk, {
+      calls: 1,
+      range: [100, 85],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+  });
+
+  it('a stale idle record keys no cause and no agent into this plan\u2019s chunk', () => {
+    // The cause notes keyed the record's `chunk N of M` id against the
+    // CURRENT plan with no identity seal, while the declaration branch in
+    // the same walk required membership, count and territory because "a
+    // stale id can collide with a planned one". A stale `chunk 2 of 9`
+    // surviving the mtime fence noted `idle` for this plan's chunk 2 and
+    // put its label in the ledger's agents, where the true state is
+    // no-agent and nobody. The prose arrays still name the record — those
+    // describe the RECORD — but the ledger is this plan's.
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'stale',
+      `You are reviewing chunk 2 of 9.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      { calls: 0 },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toContain('chunk 2');
+    expect(r.missingChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('no-agent');
+    expect(entry?.agents).toEqual([]);
+  });
+
+  it('a stale blind record does not outrank the genuine current cause', () => {
+    // The same seal on the blind arm. `classify()` orders the prompt-defect
+    // family above `idle`, so an unsealed stale `chunk 2 of 9` launch
+    // without the diff noted `blind-prompt` for this plan's chunk 2 and
+    // outranked the chunk's genuine current idle — handing the operator
+    // "rebuild the prompt" for a prompt this run delivered verbatim.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+    transcript(
+      'stale',
+      'The changes are in chunk 2 of 9, covering lines 801-900 of the diff.',
+      { calls: 0 },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.blindAgents).toContain('chunk 2');
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('idle');
+  });
+});
+
+describe('coverage — a declaration must be evidenced by the declarer\u2019s own reads', () => {
+  it('does not admit a declaration from an agent whose ranged reads avoid the chunk', () => {
+    // Told the right window, it read lines 1-50 only and returned the
+    // declaration line its prompt carried: membership, count and the
+    // told-range territory all pass, but its own ranged reads prove it
+    // never reached the chunk it declares. Admitted anyway, the verdict
+    // pinned `declared-uncoverable` — nothing is repaired by relaunching —
+    // over a repairable gap, steering every classification-routing
+    // consumer away from the one repair that works. Refused, the chunk is
+    // the relaunchable gap its reads demonstrate.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 1,
+      range: [0, 50],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('unknown');
+  });
+
+  it('admits a declaration whose paged reads together span the chunk', () => {
+    // The guard merges before it asks: a declarer that paged its window in
+    // two abutting reads holds the same evidence as one spanning read —
+    // paging is what the prompt tells it to do when a read truncates. A
+    // mutant dropping the merge refuses this honest declarer.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      ranges: [
+        [100, 50],
+        [150, 50],
+      ],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('uncoverable');
     expect(entry?.classification).toBe('declared-uncoverable');
