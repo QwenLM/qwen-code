@@ -152,6 +152,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     YOLO: 'yolo',
     PLAN: 'plan',
   },
+  OutputFormat: {
+    TEXT: 'text',
+    JSON: 'json',
+    STREAM_JSON: 'stream-json',
+  },
   Kind: {
     Read: 'read',
     Edit: 'edit',
