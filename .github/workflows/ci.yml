@@ -321,7 +321,7 @@ jobs:
           # Lets the growth ratchet tell "this PR grew the workflow" apart
           # from "the baseline went stale on main" so one author's missing
           # baseline bump cannot red-wall every unrelated open PR (#9904).
-          WORKFLOW_SIZE_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
+          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
         run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
@@ -532,6 +532,11 @@ jobs:
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
+          # Same base SHA the size gate above receives: the vitest mirror of
+          # the ratchet applies the identical stale-baseline leniency (#9904),
+          # so main-side drift warns here too instead of red-walling the
+          # full-CI lanes the gate just passed.
+          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -877,6 +882,7 @@ jobs:
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
+          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -1007,6 +1013,7 @@ jobs:
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
+          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
