@@ -141,7 +141,7 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
   }
@@ -718,7 +718,7 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const cacheSafeParams = getCacheSafeParams();
+    const cacheSafeParams = getCacheSafeParams(config.getSessionId());
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
     const resolvedModel = model ?? cacheSafeParams.model;

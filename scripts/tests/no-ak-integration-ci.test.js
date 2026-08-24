@@ -213,6 +213,7 @@ describe('no-AK integration CI wiring', () => {
       'IDEALAB_API_KEY',
       'MINIMAX_API_KEY',
       'MODELSCOPE_API_KEY',
+      'MOONSHOT_API_KEY',
       'OPENAI_API_KEY',
       'OPENAI_BASE_URL',
       'OPENAI_MODEL',

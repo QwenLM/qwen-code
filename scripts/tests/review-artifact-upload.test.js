@@ -40,8 +40,11 @@ const workflowText = readFileSync(
 );
 const workflow = parse(workflowText);
 const runTs = readFileSync('packages/cli/src/commands/review/run.ts', 'utf8');
+// The doc side of the contract lives in the persistence reference since
+// the skill's Step 8 was extracted there: the findings name, the cost
+// ledger, the retention window, and the deferred-marker literal.
 const skillMd = readFileSync(
-  'packages/core/src/skills/bundled/review/SKILL.md',
+  'packages/core/src/skills/bundled/review/references/persistence.md',
   'utf8',
 );
 
@@ -83,11 +86,11 @@ const fnmatch = (pattern, name) =>
 const inReviews = (name) => reviewsPatterns.some((p) => fnmatch(p, name));
 const inTmp = (name) => tmpPatterns.some((p) => fnmatch(p, name));
 
-// The findings artifact's name has no code constant — SKILL.md prose is its
-// only producer-side authority. Bind the documented template to this test's
-// PR number and match THAT against the find patterns (the pin below holds
-// the template to the doc), so a rename on either side fails here instead
-// of silently emptying the artifact.
+// The findings artifact's name has no code constant — the persistence
+// reference's prose is its only producer-side authority. Bind the
+// documented template to this test's PR number and match THAT against the
+// find patterns (the pin below holds the template to the doc), so a rename
+// on either side fails here instead of silently emptying the artifact.
 const findingsTemplate = 'qwen-review-{target}-findings.json';
 const findingsName = findingsTemplate.replace('{target}', 'pr-42');
 
@@ -199,21 +202,23 @@ describe('review artifact upload — naming contract', () => {
     // attempt 409s and the stale first-attempt record survives.
     expect(uploadBlock).toContain('${{ github.run_attempt }}');
     expect(uploadBlock).toContain('retention-days: 90');
-    // SKILL.md promises the same window beside the overflow pointer, and
-    // its own test pins the promise against the doc's text alone — join
-    // the two sides here, so an edit on either fails against the other
-    // instead of leaving the promise describing a different artifact.
+    // The persistence reference promises the same window beside the
+    // overflow pointer, and its own test pins the promise against the
+    // doc's text alone — join the two sides here, so an edit on either
+    // fails against the other instead of leaving the promise describing a
+    // different artifact.
     const days = uploadBlock.match(/retention-days: (\d+)/)?.[1] ?? '';
     expect(skillMd).toContain(`${days}-day retention window`);
   });
 
   it('keeps the deferred-marker literal joined between the emitter and the doc', () => {
-    // The collector the marker exists for learns the literal from SKILL.md;
-    // a rename in the emitter must not leave the doc — and every collector
-    // reading it — grepping a string the body no longer emits. Extract from
-    // the EMITTER (the literal heading its block), not from anywhere in the
-    // file: a stale comment mentioning the old literal must not satisfy
-    // this pin while the body emits the new one.
+    // The collector the marker exists for learns the literal from the
+    // persistence reference; a rename in the emitter must not leave the
+    // doc — and every collector reading it — grepping a string the body
+    // no longer emits. Extract from the EMITTER (the literal heading its
+    // block), not from anywhere in the file: a stale comment mentioning
+    // the old literal must not satisfy this pin while the body emits the
+    // new one.
     const composeTs = readFileSync(
       'packages/cli/src/commands/review/compose-review.ts',
       'utf8',
