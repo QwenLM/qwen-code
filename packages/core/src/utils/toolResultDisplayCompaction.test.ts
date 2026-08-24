@@ -386,6 +386,57 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.findings[0].outcome).toBe('skipped');
     expect(compacted.findings[0].shortSummary).toBe('short');
     expect(compacted.level).toBe('high');
+    expect(compacted.omittedFindings).toBeUndefined();
+  });
+
+  it('applies an aggregate budget across the list, keeping the most severe prefix', () => {
+    // The schema-maximal shape: 50 findings at the field maxima (summary
+    // 2000 / failureScenario 4000 / outcomeNote 1000). Per-field caps alone
+    // retained ~358 KB through compaction, bypassing the retained-display
+    // budget every other display type obeys. Severities are staggered so
+    // the sort order (most severe first) is observable in the retained
+    // prefix.
+    const severities = ['Critical', 'Suggestion', 'Nice to have'] as const;
+    const findings = Array.from({ length: 50 }, (_, i) => ({
+      id: `R1-${i + 1}`,
+      severity: severities[i % 3],
+      confidence: 'high' as const,
+      file: `src/f${i}.ts`,
+      summary: `s${i}-${'x'.repeat(1996)}`,
+      shortSummary: 'short',
+      failureScenario: `f${i}-${'y'.repeat(3996)}`,
+      outcome: 'skipped' as const,
+      outcomeNote: `n${i}-${'z'.repeat(996)}`,
+    }));
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings,
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    // The retained prefix starts at the most severe entry and stays within
+    // the general retained-display budget; the evicted tail is counted.
+    expect(compacted.findings[0].id).toBe('R1-1');
+    expect(compacted.findings.length).toBeLessThan(50);
+    expect(compacted.findings.length).toBeGreaterThan(0);
+    expect(compacted.omittedFindings).toBe(50 - compacted.findings.length);
+    const retainedChars = compacted.findings.reduce(
+      (total, f) =>
+        total +
+        f.summary.length +
+        f.failureScenario.length +
+        (f.outcomeNote?.length ?? 0),
+      0,
+    );
+    expect(retainedChars).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    // The retained prefix keeps the list's own order, unsorted.
+    expect(compacted.findings.map((f) => f.id)).toEqual(
+      findings.slice(0, compacted.findings.length).map((f) => f.id),
+    );
   });
 
   it('compacts task list and team result displays', () => {

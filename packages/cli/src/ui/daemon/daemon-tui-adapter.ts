@@ -24,6 +24,7 @@ import {
   type HistoryItemWithoutId,
   type IndividualToolCallDisplay,
 } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 
 export interface DaemonTuiEvent {
   id?: number;
@@ -286,6 +287,12 @@ function isFindingsListDisplay(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    value['omittedFindings'] !== undefined &&
+    typeof value['omittedFindings'] !== 'number'
+  ) {
+    return false;
+  }
   return (value['findings'] as unknown[]).every(
     (entry) =>
       isRecord(entry) &&
@@ -437,6 +444,20 @@ function toolUpdateToHistoryItem(
       const oldest = state.toolCallOrder.shift();
       if (oldest !== undefined) {
         state.toolCallsById.delete(oldest);
+      }
+    }
+    // A delivered findings list REPLACES the session's earlier one: the
+    // projection keeps a single logical report, so the previous list's
+    // entry takes the replacement marker instead of rendering beside it.
+    if (isFindingsListDisplay(tool.resultDisplay)) {
+      for (const [id, entry] of state.toolCallsById) {
+        if (id === toolCallId) continue;
+        if (isFindingsListDisplay(entry.resultDisplay)) {
+          state.toolCallsById.set(id, {
+            ...entry,
+            resultDisplay: SUPERSEDED_FINDINGS_MESSAGE,
+          });
+        }
       }
     }
   }

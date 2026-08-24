@@ -496,6 +496,78 @@ describe('ReportFindingsTool', () => {
       .build({ findings: [finding({ outcome: 'fixed' })] })
       .execute(new AbortController().signal);
   });
+
+  it('does not commit the identity at build: an undelivered report blocks nothing', async () => {
+    // The scheduler builds every invocation of a batch up front and can
+    // discard one before it executes (pre-validation cancellation, an
+    // aborted signal). Identity committed at build time would make the
+    // never-delivered round-2 report the active one, rejecting a
+    // legitimate outcome call for the round-1 report the client shows.
+    const tool = new ReportFindingsTool();
+    await tool
+      .build({ findings: [finding({ id: 'R1-1' })] })
+      .execute(new AbortController().signal);
+    // Built but never executed — a cancelled turn's dropped call.
+    tool.build({ findings: [finding({ id: 'R2-1', file: 'src/new.ts' })] });
+
+    const outcome = await tool
+      .build({
+        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
+      })
+      .execute(new AbortController().signal);
+    expect(displayOf(outcome).findings[0].outcome).toBe('fixed');
+  });
+
+  it('clears the identity when a later report has none', async () => {
+    // The removal transition: an id-less re-report (a low-effort pass)
+    // replaces the active identity with none, so a following outcome call
+    // is accepted on its own terms instead of being held to the old ids.
+    const tool = new ReportFindingsTool();
+    await tool
+      .build({ findings: [finding({ id: 'R1-1' })] })
+      .execute(new AbortController().signal);
+    await tool
+      .build({ findings: [finding({ file: 'src/new.ts' })] })
+      .execute(new AbortController().signal);
+
+    const result = await tool
+      .build({
+        findings: [finding({ id: 'R9-9', outcome: 'fixed' })],
+      })
+      .execute(new AbortController().signal);
+    expect(displayOf(result).findings).toHaveLength(1);
+  });
+
+  it('documents the cold-resume limit: a fresh instance has no active identity', async () => {
+    // The identity gate is a live-process contract. A cold session resume
+    // (--resume, a restart) constructs a fresh tool instance that never saw
+    // the pre-restart report, so an outcome call is validated on its own
+    // terms — all-or-nothing outcomes — instead of against the old list.
+    // The same subset the original instance rejects is accepted here.
+    const original = new ReportFindingsTool();
+    await original
+      .build({
+        findings: [
+          finding({ id: 'R1-1' }),
+          finding({ id: 'R1-2', file: 'src/bar.ts' }),
+          finding({ id: 'R1-3', file: 'src/baz.ts' }),
+        ],
+      })
+      .execute(new AbortController().signal);
+    expect(() =>
+      original.build({
+        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
+      }),
+    ).toThrow(/drops 2 finding\(s\) from the active report/);
+
+    const resumed = new ReportFindingsTool();
+    const result = await resumed
+      .build({
+        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
+      })
+      .execute(new AbortController().signal);
+    expect(displayOf(result).findings).toHaveLength(1);
+  });
 });
 
 describe('compressFindingSummary', () => {

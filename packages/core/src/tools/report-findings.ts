@@ -83,8 +83,8 @@ export function compressFindingSummary(
   const flat = summary.replace(/\s+/g, ' ').trim();
   if (flat.length <= max) return flat;
   // Cut on a word boundary when one is reasonably near the limit, so the label
-  // reads as a clause rather than a severed word. `max - 1` leaves room for the
-  // ellipsis, which is one character (U+2026), not three dots. The hard cut
+  // reads as a clause rather than a severed word. `max - 1` leaves room for
+  // the ellipsis, which is one character (U+2026), not three dots. The hard cut
   // backs off one unit when it would land inside a surrogate pair — an
   // unpaired high surrogate is not a character, and the codebase's other
   // truncation paths (terminal sanitizing, display compaction) all cut on
@@ -199,6 +199,20 @@ class ReportFindingsInvocation extends BaseToolInvocation<
   ReportFindingsParams,
   ToolResult
 > {
+  constructor(
+    params: ReportFindingsParams,
+    // Identity is committed on successful delivery, not at build: the
+    // scheduler builds every invocation of a batch up front and can still
+    // discard it before execution (pre-validation cancellation, an aborted
+    // signal), and a built-but-never-executed report must not replace the
+    // identity the client actually received.
+    private readonly commitActiveReport: (
+      identity: ReadonlySet<string> | undefined,
+    ) => void,
+  ) {
+    super(params);
+  }
+
   override getDescription(): string {
     const n = this.params.findings.length;
     return `Report ${n} finding${n === 1 ? '' : 's'}`;
@@ -231,6 +245,8 @@ class ReportFindingsInvocation extends BaseToolInvocation<
       findings.length === 0
         ? 'Reported an empty findings list to the client UI.'
         : `Reported ${findings.length} finding${findings.length === 1 ? '' : 's'} to the client UI (${bySeverity.join(', ')})${withOutcomes}.`;
+
+    this.commitActiveReport(reportIdentity(this.params.findings));
 
     return {
       llmContent: `${summaryLine} Nothing was persisted; the review's findings artifact remains the canonical record.`,
@@ -293,10 +309,20 @@ export class ReportFindingsTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.REPORT_FINDINGS;
 
-  // Id set of the most recent accepted report whose findings all carried
-  // ids. An outcome call replaces the whole list, so it must match this
-  // identity in full; undefined when there is no identity to join on (no
-  // report yet, or a low-effort report without artifact ids).
+  // Id set of the most recent DELIVERED report whose findings all carried
+  // ids, committed in the invocation's execute(). An outcome call replaces
+  // the whole list, so it must match this identity in full; undefined when
+  // there is no identity to join on (no report yet, or a low-effort report
+  // without artifact ids).
+  //
+  // The gate is a contract about the live process, not a persisted one: the
+  // tool instance is cached by the registry for the session, but a cold
+  // session resume (--resume, a daemon or process restart) constructs a
+  // fresh instance with no active identity. That is the documented limit of
+  // the join — after a restart an outcome call is validated on its own
+  // terms (all-or-nothing outcomes) instead of against the pre-restart
+  // report — and the transcript surfaces render the same replacement (the
+  // last delivered list wins) independently of this gate.
   private activeReportIds: ReadonlySet<string> | undefined;
 
   constructor() {
@@ -418,8 +444,9 @@ export class ReportFindingsTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ReportFindingsParams,
   ): ToolInvocation<ReportFindingsParams, ToolResult> {
-    this.activeReportIds = reportIdentity(params.findings);
-    return new ReportFindingsInvocation(params);
+    return new ReportFindingsInvocation(params, (identity) => {
+      this.activeReportIds = identity;
+    });
   }
 }
 

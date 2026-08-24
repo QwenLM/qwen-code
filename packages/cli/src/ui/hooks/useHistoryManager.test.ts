@@ -14,6 +14,7 @@ import {
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
 import { ToolCallStatus } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
@@ -60,6 +61,56 @@ describe('useHistoryManager', () => {
     );
     // Basic check that ID incorporates timestamp
     expect(result.current.history[0].id).toBeGreaterThanOrEqual(timestamp);
+  });
+
+  it('replaces earlier findings displays when a new report_findings group commits', () => {
+    // A delivered findings list REPLACES the session's earlier one: the
+    // previous group's display collapses to the marker at commit time, so
+    // every re-render surface shows only the latest list.
+    const { result } = renderHook(() => useHistory());
+    const findingsGroup = (id: string, outcome?: 'fixed') => ({
+      type: 'tool_group' as const,
+      tools: [
+        {
+          callId: id,
+          name: 'ReportFindings',
+          description: 'Report 1 finding',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+          resultDisplay: {
+            type: 'findings_list' as const,
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical' as const,
+                file: 'src/foo.ts',
+                summary: 's',
+                shortSummary: 's',
+                failureScenario: 'f',
+                ...(outcome ? { outcome } : {}),
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    act(() => {
+      result.current.addItem(findingsGroup('call-1'), Date.now());
+    });
+    act(() => {
+      result.current.addItem(findingsGroup('call-2', 'fixed'), Date.now());
+    });
+
+    expect(result.current.history).toHaveLength(2);
+    const [first, second] = result.current.history as HistoryItemToolGroup[];
+    expect(first.tools[0].resultDisplay).toBe(SUPERSEDED_FINDINGS_MESSAGE);
+    const latest = second.tools[0].resultDisplay as {
+      type: string;
+      findings: Array<{ outcome?: string }>;
+    };
+    expect(latest.type).toBe('findings_list');
+    expect(latest.findings[0].outcome).toBe('fixed');
   });
 
   it('should generate unique IDs for items added with the same base timestamp', () => {

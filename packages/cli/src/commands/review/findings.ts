@@ -304,8 +304,23 @@ function parseLocations(
  * are derived or dropped, never demanded.
  */
 export function validateFindings(raw: unknown): Finding[] {
+  // Step 9 cleanup deletes the side files `--input` normally receives, but
+  // not the saved artifact (Step 8, under .qwen/reviews/) nor a surviving
+  // `--out` report — and both wrap the findings array. Accept the wrapper,
+  // so a later outcome path can recover from the state that survives the
+  // cleanup instead of dying on a missing findings-in.json.
+  if (
+    !Array.isArray(raw) &&
+    raw !== null &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as { findings?: unknown }).findings)
+  ) {
+    raw = (raw as { findings: unknown }).findings;
+  }
   if (!Array.isArray(raw)) {
-    throw new Error('Input must be a JSON array of findings.');
+    throw new Error(
+      'Input must be a JSON array of findings, or a saved review artifact/report object carrying one as "findings".',
+    );
   }
   const findings = raw.map((r, i) => {
     if (r === null || typeof r !== 'object' || Array.isArray(r)) {
@@ -1018,7 +1033,8 @@ export const findingsCommand: CommandModule = {
       .option('input', {
         type: 'string',
         demandOption: true,
-        describe: 'JSON array of findings written by the review',
+        describe:
+          'JSON array of findings written by the review (or a saved review artifact/report object carrying the array as "findings")',
       })
       .option('out', {
         type: 'string',

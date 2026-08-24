@@ -886,6 +886,12 @@ export interface FindingsResultDisplay {
   /** The review effort the findings came from. */
   level?: 'low' | 'medium' | 'high';
   findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
 }
 
 export interface TodoResultDisplay {

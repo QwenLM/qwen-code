@@ -16,6 +16,7 @@ import {
   type DaemonTuiEvent,
   type DaemonTuiSessionClient,
 } from './daemon-tui-adapter.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 import { ToolCallStatus } from '../types.js';
 
 class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
@@ -178,6 +179,10 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           rawOutput: {
             type: 'findings_list',
             level: 'high',
+            // Compaction's eviction count is part of the trusted shape and
+            // must pass the boundary, or a compacted re-report degrades to
+            // text exactly where the omission matters.
+            omittedFindings: 3,
             findings: [
               {
                 id: 'R1-1',
@@ -204,6 +209,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
               resultDisplay: {
                 type: 'findings_list',
                 level: 'high',
+                omittedFindings: 3,
                 findings: [
                   {
                     id: 'R1-1',
@@ -219,6 +225,65 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         },
       },
     ]);
+  });
+
+  it('replaces the previous findings list in the projection when a new one arrives', () => {
+    // The daemon reducer holds one logical report: a delivered findings list
+    // supersedes the earlier call's list instead of rendering beside it.
+    const state = createDaemonTuiReducerState();
+    const findingsEvent = (toolCallId: string, outcome?: string) => ({
+      id: 1,
+      v: 1 as const,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          kind: 'think',
+          title: 'ReportFindings',
+          status: 'completed',
+          rawOutput: {
+            type: 'findings_list',
+            level: 'high',
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical',
+                confidence: 'high',
+                file: 'src/foo.ts',
+                line: 42,
+                summary: 'wrong return value on cold cache',
+                shortSummary: 'wrong return value on cold cache',
+                failureScenario: 'first call after start returns undefined',
+                ...(outcome ? { outcome } : {}),
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    reduceDaemonEventToTuiUpdates(findingsEvent('tool-report-1'), state);
+    const updates = reduceDaemonEventToTuiUpdates(
+      findingsEvent('tool-report-2', 'fixed'),
+      state,
+    );
+
+    const group = updates.find((u) => u.type === 'tool_group_update');
+    expect(group).toBeDefined();
+    if (!group || group.type !== 'tool_group_update') return;
+    expect(group.item.tools).toHaveLength(2);
+    const byId = Object.fromEntries(
+      group.item.tools.map((tool) => [tool.callId, tool]),
+    );
+    expect(byId['tool-report-1'].resultDisplay).toBe(
+      SUPERSEDED_FINDINGS_MESSAGE,
+    );
+    expect(byId['tool-report-2'].resultDisplay).toMatchObject({
+      type: 'findings_list',
+      findings: [{ id: 'R1-1', outcome: 'fixed' }],
+    });
   });
 
   it('falls back to text for findings_list payloads that fail the shape check', () => {

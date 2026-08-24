@@ -84,6 +84,27 @@ describe('<FindingsDisplay />', () => {
     expect(lastFrame()).toContain('No findings.');
   });
 
+  it('keeps the unverified marker for an empty low-effort report', () => {
+    // A quick pass that finds nothing still reports an UNVERIFIED nothing;
+    // the early empty-state return must not drop the banner, or the row
+    // reads as a verified clean bill.
+    const { lastFrame } = render(
+      <FindingsDisplay data={display({ level: 'low', findings: [] })} />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('No findings.');
+    expect(frame).toContain('unverified');
+  });
+
+  it('counts findings history compaction evicted', () => {
+    const data = display();
+    data.omittedFindings = 47;
+    const { lastFrame } = render(<FindingsDisplay data={data} />);
+    expect(lastFrame()!).toContain(
+      '(+47 more findings removed by history compaction)',
+    );
+  });
+
   it('marks a low-level report unverified even where rows omit confidence', () => {
     // Step 3C sends `level: 'low'` while omitting per-finding confidence for
     // candidates the pass kept — the list itself must carry the unverified

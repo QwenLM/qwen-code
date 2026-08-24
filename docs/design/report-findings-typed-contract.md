@@ -39,7 +39,28 @@ is disclosed and never alters artifacts or the verdict.
 Rendering: the TUI gets a `FindingsDisplay` row list (severity color, id,
 `file:line`, short summary, confidence marker, outcome badge); the daemon TUI
 adapter passes `findings_list` through; history/recording compaction truncates
-only the free-text fields.
+the free-text fields and applies an aggregate retained-display budget across
+the list, keeping the most severe prefix and counting the evicted tail
+(`omittedFindings`).
+
+"Later calls replace the list" is rendered, not just validated: every
+transcript surface — live history, restored history, recording/resume, and
+the daemon projection — keeps only the last delivered `findings_list` and
+collapses each earlier one to a one-line replacement marker, so an initial
+report and its outcome re-report never show two checklists at once.
+
+The outcome identity gate (`activeReportIds`) is a live-process contract:
+the tool instance is cached by the registry for the session, but a cold
+session resume constructs a fresh instance with no active identity, and an
+outcome call is then validated on its own terms (all-or-nothing outcomes)
+instead of against the pre-restart report. Persisting the identity across
+restarts is deliberately out of scope; the transcript-side replacement above
+does not depend on it.
+
+The findings command's `--input` also accepts a saved review artifact or a
+prior `--out` report (any object carrying the array as `findings`), because
+Step 9 cleanup deletes the `findings-in.json` side file a later-session
+outcome path would otherwise need.
 
 ## Verification
 
