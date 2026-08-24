@@ -2673,6 +2673,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(brief).not.toContain('**Wrapper/proxy routing.**');
   });
 
+  it('states the Go and Kotlin checklist entries with their real semantics', () => {
+    // Both entries shipped inverted. Range-variable capture is the PRE-1.22
+    // per-loop footgun — Go 1.22+ allocates the loop variable per iteration,
+    // so the capture is safe — and Kotlin `==` already translates to `equals`
+    // (`===` is identity). As first written, the checklist prompted Agent 1d
+    // to report correct Go 1.22 and Kotlin code as bugs. Pin the corrected
+    // wording, per language, so a re-inversion ships red.
+    const brief = buildRoleBrief(PLAN, '1d');
+    // Go: the capture item is scoped to the vulnerable semantics alone, and
+    // the safe case is named so a 1.22+ module is not flagged.
+    expect(brief).toContain('only under the pre-1.22 per-loop semantics');
+    expect(brief).toContain('Go 1.22+');
+    expect(brief).not.toContain('per-iteration semantics or below');
+    // Java and Kotlin are separate entries with opposite equality traps:
+    // Java owes `.equals` where `==` stands; Kotlin's `==` already calls
+    // `equals`, so `===` is the operator owed.
+    expect(brief).toContain('**Java:**');
+    expect(brief).toContain('`===` where `==` is owed');
+    expect(brief).not.toContain('**Java/Kotlin:**');
+  });
+
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,
