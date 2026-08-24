@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, win32 } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -71,9 +71,13 @@ describe('workflow file size', () => {
     // enforcer — without each step hand-wiring a copy a future lane could
     // forget.
     const workflowEnv = ciWorkflow.match(/^env:[\s\S]*?\njobs:/m)?.[0];
-    expect(workflowEnv).toContain('WORKFLOW_SIZE_BASE_SHA');
-    expect(workflowEnv).toContain('github.event.pull_request.base.sha');
-    expect(workflowEnv).toContain('github.event.merge_group.base_sha');
+    // Anchored to the whole line: substring checks still pass a `||` → `&&`
+    // mutation (empty on both events — the #9904 red wall returns) and an
+    // appended `|| github.sha` fallback (workflow_dispatch resolves the base
+    // to the checked-out commit, failing the ratchet open on that lane).
+    expect(workflowEnv).toMatch(
+      /^\s*WORKFLOW_SIZE_BASE_SHA: '\$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \}\}'$/m,
+    );
   });
 });
 
@@ -163,13 +167,16 @@ describe('workflow size growth ratchet', () => {
     // PR removes into `npm run test:ci`.
     expect(
       fileMatchesBase(file),
-      `${file} has no entry in .size-baseline and differs from the PR's base`,
+      `${file} has no entry in .size-baseline and differs from the PR's base — add its byte size to .size-baseline in this PR so its growth is tracked`,
     ).toBe(true);
   });
 
   it.each(workflowFiles)('%s is within its baseline allowance', (file) => {
     const bytes = Buffer.byteLength(readFileSync(file));
     const recorded = baseline.get(workflowName(file));
+    // An entry-less file renders NaN/undefined below; the missing-entry test
+    // above owns that state.
+    if (recorded === undefined) return;
     if (bytes <= recorded + allowance) return;
     // Stale-baseline leniency (#9904), mirroring the shell gate: overage on
     // a file byte-identical to the PR's base is main-side drift, not this
@@ -177,7 +184,7 @@ describe('workflow size growth ratchet', () => {
     // the run, relocating the red wall into `npm run test:ci`.
     expect(
       fileMatchesBase(file),
-      `${file} is ${bytes - recorded} bytes over its recorded ${recorded} and differs from the PR's base`,
+      `${file} is ${bytes - recorded} bytes over its recorded ${recorded} and differs from the PR's base — move prose into a sibling .md and long steps into .github/scripts/, or, if the growth is real, update .size-baseline in this PR and say why`,
     ).toBe(true);
   });
 
@@ -241,6 +248,54 @@ const hermeticGateEnv = (dir) => {
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: gitconfigPath,
   });
+};
+
+// Both fetch-arm fixtures need the same shape: a bare origin whose base
+// commit sits behind an unrelated tip, so a depth-1 clone of the tip lacks
+// the base and any success must come from the runtime's own fetch. Building
+// it once keeps the gate's fixture and the mirror's from drifting — the clone
+// URL spelling already drifted between the two copies.
+const seedShallowClone = ({ root, env, seedFiles }) => {
+  const bare = join(root, 'origin.git');
+  const seed = join(root, 'seed');
+  const checkout = join(root, 'checkout');
+  const git = (args, cwd) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', env });
+    expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
+    return r;
+  };
+  mkdirSync(seed, { recursive: true });
+  git(['init', '--quiet', '--bare', bare], root);
+  // The bare repo's HEAD defaults to refs/heads/master; point it at the
+  // branch the seed pushes so the clone checks files out at all.
+  git(['symbolic-ref', 'HEAD', 'refs/heads/main'], bare);
+  git(['config', 'uploadpack.allowAnySHA1InWant', 'true'], bare);
+  git(['init', '--quiet'], seed);
+  git(['config', 'user.email', 'gate-test@example.com'], seed);
+  git(['config', 'user.name', 'gate-test'], seed);
+  for (const [relPath, contents] of Object.entries(seedFiles)) {
+    const filePath = join(seed, relPath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, contents);
+  }
+  git(['add', '.'], seed);
+  git(['commit', '--quiet', '-m', 'base'], seed);
+  const baseSha = git(['rev-parse', 'HEAD'], seed).stdout.trim();
+  // A second commit touching only an unrelated file pushes the base behind
+  // the tip, so a depth-1 clone does not contain it.
+  writeFileSync(join(seed, 'README.md'), 'unrelated tip change\n');
+  git(['add', '.'], seed);
+  git(['commit', '--quiet', '-m', 'unrelated tip'], seed);
+  git(['remote', 'add', 'origin', bare], seed);
+  git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], seed);
+  // Depth-1 clone holds only the tip; the base commit needs a fetch. The
+  // file:// URL matters: a plain local path ignores --depth and copies
+  // full history, which would hide the fetch under test.
+  git(
+    ['clone', '--quiet', '--depth', '1', pathToFileURL(bare).href, checkout],
+    root,
+  );
+  return { checkout, baseSha };
 };
 
 describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
@@ -535,58 +590,23 @@ describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
       it('fetches the base commit when it is not local (CI shallow-clone path)', () => {
         // The production path: ci.yml checks out at fetch-depth 1, so the
         // PR's base commit is never present locally and the gate must reach
-        // it via `git fetch --depth=1 origin <sha>`. Re-implementing the
-        // fixture here (rather than reusing runGate, which commits into the
-        // same repo) so the base commit genuinely has to be fetched.
+        // it via `git fetch --depth=1 origin <sha>` — runGate cannot stage
+        // that, because it commits into the same repo the script inspects.
         // Removing the fetch line from the script must turn this test red.
         const dir = mkdtempSync(join(tmpdir(), 'workflow-size-gate-fetch-'));
         try {
           const env = hermeticGateEnv(dir);
-          const bare = join(dir, 'origin.git');
-          const seed = join(dir, 'seed');
-          const gateCwd = join(dir, 'checkout');
-          const git = (args, cwd) => {
-            const r = spawnSync('git', args, { cwd, encoding: 'utf8', env });
-            expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
-            return r;
-          };
-          mkdirSync(seed, { recursive: true });
-          git(['init', '--quiet', '--bare', bare], dir);
-          // The bare repo's HEAD defaults to refs/heads/master; point it at
-          // the branch the seed pushes so the clone checks files out at all.
-          git(['symbolic-ref', 'HEAD', 'refs/heads/main'], bare);
-          git(['config', 'uploadpack.allowAnySHA1InWant', 'true'], bare);
-          // Seed: a base commit with the grown workflow + a stale baseline,
-          // then a second commit that changes only an unrelated file, so the
-          // base sits behind the tip and a depth-1 clone does not contain it.
-          git(['init', '--quiet'], seed);
-          git(['config', 'user.email', 'gate-test@example.com'], seed);
-          git(['config', 'user.name', 'gate-test'], seed);
-          const seedWorkflows = join(seed, WORKFLOW_DIR);
-          mkdirSync(seedWorkflows, { recursive: true });
-          writeFileSync(join(seedWorkflows, 'small.yml'), 'a'.repeat(5000));
-          writeFileSync(
-            join(seedWorkflows, '.size-baseline'),
-            '100 small.yml\n',
-          );
-          git(['add', '.'], seed);
-          git(['commit', '--quiet', '-m', 'base'], seed);
-          const baseSha = git(['rev-parse', 'HEAD'], seed).stdout.trim();
-          writeFileSync(join(seed, 'README.md'), 'unrelated tip change\n');
-          git(['add', '.'], seed);
-          git(['commit', '--quiet', '-m', 'unrelated tip'], seed);
-          git(['remote', 'add', 'origin', bare], seed);
-          git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], seed);
-          // Depth-1 clone holds only the tip; the base commit needs a fetch.
-          // The file:// URL matters: a plain local path ignores --depth and
-          // copies full history, which would hide the fetch the gate must do.
-          git(
-            ['clone', '--quiet', '--depth', '1', `file://${bare}`, gateCwd],
-            dir,
-          );
+          const { checkout, baseSha } = seedShallowClone({
+            root: dir,
+            env,
+            seedFiles: {
+              [join(WORKFLOW_DIR, 'small.yml')]: 'a'.repeat(5000),
+              [join(WORKFLOW_DIR, '.size-baseline')]: '100 small.yml\n',
+            },
+          });
           env.WORKFLOW_SIZE_BASE_SHA = baseSha;
           const result = spawnSync('bash', [gatePath], {
-            cwd: gateCwd,
+            cwd: checkout,
             encoding: 'utf8',
             env,
           });
@@ -699,59 +719,21 @@ describe.skipIf(!gitAvailable)(
       const fetchCwd = process.cwd();
       try {
         const env = hermeticGateEnv(fetchDir);
-        const bare = join(fetchDir, 'origin.git');
-        const seed = join(fetchDir, 'seed');
-        const checkout = join(fetchDir, 'checkout');
-        const git = (args, cwd) => {
-          const r = spawnSync('git', args, { cwd, encoding: 'utf8', env });
-          expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
-          return r;
-        };
-        mkdirSync(seed, { recursive: true });
-        git(['init', '--quiet', '--bare', bare], fetchDir);
-        // The bare repo's HEAD defaults to refs/heads/master; point it at
-        // the branch the seed pushes so the clone checks files out at all.
-        git(['symbolic-ref', 'HEAD', 'refs/heads/main'], bare);
-        git(['config', 'uploadpack.allowAnySHA1InWant', 'true'], bare);
-        // Seed: a base commit, then a second commit that changes only an
-        // unrelated file, so the base sits behind the tip and a depth-1
-        // clone does not contain it.
-        git(['init', '--quiet'], seed);
-        git(['config', 'user.email', 'gate-test@example.com'], seed);
-        git(['config', 'user.name', 'gate-test'], seed);
-        const seedWorkflows = join(seed, WORKFLOW_DIR);
-        mkdirSync(seedWorkflows, { recursive: true });
-        writeFileSync(join(seedWorkflows, 'small.yml'), 'base content\n');
-        git(['add', '.'], seed);
-        git(['commit', '--quiet', '-m', 'base'], seed);
-        const fetchBaseSha = git(['rev-parse', 'HEAD'], seed).stdout.trim();
-        writeFileSync(join(seed, 'README.md'), 'unrelated tip change\n');
-        git(['add', '.'], seed);
-        git(['commit', '--quiet', '-m', 'unrelated tip'], seed);
-        git(['remote', 'add', 'origin', bare], seed);
-        git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], seed);
-        // Depth-1 clone holds only the tip; the base commit needs a fetch.
-        // The file:// URL matters: a plain local path ignores --depth and
-        // copies full history, which would hide the fetch under test.
-        git(
-          [
-            'clone',
-            '--quiet',
-            '--depth',
-            '1',
-            pathToFileURL(bare).href,
-            checkout,
-          ],
-          fetchDir,
-        );
+        const { checkout, baseSha } = seedShallowClone({
+          root: fetchDir,
+          env,
+          seedFiles: {
+            [join(WORKFLOW_DIR, 'small.yml')]: 'base content\n',
+          },
+        });
         process.chdir(checkout);
-        process.env.WORKFLOW_SIZE_BASE_SHA = fetchBaseSha;
+        process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
         // Pin the precondition: the base is absent locally, so any success
         // below must come from the fetch arm, not from local history.
         expect(
           spawnSync(
             'git',
-            ['rev-parse', '--verify', '--quiet', `${fetchBaseSha}^{commit}`],
+            ['rev-parse', '--verify', '--quiet', `${baseSha}^{commit}`],
             { stdio: 'ignore' },
           ).status,
         ).not.toBe(0);
