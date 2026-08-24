@@ -476,7 +476,11 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 }
 
 type AutoCompressionSendResult =
-  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
+  | {
+      responseStream: AsyncGenerator<StreamEvent>;
+      requestRouteKey: string;
+      stopReason?: never;
+    }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 function getAbortAwareEndTurnStopReason(
@@ -1849,6 +1853,7 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  private readonly lastPromptTokenCountsByRouteKey = new Map<string, number>();
   // The model route that produced `lastPromptTokenCount` (Config
   // .getModelRouteIdentity). ACP model switches keep the same GeminiChat, so
   // the chat-instance check alone never invalidates the count on a route
@@ -6357,7 +6362,7 @@ export class Session implements SessionContext {
       );
 
       if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata);
+        this.#recordPromptTokenCount(usageMetadata, sendResult.requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,
@@ -6795,14 +6800,19 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (!compressionInfo) {
-      this.#syncPromptTokenCountWithCurrentChat();
-    }
+    const model =
+      options.getModelOverride?.() ??
+      options.modelOverride ??
+      this.config.getModel();
+    const requestRouteKey = await this.#requestRouteKeyForModel(model);
+    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
 
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
-      const lastPromptTokenCount =
-        this.#getPostCompressionTokenCount(compressionInfo);
+      const lastPromptTokenCount = this.#getPostCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+      );
       if (lastPromptTokenCount > sessionTokenLimit) {
         debugLogger.warn(
           `Session token limit exceeded for prompt ${promptId}: ` +
@@ -6847,10 +6857,6 @@ export class Session implements SessionContext {
     }
 
     const chat = this.#getCurrentChat();
-    const model =
-      options.getModelOverride?.() ??
-      options.modelOverride ??
-      this.config.getModel();
     const request = {
       message,
       config: {
@@ -6861,7 +6867,7 @@ export class Session implements SessionContext {
     const responseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    return { responseStream };
+    return { responseStream, requestRouteKey };
   }
 
   #clearPendingRestoreNotices(): void {
@@ -7062,30 +7068,36 @@ export class Session implements SessionContext {
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+    const routeKey = this.#currentRouteKey();
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(routeKey, tokenCount);
     }
   }
 
   #recordPromptTokenCount(
     usageMetadata: GenerateContentResponseUsageMetadata,
+    routeKey = this.#currentRouteKey(),
   ): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     const tokenCount =
       usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
     if (tokenCount !== undefined && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(routeKey, tokenCount);
     }
   }
 
-  #getPostCompressionTokenCount(info: ChatCompressionInfo | null): number {
+  #getPostCompressionTokenCount(
+    info: ChatCompressionInfo | null,
+    routeKey = this.#currentRouteKey(),
+  ): number {
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null) {
       return tokenCount;
     }
 
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     return this.lastPromptTokenCount;
   }
 
@@ -7112,21 +7124,49 @@ export class Session implements SessionContext {
     return this.config.getModelRouteIdentity?.() ?? '';
   }
 
-  #syncPromptTokenCountWithCurrentChat(): void {
+  async #requestRouteKeyForModel(model: string): Promise<string> {
+    if (!this.config.getModelRouteIdentity) {
+      return '';
+    }
+    if (!model.endsWith('\0')) {
+      return this.config.getModelRouteIdentity(model);
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(model.slice(0, -1), { failClosed: true });
+    return this.config.getModelRouteIdentity(
+      runtimeView.model,
+      runtimeView.contentGeneratorConfig,
+    );
+  }
+
+  #setLastPromptTokenCount(routeKey: string, tokenCount: number): void {
+    this.lastPromptTokenCount = tokenCount;
+    this.lastPromptTokenCountRouteKey = routeKey;
+    this.lastPromptTokenCountsByRouteKey.set(routeKey, tokenCount);
+  }
+
+  #syncPromptTokenCountWithCurrentChat(
+    routeKey = this.#currentRouteKey(),
+  ): void {
     const chat = this.#getCurrentChat();
-    const routeKey = this.#currentRouteKey();
     const chatChanged =
       this.lastPromptTokenCountChat && this.lastPromptTokenCountChat !== chat;
-    // A model switch rebuilds the content generator but keeps the same
-    // GeminiChat, so the chat-instance check above never fires on a route
-    // change. A count recorded for the previous route must not anchor the
-    // session-token-limit gate for the new one — reset it so the gate falls
-    // back to the fresh send's own count (#9529, follow-up to #9454/#9506).
-    const routeChanged =
-      this.lastPromptTokenCountRouteKey !== undefined &&
-      this.lastPromptTokenCountRouteKey !== routeKey;
-    if (chatChanged || routeChanged) {
+    if (chatChanged) {
+      this.lastPromptTokenCountsByRouteKey.clear();
       this.lastPromptTokenCount = 0;
+    } else if (this.lastPromptTokenCountRouteKey !== routeKey) {
+      if (
+        this.lastPromptTokenCountRouteKey !== undefined &&
+        this.lastPromptTokenCount > 0
+      ) {
+        this.lastPromptTokenCountsByRouteKey.set(
+          this.lastPromptTokenCountRouteKey,
+          this.lastPromptTokenCount,
+        );
+      }
+      this.lastPromptTokenCount =
+        this.lastPromptTokenCountsByRouteKey.get(routeKey) ?? 0;
     }
     this.lastPromptTokenCountChat = chat;
     this.lastPromptTokenCountRouteKey = routeKey;
