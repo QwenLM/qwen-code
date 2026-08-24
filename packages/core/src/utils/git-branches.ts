@@ -87,27 +87,39 @@ export function gitEnv(
   return env;
 }
 
-function runGit(
+function runGitBuffer(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
+): Promise<Buffer> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
     env: gitEnv(env),
+    encoding: 'buffer',
   }).then(({ stdout }) => stdout);
 }
 
+function runGit(
+  cwd: string,
+  args: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return runGitBuffer(cwd, args, env).then((stdout) => stdout.toString('utf8'));
+}
+
 // runGit for commands that take their input on stdin (check-ignore
-// --stdin), where the number of paths is not bounded by argv limits.
+// --stdin), where the number of paths is not bounded by argv limits. The
+// paths travel as raw bytes end to end: decoding them as UTF-8 would
+// corrupt names holding invalid byte sequences to U+FFFD, which could
+// never match their on-disk counterpart again.
 function runGitStdin(
   cwd: string,
   args: string[],
-  input: string,
+  input: Buffer,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = execFile(
       'git',
@@ -117,6 +129,7 @@ function runGitStdin(
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 10 * 1024 * 1024,
         env: gitEnv(env),
+        encoding: 'buffer',
       },
       (error, stdout) => {
         if (error) {
@@ -126,6 +139,11 @@ function runGitStdin(
         }
       },
     );
+    // The child can die with input still pending (the 30s timeout kill,
+    // an early fatal); without an 'error' listener the EPIPE would be
+    // thrown as an uncaught exception and crash the process instead of
+    // rejecting the pull.
+    child.stdin!.on('error', () => {});
     child.stdin!.end(input);
   });
 }
@@ -597,22 +615,31 @@ async function hasMergeHead(
     .catch(() => false);
 }
 
+async function inProgressRebaseDir(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  for (const stateDir of ['rebase-merge', 'rebase-apply']) {
+    // --git-path resolves the state directory for linked worktrees too.
+    const rel = (
+      await runGit(cwd, ['rev-parse', '--git-path', stateDir], env)
+    ).trim();
+    if (!rel) continue;
+    const abs = path.resolve(cwd, rel);
+    if (fs.existsSync(abs)) return abs;
+  }
+  return '';
+}
+
 async function hasInProgressRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
-  for (const stateDir of ['rebase-merge', 'rebase-apply']) {
-    // --git-path resolves the state directory for linked worktrees too.
-    const rel = (
-      await runGit(cwd, ['rev-parse', '--git-path', stateDir], env).catch(
-        () => '',
-      )
-    ).trim();
-    if (rel && fs.existsSync(path.resolve(cwd, rel))) {
-      return true;
-    }
+  try {
+    return (await inProgressRebaseDir(cwd, env)) !== '';
+  } catch {
+    return false;
   }
-  return false;
 }
 
 async function hasUnmergedEntries(
@@ -653,6 +680,21 @@ async function aheadBehind(
   return { ahead: ahead ?? 0, behind: behind ?? 0 };
 }
 
+function splitBuffer(buf: Buffer, byte: number): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (
+    let idx = buf.indexOf(byte);
+    idx !== -1;
+    idx = buf.indexOf(byte, start)
+  ) {
+    if (idx > start) parts.push(buf.subarray(start, idx));
+    start = idx + 1;
+  }
+  if (start < buf.length) parts.push(buf.subarray(start));
+  return parts;
+}
+
 // Paths the incoming merge would add that exist locally as IGNORED files:
 // git silently checks an incoming tracked file out over a local ignored
 // file of the same path, and neither the auto-stash (--include-untracked
@@ -665,35 +707,26 @@ async function aheadBehind(
 // rename destinations into additions, and -z NUL-separates the paths and
 // suppresses C-quoting of non-ASCII names. Both commands run from the
 // repository toplevel: diff prints toplevel-relative paths, while
-// check-ignore resolves its input against the cwd.
+// check-ignore resolves its input against the cwd. Names travel as raw
+// bytes end to end, so a name holding invalid UTF-8 still matches its
+// on-disk counterpart. The caller has already verified that @{u} exists,
+// so there is no "no upstream" negative to preserve here.
 async function incomingIgnoredPaths(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string[]> {
-  const toplevel = (
-    await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => '')
-  ).trim();
-  if (!toplevel) return [];
-  // Without an upstream there is nothing incoming to collide with; the
-  // pull itself fails loudly with a classifiable error. (Also keeps the
-  // no-upstream shape out of the probe's failure path below.)
-  const hasUpstream = await runGit(
-    toplevel,
-    ['rev-parse', '-q', '--verify', '@{u}'],
-    env,
-  )
-    .then(() => true)
-    .catch(() => false);
-  if (!hasUpstream) return [];
+): Promise<Buffer[]> {
   // No catches below: a probe failure (index.lock contention with a
   // concurrent git process, the 30s timeout, a git fatal) must refuse the
   // pull instead of masquerading as "no collision" and letting an
   // overwriting merge through. The caller classifies these like any other
   // pull failure.
+  const toplevel = (
+    await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
+  ).trim();
   const base = (
     await runGit(toplevel, ['merge-base', 'HEAD', '@{u}'], env)
   ).trim();
-  const added = await runGit(
+  const added = await runGitBuffer(
     toplevel,
     [
       'diff',
@@ -706,15 +739,14 @@ async function incomingIgnoredPaths(
     ],
     env,
   );
-  if (!added) return [];
-  const paths = added.split('\0').filter(Boolean);
+  const paths = splitBuffer(added, 0);
   if (paths.length === 0) return [];
-  let ignoredRaw: string;
+  let ignoredRaw: Buffer;
   try {
     ignoredRaw = await runGitStdin(
       toplevel,
       ['check-ignore', '--stdin', '-z'],
-      `${paths.join('\0')}\0`,
+      Buffer.concat(paths.flatMap((p) => [p, Buffer.from([0])])),
       env,
     );
   } catch (err) {
@@ -723,19 +755,40 @@ async function incomingIgnoredPaths(
     if ((err as { code?: number })?.code === 1) return [];
     throw err;
   }
-  // check-ignore reports pattern matches regardless of existence; only a
-  // path present in the worktree can actually be overwritten, and refusing
-  // for an absent one names a file the user cannot move or remove.
-  return ignoredRaw
-    .split('\0')
-    .filter(Boolean)
-    .filter((p) => fs.existsSync(path.join(toplevel, p)));
+  const toplevelBuf = Buffer.from(toplevel);
+  return splitBuffer(ignoredRaw, 0).filter((p) =>
+    hasWorktreeCollision(toplevelBuf, p),
+  );
 }
 
-function refusedIgnoredCollision(paths: string[]): GitPullFailure {
+// check-ignore reports pattern matches regardless of existence; only a
+// path present in the worktree can actually be overwritten, and refusing
+// for an absent one names a file the user cannot move or remove. Walk the
+// path's components instead of probing only the full path: the merge also
+// destroys a local entry that sits at a path PREFIX (ignored file `docs`,
+// incoming addition `docs/guide.md` — a full-path probe misses the file
+// because the walk dies with ENOTDIR, and the merge replaces the file
+// with the incoming directory).
+function hasWorktreeCollision(toplevel: Buffer, rel: Buffer): boolean {
+  let current = toplevel;
+  for (const segment of splitBuffer(rel, '/'.charCodeAt(0))) {
+    current = Buffer.concat([current, Buffer.from('/'), segment]);
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(current);
+    } catch {
+      return false;
+    }
+    if (!stats.isDirectory()) return true;
+  }
+  return false;
+}
+
+function refusedIgnoredCollision(paths: Buffer[]): GitPullFailure {
+  const names = paths.map((p) => p.toString('utf8')).join(', ');
   return new GitPullFailure(
     'ignored_collision',
-    `cannot pull: the incoming changes add files that exist locally as ignored files and would be overwritten silently: ${paths.join(', ')}`,
+    `cannot pull: the incoming changes add files that exist locally as ignored files and would be overwritten silently: ${names}`,
   );
 }
 
@@ -776,14 +829,14 @@ async function pullLockKey(
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
   // --git-common-dir prints relative to cwd for the common case and is
-  // shared by linked worktrees. Fall back to the resolved cwd when the
-  // probe fails (not a repository — the pull itself fails loudly).
+  // shared by linked worktrees. No catch: a pull whose repository
+  // identity cannot be probed cannot be serialized against concurrent
+  // pulls on the same repository, so a probe failure refuses the pull
+  // instead of falling back to the per-cwd key — the exact key shape
+  // that hands two paths into one repository independent chains.
   const commonDir = (
-    await runGit(cwd, ['rev-parse', '--git-common-dir'], env).catch(() => '')
+    await runGit(cwd, ['rev-parse', '--git-common-dir'], env)
   ).trim();
-  if (!commonDir) {
-    return path.resolve(cwd);
-  }
   const abs = path.resolve(cwd, commonDir);
   try {
     return fs.realpathSync(abs);
@@ -851,17 +904,28 @@ async function classifyPullFailure(
 }
 
 // Throws when a merge or rebase this pull did not start is in progress.
+// Probe errors fail closed: reading a failed probe as "no foreign state"
+// would admit the pull into a foreign merge/rebase that the failure
+// recovery then destroys. Exit 1 is rev-parse's legitimate "absent"
+// answer; every other error refuses the pull.
 async function refuseForeignMergeOrRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
-  if (await hasMergeHead(cwd, env)) {
+  let mergeInProgress = false;
+  try {
+    await runGit(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], env);
+    mergeInProgress = true;
+  } catch (err) {
+    if ((err as { code?: number })?.code !== 1) throw err;
+  }
+  if (mergeInProgress) {
     throw new GitPullFailure(
       'merge_in_progress',
       'cannot pull: a merge is already in progress — finish or abort it before updating',
     );
   }
-  if (await hasInProgressRebase(cwd, env)) {
+  if ((await inProgressRebaseDir(cwd, env)) !== '') {
     throw new GitPullFailure(
       'rebase_in_progress',
       'cannot pull: a rebase is already in progress — finish or abort it before updating',
@@ -922,6 +986,10 @@ async function gitPullInner(
   // re-fetch could also fail after the local changes were already
   // discarded.
   await runGit(cwd, ['fetch'], env);
+  // The update merges/rebases exactly this tip; the failure recovery
+  // below compares any in-progress state against it to tell state this
+  // pull started from a concurrent actor's.
+  const fetchedTip = (await runGit(cwd, ['rev-parse', '@{u}'], env)).trim();
   if (opts?.force) {
     // Without a catch: a missing upstream must surface here, before
     // anything is discarded. A diverged branch is refused because the
@@ -949,7 +1017,7 @@ async function gitPullInner(
   // reads clean and would silently check the incoming file out over the
   // local one. Probe failures must refuse the pull, not read as "no
   // collision" (see incomingIgnoredPaths).
-  let ignored: string[];
+  let ignored: Buffer[];
   try {
     ignored = await incomingIgnoredPaths(cwd, env);
   } catch (err) {
@@ -987,8 +1055,10 @@ async function gitPullInner(
       // refusing; classify from repository state, since the push's own
       // error text (e.g. "needs merge") is version- and locale-dependent.
       const afterPush = await currentStashSha(cwd, env);
+      let popBackFailed = false;
       if (afterPush !== '' && afterPush !== before) {
         await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
+          popBackFailed = true;
           // eslint-disable-next-line no-console
           console.error(
             'git pull: failed to pop back a partially created auto-stash:',
@@ -996,7 +1066,10 @@ async function gitPullInner(
           );
         });
       }
-      throw await classifyPullFailure(cwd, env, err, true);
+      const failure = await classifyPullFailure(cwd, env, err, true);
+      // A failed pop-back leaves the changes in the kept entry; name it,
+      // like every sibling restore-failure path.
+      throw popBackFailed ? withStashRestoreNote(failure) : failure;
     }
     const after = await currentStashSha(cwd, env);
     stashed = after !== '' && after !== before;
@@ -1029,23 +1102,55 @@ async function gitPullInner(
     if (stashed || opts?.force) {
       if (!foreignState) {
         // Never leave the repository wedged mid-merge: abort the partial
-        // merge/rebase this update started (restoring the pre-pull HEAD).
-        // Only abort states that exist — the guard above ran immediately
-        // before the update, so anything present now was started by it.
-        if (await hasMergeHead(cwd, env)) {
-          await runGit(cwd, ['merge', '--abort'], env).catch((abortErr) => {
-            // eslint-disable-next-line no-console
-            console.error('git pull recovery: merge --abort failed:', abortErr);
-          });
-        }
-        if (await hasInProgressRebase(cwd, env)) {
-          await runGit(cwd, ['rebase', '--abort'], env).catch((abortErr) => {
-            // eslint-disable-next-line no-console
-            console.error(
-              'git pull recovery: rebase --abort failed:',
-              abortErr,
-            );
-          });
+        // merge/rebase this update started (restoring the pre-pull HEAD) —
+        // and only that. The guard re-ran immediately before the update,
+        // but a concurrent actor can still create state in the window
+        // between the two; the update then fails fast without touching the
+        // foreign state, and aborting it would destroy the actor's work.
+        // Identify ours first: a merge this pull started wrote the
+        // fetched tip to MERGE_HEAD, and a rebase it started wrote it to
+        // the state directory's `onto` file.
+        if (!opts?.rebase) {
+          const mergeHead = (
+            await runGit(
+              cwd,
+              ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+              env,
+            ).catch(() => '')
+          ).trim();
+          if (mergeHead !== '' && mergeHead === fetchedTip) {
+            await runGit(cwd, ['merge', '--abort'], env).catch((abortErr) => {
+              // eslint-disable-next-line no-console
+              console.error(
+                'git pull recovery: merge --abort failed:',
+                abortErr,
+              );
+            });
+          }
+        } else {
+          const rebaseDir = await inProgressRebaseDir(cwd, env).catch(() => '');
+          if (rebaseDir !== '') {
+            let onto = '';
+            try {
+              onto = fs
+                .readFileSync(path.join(rebaseDir, 'onto'), 'utf8')
+                .trim();
+            } catch {
+              // A state directory without an `onto` file is not one this
+              // update created.
+            }
+            if (onto === fetchedTip) {
+              await runGit(cwd, ['rebase', '--abort'], env).catch(
+                (abortErr) => {
+                  // eslint-disable-next-line no-console
+                  console.error(
+                    'git pull recovery: rebase --abort failed:',
+                    abortErr,
+                  );
+                },
+              );
+            }
+          }
         }
       }
       if (stashed) {
