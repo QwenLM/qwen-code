@@ -91,6 +91,12 @@ const VSCODE_THEME_STYLE = {
   '--chat-editor-text-dimmed': 'var(--vscode-input-placeholderForeground)',
   '--chat-editor-accent-color': 'var(--vscode-focusBorder)',
   '--agent-gray-200': 'var(--vscode-input-border, var(--vscode-widget-border))',
+  '--success-color': 'var(--vscode-testing-iconPassed, #89d185)',
+  '--warning-color': 'var(--vscode-editorWarning-foreground, #cca700)',
+  '--error-color': 'var(--vscode-errorForeground, #f48771)',
+  '--scrollbar-thumb': 'var(--vscode-scrollbarSlider-background)',
+  '--scrollbar-thumb-hover': 'var(--vscode-scrollbarSlider-hoverBackground)',
+  '--scrollbar-track': 'transparent',
 } as CSSProperties;
 
 const EmbeddedWebShell = lazy(() =>

@@ -584,7 +584,7 @@ export function EmbeddedWebShell(props: EmbeddedWebShellProps): ReactElement {
                 >
                   <TodoTimelineContext.Provider value={todoTimeline}>
                     <TodoDetailContext.Provider value={todoDetails}>
-                      <CompactModeContext.Provider value={false}>
+                      <CompactModeContext.Provider value={true}>
                         {content}
                       </CompactModeContext.Provider>
                     </TodoDetailContext.Provider>

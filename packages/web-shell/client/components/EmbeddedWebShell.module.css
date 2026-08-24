@@ -2,20 +2,23 @@
   height: 100%;
   min-height: 0;
   min-width: 0;
+  --radius: 4px;
+  font-family: var(--vscode-font-family, var(--font-sans));
   font-size: 13px;
+  line-height: 1.4;
 }
 
 .root :global([data-web-shell-message-list]) {
-  padding: 8px 10px 6px;
-  scroll-padding-bottom: 6px;
+  padding: 8px 12px 4px;
+  scroll-padding-bottom: 4px;
 }
 
 .root :global([data-web-shell-user-row]) {
-  margin: 16px 0 14px;
+  margin: 10px 0 8px;
 }
 
 .root :global([data-web-shell-user-row] > div) {
-  max-width: 92%;
+  max-width: 100%;
 }
 
 .root :global([data-web-shell-user-bubble]),
@@ -25,7 +28,20 @@
 }
 
 .root :global([data-web-shell-user-bubble]) {
-  padding: 7px 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-chat-requestBorder, transparent);
+  border-radius: 6px;
+  background: var(--vscode-chat-requestBackground, var(--accent));
+}
+
+.root :global(pre.shiki) {
+  border-color: var(--vscode-chat-requestBorder, var(--border));
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, var(--card)) !important;
+}
+
+.root :global([data-markdown-source] code:not(pre code)) {
+  background: var(--vscode-textCodeBlock-background, var(--card));
 }
 
 .root :global([data-web-shell-composer]) {
@@ -37,7 +53,7 @@
   --chat-editor-max-height: min(260px, 42vh);
   --chat-editor-input-min-height: 36px;
   --chat-editor-input-max-height: 200px;
-  border-radius: 8px;
+  border-radius: 6px;
 }
 
 .root :global([data-web-shell-composer-content]) {
@@ -56,7 +72,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 6px 10px 6px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--background);
 }
@@ -74,8 +90,8 @@
 
 .headerAction {
   display: inline-flex;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
