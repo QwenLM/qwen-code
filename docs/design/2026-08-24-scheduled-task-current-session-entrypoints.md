@@ -15,7 +15,7 @@ session even when the Web Shell selects a different conversation.
 Two user entrypoints still cannot request that behavior. The Scheduled Tasks
 form never sends the current session id, and `cron_create` has no current-session
 mode. This design adds those entrypoints without changing the scheduler,
-persisted ownership model, or the default dedicated-session behavior.
+persisted ownership model, or either entrypoint's existing default behavior.
 
 ## Existing baseline
 
@@ -32,6 +32,11 @@ The merged #9361 contract is the source of truth:
 - Enabled bound sessions are kept resident and rehydrated after daemon restart.
 - A session may be bound to at most one scheduled task.
 
+This REST behavior is different from the existing core tool behavior. A durable
+task created by `cron_create` is unbound: it has no `sessionId` and fires through
+the existing shared per-project lock owner. The tool does not mint a dedicated
+task conversation today.
+
 The scheduler already maps `task.sessionId` to `boundSessionId` and fires the
 task only from the matching session. Session execution already serializes cron
 turns behind active user turns.
@@ -41,7 +46,8 @@ turns behind active user turns.
 - Let the Scheduled Tasks form bind a new task to the currently selected
   ordinary conversation.
 - Let a user explicitly request current-session binding through `cron_create`.
-- Preserve dedicated sessions as the default for every existing caller.
+- Preserve the form's dedicated-session default and `cron_create`'s unbound
+  durable default.
 - Preserve the #9361 ownership, workspace, capacity, lifecycle, and unique
   binding checks.
 - Fail clearly when the host cannot guarantee daemon-managed restoration.
@@ -51,8 +57,9 @@ turns behind active user turns.
 - Rebinding an existing task through PATCH.
 - Binding more than one task to a session.
 - Migrating task history between sessions.
-- Supporting Channel, side-task, Live, standalone, archived, or non-live
-  sessions.
+- Binding a session with `parentSessionId`, a `channel`, `side_task`,
+  `scheduled_task`, or explicit `standalone` source, a reserved Live Voice
+  source id, an unknown source value, or an archived or non-live session.
 - Changing the Scheduled Tasks page's existing "Create via chat" action, which
   intentionally starts a fresh conversation.
 - Solving the remaining legacy teardown-versus-reuse race tracked by #9415.
@@ -66,16 +73,29 @@ The create form gains a two-option session selector:
 
 - **Dedicated task conversation** — default; omit `sessionId`, preserving the
   current behavior.
-- **Current conversation** — send the active session id in the existing
+- **Current conversation** — send the selected session id in the existing
   `DaemonCreateScheduledTaskRequest.sessionId` field.
+
+Here, current means the ordinary session selected by the outer Web Shell
+connection (`connection.sessionId`), even while `mainView` is the Scheduled
+Tasks page and the chat pane is covered. A visible chat pane is not required.
+No selection disables the option. Split panes do not replace the outer selected
+id and no pane implicitly wins; activity in a non-selected pane neither disables
+the option nor supplies the `sessionId`.
+
+The selected session is eligible only when it is top-level, has no `sourceId`,
+and its `sourceType` is absent or `default`. This is the metadata shape of an
+ordinary Web Shell conversation. The form rejects `channel`, `side_task`,
+`scheduled_task`, and explicit `standalone` source values, any unknown source
+value, and `default` paired with the reserved `realtime_voice:` source-id prefix.
 
 The current-conversation option is shown only when the daemon advertises a new
 `scheduled_task_session_reuse` capability. It is disabled with a reason when:
 
-- there is no active session;
-- the active session still has a running turn or pending interaction;
-- the active session is not an eligible top-level ordinary conversation;
-- the form's selected workspace differs from the active session's workspace;
+- there is no selected session;
+- the selected session still has a running turn or pending interaction;
+- the selected session is not an eligible top-level ordinary conversation;
+- the form's selected workspace differs from the selected session's workspace;
   or
 - the loaded task list already contains a task with that session id.
 
@@ -92,17 +112,27 @@ which is correct for both dedicated and caller-owned sessions.
 `CronCreateParams` gains:
 
 ```ts
-sessionMode?: 'dedicated' | 'current';
+sessionMode?: 'unbound' | 'current';
 ```
 
-The default is `dedicated`. `sessionMode: 'current'` is valid only with
-`durable: true`, and the tool description instructs the model to use it only
-when the user explicitly asks to keep scheduled work in the current
-conversation. The permission-classifier projection includes `sessionMode`.
+The default is `unbound`. `sessionMode: 'unbound'` and an omitted mode both use
+the existing paths: durable tasks stay unbound and session-only jobs stay local
+to the current process. `sessionMode: 'current'` is valid only when `durable` is
+`true`, and the tool description instructs the model to use it only when the
+user explicitly asks to keep scheduled work in the current conversation. The
+permission-classifier projection includes `sessionMode`.
+
+The entrypoints therefore have three explicit outcomes:
+
+| Entry point and request                          | Persisted session binding                         | Execution ownership                    |
+| ------------------------------------------------ | ------------------------------------------------- | -------------------------------------- |
+| Form default, REST `sessionId` omitted           | Daemon mints a task-owned session                 | Dedicated task conversation            |
+| Durable `cron_create`, mode omitted or `unbound` | No `sessionId`                                    | Existing shared per-project lock owner |
+| `cron_create` mode `current`                     | Caller's session with `sessionOwnedByTask: false` | Caller-owned current conversation      |
 
 Outside a daemon-managed ACP session, current mode returns a clear
-`current_session_scheduling_unavailable` error. Dedicated durable and
-session-only jobs retain their existing paths.
+`current_session_scheduling_unavailable` error. Unbound durable and session-only
+jobs retain their existing paths.
 
 ## Architecture
 
@@ -115,8 +145,11 @@ necessarily busy and a direct REST-equivalent call would return
 
 The busy rule must remain unchanged for ordinary clients: an arbitrary caller
 must not bind a session while a different turn is mutating it. Current-mode
-tool creation therefore uses a daemon-only control path that can attest that
-the active turn is the caller requesting the binding.
+tool creation therefore uses a daemon-only control path. This path trusts the
+daemon-spawned workspace agent runtime; a shared ACP connection by itself cannot
+prove that an arbitrary owned session id belongs to the exact executing turn.
+The control request instead binds daemon-owned prompt state to identifiers
+stamped inside the runtime, outside the model-visible tool arguments.
 
 ### Daemon control path
 
@@ -128,23 +161,33 @@ Session implementation wires it to a new control request:
 qwen/control/scheduled-task/create-current
 ```
 
-The child request carries `cron`, `prompt`, `recurring`, and its own
-`callerSessionId`. It does not accept a separate target session id.
+The core creator input includes the executing `promptId` captured from the tool
+invocation context. The ACP Session object stamps `callerSessionId` from
+`this.sessionId` and forwards that prompt id. Neither identifier is accepted in
+`CronCreateParams`, and the control request does not accept a separate target
+session id.
 
 The bridge handler:
 
 1. validates payload types and the same prompt bounds as the REST route;
 2. verifies that the bridge client owns `callerSessionId`;
 3. resolves that live session in the bridge that received the request;
-4. requires a top-level session and rejects `channel`, `side_task`,
-   `scheduled_task`, `standalone`, and the reserved Live source marker;
-   unreserved top-level source types remain compatible with the existing API;
-   and
-5. delegates to a host callback installed only by `qwen serve` runtimes that
+4. requires `promptId` to equal that entry's `activePromptId` while
+   `promptActive` is true, following the existing
+   `external_tool_guard/prepare` binding pattern;
+5. applies the same exact source allow-list as the form: no parent, no
+   `sourceId`, and `sourceType` absent or `default`; and
+6. delegates to a host callback installed only by `qwen serve` runtimes that
    manage scheduled-task sessions.
 
-No host callback returns method-not-found, which the tool maps to
-`current_session_scheduling_unavailable`.
+The prompt match prevents an accidental busy-sibling binding on a connection
+that owns multiple sessions. It is a consistency check inside a trusted agent
+runtime, not a claim that ACP cryptographically authenticates the exact turn.
+The public REST path never uses this exception and always rejects a busy supplied
+session.
+
+If no host callback is installed, the bridge returns method-not-found, which the
+tool maps to `current_session_scheduling_unavailable`.
 
 ### Shared daemon creation command
 
@@ -154,19 +197,20 @@ provided-session branch. The command accepts an internal binding context:
 
 ```ts
 type ExistingSessionBindingContext =
-  | { source: 'rest'; allowActiveCaller: false }
+  | { source: 'rest' }
   | {
       source: 'cron-tool';
-      allowActiveCaller: true;
       callerSessionId: string;
+      callerPromptId: string;
     };
 ```
 
 Both paths apply the same session-id normalization, selected-runtime and
 workspace ownership, archive state, scheduled-task-source, capacity,
-generation, and unique-binding checks. Only the authenticated cron-tool path
-may skip the idle rejection, and only when the resolved session id equals its
-caller session id.
+generation, and unique-binding checks. Only the prompt-matched trusted
+cron-tool path may skip the idle rejection, and only after the bridge matched
+the internally stamped caller session and prompt ids to the live active prompt.
+Public REST never skips the idle check.
 
 The final write-lock check remains authoritative. It revalidates that the
 session is live and not task-reserved, rejects a concurrent binding, and writes
@@ -202,12 +246,16 @@ different conversation.
 
 ## Compatibility and rollout
 
-- `sessionMode` is optional and defaults to the existing behavior.
+- `sessionMode` is optional and defaults to the existing unbound tool behavior.
 - Existing REST and SDK callers do not change.
 - Existing task files require no rewrite.
-- The daemon advertises `scheduled_task_session_reuse` only when
-  `manageScheduledTaskSessions` is enabled, so minimal embeds do not promise a
-  lifecycle they cannot keep alive.
+- One `currentSessionSchedulingEnabled` construction-time condition requires
+  `manageScheduledTaskSessions` and the ACP current-session host callback. The
+  same condition advertises `scheduled_task_session_reuse` and installs the
+  callback on the primary and every dynamically created workspace runtime
+  bridge. A process does not advertise partial support, so a selected workspace
+  cannot offer the selector and then return method-not-found for `cron_create`
+  current mode.
 - Web clients without `scheduled_task_session_reuse` do not render the new
   selector, preventing an older daemon from silently ignoring the intent.
 - Non-daemon tool callers receive an explicit error rather than creating a
@@ -219,8 +267,10 @@ different conversation.
 
 ### Core tool
 
-- Omitted mode preserves session-only and dedicated durable creation.
-- Current mode requires `durable: true` and an injected host capability.
+- Omitted and explicit unbound modes preserve session-only and unbound durable
+  creation without minting a session.
+- Current mode requires `durable: true`, an executing prompt id, and an injected
+  host capability.
 - Current mode forwards the exact schedule and returns the committed task id.
 - The permission-classifier input includes `sessionMode`.
 - Host failure and method-not-found are surfaced without creating an unbound
@@ -230,21 +280,35 @@ different conversation.
 
 - The control method rejects malformed payloads, an unknown caller, and a
   caller session not owned by the bridge client.
-- The authenticated active caller succeeds despite `hasActivePrompt: true`.
+- A missing or stale prompt id and an active prompt on an owned sibling session
+  are rejected without creating a task.
+- The trusted caller succeeds despite `hasActivePrompt: true` only when its
+  stamped prompt id matches that session's `activePromptId`.
 - REST creation with the same busy session still returns `session_busy`.
-- Workspace mismatch, archived/non-live sessions, task-created sessions,
-  capacity, generation closure, and an existing binding preserve #9361 errors.
+- The source matrix accepts only top-level unset/default sessions without a
+  source id and rejects parented, Channel, side-task, scheduled-task, explicit
+  standalone, Live Voice, and unknown-source sessions.
+- Workspace mismatch, archived/non-live sessions, capacity, generation closure,
+  and an existing binding preserve #9361 errors.
 - A concurrent REST/tool create commits exactly one task.
 - The committed task is caller-owned; task rename and deletion do not rename or
   close the conversation.
+- The capability is absent when either scheduled-task session management or the
+  ACP host callback is absent.
+- A dynamically created workspace runtime receives the same callback as the
+  primary runtime; current-mode creation routes to the selected runtime rather
+  than falling back to primary.
 
 ### Web Shell
 
 - Dedicated mode is the default and omits `sessionId`.
-- Current mode sends the active session id.
-- Capability absence, no active session, an active turn, an ineligible session
-  source, workspace mismatch, and an existing binding disable the option with
-  the expected explanation.
+- Current mode sends the outer selected session id while the Scheduled Tasks
+  page covers the chat pane.
+- Capability absence, no selected session, a selected-session active turn, an
+  ineligible session source, workspace mismatch, and an existing binding disable
+  the option with the expected explanation.
+- Split-pane activity does not disable or replace an idle outer selected
+  session.
 - Edit requests never mutate binding.
 - "Create via chat" continues to start a fresh conversation.
 
@@ -264,8 +328,10 @@ different conversation.
 
 ### Relax `session_busy` for the public endpoint
 
-This cannot prove that the active turn belongs to the caller requesting the
-binding and weakens #9361 for every API client.
+REST has neither the trusted workspace-runtime context nor the internally
+stamped prompt identity used by the control path. Relaxing it would let an
+arbitrary client bind a session another turn is mutating and would weaken #9361
+for every API client.
 
 ### Write the task file directly from `cron_create`
 
@@ -276,7 +342,7 @@ cannot safely promise keepalive outside `qwen serve`.
 
 The tool would have to report success before persistence, or keep a
 process-local deferred operation whose failure cannot be returned to the user.
-The authenticated control path commits before the tool returns.
+The trusted control path commits before the tool returns.
 
 ### Create a dedicated session and later migrate it
 
