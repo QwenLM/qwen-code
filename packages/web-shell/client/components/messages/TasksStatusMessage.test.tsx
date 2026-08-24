@@ -18,7 +18,7 @@ const { getTasksMock, cancelTaskMock } = vi.hoisted(() => ({
   getTasksMock: vi.fn(),
   cancelTaskMock: vi.fn(),
 }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => ({
     getTasks: getTasksMock,
     cancelTask: cancelTaskMock,

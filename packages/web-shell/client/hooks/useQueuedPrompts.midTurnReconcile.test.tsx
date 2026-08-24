@@ -12,7 +12,7 @@ import {
   useQueuedPrompts,
   type UseQueuedPromptsResult,
 } from './useQueuedPrompts';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -47,10 +47,10 @@ const sdkMock = vi.hoisted(() => {
   return mock;
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
   const actual = await vi.importActual<
-    typeof import('@qwen-code/webui/daemon-react-sdk')
-  >('@qwen-code/webui/daemon-react-sdk');
+    typeof import('@qwen-code/web-shell/daemon-react-sdk')
+  >('@qwen-code/web-shell/daemon-react-sdk');
   // useSyncExternalStore needs reference-stable snapshots; a fresh [] per
   // call loops the store into "Maximum update depth exceeded". The mutable
   // sdkMock arrays are only swapped wholesale, so their identity is stable

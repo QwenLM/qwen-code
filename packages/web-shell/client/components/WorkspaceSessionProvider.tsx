@@ -4,7 +4,7 @@ import {
   DaemonSessionProvider,
   useWorkspace,
   useWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {

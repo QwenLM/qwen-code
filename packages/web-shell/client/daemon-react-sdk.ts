@@ -5,7 +5,7 @@
  */
 
 /**
- * `@qwen-code/webui/daemon-react-sdk`
+ * Daemon React bindings owned by `@qwen-code/web-shell`.
  *
  * React bindings for the Qwen Code daemon process.
  * Provides context Providers, hooks, types, and constants
@@ -18,7 +18,7 @@
  *   DaemonWorkspaceProvider,
  *   useConnection,
  *   useStreamingState,
- * } from '@qwen-code/webui/daemon-react-sdk';
+ * } from '@qwen-code/web-shell';
  * ```
  */
 

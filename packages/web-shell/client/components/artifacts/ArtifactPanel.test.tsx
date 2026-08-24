@@ -10,7 +10,7 @@ import type {
 import type {
   DaemonScheduledTask,
   DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
@@ -76,7 +76,7 @@ const {
 });
 
 vi.mock(
-  '@qwen-code/webui/daemon-react-sdk',
+  '@qwen-code/web-shell/daemon-react-sdk',
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,

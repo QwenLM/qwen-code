@@ -2,7 +2,7 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 
 export function artifactKindLabel(
   kind: string,

@@ -4,7 +4,7 @@ import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
 import {
   useConnection,
   type DaemonSessionSummary,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';

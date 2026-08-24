@@ -40,7 +40,7 @@ let workspaceClient: { listWorkspaceSessionsPage: ReturnType<typeof vi.fn> };
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
 const statusReload = vi.fn(async () => statusState.report);
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connectionState,
   useSessions: () => ({ ...sessionsState, reload: sessionsReload }),
   useStatusReport: () => ({ ...statusState, reload: statusReload }),

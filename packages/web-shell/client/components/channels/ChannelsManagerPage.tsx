@@ -30,7 +30,10 @@ import type {
   DaemonChannelUpsertRequest,
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
-import { useChannels, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useChannels,
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';

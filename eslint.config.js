@@ -301,6 +301,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ['packages/web-shell/client/daemon/**/*.{ts,tsx}'],
+    rules: {
+      'no-console': ['error', { allow: ['debug', 'warn', 'error'] }],
+    },
+  },
+  {
     files: [
       'packages/web-shell/client/**/*.test.{ts,tsx}',
       'packages/web-shell/client/test/**/*.{ts,tsx}',

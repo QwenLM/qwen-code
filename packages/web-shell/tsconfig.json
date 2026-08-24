@@ -6,6 +6,7 @@
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
+      "@qwen-code/web-shell/daemon-react-sdk": ["./client/daemon-react-sdk.ts"],
       "@/*": ["./client/*"]
     },
     "strict": true,

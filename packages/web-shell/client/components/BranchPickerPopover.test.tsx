@@ -46,9 +46,11 @@ const { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient } =
     return { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient };
   });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({

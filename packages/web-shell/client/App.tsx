@@ -32,7 +32,7 @@ import {
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
   type DaemonStreamingState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   DaemonHttpError,
   isDaemonTurnError,
