@@ -65,6 +65,51 @@ describe('createExtensionGitClient', () => {
     expect(spawned).toBe(true);
   });
 
+  it.each([
+    ['alias', 'https://github.com/owner/alias-service.git'],
+    [
+      'credential helper',
+      'https://git.example.com/owner/credential.helper.git',
+    ],
+  ])(
+    'runs authenticated Git commands when the URL contains %s text',
+    async (_label, source) => {
+      let spawned = false;
+      const git = createExtensionGitClient(simpleGit, {
+        baseDir: tempDir,
+        authentication: {
+          source,
+          credential: { username: 'user', password: 'token' },
+        },
+      });
+      git.outputHandler(() => {
+        spawned = true;
+      });
+
+      await expect(git.version()).resolves.toBeDefined();
+      expect(spawned).toBe(true);
+    },
+  );
+
+  it('does not allow unrelated unsafe config for a URL false positive', async () => {
+    let spawned = false;
+    const git = createExtensionGitClient(simpleGit, {
+      baseDir: tempDir,
+      authentication: {
+        source: 'https://github.com/owner/alias-service.git',
+        credential: { username: 'user', password: 'token' },
+      },
+    });
+    git.outputHandler(() => {
+      spawned = true;
+    });
+
+    await expect(
+      git.raw(['-c', 'credential.helper=store', '--version']),
+    ).rejects.toThrow('allowUnsafeCredentialHelper');
+    expect(spawned).toBe(false);
+  });
+
   it('does not inherit Git config count for anonymous public commands', async () => {
     vi.stubEnv('GIT_CONFIG_COUNT', '1');
     vi.stubEnv('GIT_CONFIG_KEY_0', 'http.extraHeader');
