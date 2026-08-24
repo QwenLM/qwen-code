@@ -20,7 +20,7 @@ const observed = vi.hoisted(() => ({
   shouldThrow: false,
 }));
 
-vi.mock('../App', () => ({
+vi.mock('../WebShellContexts', () => ({
   CompactModeContext: createContext(false),
   TodoDetailContext: createContext(new Map()),
   TodoTimelineContext: createContext(new Map()),
@@ -28,7 +28,7 @@ vi.mock('../App', () => ({
 
 vi.mock('./MessageList', async () => {
   const React = await import('react');
-  const { CompactModeContext } = await import('../App');
+  const { CompactModeContext } = await import('../WebShellContexts');
   const { useWebShellCustomization } = await import('../customization');
   const { useI18n } = await import('../i18n');
   const { useTheme } = await import('../themeContext');

@@ -11,7 +11,7 @@ import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),

@@ -13,7 +13,7 @@ import {
   CompactModeContext,
   TodoDetailContext,
   TodoTimelineContext,
-} from '../App';
+} from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,

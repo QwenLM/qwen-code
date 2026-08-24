@@ -1,6 +1,5 @@
 import './styles/globals.css';
 import {
-  createContext,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -10,7 +9,6 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -341,51 +339,8 @@ import {
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
+import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
-
-export const CompactModeContext = createContext(false);
-
-/**
- * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
- * history row can render what changed in that snapshot without re-deriving it
- * from the whole transcript. Empty by default so a row rendered outside the
- * provider still falls back gracefully.
- */
-export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
-  new Map(),
-);
-
-/**
- * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
- * expanded todo list so a finished task can reveal when it ran and what it
- * spent. Empty by default so a row rendered outside the provider (or in tests)
- * simply shows no expander.
- */
-export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
-  new Map(),
-);
-
-/**
- * Provides both todo contexts in one wrapper so the message list stays at a
- * single nesting level (one provider in the tree, not two).
- */
-function TodoContextsProvider({
-  timeline,
-  details,
-  children,
-}: {
-  timeline: Map<string, TodoSnapshotDiff>;
-  details: Map<string, TodoDetail>;
-  children: ReactNode;
-}) {
-  return (
-    <TodoTimelineContext.Provider value={timeline}>
-      <TodoDetailContext.Provider value={details}>
-        {children}
-      </TodoDetailContext.Provider>
-    </TodoTimelineContext.Provider>
-  );
-}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
