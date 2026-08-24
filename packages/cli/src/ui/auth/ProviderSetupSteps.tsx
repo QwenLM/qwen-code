@@ -672,7 +672,13 @@ function ModelIdsStep({
       flow.changeModelIds(
         mergeModelIds(customText, recommendationKeys).join(', '),
         {
-          customModelIds: normalizeModelIds(customText),
+          // Ordered segments with duplicates kept: the hook's growth latch
+          // follows the frozen occurrence, and a deduped list collapses the
+          // twins it must tell apart.
+          customModelIds: customText
+            .split(',')
+            .map((segment) => segment.trim())
+            .filter((segment) => segment.length > 0),
           activeCustomModelId: editingCustomInput
             ? modelIdAtCaret(customText, modelIdsCaretRef.current)
             : undefined,
