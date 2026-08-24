@@ -41,7 +41,7 @@ vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/session-pr-service.js')
   >()),
-  upsertSessionPr: vi.fn().mockResolvedValue([]),
+  upsertSessionPrs: vi.fn(),
 }));
 vi.mock('../utils/github-prs.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../utils/github-prs.js')>()),
@@ -55,7 +55,7 @@ import {
   type ShellToolParams,
 } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
-import { upsertSessionPr } from '../services/session-pr-service.js';
+import { upsertSessionPrs } from '../services/session-pr-service.js';
 import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -243,6 +243,20 @@ describe('ShellTool', () => {
     const fetchCurrentBranchPullRequestMock = vi.mocked(
       fetchCurrentBranchPullRequest,
     );
+    const upsertSessionPrsMock = vi.mocked(upsertSessionPrs);
+
+    beforeEach(() => {
+      // Default: every offered candidate lands as a new binding. Tests that
+      // simulate an already-bound number override this per test.
+      upsertSessionPrsMock.mockImplementation(
+        async (_filePath, candidates) => ({
+          prs: [],
+          added: candidates.map((candidate) => candidate.number),
+          alreadyBound: [],
+          unresolved: [],
+        }),
+      );
+    });
 
     async function runShell(
       command: string,
@@ -269,6 +283,7 @@ describe('ShellTool', () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
         number: 77,
         url: 'https://github.com/o/r/pull/77',
+        state: 'open',
       });
       await runShell('gh pr create --title x --body y', {
         output: 'noise\nhttps://github.com/o/r/pull/77\n',
@@ -276,13 +291,15 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
-        {
-          number: 77,
-          url: 'https://github.com/o/r/pull/77',
-          state: 'open',
-        },
+        [
+          {
+            number: 77,
+            url: 'https://github.com/o/r/pull/77',
+            state: 'open',
+          },
+        ],
       );
       // The daemon never sees the child's sidecar write; the catalog
       // notification is what makes the badge appear.
@@ -294,6 +311,7 @@ describe('ShellTool', () => {
         {
           number: 77,
           url: 'https://github.com/o/r/pull/77',
+          state: 'open',
         },
       );
     });
@@ -304,6 +322,7 @@ describe('ShellTool', () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
         number: 100,
         url: 'https://github.com/o/r/pull/100',
+        state: 'open',
       });
       await runShell('gh pr create --fill', {
         output:
@@ -312,9 +331,9 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
-        expect.objectContaining({ number: 100 }),
+        [expect.objectContaining({ number: 100 })],
       );
     });
 
@@ -326,7 +345,7 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind a non-zero exit even when the output carries a URL', async () => {
@@ -335,6 +354,7 @@ describe('ShellTool', () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
         number: 1234,
         url: 'https://github.com/o/r/pull/1234',
+        state: 'open',
       });
       await runShell('gh pr create --fill; cat notes.txt', {
         output: 'https://github.com/o/r/pull/1234\n',
@@ -342,7 +362,7 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind a URL that gh did not vouch for', async () => {
@@ -369,7 +389,7 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind when gh resolves a PR whose URL is absent from the output', async () => {
@@ -378,6 +398,7 @@ describe('ShellTool', () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
         number: 5,
         url: 'https://github.com/o/r/pull/5',
+        state: 'open',
       });
       await runShell('gh pr create --help', {
         output: 'usage: gh pr create\n',
@@ -385,7 +406,7 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
-      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -396,6 +417,7 @@ describe('ShellTool', () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({
         number: 77,
         url: 'https://github.com/o/r/pull/77',
+        state: 'open',
       });
       const invocation = shellTool.build({
         command: 'gh pr create --fill',
@@ -417,9 +439,100 @@ describe('ShellTool', () => {
       expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
         '/test/dir/nested',
       );
-      expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
-        expect.objectContaining({ number: 77 }),
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('does not bind when gh resolves a merged or closed PR', async () => {
+      // The retry shape passes the execution gate and exits 0 without
+      // creating anything; gh resolves the branch's EXISTING merged PR, and
+      // the state gate must decline it — binding would stamp 'open' over a
+      // merged state and move the entry to the tail with a fresh createdAt.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'merged',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not re-emit when the resolved PR is already bound', async () => {
+      // Same retry shape, but the existing PR is still open: the write
+      // reports it alreadyBound, so nothing is re-stamped and no catalog
+      // notification fires.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      upsertSessionPrsMock.mockResolvedValue({
+        prs: [],
+        added: [],
+        alreadyBound: [42],
+        unresolved: [],
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [{ number: 42, url: 'https://github.com/o/r/pull/42', state: 'open' }],
+      );
+      const sessionService = mockConfig.getSessionService() as unknown as {
+        emitSessionPrBound: ReturnType<typeof vi.fn>;
+      };
+      expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
+    });
+
+    it('binds when a promote is refused after the command settled', async () => {
+      // The promote abort fires with kind 'background', but the child had
+      // already completed with exit 0 and full output — the run still goes
+      // through the binding gate.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+      });
+      const setPromoteAc = vi.fn();
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = (invocation as ShellToolInvocation).execute(
+        new AbortController().signal,
+        undefined,
+        {},
+        undefined,
+        setPromoteAc,
+      );
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      const promoteAc = setPromoteAc.mock.calls[0][0] as AbortController;
+      promoteAc.abort({ kind: 'background' });
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: true,
+      } as ShellExecutionResult);
+      await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
       );
     });
   });

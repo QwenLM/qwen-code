@@ -8,7 +8,6 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
-  commandRunsGhPrCreate,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   readWorktreeSession,
@@ -71,17 +70,9 @@ interface BackfillCandidate {
   archiveState: SessionArchiveState;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** PRs the session created via `gh pr create` (number → printed URL). */
-  direct: ReadonlyMap<number, string>;
   /** PR numbers the session was asked to review (`/review <N|url>`). */
   reviewed: readonly number[];
 }
-
-// A printed URL only counts when gh itself printed it in the response of
-// the very `gh pr create` run (paired by part id) AND it belongs to the
-// workspace's own repo — text alone must never forge a binding.
-const PRINTED_PR_URL_PATTERN =
-  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})/g;
 
 // `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
 // only at COMMAND position — the very start of the prompt the user typed.
@@ -97,83 +88,15 @@ const REVIEW_COMMAND_PATTERN =
 
 const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 
-interface TranscriptToolPart {
-  functionCall?: {
-    id?: string;
-    name?: string;
-    args?: { command?: string };
-  };
-  functionResponse?: {
-    id?: string;
-    name?: string;
-    response?: { output?: string };
-  };
-}
-
-function collectGhPrCreateBindings(
-  raw: string,
-  workspaceRepoKey: string | undefined,
-): ReadonlyMap<number, string> {
-  const commandById = new Map<string, string>();
-  const bindings = new Map<number, string>();
-  for (const line of raw.split('\n')) {
-    if (!line.includes('run_shell_command')) continue;
-    let parts: unknown;
-    try {
-      parts = (JSON.parse(line) as { message?: { parts?: unknown } })?.message
-        ?.parts;
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts as TranscriptToolPart[]) {
-      const call = part.functionCall;
-      if (
-        call?.name === 'run_shell_command' &&
-        typeof call.id === 'string' &&
-        typeof call.args?.command === 'string'
-      ) {
-        commandById.set(call.id, call.args.command);
-        continue;
-      }
-      const response = part.functionResponse;
-      if (
-        response?.name !== 'run_shell_command' ||
-        typeof response.id !== 'string' ||
-        typeof response.response?.output !== 'string'
-      ) {
-        continue;
-      }
-      const command = commandById.get(response.id);
-      if (command === undefined || !commandRunsGhPrCreate(command)) {
-        continue;
-      }
-      if (command.includes('--dry-run')) continue;
-      for (const match of response.response.output.matchAll(
-        PRINTED_PR_URL_PATTERN,
-      )) {
-        const url = match[0];
-        // Elided owner/repo placeholders are not link targets; foreign
-        // repos must never bind into this workspace.
-        if (url.includes('...')) continue;
-        if (
-          workspaceRepoKey === undefined ||
-          repoKeyFromWebUrl(url) !== workspaceRepoKey
-        ) {
-          continue;
-        }
-        bindings.set(Number(match[1]), url);
-      }
-    }
-  }
-  return bindings;
-}
-
-// Only USER records count, and only the prompt the user typed: assistant
-// prose, tool calls, and tool results (read_file echoes of fixtures/docs)
-// quote `/review <N>` without requesting one, and the parts after the first
-// carry @-imported file content whose line-leading examples would forge
-// bindings.
+// Only the prompt the user typed counts: assistant prose, tool calls, and
+// tool results (read_file echoes of fixtures/docs) quote `/review <N>`
+// without requesting one, and the parts after the first carry @-imported
+// file content whose line-leading examples would forge bindings. The TUI
+// expands bundled skills BEFORE recording: the user record's first part is
+// the skill body with the typed command appended at its END, so the typed
+// `/review <N>` survives only in the `slash_command` system record's
+// `rawCommand` — read that when present, falling back to the user record's
+// first text part (the daemon-provided prompt path carries no payload).
 function collectReviewedPrNumbers(
   raw: string,
   workspaceRepoKey: string | undefined,
@@ -183,6 +106,8 @@ function collectReviewedPrNumbers(
     if (!line.includes('/review')) continue;
     let record: {
       type?: string;
+      subtype?: string;
+      systemPayload?: { phase?: string; rawCommand?: string };
       message?: {
         parts?: Array<{ text?: string; functionResponse?: unknown }>;
       };
@@ -192,12 +117,22 @@ function collectReviewedPrNumbers(
     } catch {
       continue;
     }
-    if (record.type !== 'user') continue;
-    const firstPart = record.message?.parts?.[0];
-    if (typeof firstPart?.text !== 'string' || firstPart.functionResponse) {
-      continue;
+    let prompt: string | undefined;
+    if (
+      record.type === 'system' &&
+      record.subtype === 'slash_command' &&
+      record.systemPayload?.phase === 'invocation' &&
+      typeof record.systemPayload.rawCommand === 'string'
+    ) {
+      prompt = record.systemPayload.rawCommand;
+    } else if (record.type === 'user') {
+      const firstPart = record.message?.parts?.[0];
+      if (typeof firstPart?.text === 'string' && !firstPart.functionResponse) {
+        prompt = firstPart.text;
+      }
     }
-    const match = REVIEW_COMMAND_PATTERN.exec(firstPart.text);
+    if (prompt === undefined) continue;
+    const match = REVIEW_COMMAND_PATTERN.exec(prompt);
     if (!match) continue;
     const bareNumber = match[1];
     if (bareNumber !== undefined) {
@@ -226,14 +161,15 @@ function collectReviewedPrNumbers(
 
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * ascending authority order: `/review <N|#N|url>` commands in the session's
- * user records (the session merely looked at that PR); URLs gh itself
- * printed in the session's `gh pr create` runs (call/response paired by
- * part id, repo-gated — text alone must never forge a binding); and the
- * worktree slug/branch convention last (the session exists FOR that PR, so
- * it must never be evicted by weaker numbers). Numbers resolve to URLs via
- * one batched `gh pr list --state all` per workspace, else the workspace's
- * git remote web URL; a session may bind several PRs.
+ * ascending authority order: `/review <N|#N|url>` commands the user typed
+ * (the session merely looked at that PR), and the worktree slug/branch
+ * convention last (the session exists FOR that PR, so it must never be
+ * evicted by weaker numbers). Transcript `gh pr create` traces are
+ * deliberately NOT a source: no gh-side attribution exists per historical
+ * command, so text alone could forge a binding — live creates bind through
+ * the shell tool post-hook, which verifies with gh itself. Numbers resolve
+ * to URLs via one batched `gh pr list --state all` per workspace, else the
+ * workspace's git remote web URL; a session may bind several PRs.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -249,8 +185,8 @@ export async function backfillWorkspaceSessionPrs(
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   // One remote lookup per backfill run, before transcript scanning so the
-  // gh-create source can repo-validate printed URLs; async so the daemon
-  // event loop is never blocked by it.
+  // /review URL form can repo-gate against it; async so the daemon event
+  // loop is never blocked by it.
   const remote = await fetchRemoteWebUrl(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -293,7 +229,6 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         transcriptRaw = '';
       }
-      const direct = collectGhPrCreateBindings(transcriptRaw, workspaceRepoKey);
       const reviewed = collectReviewedPrNumbers(
         transcriptRaw,
         workspaceRepoKey,
@@ -301,18 +236,13 @@ export async function backfillWorkspaceSessionPrs(
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
-      if (
-        conventionNumber === undefined &&
-        direct.size === 0 &&
-        reviewed.length === 0
-      ) {
+      if (conventionNumber === undefined && reviewed.length === 0) {
         continue;
       }
       candidates.push({
         sessionId,
         archiveState,
         conventionNumber,
-        direct,
         reviewed,
       });
     }
@@ -359,20 +289,11 @@ export async function backfillWorkspaceSessionPrs(
   for (const candidate of candidates) {
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail-10 cap: reviewed first (the session merely looked at
-    // that PR), then gh-create traces, and the worktree slug/branch
-    // convention last (the session exists FOR that PR, so it must never be
-    // evicted by weaker numbers).
+    // that PR), and the worktree slug/branch convention last (the session
+    // exists FOR that PR, so it must never be evicted by weaker numbers).
     const numbers: number[] = [];
     for (const reviewedNumber of candidate.reviewed) {
       if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
-    }
-    for (const directNumber of candidate.direct.keys()) {
-      // Filter+re-append, the same as the convention tier below: skipping
-      // in place would leave the number at its weaker reviewed position,
-      // where the tail cap evicts the strongest binding in the overlap.
-      const rest = numbers.filter((n) => n !== directNumber);
-      numbers.length = 0;
-      numbers.push(...rest, directNumber);
     }
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
@@ -441,12 +362,8 @@ async function bindCandidateNumbers(
     state?: SessionPrState;
   }> = [];
   for (const number of numbers) {
-    const isConvention = number === candidate.conventionNumber;
-    let url = sources.numberToUrl.get(number) ?? candidate.direct.get(number);
-    if (
-      url === undefined &&
-      (isConvention || candidate.reviewed.includes(number))
-    ) {
+    let url = sources.numberToUrl.get(number);
+    if (url === undefined) {
       // Fork layout: the repo gate above rejects the parent-repo page, but
       // gh's own attribution still names the PR authoritatively — prefer it
       // over a synthesized fork URL (forks host no PRs, the link would

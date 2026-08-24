@@ -38,7 +38,7 @@ import {
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import {
   commandRunsGhPrCreate,
-  upsertSessionPr,
+  upsertSessionPrs,
 } from '../services/session-pr-service.js';
 import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
 import type {
@@ -2722,7 +2722,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
-    if (!result.aborted && result.exitCode === 0) {
+    // A promote refused because the command already settled still carries
+    // its full output and exit code — it runs the same binding gate as an
+    // uninterrupted foreground run.
+    const wasPromoteRefused =
+      result.aborted &&
+      getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    if ((!result.aborted || wasPromoteRefused) && result.exitCode === 0) {
       this.bindGhPrCreate(commandToExecute, result.output, cwd);
     }
 
@@ -2731,9 +2737,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       result.aborted &&
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
-    const wasPromoteRefused =
-      result.aborted &&
-      getShellAbortReasonKind(combinedSignal.reason) === 'background';
     const timeoutSummary = wasTimeout
       ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
       : undefined;
@@ -3068,9 +3071,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
    * pattern; a failure must never shadow the tool result. gh itself is the
    * attribution authority: the binding is the PR gh resolves for the working
-   * branch, accepted only when this command's output carries gh's URL —
-   * command/output text alone cannot attribute a printed URL to gh's own
-   * execution, so a text-matched URL never binds on its own.
+   * branch, accepted only when it is OPEN and this command's output carries
+   * gh's URL — command/output text alone cannot attribute a printed URL to
+   * gh's own execution, and a retry that passes the execution gate
+   * (`gh pr create || gh pr view`) resolves the branch's EXISTING PR, which
+   * the open-state check plus the no-re-bind persistence decline.
    */
   private bindGhPrCreate(command: string, output: string, cwd: string): void {
     void (async () => {
@@ -3081,14 +3086,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd);
-        if (!created || !output.includes(created.url)) return;
+        if (!created || created.state !== 'open') return;
+        if (!output.includes(created.url)) return;
         const prPath = this.config
           .getSessionService()
           .getPrSessionPathForArchiveState(
             this.config.getSessionId(),
             'active',
           );
-        await upsertSessionPr(prPath, { ...created, state: 'open' });
+        // An already-bound number stays untouched (position and createdAt):
+        // only a genuinely new binding persists and notifies — a re-bind
+        // would move the entry to the tail with a fresh createdAt.
+        const applied = await upsertSessionPrs(prPath, [created]);
+        if (!applied.added.includes(created.number)) return;
         // The daemon never sees this write; the notification carries the
         // catalog mark so live-state clients refetch it (~2s) instead of
         // waiting for unrelated catalog churn.

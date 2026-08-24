@@ -16,6 +16,7 @@ vi.mock('node:child_process', () => ({
 import { execFile } from 'node:child_process';
 import {
   createGitHubPullRequest,
+  fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
@@ -232,7 +233,10 @@ describe('fetchGitHubPullRequests', () => {
         '--limit',
         String(GITHUB_PR_LIST_LIMIT),
         '--json',
-        expect.stringContaining('reviewDecision'),
+        // The full field set must request `state` too: a non-slim
+        // `--state all` query without it maps every merged/closed PR as
+        // open/draft.
+        expect.stringMatching(/reviewDecision.*state/),
       ],
       expect.objectContaining({ cwd: dir, timeout: 10_000 }),
       expect.any(Function),
@@ -474,6 +478,14 @@ describe('repoKeyFromWebUrl', () => {
     );
   });
 
+  it('canonicalizes a www. host prefix', () => {
+    // An origin remote spelled with www. must key identically to gh's own
+    // page URLs or the repo gate never matches them.
+    expect(repoKeyFromWebUrl('https://www.github.com/o/r')).toBe(
+      'github.com/o/r',
+    );
+  });
+
   it('returns undefined for non-http URLs and missing path segments', () => {
     expect(repoKeyFromWebUrl('javascript:alert(1)')).toBeUndefined();
     expect(repoKeyFromWebUrl('https://github.com/o')).toBeUndefined();
@@ -525,5 +537,68 @@ describe('fetchRemoteWebUrl', () => {
     );
 
     expect(await fetchRemoteWebUrl(dir)).toBeUndefined();
+  });
+});
+
+describe('fetchCurrentBranchPullRequest', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-branch-pr-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves number, url, and normalized state from gh', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
+        expect(args).toEqual(['pr', 'view', '--json', 'number,url,state']);
+        (cb as ExecCallback)(
+          null,
+          JSON.stringify({
+            number: 77,
+            url: 'https://github.com/o/r/pull/77',
+            state: 'OPEN',
+          }),
+          '',
+        );
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'open',
+    });
+  });
+
+  it('fails closed when gh reports no recognizable state', async () => {
+    // A retry that resolves the branch's existing PR must never bind on a
+    // shape the caller cannot gate on — missing or unknown state declines.
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhSuccess({ number: 77, url: 'https://github.com/o/r/pull/77' });
+    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'SOMETHING_NEW',
+    });
+    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+  });
+
+  it('returns undefined when gh fails (no PR for the branch)', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhError(new Error('no open pull request found for branch'));
+    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+  });
+
+  it('returns undefined outside a git repository without spawning gh', async () => {
+    expect(await fetchCurrentBranchPullRequest(dir)).toBeUndefined();
+    expect(mockExecFile).not.toHaveBeenCalled();
   });
 });

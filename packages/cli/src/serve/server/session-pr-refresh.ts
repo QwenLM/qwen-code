@@ -30,19 +30,28 @@ const FIRST_RUN_DELAY_MS = 60_000;
 
 /**
  * `QWEN_SESSION_PR_REFRESH_MINUTES`: refresh interval in minutes; `0`
- * disables the sweep. Missing/invalid values fall back to the default.
+ * disables the sweep. Missing, blank, or invalid values fall back to the
+ * default — a blank env var is unset, not a disable.
  */
 export function resolveSessionPrRefreshIntervalMs(
   env: Readonly<Record<string, string | undefined>>,
 ): number | undefined {
   const raw = env['QWEN_SESSION_PR_REFRESH_MINUTES'];
-  if (raw === undefined) return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  }
   const minutes = Number(raw);
   if (!Number.isFinite(minutes) || minutes < 0) {
     return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
   }
   if (minutes === 0) return undefined;
-  return minutes * 60_000;
+  const intervalMs = minutes * 60_000;
+  // Node clamps setTimeout delays above this to ~1ms, which would turn the
+  // sweep into a gh-spawning busy loop; use the default instead.
+  if (intervalMs > 2_147_483_647) {
+    return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  }
+  return intervalMs;
 }
 
 export interface SessionPrRefreshResult {

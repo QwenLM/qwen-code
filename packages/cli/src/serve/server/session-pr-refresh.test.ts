@@ -75,6 +75,37 @@ describe('resolveSessionPrRefreshIntervalMs', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('treats a blank value as unset, not a disable', () => {
+    // `Number('')` is 0: without the blank check an env var that is set
+    // but empty would silently turn the sweep off.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '   ',
+      }),
+    ).toBe(300_000);
+  });
+
+  it('clamps values beyond the setTimeout delay limit back to the default', () => {
+    // Node clamps delays above 2^31-1 ms to ~1ms — an unclamped minutes
+    // value would fire the sweep in a tight loop.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '43200',
+      }),
+    ).toBe(300_000);
+    // The largest whole-minute value still under the limit stays honored.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '35791',
+      }),
+    ).toBe(2_147_460_000);
+  });
 });
 
 describe('refreshWorkspaceSessionPrStates', () => {

@@ -11,6 +11,7 @@ import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  SESSION_PR_LIST_LIMIT,
   Storage,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
@@ -418,139 +419,44 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result).toMatchObject({ scanned: 1, bound: 0 });
   });
 
-  it('recovers PRs created via gh pr create in the session shell', async () => {
+  it('does not bind PRs from transcript gh pr create traces (source removed)', async () => {
+    // Transcript traces carry no gh-side attribution per historical command:
+    // an echo-shaped command that merely mentions `gh pr create` passes the
+    // execution gate and can print any same-repo URL, forging a binding.
+    // Live creates bind through the shell post-hook (verified with gh
+    // itself); backfill must not recover them from text.
     fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
     const sessionId = '00000000-0000-4000-8000-000000000008';
     await seedSession(sessionId);
-    const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    const call = {
-      uuid: `${sessionId}-call`,
-      parentUuid: `${sessionId}-user-1`,
+    await appendShellCommand(
       sessionId,
-      timestamp: '2026-08-02T00:00:00.000Z',
-      type: 'assistant',
-      message: {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call-1',
-              name: 'run_shell_command',
-              args: { command: 'gh pr create --title x --body y' },
-            },
-          },
-        ],
-      },
-      cwd: workspaceCwd,
-    };
-    const response = {
-      uuid: `${sessionId}-resp`,
-      parentUuid: `${sessionId}-call`,
-      sessionId,
-      timestamp: '2026-08-02T00:00:01.000Z',
-      type: 'user',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'run_shell_command',
-              response: {
-                output: `created\nhttps://github.com/o/r/pull/99\n`,
-              },
-            },
-          },
-        ],
-      },
-      cwd: workspaceCwd,
-    };
-    await fsp.appendFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify(call)}\n${JSON.stringify(response)}\n`,
-      'utf8',
+      'gh pr create --title x --body y',
+      'created\nhttps://github.com/o/r/pull/99\n',
     );
-    // gh is unavailable: the URL printed at create time is the only source.
+    await appendShellCommand(
+      sessionId,
+      'gh pr view 98 --json url -q .url',
+      'https://github.com/o/r/pull/98\n',
+    );
+    await appendShellCommand(
+      sessionId,
+      'gh pr create --title x',
+      'https://github.com/evil/other/pull/5\n',
+    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'cli_unavailable',
     });
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ bound: 1 });
-    const prs = await readSessionPrs(
-      sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
-    );
-    expect(prs).toEqual([
-      {
-        number: 99,
-        url: 'https://github.com/o/r/pull/99',
-        createdAt: expect.any(String),
-      },
-    ]);
-  });
-
-  it('does not recover a transcript URL from another repository', async () => {
-    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
-    const sessionId = '00000000-0000-4000-8000-000000000009';
-    await seedSession(sessionId);
-    const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.appendFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({
-        uuid: `${sessionId}-call`,
-        parentUuid: `${sessionId}-user-1`,
-        sessionId,
-        timestamp: '2026-08-02T00:00:00.000Z',
-        type: 'assistant',
-        message: {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call-1',
-                name: 'run_shell_command',
-                args: { command: 'gh pr create --title x' },
-              },
-            },
-          ],
-        },
-        cwd: workspaceCwd,
-      })}\n${JSON.stringify({
-        uuid: `${sessionId}-resp`,
-        parentUuid: `${sessionId}-call`,
-        sessionId,
-        timestamp: '2026-08-02T00:00:01.000Z',
-        type: 'user',
-        message: {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'run_shell_command',
-                response: {
-                  output: 'https://github.com/evil/other/pull/5\n',
-                },
-              },
-            },
-          ],
-        },
-        cwd: workspaceCwd,
-      })}\n`,
-      'utf8',
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
-
-    const result = await backfillWorkspaceSessionPrs(runtime);
-
-    expect(result).toMatchObject({ bound: 0 });
+    expect(result).toMatchObject({ scanned: 1, bound: 0 });
+    // No candidates at all — gh must not be spawned for the run.
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+      ),
+    ).toBeNull();
   });
 
   it('never binds number 0 from a pr-0 user slug', async () => {
@@ -697,37 +603,6 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
-  it('moves a gh-create number past weaker reviewed duplicates', async () => {
-    await seedSession(SESSION_A);
-    for (const n of [5, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11]) {
-      await appendUserText(SESSION_A, `/review ${n}`);
-    }
-    await appendShellCommand(
-      SESSION_A,
-      'gh pr create --title x --body y',
-      'https://github.com/o/r/pull/5\n',
-    );
-    // Negative control: a non-create gh command printing the workspace's
-    // own PR URL must not bind at gh-create authority.
-    await appendShellCommand(
-      SESSION_A,
-      'gh pr view 98 --json url -q .url',
-      'https://github.com/o/r/pull/98\n',
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
-
-    const result = await backfillWorkspaceSessionPrs(runtime);
-
-    // 11 candidates, tail-10 cap: only the 10 persisted bindings count.
-    expect(result.bound).toBe(10);
-    const prs = await readSessionPrs(
-      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
-    );
-    // The created PR outranks the reviewed tier, so it sits at the tail and
-    // survives the sidecar's cap instead of being evicted from the head.
-    expect(prs?.map((p) => p.number)).toEqual([2, 3, 4, 6, 7, 8, 9, 10, 11, 5]);
-  });
-
   it("keeps the run's new bindings under the sidecar tail cap", async () => {
     // Seeded at 8 so the 3 new bindings overflow the cap: the single
     // capped write must keep every new binding (evicting the oldest seeded
@@ -759,6 +634,108 @@ describe('backfillWorkspaceSessionPrs', () => {
       2, 3, 4, 5, 6, 7, 8, 102, 103, 101,
     ]);
     expect(final?.[0]?.createdAt).toBe('2026-08-01T00:00:01.000Z');
+  });
+
+  it('binds /review typed through the TUI slash-command expansion', async () => {
+    // The TUI records the EXPANDED skill body as the user record — the
+    // typed command appended at its end is out of pattern reach; it
+    // survives only in the slash_command system record's rawCommand.
+    await seedSession(SESSION_A);
+    await seedSession(SESSION_B);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const expandedBody = {
+      text: 'You are the /review skill. Steps: ...\n/review 55',
+    };
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      transcriptRecord(SESSION_A, 'user', [expandedBody]) +
+        '\n' +
+        JSON.stringify({
+          uuid: `${SESSION_A}-slash`,
+          parentUuid: `${SESSION_A}-user-1`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: { phase: 'invocation', rawCommand: '/review 55' },
+          cwd: workspaceCwd,
+        }) +
+        '\n',
+      'utf8',
+    );
+    // Control: the expanded user record ALONE (no slash record) must not
+    // bind — the command sits at the part's end, out of pattern reach.
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_B}.jsonl`),
+      transcriptRecord(SESSION_B, 'user', [expandedBody]) + '\n',
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(55, 'fix/55')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({ number: 55 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps the convention binding across runs as weaker numbers accumulate', async () => {
+    // Run 1 binds the convention number alone; later runs accumulate more
+    // reviewed numbers than the sidecar cap holds. The convention number is
+    // re-offered on every run and must survive each one — a plain
+    // head-eviction drops it once enough weaker numbers land after it.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-7', 'worktree-pr-7');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const run1 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run1.bound).toBe(1);
+    expect((await readSessionPrs(prPath))?.map((p) => p.number)).toEqual([7]);
+
+    for (const n of [101, 102, 103, 104, 105]) {
+      await appendUserText(SESSION_A, `/review ${n}`);
+    }
+    const run2 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run2.bound).toBe(5);
+    expect((await readSessionPrs(prPath))?.map((p) => p.number)).toEqual([
+      7, 101, 102, 103, 104, 105,
+    ]);
+
+    for (const n of [106, 107, 108, 109, 110]) {
+      await appendUserText(SESSION_A, `/review ${n}`);
+    }
+    const run3 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run3.bound).toBe(5);
+    const afterRun3 = await readSessionPrs(prPath);
+    expect(afterRun3).toHaveLength(SESSION_PR_LIST_LIMIT);
+    // The convention binding survives; only the weakest non-re-offered
+    // number (101) made room for the new ones.
+    expect(afterRun3?.map((p) => p.number)).toEqual([
+      7, 102, 103, 104, 105, 106, 107, 108, 109, 110,
+    ]);
+
+    // A fourth run on the same transcript binds nothing new and changes
+    // nothing.
+    const run4 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run4).toMatchObject({ bound: 0 });
+    expect(await readSessionPrs(prPath)).toEqual(afterRun3);
   });
 
   it('does not bind /review named mid-prose in user text', async () => {

@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
 import { gitEnv } from './git-branches.js';
+import type { SessionPrState } from '../services/session-pr-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -24,7 +25,7 @@ export const GITHUB_PR_ERROR_MESSAGE_MAX = 512;
 export const GITHUB_PR_LIST_LIMIT = 30;
 
 const GH_PR_LIST_FIELDS =
-  'number,title,url,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt';
+  'number,title,url,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt,state';
 
 const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state,updatedAt';
 
@@ -449,7 +450,10 @@ export function repoKeyFromWebUrl(webUrl: string): string | undefined {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
   const segments = url.pathname.split('/').filter(Boolean);
   if (segments.length < 2) return undefined;
-  return `${url.hostname}/${segments[0]}/${segments[1]}`.toLowerCase();
+  // Enterprise remotes can carry a `www.` prefix while gh's own URLs never
+  // do; the key must canonicalize it or the two never match.
+  const hostname = url.hostname.replace(/^www\./, '');
+  return `${hostname}/${segments[0]}/${segments[1]}`.toLowerCase();
 }
 
 /**
@@ -485,28 +489,28 @@ export function fetchRemoteWebUrl(
 /**
  * Resolves the PR gh associates with the current branch of the repo
  * containing `cwd` (`gh pr view` with no argument names one), best-effort:
- * undefined when the branch has no PR, gh is unavailable, or the repo
- * cannot be resolved. Used to attribute a `gh pr create` run to the PR it
- * created — command/output text alone cannot prove which printed URL gh
- * itself produced.
+ * undefined when the branch has no PR, gh is unavailable, the repo cannot
+ * be resolved, or gh reports no recognizable state. Used to attribute a
+ * `gh pr create` run to the PR it created — command/output text alone
+ * cannot prove which printed URL gh itself produced. The state lets the
+ * caller decline an already-merged/closed PR a retry merely resolved.
  */
 export function fetchCurrentBranchPullRequest(
   cwd: string,
-  env?: Readonly<Record<string, string | undefined>>,
-): Promise<{ number: number; url: string } | undefined> {
+): Promise<{ number: number; url: string; state: SessionPrState } | undefined> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return Promise.resolve(undefined);
   return new Promise((resolve) => {
     execFile(
       'gh',
-      ['pr', 'view', '--json', 'number,url'],
+      ['pr', 'view', '--json', 'number,url,state'],
       {
         cwd: gitRoot,
         timeout: GH_TIMEOUT_MS,
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: gitEnv(),
       },
       (error, stdout) => {
         if (error) {
@@ -517,10 +521,15 @@ export function fetchCurrentBranchPullRequest(
           const parsed = JSON.parse(stdout) as {
             number?: number;
             url?: string;
+            state?: string;
           };
+          // gh reports OPEN/MERGED/CLOSED; anything else fails closed.
+          const state = parsed.state?.toLowerCase();
           resolve(
-            typeof parsed.number === 'number' && typeof parsed.url === 'string'
-              ? { number: parsed.number, url: parsed.url }
+            typeof parsed.number === 'number' &&
+              typeof parsed.url === 'string' &&
+              (state === 'open' || state === 'merged' || state === 'closed')
+              ? { number: parsed.number, url: parsed.url, state }
               : undefined,
           );
         } catch {

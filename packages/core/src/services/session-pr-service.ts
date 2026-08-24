@@ -293,6 +293,13 @@ export interface SessionPrUpsertManyResult {
  * once, so the write cannot cascade and a failure cannot strand a partial
  * result. The read inside the lock sees bindings concurrent writers land
  * before this mutation.
+ *
+ * When the merged list overflows the cap, eviction drops entries this run
+ * did NOT re-offer first (oldest position first), and only then the oldest
+ * re-offered ones. The cap must not evict a binding the run's sources still
+ * assert — across re-runs that re-offer a session's earliest (strongest,
+ * e.g. its worktree convention) binding, plain head eviction would drop it
+ * once enough weaker numbers accumulate.
  */
 export function upsertSessionPrs(
   filePath: string,
@@ -335,7 +342,23 @@ export function upsertSessionPrs(
     if (appended.size === 0) {
       return { prs: existing, added: [], alreadyBound, unresolved };
     }
-    const prs = next.slice(-SESSION_PR_LIST_LIMIT);
+    const offered = new Set(candidates.map((candidate) => candidate.number));
+    let overflow = next.length - SESSION_PR_LIST_LIMIT;
+    let prs: SessionPr[];
+    if (overflow <= 0) {
+      prs = next;
+    } else {
+      const survivors = next.filter((entry) => {
+        if (overflow > 0 && !offered.has(entry.number)) {
+          overflow -= 1;
+          return false;
+        }
+        return true;
+      });
+      // Remaining overflow means every survivor was re-offered; drop the
+      // oldest positions — the weakest the offer re-asserted.
+      prs = survivors.slice(overflow);
+    }
     const persistedNumbers = new Set(prs.map((entry) => entry.number));
     const added = [...appended].filter((number) =>
       persistedNumbers.has(number),

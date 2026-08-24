@@ -333,6 +333,44 @@ describe('upsertSessionPrs', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
+  it('evicts non-re-offered entries before re-offered ones at the cap', async () => {
+    // Across runs, the tail cap must not drop a binding the run's
+    // candidates still assert (a session's earliest — strongest — binding)
+    // while entries the candidates no longer name are still present.
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 1, url: entry(1).url },
+      { number: 11, url: entry(11).url },
+      { number: 12, url: entry(12).url },
+    ]);
+    expect(result.added).toEqual([11, 12]);
+    expect(result.alreadyBound).toEqual([1]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      1, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    // The re-offered survivor keeps its original entry — no re-stamp.
+    expect(result.prs[0]).toEqual(entry(1));
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('falls back to oldest-position eviction when every entry is re-offered', async () => {
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      ...seeded.map((e) => ({ number: e.number, url: e.url })),
+      { number: 11, url: entry(11).url },
+      { number: 12, url: entry(12).url },
+    ]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+  });
+
   it('reports url-less candidates as unresolved, counting already-bound ones separately', async () => {
     await writeSessionPrs(filePath, [entry(100)]);
     const result = await upsertSessionPrs(filePath, [
