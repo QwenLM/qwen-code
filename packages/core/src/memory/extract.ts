@@ -23,7 +23,7 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
-import { getCacheSafeParamsSessionId } from '../utils/forkedAgent.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
