@@ -5379,6 +5379,38 @@ describe('AnthropicContentGenerator', () => {
       expect(error).toBeUndefined();
       expect(done).toBe(true);
     });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case. A user Ctrl-C that
+      // lands while the idle-watchdog timer is pending must surface as a
+      // non-retryable AbortError, not the watchdog's retryable ETIMEDOUT —
+      // ETIMEDOUT is in the retryable set, so the retry loop would otherwise
+      // resume the turn the user just cancelled. This pins the `parentSignal`
+      // argument threaded into `withStreamGuards`: replacing it with
+      // `undefined` makes the timer reject with StreamInactivityTimeoutError
+      // and this test fail.
+      const callerAc = new AbortController();
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream({
+        ...streamRequest,
+        config: { abortSignal: callerAc.signal },
+      } as unknown as GenerateContentParameters);
+      const captured = consumeUntilSettled(stream);
+      callerAc.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('user-abort-did-not-propagate');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).not.toBe(sentinel);
+      expect((err as Error).name).toBe('AbortError');
+      expect((err as { code?: string }).code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+    });
   });
 
   describe('tool_choice mapping from Gemini toolConfig', () => {
