@@ -3678,9 +3678,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         mockedClient as unknown as ClientLib.Client,
       );
       const mockedTransport = {
-        terminateSession: vi
-          .fn()
-          .mockRejectedValue(new Error('ECONNREFUSED')),
+        terminateSession: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
         close: vi.fn().mockResolvedValue(undefined),
       };
       vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
@@ -3702,6 +3700,57 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
 
       removeMCPServerStatus('dead-http-server');
+    });
+
+    it('disconnect() does not hang when terminateSession never responds (issue #9944)', async () => {
+      // A live-but-unresponsive server (TCP open, never answers the DELETE)
+      // must not block teardown: the SDK's `terminateSession()` has no
+      // timeout of its own and the transport's abort controller is only
+      // aborted by `close()` — which runs after the await. `disconnect()`
+      // therefore bounds the call and proceeds to `close()`, which aborts
+      // the still-in-flight request.
+      vi.useFakeTimers();
+      try {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          close: vi.fn(),
+          getInstructions: vi.fn(),
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        const mockedTransport = {
+          terminateSession: vi.fn(() => new Promise<void>(() => {})), // never settles
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+        );
+
+        const client = new McpClient(
+          'unresponsive-http-server',
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          { getDirectories: () => [] } as unknown as WorkspaceContext,
+          false,
+        );
+
+        await client.connect();
+        const disconnected = client.disconnect();
+        // The bounded wait fires, and teardown completes even though the
+        // DELETE never got an answer.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(disconnected).resolves.toBeUndefined();
+        expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+        removeMCPServerStatus('unresponsive-http-server');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

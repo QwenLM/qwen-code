@@ -99,6 +99,12 @@ export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+/**
+ * Upper bound for the session-termination DELETE in `disconnect()`. The SDK
+ * call has no timeout of its own; a live-but-unresponsive server must not
+ * hang teardown (see `disconnect()`).
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
 
 const invocationContextTransports = new WeakSet<Transport>();
 const invocationContextClients = new WeakSet<Client>();
@@ -759,7 +765,29 @@ export class McpClient {
       };
       if (typeof streamableTransport.terminateSession === 'function') {
         try {
-          await streamableTransport.terminateSession();
+          // Bound the DELETE: the SDK's `terminateSession()` has no timeout
+          // of its own (the MCP undici dispatcher runs with
+          // `headersTimeout: 0, bodyTimeout: 0`), and the transport's abort
+          // controller is only aborted by `close()` below — after this
+          // await. A live-but-unresponsive server would otherwise hang
+          // `disconnect()` (and every teardown caller) indefinitely. On
+          // timeout we fall through to `close()`, which aborts the
+          // still-in-flight request.
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const timedOut = new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, TERMINATE_SESSION_TIMEOUT_MS);
+            timeout.unref?.();
+          });
+          try {
+            await Promise.race([
+              streamableTransport.terminateSession(),
+              timedOut,
+            ]);
+          } finally {
+            if (timeout) {
+              clearTimeout(timeout);
+            }
+          }
         } catch (error) {
           debugLogger.debug(
             `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
