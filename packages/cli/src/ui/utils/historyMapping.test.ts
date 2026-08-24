@@ -938,6 +938,40 @@ describe('computeApiTruncationIndex', () => {
       // The new identified turn still resolves by identity.
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
+
+    it('fails closed on duplicate prompt identities instead of demoting to the positional walk', () => {
+      // A resumed session whose JSONL carries two user records with the same
+      // promptId (the design doc's untrusted-input case). The duplicated
+      // target makes findApiHistoryPromptIndex return -1; the duplicate
+      // signal (`undefined`) from getApiHistoryPromptIndexes must then fail
+      // the rewind closed — exactly like both twins — instead of being
+      // coerced into "not fully identified" and truncating at a
+      // shape-based positional guess.
+      const ui: HistoryItem[] = [
+        userItem(1, 'prompt 1', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'prompt 2', true, 'prompt-id-dup'),
+        geminiItem(4),
+        userItem(5, 'prompt 3', true, 'prompt-id-dup'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        userContent('prompt 2'),
+        modelContent('response 2'),
+        userContent('prompt 3'),
+        modelContent('response 3'),
+      ];
+      markApiHistoryPrompt(api[0]!, 'prompt-id-1');
+      markApiHistoryPrompt(api[2]!, 'prompt-id-dup');
+      markApiHistoryPrompt(api[4]!, 'prompt-id-dup');
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      // A uniquely-identified target still resolves by identity.
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    });
   });
 });
 

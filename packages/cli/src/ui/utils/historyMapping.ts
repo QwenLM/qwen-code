@@ -165,6 +165,18 @@ export function computeApiTruncationIndex(
     if (identifiedIndex !== -1) {
       return identifiedIndex;
     }
+    // Duplicate prompt identities are ambiguous and fail closed — the same
+    // contract as both twins (the ACP session's #getRewindTurnProjection
+    // yields no projection and selectForkHistory returns []).
+    // getApiHistoryPromptIndexes signals a duplicate with `undefined`;
+    // coercing it to [] would demote to the positional walk and truncate at
+    // a shape-based guess — the exact regression class this mapping exists
+    // to eliminate (e.g. a resumed session whose JSONL carries two user
+    // records with the same promptId).
+    const apiPromptIndexes = getApiHistoryPromptIndexes(apiHistory);
+    if (apiPromptIndexes === undefined) {
+      return -1;
+    }
     // Fail closed only when EVERY user prompt the positional walk counts
     // carries a stable identity. /restore installs a checkpoint
     // round-tripped through JSON.stringify, which drops the symbol-keyed
@@ -180,7 +192,7 @@ export function computeApiTruncationIndex(
     // and reminder entries from the count, so no extra exception is needed
     // here.
     const historyFullyIdentified =
-      (getApiHistoryPromptIndexes(apiHistory) ?? []).length > 0 &&
+      apiPromptIndexes.length > 0 &&
       apiHistory.every(
         (content) =>
           !isUserTextContent(content) || !!getApiHistoryPromptId(content),
