@@ -157,8 +157,9 @@ export async function maybeOpenWebShellBrowser(
     );
     return;
   }
+  let target: URL | undefined;
   try {
-    const target = new URL(handle.url);
+    target = new URL(handle.url);
     // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
     if (target.hostname === '0.0.0.0' || target.hostname === '[::]') {
       target.hostname = '127.0.0.1';
@@ -181,8 +182,12 @@ export async function maybeOpenWebShellBrowser(
     }
     await openBrowserSecurely(target.toString());
   } catch (browserErr) {
+    const manualUrl =
+      manualFallbackWhenIneligible && target
+        ? `. Please open this URL manually: ${target.toString()}`
+        : '';
     writeStderrLine(
-      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}${manualUrl}`,
     );
   }
 }

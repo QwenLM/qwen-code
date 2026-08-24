@@ -1007,6 +1007,30 @@ describe('maybeOpenWebShellBrowser', () => {
       ),
     ).resolves.toBeUndefined();
   });
+
+  it('prints the authenticated URL when browser launch fails', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('boom'));
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(stderrWrites.join('')).toContain(
+      'Please open this URL manually: ' +
+        'http://127.0.0.1:4170/#token=temporary-secret',
+    );
+  });
 });
 
 describe('serve startup import boundary', () => {
