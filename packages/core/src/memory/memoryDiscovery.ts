@@ -27,7 +27,7 @@ import type {
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
 
-interface GeminiFileContent {
+interface MemoryFileContent {
   filePath: string;
   content: string | null;
 }
@@ -42,7 +42,7 @@ export interface InstructionsLoadedNotification {
 
 async function getMemoryFilePathsInternal(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[],
+  includeDirectoriesToReadMemory: readonly string[],
   userHomePath: string,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
@@ -51,8 +51,8 @@ async function getMemoryFilePathsInternal(
 ): Promise<string[]> {
   const dirs = new Set<string>(
     implicitDiscoveryEnabled
-      ? [...includeDirectoriesToReadGemini, currentWorkingDirectory]
-      : [...includeDirectoriesToReadGemini],
+      ? [...includeDirectoriesToReadMemory, currentWorkingDirectory]
+      : [...includeDirectoriesToReadMemory],
   );
 
   // Process directories in parallel with concurrency limit to prevent EMFILE errors
@@ -221,10 +221,10 @@ async function readMemoryFiles(
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>,
   loadReason: Exclude<InstructionLoadReason, 'include'> = 'session_start',
-): Promise<GeminiFileContent[]> {
+): Promise<MemoryFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 20; // Higher limit for file reads as they're typically faster
-  const results: GeminiFileContent[] = [];
+  const results: MemoryFileContent[] = [];
   const notifyInstructionsLoaded = async (
     notification: InstructionsLoadedNotification,
   ) => {
@@ -241,7 +241,7 @@ async function readMemoryFiles(
   for (let i = 0; i < filePaths.length; i += CONCURRENT_LIMIT) {
     const batch = filePaths.slice(i, i + CONCURRENT_LIMIT);
     const batchPromises = batch.map(
-      async (filePath): Promise<GeminiFileContent> => {
+      async (filePath): Promise<MemoryFileContent> => {
         try {
           const content = await fs.readFile(filePath, 'utf-8');
 
@@ -347,12 +347,12 @@ export function formatContextFileDisplayPath(
 // The attachment rule for the system prompt: only non-blank string content
 // reaches it. Shared by concatenateInstructions and contextFilePaths so the
 // "displayed = attached" property holds by construction.
-function hasAttachedContent(item: GeminiFileContent): boolean {
+function hasAttachedContent(item: MemoryFileContent): boolean {
   return typeof item.content === 'string' && item.content.trim().length > 0;
 }
 
 function concatenateInstructions(
-  instructionContents: GeminiFileContent[],
+  instructionContents: MemoryFileContent[],
   // CWD is needed to resolve relative paths for display markers
   currentWorkingDirectoryForDisplay: string,
 ): string {
@@ -461,7 +461,7 @@ function createMemoryTypeClassifier(
  */
 export async function loadServerHierarchicalMemory(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[],
+  includeDirectoriesToReadMemory: readonly string[],
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -479,7 +479,7 @@ export async function loadServerHierarchicalMemory(
   const userHomePath = homedir();
   const filePaths = await getMemoryFilePathsInternal(
     currentWorkingDirectory,
-    includeDirectoriesToReadGemini,
+    includeDirectoriesToReadMemory,
     userHomePath,
     fileService,
     extensionContextFilePaths,

@@ -1178,7 +1178,7 @@ export async function parseArguments(): Promise<CliArgs> {
 // TODO: Consider if App.tsx should get memory via a server call or if Config should refresh itself.
 export async function loadHierarchicalGeminiMemory(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[] = [],
+  includeDirectoriesToReadMemory: readonly string[] = [],
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -1198,7 +1198,7 @@ export async function loadHierarchicalGeminiMemory(
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
-    includeDirectoriesToReadGemini,
+    includeDirectoriesToReadMemory,
     fileService,
     extensionContextFilePaths,
     folderTrust,
