@@ -86,7 +86,7 @@ run's ledger comment — this phase edits no file, including this one.
 | Class                           | Measurement                                                                                                                                                                                                                                                                  |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Unreachable slash commands      | 0 unreachable — all 68 exported `*Command` consts appear in `BuiltinCommandLoader.ts`                                                                                                                                                                                        |
-| Settings keys with no read site | ~1 of 308 labeled settings, and it is report-only anyway (worked example 4)                                                                                                                                                                                                  |
+| Settings keys with no read site | ~1 of 317 labeled settings, and it is report-only anyway (worked example 4)                                                                                                                                                                                                  |
 | Clientless daemon routes        | none found; routes are reached by path strings, so symbol greps prove nothing here                                                                                                                                                                                           |
 | TODO / FIXME markers            | not evidence of anything removable — a marker names a wish, not a dead consumer                                                                                                                                                                                              |
 | Duplicate helpers               | real (`escapeRegExp` ×4 and `truncateText` ×5 inside `packages/cli` alone) but **report-only**: consolidating into `core` widens a published surface and trips the cross-package gate, and consolidating inside a package is the "more consistent" edit `/repo-hygiene` bans |
@@ -199,9 +199,9 @@ an unrelated refactor is a **regression**, not dead code — hand it to
 `/bugfix` and file nothing here.
 
 **8 — Design-doc ownership.** `"$RG" -l -i '<symbol>|<file basename>'
-docs/design docs/plans` (284 + 35 documents; most are not date-prefixed, so
-grep content, not filenames). A doc arguing for the surface beats your grep
-unless you can beat the doc.
+docs/design docs/plans` (most are not date-prefixed, so grep content, not
+filenames). A doc arguing for the surface beats your grep unless you can
+beat the doc.
 
 ## 4 — The corpus
 
