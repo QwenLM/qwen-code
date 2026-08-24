@@ -166,6 +166,12 @@ jobs:
   # publishing dispatch without a version input is skipped by design: the
   # build job tags such runs with its branch/sha fallback, but this job
   # files one issue per VERSION and cannot dedup a versionless failure.
+  # Known residual gap: a build job that fails before its first step runs
+  # at all (e.g. runner provisioning failure) never executes
+  # publish-decision, so push_image stays empty and this gate skips the
+  # job even though failure() is true — no issue gets filed. A "failed
+  # publish, no issue filed" investigation should start here; a scheduled
+  # npm-vs-GHCR reconciliation is the remaining backstop for this case.
   file-failure-issue:
     needs: ['build-and-push-to-ghcr']
     if: |-
