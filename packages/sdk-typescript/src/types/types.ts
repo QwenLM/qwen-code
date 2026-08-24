@@ -403,9 +403,11 @@ export interface QueryOptions {
    * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
    * If specified, only matching core tools are registered for the session
    * (non-core built-ins such as `send_message` are unaffected).
-   * `allowedTools` / `permissions.allow` also restricts tool registration:
-   * when at least one allow rule is configured, built-in tools not covered
-   * by any allow rule are not registered either (#9827).
+   * Separately, `permissions.allow` in settings.json (requires restart)
+   * activates a registry-level allowlist: when at least one allow rule is
+   * configured there, built-in tools not covered by any allow rule are not
+   * registered either (#9827). Note the SDK `allowedTools` parameter is a
+   * pure auto-approval grant and does NOT restrict tool registration.
    * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
    * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
@@ -433,7 +435,7 @@ export interface QueryOptions {
   excludeTools?: string[];
 
   /**
-   * Equivalent to `permissions.allow` in settings.json.
+   * Equivalent to `permissions.allow` in settings.json for auto-approval.
    * List of tools that are allowed to run without confirmation.
    *
    * **Behavior:**
@@ -442,10 +444,11 @@ export interface QueryOptions {
    * - Checked after `excludeTools` but before `canUseTool` callback
    * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
-   * - Registry allowlist: when at least one entry is configured, built-in
-   *   tools not covered by any entry are not registered for the session,
-   *   so their schemas are never sent to the model (MCP tools and the
-   *   `structuredOutput` contract are exempt) (#9827)
+   * - Does NOT restrict tool registration — built-in tool schemas are still
+   *   sent to the model. This parameter maps to the CLI `--allowed-tools`
+   *   flag, a pure auto-approval grant. To hide unlisted built-in tools from
+   *   the model request, set `permissions.allow` in settings.json (requires
+   *   restart); that key activates the registry allowlist (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
