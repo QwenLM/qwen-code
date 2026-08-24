@@ -1827,9 +1827,15 @@ export class AgentCore {
           // evidence. Exclude it from the loop guards and unwind the
           // request-time reservations the replayed request made when
           // streamed — the daemon twin excludes this class via its
-          // providerDuplicate / not_started filter (issue #9450).
+          // providerDuplicate / not_started filter (issue #9450). The
+          // replaySuppression mark carries the live streak evidence across
+          // the next Finished boundary, mirroring the daemon's all-replay
+          // (empty) batch decay skip — a replay of a NON-stateful tool
+          // marks nothing on its own (issue #9450 requirement #6).
           neverExecutedCallIds.add(callId);
-          loopDetector?.noteSuppressedToolCallByCallId(callId);
+          loopDetector?.noteSuppressedToolCallByCallId(callId, {
+            replaySuppression: true,
+          });
           continue;
         }
         recordHandledToolCall(

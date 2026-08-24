@@ -11690,6 +11690,112 @@ describe('Session', () => {
           expect(loopState.totalToolCalls).toBe(21);
         });
 
+        it('still halts a frozen daemon poller when NON-STATEFUL replay-only rounds are interleaved (issue #9450 requirement #6)', async () => {
+          // Non-stateful twin of the replay-only regression: the replayed
+          // id belongs to a NON-stateful tool (generic_tool), so no
+          // suppression mark exists for it anywhere — the empty-batch
+          // early return in recordDaemonToolCalls is the ONLY mechanism
+          // carrying the last executed round's result marks across the
+          // replay batch to the gap batch's decay. task_list is the only
+          // stateful tool, so every other replayed tool takes this path;
+          // without the skip the daemon would wipe the frozen streak and
+          // run to the hard backstop while the exact same event sequence
+          // halts core just past the soft cap (requirement #6 parity —
+          // core's twin carries via noteSuppressedToolCallByCallId's
+          // replaySuppression mark).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          const fingerprint = core.getToolCallFingerprint('generic_tool', {
+            step: 0,
+          });
+          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+            new Map(
+              Array.from({ length: 30 }, (_, index) => [
+                `replayed_generic_${index}`,
+                fingerprint,
+              ]),
+            ),
+          );
+          const loopState = freshLoopState();
+
+          let replayOrdinal = 0;
+          const runRound = (round: number) => {
+            const calls =
+              round % 3 === 0
+                ? [
+                    {
+                      id: `task_list_${round}`,
+                      name: 'task_list',
+                      args: TASK_LIST_ARGS,
+                    },
+                  ]
+                : round % 3 === 1
+                  ? [
+                      {
+                        id: `replayed_generic_${replayOrdinal++}`,
+                        name: 'generic_tool',
+                        args: { step: 0 },
+                      },
+                    ]
+                  : [
+                      {
+                        id: `generic_${round}`,
+                        name: 'generic_tool',
+                        args: { step: round },
+                      },
+                    ];
+            return (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-nonstateful-replay-${round}`,
+              calls,
+              loopState,
+            );
+          };
+
+          let fired = false;
+          for (let round = 0; round < 90 && !fired; round++) {
+            const result = await runRound(round);
+            if (round % 3 === 1) {
+              // The replay-only batch is suppressed whole and executes
+              // nothing (its repeat keys never count toward the stuck
+              // signal — only executable calls do).
+              expect(result.loopDetected ?? false).toBe(false);
+              expect(
+                (result.parts[0]?.functionResponse?.response?.[
+                  'error'
+                ] as string) ?? '',
+              ).toContain('Duplicate provider tool call id');
+              continue;
+            }
+            fired = result.loopDetected ?? false;
+          }
+
+          // The empty-batch decay skip carries the poll's result mark
+          // through the replay batch, so the streak survives the gap
+          // batch's boundary and arms the stuck signal: the halt lands at
+          // totalToolCalls 21 (soft cap 20 + 1; replay batches add 0),
+          // far below the hard backstop (200).
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBe(21);
+        });
+
         it('still halts a frozen daemon poller interleaved every other batch with other work (issue #9450)', async () => {
           // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
           // cap's stateful stuck signal is the ONLY live halt path. A

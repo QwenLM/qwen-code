@@ -3408,10 +3408,15 @@ export class GeminiClient {
           // pair the fabricated error with the replayed request and reset
           // the guards' streaks as a "changed" result, disarming every
           // result-aware halt — the daemon twin excludes this class via its
-          // providerDuplicate / not_started filter (issue #9450).
+          // providerDuplicate / not_started filter (issue #9450). The
+          // replaySuppression mark carries the live streak evidence across
+          // the next Finished boundary — the daemon twin skips decay for
+          // all-replay batches, and a replay of a NON-stateful tool marks
+          // nothing on its own (issue #9450 requirement #6).
           if (isDuplicateProviderToolCallResponse(part as Part)) {
             this.loopDetector.noteSuppressedToolCallByCallId(
               functionResponseId,
+              { replaySuppression: true },
             );
             continue;
           }

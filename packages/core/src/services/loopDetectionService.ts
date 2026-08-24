@@ -783,8 +783,43 @@ export class LoopDetectionService {
    * executable calls), so this keeps the runtimes aligned (issue #9450
    * requirement #6). Unknown callIds (never streamed through the guards)
    * are ignored.
+   *
+   * `replaySuppression` marks the CROSS-ROUND REPLAY class (a suppressed
+   * re-emission of an already-handled provider call id — the duplicate
+   * synthetics), as opposed to the never-executed class (authorization
+   * rejections, scheduler not_started synthetics). Replay-only rounds must
+   * carry the live stateful streak marks across the next Finished boundary:
+   * the daemon twin's batch recorder receives an all-replay batch as zero
+   * executable calls and skips its boundary decay entirely
+   * (recordDaemonToolCalls), so the last executed round's result marks
+   * survive to the NEXT non-empty batch's decay. Without the carry, core
+   * consumes those marks at the replay round's own Finished boundary and
+   * wipes a live frozen-board streak at the next one when the replayed
+   * tool is NOT stateful (a non-stateful replay marks nothing here — and
+   * its callId never resolves in the pairing, which tracks only stateful
+   * requests), so a frozen task_list board polled around non-stateful
+   * replay rounds never accumulates its stuck signal in core while the
+   * daemon halts it just past the soft cap (requirement #6 parity). The
+   * carry re-adds the keys with live streak evidence for exactly one more
+   * boundary; the never-executed class must NOT carry: the daemon treats
+   * those calls as ordinary (non-empty) batches whose boundary decay runs.
+   * Suppression awareness, not activity awareness: post-abandonment rounds
+   * have no suppressions at all, so decay still releases abandoned peaks
+   * (the literal "skip decay on stateful-inactive rounds" formulation
+   * would latch the peak forever and break the abandonment release).
    */
-  noteSuppressedToolCallByCallId(callId: string): void {
+  noteSuppressedToolCallByCallId(
+    callId: string,
+    options?: { replaySuppression?: boolean },
+  ): void {
+    // Runs BEFORE the callId pairing lookup: the pairing only tracks
+    // STATEFUL requests (see checkAlwaysOnSafeties), but the carry is
+    // needed most when the suppressed replay is a NON-stateful tool — its
+    // callId never resolves here, yet its replay-only round must still
+    // protect the live frozen-board streaks (see the doc above).
+    if (options?.replaySuppression) {
+      this.carryStatefulStreakMarksAcrossSuppression();
+    }
     const request = this.requestByCallId.get(callId);
     if (!request) return;
     this.requestByCallId.delete(callId);
@@ -816,6 +851,28 @@ export class LoopDetectionService {
       this.recentToolCallKeys.splice(windowIndex, 1);
     }
     this.statefulResultKeysSinceLastFinished.add(key);
+  }
+
+  /**
+   * One extra Finished boundary of decay coverage for the live stateful
+   * streak marks, applied when a replay suppression lands (see
+   * noteSuppressedToolCallByCallId): re-adds every key that still carries
+   * streak evidence to statefulResultKeysSinceLastFinished so the next
+   * boundary's decay skips it, mirroring the daemon's empty-batch decay
+   * skip. Keys already marked are re-added idempotently; keys whose
+   * evidence already decayed stay gone (the carry never resurrects an
+   * abandoned streak — only postpones an imminent decay by one boundary).
+   */
+  private carryStatefulStreakMarksAcrossSuppression(): void {
+    for (const [key, state] of this.statefulRepeatState) {
+      if (
+        state.consecutiveIdenticalResults > 0 ||
+        state.resultsObserved > 0 ||
+        state.unchangedStreak > 0
+      ) {
+        this.statefulResultKeysSinceLastFinished.add(key);
+      }
+    }
   }
 
   private isStatefulReadTool(toolName: string): boolean {

@@ -3794,6 +3794,72 @@ describe('LoopDetectionService', () => {
       expect(capService.getLastLoopType()).toBeNull();
     });
 
+    it('still halts a frozen poller interleaved with non-stateful replay-only rounds (requirement #6 parity)', () => {
+      // Requirement-#6 parity with the daemon (issue #9450): poll a frozen
+      // task_list board → suppressed replay of an already-handled
+      // NON-stateful call id (the round executes nothing) → gap round,
+      // repeated. The daemon's batch recorder receives the all-replay batch
+      // as zero executable calls and skips its boundary decay entirely, so
+      // the last executed round's result marks survive and the daemon halts
+      // just past the soft cap. Pre-fix core consumed the poll's mark at the
+      // replay round's Finished boundary (noteSuppressedToolCallByCallId
+      // marks nothing for a non-stateful replay) and wiped the frozen streak
+      // at the next one, so the stuck signal never armed and the turn ran to
+      // the 10x hard backstop. The replaySuppression carry must keep the
+      // streak alive across the replay round's boundary.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('replay-parity-non-stateful');
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+
+      let fired = false;
+      let totalCalls = 0;
+      for (let round = 0; round < 30 && !fired; round++) {
+        // Poll round: production ordering — the request streams, its
+        // Finished boundary runs, then the result is recorded with the next
+        // round's submission.
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        totalCalls++;
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+        fired = capService.recordToolResultByCallId(
+          `tl-${round}`,
+          taskListResult('frozen board', `tl-${round}`),
+        );
+        if (fired) break;
+        // Replay-only round: a NON-stateful already-handled call id streams
+        // in and is suppressed without executing; the suppression is noted
+        // with the following round's submission (after the Finished
+        // boundary), exactly when client.ts's feed unwinds it.
+        // Varying args: the replay's own repeat key must not build the
+        // cap's stuck signal — the mechanism under test is the stateful
+        // streak carry, not the replay's request-time counting.
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('read_file', { file_path: `/a${round}` }),
+        );
+        totalCalls++;
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+        capService.noteSuppressedToolCallByCallId('test-id', {
+          replaySuppression: true,
+        });
+        // Gap round (other productive work).
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) break;
+        capService.checkAlwaysOnSafeties(finishedEvent);
+      }
+      expect(fired).toBe(true);
+      expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+      // Halts just past the soft cap of 20 — pre-fix the streak restarted
+      // every cycle and nothing fired within 90 calls (hard backstop 200).
+      expect(totalCalls).toBeLessThanOrEqual(30);
+    });
+
     it('does not halt a resumed task_list poller whose evidence decayed mid-streak (issue #9450)', () => {
       // Two consecutive tool-call-free round-trips mid-streak (reachable
       // via checkNextSpeaker "Please continue." hook turns or agent-core
