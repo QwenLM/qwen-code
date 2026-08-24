@@ -534,15 +534,27 @@ describe('goal runtime', () => {
     expect(causes).toEqual(['turn_finished', 'usage_limited']);
     expect(host.started).toHaveLength(1);
 
-    await expect(
-      runtime.dispatch({
-        action: 'resume',
-        expectedGoalId: permit.goalId,
-        expectedRevision: permit.revision,
-      }),
-    ).rejects.toThrow('edit or replace');
-    expect(host.started).toHaveLength(1);
+    // Resuming restarts the evidence window rather than being refused, so the
+    // Goal keeps its objective and picks up from a cursor that fits.
+    const resumed = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(resumed.snapshot.goal).toMatchObject({
+      status: 'active',
+      revision: permit.revision,
+    });
+    expect(resumed.snapshot.goal?.evidenceCheckpoint).toBeUndefined();
+    expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
+    expect(host.started).toHaveLength(2);
 
+    // The window really moved: the resumed Goal no longer cites the cursor the
+    // exhausted catalog was measured against.
+    expect(resumed.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
+
+    // Editing still works from there and still keeps the Goal running, which
+    // is the escape hatch that used to be the only one.
     const edited = await runtime.dispatch({
       action: 'edit',
       objective: 'deliver result',
@@ -550,18 +562,10 @@ describe('goal runtime', () => {
       expectedRevision: permit.revision,
     });
     expect(edited.snapshot.goal).toMatchObject({
-      status: 'usage_limited',
+      status: 'active',
       revision: 2,
       lastReason: undefined,
     });
-    expect(edited.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
-    await runtime.dispatch({
-      action: 'resume',
-      expectedGoalId: permit.goalId,
-      expectedRevision: 2,
-    });
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    expect(host.started).toHaveLength(2);
   });
 
   it('does not accept catalog exhaustion as an external blocker', async () => {
@@ -1060,15 +1064,15 @@ describe('goal runtime', () => {
       lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
       limitKind: 'checkpoint_request',
     });
-    // The oversized request cannot shrink on its own, so resume must stay
-    // blocked instead of re-limiting on every resumed turn.
-    await expect(
-      runtime.dispatch({
-        action: 'resume',
-        expectedGoalId: permit.goalId,
-        expectedRevision: permit.revision,
-      }),
-    ).rejects.toThrow('edit or replace');
+    // The oversized request cannot shrink while the same evidence window is in
+    // play, so the resume drops that window instead of refusing outright.
+    const resumed = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(resumed.snapshot.goal).toMatchObject({ status: 'active' });
+    expect(resumed.snapshot.goal?.evidenceCheckpoint).toBeUndefined();
   });
 
   it('skips a checkpoint that changes source proof semantics', async () => {
