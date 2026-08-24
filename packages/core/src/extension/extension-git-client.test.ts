@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -143,4 +144,46 @@ describe('createExtensionGitClient', () => {
     await expect(git.version()).resolves.toBeDefined();
     expect(spawned).toBe(true);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'runs restricted Git commands through a PATH wrapper needing a non-allowlisted variable',
+    async () => {
+      const realGit = execSync('command -v git', { encoding: 'utf8' })
+        .trim()
+        .split(/\r?\n/)[0];
+      expect(realGit).toBeTruthy();
+      const wrapperDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'extension-git-wrapper-'),
+      );
+      await fs.writeFile(
+        path.join(wrapperDir, 'git'),
+        [
+          '#!/bin/sh',
+          'if [ -z "$QC_WRAPPER_REAL_GIT" ]; then',
+          '  echo "QC_WRAPPER_REAL_GIT missing" >&2',
+          '  exit 127',
+          'fi',
+          'exec "$QC_WRAPPER_REAL_GIT" "$@"',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      vi.stubEnv(
+        'PATH',
+        `${wrapperDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+      );
+      vi.stubEnv('QC_WRAPPER_REAL_GIT', realGit);
+      let spawned = false;
+      const git = createExtensionGitClient(simpleGit, {
+        baseDir: tempDir,
+        networkPolicy: 'public',
+      });
+      git.outputHandler(() => {
+        spawned = true;
+      });
+
+      await expect(git.version()).resolves.toBeDefined();
+      expect(spawned).toBe(true);
+    },
+  );
 });

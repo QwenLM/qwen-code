@@ -76,6 +76,45 @@ function allowGeneratedConfigKeyFalsePositives(
   }
 }
 
+// simple-git replaces the child environment wholesale with the object passed
+// to env(). Inherit the parent environment minus Git behavior variables so
+// PATH-resolved git wrappers keep their indirection variables, while ambient
+// Git configuration, program overrides, and network or trust redirection
+// never reach the spawned client. `editor`, `pager`, `prefix`, and
+// `ssh_askpass` are the non-GIT_* keys @simple-git/argv-parser (1.1.1 via
+// simple-git 3.36) flags as unsafe; inheriting one would also make its
+// pre-spawn check reject every task. The remaining entries block home
+// locations, proxies, TLS trust overrides, and loader injection.
+const blockedInheritedEnvKeys = new Set([
+  'home',
+  'userprofile',
+  'homedrive',
+  'homepath',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+  'ssl_cert_file',
+  'ssl_cert_dir',
+  'curl_ca_bundle',
+  'ld_preload',
+  'ld_library_path',
+  'dyld_insert_libraries',
+  'dyld_library_path',
+  'editor',
+  'pager',
+  'prefix',
+  'ssh_askpass',
+]);
+
+function isBlockedInheritedEnvKey(key: string): boolean {
+  const normalizedKey = key.toLowerCase().trim();
+  return (
+    normalizedKey.startsWith('git_') ||
+    blockedInheritedEnvKeys.has(normalizedKey)
+  );
+}
+
 export function createExtensionGitClient(
   simpleGit: SimpleGitFactory,
   {
@@ -100,7 +139,7 @@ export function createExtensionGitClient(
     unsafe.allowUnsafeConfigEnvCount = true;
     // @simple-git/argv-parser scans the whole key with unanchored matchers.
     // Enable only categories matched by this product-generated key.
-    // The child environment below remains allowlisted.
+    // The child environment below still strips ambient Git variables.
     // Enabled categories relax the blocklist for every task on this client,
     // including argv `-c` entries. Callers must never pass user- or
     // extension-derived arguments or config through a client created here.
@@ -113,23 +152,13 @@ export function createExtensionGitClient(
   });
   if (!restrictEnvironment) return git;
 
-  const environment: Record<string, string> = {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
-  };
-  for (const key of [
-    'PATH',
-    'Path',
-    'SystemRoot',
-    'SYSTEMROOT',
-    'WINDIR',
-    'TEMP',
-    'TMP',
-    'TMPDIR',
-  ]) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
+  const environment: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || isBlockedInheritedEnvKey(key)) continue;
+    environment[key] = value;
   }
+  environment['GIT_CONFIG_NOSYSTEM'] = '1';
+  environment['GIT_CONFIG_GLOBAL'] = os.devNull;
   if (authentication && credentialConfigKey) {
     const value = Buffer.from(
       `${authentication.credential.username}:${authentication.credential.password}`,
