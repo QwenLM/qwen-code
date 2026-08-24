@@ -91,7 +91,7 @@ import {
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -108,7 +108,7 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
   getCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -219,9 +219,9 @@ vi.mock('../tools/skill-utils.js', async (importOriginal) => {
     collectAvailableSkillEntries: vi.fn(),
   };
 });
-vi.mock('../utils/environmentContext', async (importOriginal) => {
+vi.mock('./environmentContext', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/environmentContext.js')>();
+    await importOriginal<typeof import('./environmentContext.js')>();
   return {
     ...actual,
     getEnvironmentContext: vi

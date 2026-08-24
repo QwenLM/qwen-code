@@ -35,16 +35,16 @@ import {
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
-import { prependToFirstTextPart } from './partUtils.js';
+import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { SendMessageTool } from '../tools/send-message.js';
-import { getFolderStructure } from './getFolderStructure.js';
+import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 
 vi.mock('../config/config.js');
-vi.mock('./getFolderStructure.js', () => ({
+vi.mock('../utils/getFolderStructure.js', () => ({
   getFolderStructure: vi.fn(),
 }));
 vi.mock('../tools/read-many-files.js');

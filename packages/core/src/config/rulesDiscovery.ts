@@ -17,12 +17,12 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import picomatch from 'picomatch';
-import { parse as parseYaml } from './yaml-parser.js';
-import { normalizeContent } from './textUtils.js';
-import { QWEN_DIR } from './paths.js';
-import { Storage } from '../config/storage.js';
-import { createDebugLogger } from './debugLogger.js';
-import { resolveSymlinkAwareRelativePaths } from './projectPath.js';
+import { parse as parseYaml } from '../utils/yaml-parser.js';
+import { normalizeContent } from '../utils/textUtils.js';
+import { QWEN_DIR } from '../utils/paths.js';
+import { Storage } from './storage.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { resolveSymlinkAwareRelativePaths } from '../utils/projectPath.js';
 
 const logger = createDebugLogger('RULES_DISCOVERY');
 

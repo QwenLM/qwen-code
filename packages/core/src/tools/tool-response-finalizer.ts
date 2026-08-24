@@ -6,9 +6,9 @@
 
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { ToolArtifact } from '../tools/tools.js';
+import type { ToolArtifact } from './tools.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
-import { createDebugLogger } from './debugLogger.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,

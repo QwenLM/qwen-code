@@ -7,8 +7,8 @@
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { Storage } from '../config/storage.js';
-import { atomicWriteFileSync } from './atomicFileWrite.js';
+import { Storage } from './storage.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('INSTALLATION');

@@ -11,15 +11,15 @@ import { homedir } from 'node:os';
 import {
   getAllGeminiMdFilenames,
   LOCAL_CONTEXT_FILENAME,
-} from '../memory/const.js';
+} from '../utils/memory-constants.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import { processImports } from './memoryImportProcessor.js';
-import { isSubpath, QWEN_DIR, tildeifyPath } from './paths.js';
-import { stripAnsiAndControl } from './textUtils.js';
+import { processImports } from '../utils/memoryImportProcessor.js';
+import { isSubpath, QWEN_DIR, tildeifyPath } from '../utils/paths.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { Storage } from '../config/storage.js';
-import { createDebugLogger } from './debugLogger.js';
-import { findProjectRoot } from './projectRoot.js';
-import { loadRules, type RuleFile } from './rulesDiscovery.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { findProjectRoot } from '../utils/projectRoot.js';
+import { loadRules, type RuleFile } from '../config/rulesDiscovery.js';
 import type {
   InstructionLoadReason,
   InstructionMemoryType,

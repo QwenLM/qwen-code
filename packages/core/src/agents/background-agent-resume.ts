@@ -35,7 +35,7 @@ import {
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {

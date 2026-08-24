@@ -32,13 +32,13 @@ import {
   statSync,
 } from 'node:fs';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
-import { promptIdContext } from './promptIdContext.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import {
   sessionIdContext,
   getSessionProjectDir,
   getSessionModel,
   getSessionModelIdentity,
-} from './sessionIdContext.js';
+} from '../utils/sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,

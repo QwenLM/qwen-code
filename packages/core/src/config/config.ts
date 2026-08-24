@@ -80,7 +80,7 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
-import { setGeminiMdFilename } from '../memory/const.js';
+import { setGeminiMdFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -186,7 +186,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../tools/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import {
@@ -196,11 +196,11 @@ import {
 } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
-import type { FileFilteringOptions } from './constants.js';
+import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-} from './constants.js';
+} from '../utils/file-filtering-options.js';
 import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
@@ -242,8 +242,8 @@ import {
   SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
-import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
+import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from './rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,

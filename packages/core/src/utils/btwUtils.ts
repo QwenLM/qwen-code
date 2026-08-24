@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CacheSafeParams } from './forkedAgent.js';
+import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 

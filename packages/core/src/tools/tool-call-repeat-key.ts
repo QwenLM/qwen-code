@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { canonicalToolName } from '../tools/tool-names.js';
+import { canonicalToolName } from './tool-names.js';
 
 /**
  * Recursively canonicalizes a JSON-compatible value for stable hashing: object

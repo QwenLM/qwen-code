@@ -17,7 +17,7 @@ import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
-import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
 
 vi.mock('../core/geminiChat.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/geminiChat.js')>();

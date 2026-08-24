@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getPlanModeSystemReminder } from '../core/prompts.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames } from './tool-names.js';
 import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
@@ -25,7 +25,7 @@ const debugLogger = vi.hoisted(() => ({
 }));
 const boundaryObserveMock = vi.hoisted(() => vi.fn());
 
-vi.mock('./debugLogger.js', () => ({
+vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => debugLogger,
 }));
 

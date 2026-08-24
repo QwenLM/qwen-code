@@ -54,17 +54,17 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../../utils/tool-response-finalizer.js';
+} from '../../tools/tool-response-finalizer.js';
 import {
   isToolResultBoundaryDiagnosticsEnabled,
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../../utils/tool-result-boundary-diagnostics.js';
+} from '../../tools/tool-result-boundary-diagnostics.js';
 import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,

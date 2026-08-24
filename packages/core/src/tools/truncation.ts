@@ -8,10 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import type { Part, PartListUnion } from '@google/genai';
-import { ReadFileTool } from '../tools/read-file.js';
+import { ReadFileTool } from './read-file.js';
 import type { Config } from '../config/config.js';
-import { atomicWriteFile } from './atomicFileWrite.js';
-import { createDebugLogger } from './debugLogger.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 

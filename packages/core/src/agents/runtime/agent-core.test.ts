@@ -51,7 +51,7 @@ import {
 } from '../../utils/invocation-context.js';
 import { GeminiChat } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
-import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../../tools/tool-result-boundary-diagnostics.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -67,10 +67,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../../utils/tool-result-boundary-diagnostics.js',
+  '../../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),

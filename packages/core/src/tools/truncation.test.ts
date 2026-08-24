@@ -17,10 +17,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { atomicWriteFile } from './atomicFileWrite.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 vi.mock('node:fs/promises');
-vi.mock('./atomicFileWrite.js');
+vi.mock('../utils/atomicFileWrite.js');
 vi.mock('../telemetry/loggers.js', () => ({
   logToolOutputTruncated: vi.fn(),
 }));

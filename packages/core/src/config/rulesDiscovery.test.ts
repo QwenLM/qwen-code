@@ -13,7 +13,7 @@ import {
   loadRules,
   ConditionalRulesRegistry,
 } from './rulesDiscovery.js';
-import { QWEN_DIR, unescapePath } from './paths.js';
+import { QWEN_DIR, unescapePath } from '../utils/paths.js';
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
