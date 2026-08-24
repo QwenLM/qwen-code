@@ -373,6 +373,9 @@ const {
       sessionHasActivePrompt: false,
       blocks: [] as unknown[],
       liveBlocks: undefined as unknown[] | undefined,
+      snapshotCallOptions: [] as Array<
+        { structuralOnly?: boolean } | undefined
+      >,
       messages: [] as unknown[],
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
@@ -597,12 +600,15 @@ vi.mock('./hooks/useMessages', () => ({
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
   useAnimationFrameTranscriptSnapshot: (options?: {
     structuralOnly?: boolean;
-  }) => ({
-    blocks:
-      options?.structuralOnly === true
-        ? testState.blocks
-        : (testState.liveBlocks ?? testState.blocks),
-  }),
+  }) => {
+    testState.snapshotCallOptions.push(options);
+    return {
+      blocks:
+        options?.structuralOnly === true
+          ? testState.blocks
+          : (testState.liveBlocks ?? testState.blocks),
+    };
+  },
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -5030,6 +5036,7 @@ beforeEach(() => {
   testState.sessionHasActivePrompt = false;
   testState.blocks = [];
   testState.liveBlocks = undefined;
+  testState.snapshotCallOptions = [];
   testState.messages = [];
   testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
@@ -5246,6 +5253,10 @@ describe('App live transcript boundary', () => {
       { id: 'assistant', role: 'assistant', content: 'ab' },
     ]);
     expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
+    expect(testState.snapshotCallOptions).toContainEqual({
+      structuralOnly: true,
+    });
+    expect(testState.snapshotCallOptions).toContainEqual(undefined);
 
     await clickSubmit(document.body);
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('ab'));

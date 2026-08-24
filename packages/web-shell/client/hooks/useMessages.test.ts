@@ -810,6 +810,84 @@ describe('background agent task reconciliation', () => {
     await act(async () => root.unmount());
   });
 
+  it('keeps agent reconciliation when an insight tail matches a projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty thought block projects a thinking message (unlike assistant),
+    // so the insight append below matches the tail's projected message.
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+    const reconciledToolGroup = latest[0];
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalled();
+    expect(latest[0]).toBe(reconciledToolGroup);
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
   it('uses terminal agent notifications as a reconciliation trigger without requiring toolUseId', () => {
     expect(
       getBackgroundAgentNotificationKey([
