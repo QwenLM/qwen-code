@@ -126,11 +126,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell', () => ({
-    EmbeddedWebShell: (props: CapturedProps) => {
-      mocks.embeddedProps.current = props;
-      return null;
-    },
-  }));
+  EmbeddedWebShell: (props: CapturedProps) => {
+    mocks.embeddedProps.current = props;
+    return null;
+  },
+}));
 
 vi.mock('./hooks/useVSCode.js', () => ({
   useVSCode: () => mocks.vscode,
@@ -354,6 +354,11 @@ describe('EmbeddedApp host wiring', () => {
     });
 
     const props = mocks.embeddedProps.current as CapturedProps;
+    expect(props.style).toMatchObject({
+      '--background': 'var(--vscode-sideBar-background)',
+      '--foreground': 'var(--vscode-foreground)',
+      '--chat-editor-bg-primary': 'var(--vscode-input-background)',
+    });
     expect(props.pendingPermission).toMatchObject({
       id: 'tool-1',
       kind: 'bash',
