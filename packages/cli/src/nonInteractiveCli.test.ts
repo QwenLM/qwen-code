@@ -2052,7 +2052,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('describes a chanting halt as output-or-reasoning repetition', async () => {
+  it('labels CHANTING_IDENTICAL_SENTENCES as output-or-reasoning repetition', async () => {
     setupMetricsMock();
     const events: ServerGeminiStreamEvent[] = [
       {
