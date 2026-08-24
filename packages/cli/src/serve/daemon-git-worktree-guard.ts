@@ -403,15 +403,57 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
+// On Windows the daemon runs shell commands through cmd.exe/PowerShell,
+// where a backslash is a literal path separator rather than a POSIX escape.
+// shell-quote models POSIX sh, so an unquoted `C:\Users\repo` would arrive
+// stripped to `C:Usersrepo` and every Windows path the guard resolves
+// becomes relative garbage: legitimate commands get denied on an
+// unresolvable target while relocated ones slip through via the nearest
+// existing ancestor. Mask each backslash behind a control-character
+// placeholder for the parse and restore it in the tokens afterwards; the
+// placeholder takes no part in quoting or escape handling, so the token
+// structure matches what the real Windows shell sees.
+const WIN32_BACKSLASH_PLACEHOLDER = '\u0001';
+
+function maskWindowsBackslashes(segment: string): string | null {
+  if (process.platform !== 'win32') return null;
+  // A segment that already contains the placeholder cannot be masked
+  // safely; fall back to the POSIX reading instead of corrupting the
+  // restore step.
+  if (segment.includes(WIN32_BACKSLASH_PLACEHOLDER)) return null;
+  return segment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER);
+}
+
+function restoreWindowsBackslashes(
+  entry: ReturnType<typeof parse>[number],
+): ReturnType<typeof parse>[number] {
+  const restored = (value: string): string =>
+    value.split(WIN32_BACKSLASH_PLACEHOLDER).join('\\');
+  if (typeof entry === 'string') return restored(entry);
+  if (
+    entry !== null &&
+    typeof entry === 'object' &&
+    'pattern' in entry &&
+    typeof entry.pattern === 'string'
+  ) {
+    return { ...entry, pattern: restored(entry.pattern) };
+  }
+  return entry;
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
+  const masked = maskWindowsBackslashes(segment);
   let parsed: ReturnType<typeof parse>;
   try {
-    parsed = parse(segment, (key) => `$${key}`);
+    parsed = parse(masked ?? segment, (key) => `$${key}`);
   } catch {
     return null;
+  }
+  if (masked !== null) {
+    parsed = parsed.map(restoreWindowsBackslashes);
   }
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
@@ -1449,9 +1491,24 @@ async function resolvePhysicalPath(
   base: string,
   target: string,
 ): Promise<string> {
-  let current = path.isAbsolute(target) ? path.parse(target).root : base;
+  // Strip the root from an absolute target before splitting: on Windows the
+  // split keeps a bare `C:` first segment, and joining it onto `C:\` again
+  // yields `C:\C:\…`, silently relocating every later resolution onto a
+  // nonexistent doubling of the path. Slicing the root off leaves the same
+  // segments a POSIX absolute path produces after its empty leading segment
+  // is skipped, and drops the `\\server\share` prefix of a UNC path whole.
+  let current: string;
+  let remainder: string;
+  if (path.isAbsolute(target)) {
+    const root = path.parse(target).root;
+    current = root;
+    remainder = target.slice(root.length);
+  } else {
+    current = base;
+    remainder = target;
+  }
   const separators = path.sep === '\\' ? /[\\/]+/ : /\/+/;
-  for (const segment of target.split(separators)) {
+  for (const segment of remainder.split(separators)) {
     if (segment === '' || segment === '.') continue;
     if (segment === '..') {
       current = path.dirname(await realpathNearestExistingAsync(current));

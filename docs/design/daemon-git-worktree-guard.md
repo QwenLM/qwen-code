@@ -109,6 +109,18 @@ during option parsing and resolves relative `--git-dir`/`--work-tree` against
 the post-`-C` cwd, so relative targets resolve against the final cwd of the
 `-C` chain regardless of argv order.
 
+On Windows the command runs under cmd.exe or PowerShell, where a backslash is
+a literal path separator rather than a POSIX escape, so the tokenizer masks
+every backslash behind a placeholder for the POSIX-shaped parse and restores
+it in the tokens afterwards — an unquoted `C:\repo` keeps its separators
+instead of collapsing into a mangled relative word that could neither be
+contained (denying legitimate commands) nor resolved (allowing relocated ones
+through the nearest-existing-ancestor fallback). Physical resolution strips a
+target's root before walking its components, so an absolute `C:\repo`
+resolves from `C:\` onward instead of onto a doubled `C:\C:\repo`, and a UNC
+target drops its `\\server\share` prefix whole. Non-Windows parsing and
+resolution are unchanged.
+
 A statically resolved Git relocation is denied when both of the following
 hold:
 

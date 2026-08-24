@@ -713,6 +713,11 @@ it -C ${outsideRepo} reset --hard`,
     expect(longReason.length).toBeLessThanOrEqual(500);
     expect(longReason).toContain('…');
 
+    if (process.platform === 'win32') {
+      // Windows forbids control characters in file names, so the
+      // control-character scenario cannot even be constructed there.
+      return;
+    }
     const tabTarget = path.join(temporaryRoot, 'tab\tdir');
     await mkdir(path.join(tabTarget, '.git'), { recursive: true });
     const controlDenial = await guard(
