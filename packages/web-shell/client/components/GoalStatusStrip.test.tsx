@@ -4,7 +4,6 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GOAL_EVIDENCE_LIMIT_REASONS } from '../utils/goalGate';
 import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
 
 function snapshot(
@@ -137,26 +136,27 @@ describe('GoalStatusStrip', () => {
   it('offers resume for a Goal evidence-limited before `limitKind` existed', () => {
     // The sentinel prose shipped before the `limitKind` field did, so a Goal
     // persisted in that window restores as `usage_limited` with no `limitKind`
-    // at all. The reducer recognizes it and restarts the evidence window.
+    // at all. The strip does not parse the prose -- resumability is decided by
+    // status alone -- so one representative sentinel is enough here.
     const limited = snapshot('usage_limited');
-    for (const lastReason of GOAL_EVIDENCE_LIMIT_REASONS) {
-      act(() => {
-        root.render(
-          <I18nProvider language="en">
-            <GoalStatusStrip
-              snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
-              onEdit={vi.fn()}
-              onPause={vi.fn()}
-              onResume={vi.fn()}
-              onClear={vi.fn()}
-            />
-          </I18nProvider>,
-        );
-      });
-      expect(
-        container.querySelector('[aria-label="Resume goal"]'),
-      ).not.toBeNull();
-    }
+    const lastReason =
+      'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
+    ).not.toBeNull();
   });
 
   it('still offers resume for an ordinary usage-limited stop', () => {

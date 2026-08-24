@@ -9,8 +9,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-import { GOAL_EVIDENCE_LIMIT_REASONS } from '../../utils/goalGate';
-
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 interface MockGoal {
@@ -233,19 +231,19 @@ describe('GoalsDialog', () => {
     expect(resumeButton()).not.toBeNull();
   });
 
-  // One `it` per sentinel: `mount` installs a fresh container each call and
-  // only the last is torn down, so two mounts in one test strand a stale DOM
-  // that every later test then queries.
-  it.each([...GOAL_EVIDENCE_LIMIT_REASONS])(
-    'offers resume for a Goal evidence-limited before `limitKind` existed (%#)',
-    async (lastReason) => {
-      // The sentinel prose shipped before the `limitKind` field did: a Goal
-      // persisted in that window restores as `usage_limited` with no
-      // `limitKind`. The reducer still recognizes it and restarts the window.
-      await mount([stopped({ lastReason })]);
-      expect(resumeButton()).not.toBeNull();
-    },
-  );
+  it('offers resume for a Goal evidence-limited before `limitKind` existed', async () => {
+    // The sentinel prose shipped before the `limitKind` field did: a Goal
+    // persisted in that window restores as `usage_limited` with no
+    // `limitKind`. The dialog does not parse the prose -- resumability is
+    // decided by status alone -- so one representative sentinel is enough.
+    await mount([
+      stopped({
+        lastReason:
+          'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.',
+      }),
+    ]);
+    expect(resumeButton()).not.toBeNull();
+  });
 
   it('renders a goal with its condition, turn count and judge verdict', async () => {
     await mount([

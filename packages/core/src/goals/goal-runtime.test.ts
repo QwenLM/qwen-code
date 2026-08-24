@@ -59,7 +59,11 @@ function fakeGoalJournal(
     appended,
     records,
     getTranscriptCursor(): TranscriptCursor {
-      return { recordId: null };
+      // Answer with the transcript tail, as the real journal does. A fixed
+      // { recordId: null } here would make every resume-cursor assertion
+      // trivial -- and null is exactly the value the real evidence pipeline
+      // hard-rejects (`analyzeEvidence` throws `cursor_unset`).
+      return { recordId: records.at(-1)?.uuid ?? null };
     },
     async recordGoalState(
       recordUuid: string,
@@ -536,6 +540,7 @@ describe('goal runtime', () => {
 
     // Resuming restarts the evidence window rather than being refused, so the
     // Goal keeps its objective and picks up from a cursor that fits.
+    const tailBeforeResume = journal.records.at(-1)!.uuid;
     const resumed = await runtime.dispatch({
       action: 'resume',
       expectedGoalId: permit.goalId,
@@ -549,9 +554,13 @@ describe('goal runtime', () => {
     expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
     expect(host.started).toHaveLength(2);
 
-    // The window really moved: the resumed Goal no longer cites the cursor the
-    // exhausted catalog was measured against.
-    expect(resumed.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
+    // The window really moved, and to a live position: the resumed Goal cites
+    // the transcript tail, not the cursor the exhausted catalog was measured
+    // against and not the null the evidence pipeline would reject.
+    expect(resumed.snapshot.goal?.evidenceCursor.recordId).toBe(
+      tailBeforeResume,
+    );
+    expect(tailBeforeResume).not.toBe(cursorId);
 
     // Editing still works from there and still keeps the Goal running, which
     // is the escape hatch that used to be the only one.
