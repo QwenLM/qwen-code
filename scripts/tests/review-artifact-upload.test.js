@@ -275,18 +275,22 @@ describe('review artifact upload — naming contract', () => {
     expect(uploadStep.if).toBe('always()');
   });
 
-  it('keeps the runner command files truncated after the agent runs', () => {
-    // The stage step's guards all assume a trusted PATH, but the
-    // no-sandbox review agent can append to $GITHUB_PATH (prepended for
-    // every later step, shell lookup included) and $GITHUB_ENV — a shim
-    // `cp`/`rm` would own the staging guardrails outright. 'Run review'
-    // must therefore truncate both command files on its EXIT trap, the
-    // failure paths included, and nothing later may rely on an append.
+  it('keeps the agent away from the runner command files and the step PATH', () => {
+    // The stage step's guards assume a trusted interpreter, PATH and env —
+    // but the no-sandbox review agent can append to $GITHUB_PATH (prepended
+    // for every later step, shell lookup included), write $GITHUB_ENV, and
+    // drop shims into agent-writable prepended dirs. The dependency is
+    // closed, not patched per bypass: the agent's command files are
+    // invocation-scoped decoys (the real ones stay empty no matter how the
+    // step dies), and the stage step pins an absolute shell and a known
+    // PATH so prepended shims resolve nothing.
     const runStep = reviewSteps.find((s) => s.name === 'Run review');
     expect(runStep).toBeDefined();
-    expect(runStep.run).toContain(': > "$GITHUB_PATH"');
-    expect(runStep.run).toContain(': > "$GITHUB_ENV"');
-    expect(runStep.run).toMatch(/trap '[^']*GITHUB_PATH/);
+    expect(runStep.run).toContain('GITHUB_PATH="$PROXY_BIN/decoy.github-path"');
+    expect(runStep.run).toContain('GITHUB_ENV="$PROXY_BIN/decoy.github-env"');
+    expect(runStep.run).not.toContain(': > "$GITHUB_PATH"');
+    expect(stageStep.shell).toContain('/bin/bash');
+    expect(stageBlock).toContain('PATH=/usr/bin:/bin');
   });
 });
 

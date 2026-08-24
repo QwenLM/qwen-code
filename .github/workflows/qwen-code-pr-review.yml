@@ -943,17 +943,7 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
-          # Truncate the runner command files on the way out, success or
-          # failure: the agent below runs no-sandbox and can append to
-          # $GITHUB_PATH / $GITHUB_ENV, and the runner PREPENDS the path
-          # file for every later step (resolving the step's own shell
-          # through it) — a planted shim `find`/`cp`/`rm` would own the
-          # stage step's guards, and a planted env var would ride every
-          # later step. Nothing after this step needs anything appended
-          # here: later steps use base-PATH tools only (gh/git/find), the
-          # capture-tools prepend is consumed inside this step, and the
-          # workflow never writes GITHUB_ENV intentionally.
-          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; : > "$GITHUB_PATH" 2>/dev/null || true; : > "$GITHUB_ENV" 2>/dev/null || true' EXIT
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1370,6 +1360,16 @@ jobs:
             stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
+            # The agent runs no-sandbox with the full job environment, and
+            # the runner applies whatever it appends to $GITHUB_PATH /
+            # $GITHUB_ENV to every LATER step (prepending the path file,
+            # shell lookup included). Point both at invocation-scoped decoys
+            # so appends die with PROXY_BIN no matter how the step exits —
+            # SIGKILL, set -e abort, chmod 444 on the real files, or an
+            # EXIT-trap bypass all become irrelevant because the real
+            # command files are never in the agent's environment.
+            GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
+            GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
@@ -1848,30 +1848,42 @@ jobs:
             --body "$body"
 
       # Preserve the review's machine record for later consumers — an agent
-      # collecting deferred Suggestions, a maintainer auditing the run. What
-      # is staged decides what a fork PR can do with this step, so these
-      # rules are load-bearing:
-      #  - NEVER the review worktree (.qwen/tmp/review-pr-<N>/): it is a
-      #    checkout of the PR head, i.e. contributor-controlled. A
-      #    force-committed symlink there is FOLLOWED by upload-artifact
-      #    (exfiltration of anything the runner user can read), and a
-      #    force-committed regular file becomes a forged entry in the
-      #    record this step publishes about the run.
-      #  - Regular files only (`-type f`, no -L): a symlink planted in the
-      #    main checkout by a prompt-injected agent never matches, so its
-      #    target cannot ride the upload either.
-      # The cost: a run killed before Step 8 leaves its findings/composed
-      # side files inside the worktree and they are NOT salvaged. A finished
-      # run's durable record (`.qwen/reviews/` report + saved findings
-      # artifact + cost ledger) and the main checkout's own early side
-      # files (plan, context) are unaffected.
+      # collecting deferred Suggestions, a maintainer auditing the run.
+      # GUARANTEE BOUNDARY, stated so the artifact is read correctly:
+      #  - CLOSED — anything contributor-COMMITTED: the upload never reads
+      #    the review worktree (.qwen/tmp/review-pr-<N>/ is a checkout of
+      #    the PR head), so a force-committed file or symlink in the PR
+      #    tree cannot reach the artifact without the review agent's
+      #    cooperation, and `-type f` (no -L) keeps even agent-planted
+      #    symlinks in the trusted trees out.
+      #  - CLOSED — runner command files and PATH shims: the agent's
+      #    $GITHUB_PATH/$GITHUB_ENV point at invocation-scoped decoys
+      #    ('Run review'), and this step runs an absolute shell with a
+      #    pinned PATH, so prepended shims — including any dropped into
+      #    the agent-writable capture-tools dir — resolve nothing here.
+      #  - ACCEPTED, not a hole to keep patching: a prompt-injected agent
+      #    with arbitrary code execution already holds the job's PAT,
+      #    network and unsandboxed shell. REGULAR files it plants in
+      #    .qwen/reviews/ or .qwen/tmp/ during the review match these
+      #    patterns and ride the upload with no provenance distinction,
+      #    and a same-uid survivor of the review step can relink the
+      #    fixed staging path between this step and the upload. Read the
+      #    artifact as the run's BEST-EFFORT record, never an
+      #    integrity-attested one: the authoritative channel is the
+      #    posted review body, and the reliable re-check of any finding
+      #    is a fresh review run, not this file set.
       - name: 'Stage review artifacts'
         if: 'always()'
         continue-on-error: true
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
         env:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
         run: |-
           set -uo pipefail
+          # Resolve nothing through the job PATH: shims prepended by
+          # earlier steps or dropped into agent-writable dirs stay inert
+          # (the interpreter itself is pinned absolutely on the step).
+          PATH=/usr/bin:/bin
           # Runner-context interpolation, not the env var: the value is
           # resolved from RunnerContext, which nothing the agent writes
           # (GITHUB_ENV, GITHUB_PATH) can reshape on any runner version.
