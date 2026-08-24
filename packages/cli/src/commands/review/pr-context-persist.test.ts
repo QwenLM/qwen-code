@@ -1039,6 +1039,65 @@ describe('persistRecoveredLedger', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('keeps the src0 baseline through the recovered write', () => {
+    // compose-review's approach signal reads src0 from this side file; this
+    // writer is the joint in the marker→parse→persist→read chain the
+    // compose tests cannot reach (they write the file directly).
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, src0: 228 },
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: true, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).src0).toBe(228);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the src0 baseline across an anonymous higher-round advance', () => {
+    // The advance rebuilds the file by explicit field selection (existing
+    // minus sha/commitId, plus the new round and review id) — a swap to
+    // named fields there must not drop the baseline compose-review reads
+    // next round.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ ...ledger, round: 7, reviewId: 100, src0: 228 }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 200,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: true, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(8);
+      expect(written.src0).toBe(228);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('persistedAnchorSha', () => {
