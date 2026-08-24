@@ -822,6 +822,54 @@ describe('Storage – ensureAuditFallbackDir', () => {
     }
   });
 
+  it('refuses a case-variant spelling of the audited root on case-insensitive platforms', () => {
+    // Darwin's default volumes equate spellings that differ only in case,
+    // and realpath preserves the spelling it was given — so the same
+    // physical repository can reach the containment check spelled one way
+    // as the audited root and another way inside QWEN_HOME. A byte-wise
+    // comparison misses the containment and creates the landing inside the
+    // working tree; the refusal must hold across a case mismatch.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const repo = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'audit-CaseRepo-'),
+    );
+    const variant = repo.replace('audit-CaseRepo-', 'audit-caserepo-');
+    try {
+      process.env['QWEN_HOME'] = path.join(variant, '.qwen-state');
+      expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+        /resolves inside the audited/,
+      );
+      // Refused before creating anything inside the working tree.
+      expect(actualFs.existsSync(path.join(variant, '.qwen-state'))).toBe(
+        false,
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      actualFs.rmSync(repo, { recursive: true, force: true });
+      actualFs.rmSync(variant, { recursive: true, force: true });
+    }
+  });
+
+  it('lands case-variant spellings of one root at one leaf on case-insensitive platforms', () => {
+    // Two spellings of the same physical repository must hash to one leaf,
+    // or plan-files, guard-check, and relocation split across two roots.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const repo = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'audit-CaseRepo-'),
+    );
+    const variant = repo.replace('audit-CaseRepo-', 'audit-caserepo-');
+    try {
+      expect(Storage.ensureAuditFallbackDir(variant)).toBe(
+        Storage.ensureAuditFallbackDir(repo),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      actualFs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'refuses a landing planted as a symlink instead of adopting it',
     () => {

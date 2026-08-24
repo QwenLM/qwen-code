@@ -23,8 +23,18 @@ const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
+// Win32 and darwin default volumes equate names differing only in case,
+// and realpath preserves the spelling it was given — so the same physical
+// path can reach a comparison under two spellings. Fold case there, or a
+// case-variant spelling slips past the containment guard.
+function platformFoldsCase(): boolean {
+  return process.platform === 'win32' || process.platform === 'darwin';
+}
+
 function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
-  const relativePath = path.relative(parentPath, childPath);
+  const child = platformFoldsCase() ? childPath.toLowerCase() : childPath;
+  const parent = platformFoldsCase() ? parentPath.toLowerCase() : parentPath;
+  const relativePath = path.relative(parent, child);
   return (
     relativePath === '' ||
     (!relativePath.startsWith(`..${path.sep}`) &&
@@ -352,6 +362,10 @@ export class Storage {
       resolved = fs.realpathSync(projectRoot);
     } catch {
       // Unresolvable (e.g. not yet created): hash the raw path.
+    }
+    if (platformFoldsCase()) {
+      // Case-variant spellings of one physical root must share one leaf.
+      resolved = resolved.toLowerCase();
     }
     const baseDir = Storage.getGlobalQwenDir();
     const dir = path.join(baseDir, 'audits', getProjectHash(resolved));
