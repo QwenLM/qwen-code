@@ -12393,6 +12393,53 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
+      it('evicts the oldest retained route token count after eight routes (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-0';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                usageMetadata: {
+                  totalTokenCount: 101,
+                  promptTokenCount: 101,
+                },
+              },
+            },
+          ]),
+        );
+
+        for (let i = 0; i < 9; i++) {
+          routeIdentity = `route-${i}`;
+          mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: `route ${i}` }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+        }
+
+        routeIdentity = 'route-0';
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'return to evicted route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(10);
+      });
+
       it('returns cancelled when automatic compression is aborted', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat.mockImplementation(
