@@ -1987,6 +1987,145 @@ describe('useGeminiStream', () => {
     expect(secondBatchId).not.toEqual(firstBatchId);
   });
 
+  it('keeps the turn Responding across the completion-callback window opened by the early clear (#9602)', async () => {
+    const completedTool = {
+      request: {
+        callId: 'window-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-clear-window',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'window-tool',
+        responseParts: [{ text: 'window-tool response' }],
+        errorType: undefined,
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'window-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    // Until the batch completes, the terminal-but-unsubmitted call alone
+    // keeps the turn off Idle; the scheduler empties the display list
+    // BEFORE invoking onComplete (#9420), in the same tick.
+    let displayToolCalls: TrackedToolCall[] = [completedTool];
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        displayToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+
+    // Hold the continuation's preamble open so the callback window is
+    // observable.
+    let releaseFinalize!: () => void;
+    const finalizeGate = new Promise<void>((resolve) => {
+      releaseFinalize = resolve;
+    });
+    mockFinalizeToolResponses.mockImplementationOnce(
+      async (_config: unknown, entries: unknown[]) => {
+        await finalizeGate;
+        return entries;
+      },
+    );
+
+    const { result, rerender } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+    // A notification queued while tools run must wait for the turn to end.
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+    const notifyBackgroundShell = mockBackgroundShellRegistry
+      .setNotificationCallback.mock.calls[0][0] as (
+      displayText: string,
+      modelText: string,
+    ) => void;
+    const notificationDisplay = 'Background shell "npm test" completed.';
+    const notificationModelText = '<task-notification>done</task-notification>';
+    act(() => {
+      notifyBackgroundShell(notificationDisplay, notificationModelText);
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    // The scheduler clears the display list and invokes the completion
+    // callback in the same tick; the callback's preamble awaits before the
+    // ToolResult continuation re-acquires the submission lease.
+    let completionSettled = false;
+    await act(async () => {
+      displayToolCalls = [];
+      void capturedOnComplete?.([completedTool]).then(() => {
+        completionSettled = true;
+      });
+      rerender();
+    });
+    await waitFor(() => {
+      expect(mockFinalizeToolResponses).toHaveBeenCalledTimes(1);
+    });
+
+    // Mid-turn window: the turn is still in flight, so no phantom Idle —
+    // otherwise the queued notification would drain concurrently with the
+    // pending ToolResult continuation.
+    expect(completionSettled).toBe(false);
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseFinalize();
+    });
+    await waitFor(() => {
+      expect(completionSettled).toBe(true);
+    });
+
+    // The continuation is delivered first; the queued notification only
+    // drains once the turn truly settles back to Idle.
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+      { text: 'window-tool response' },
+    ]);
+    expect(mockSendMessageStream.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+    expect(mockSendMessageStream.mock.calls[1][0]).toBe(notificationModelText);
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+  });
+
   it('forwards one exact Goal context across a ToolResult batch', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-tools',
