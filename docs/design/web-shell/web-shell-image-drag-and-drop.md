@@ -502,9 +502,14 @@ oversized placeholder。它们验证既有服务端契约；Web Shell helper 测
 候选顺序和 encoded-data 剩余预算。
 
 BMP 以 `image/bmp` 进入缩略图 data URL 和 daemon image block。Core 的
-`SUPPORTED_IMAGE_MIME_TYPES` 明确包含 `image/bmp`，`ImageTokenizer` 解析 BMP 尺寸，
-OpenAI converter 把启用 image modality 的 `inlineData` 原样构造成
-`data:image/bmp;base64,...`；Gemini 路径保留相同 `inlineData`。因此 V1 不在浏览器转码。
+`SUPPORTED_IMAGE_MIME_TYPES` 明确包含 `image/bmp`，OpenAI converter 把启用 image modality 的
+`inlineData` 原样构造成 `data:image/bmp;base64,...`；Gemini 路径保留相同 `inlineData`。
+因此 V1 不在浏览器转码。
+
+> **2026-08-24 同步注记（PR #9676）**：request-tokenizer 估计器簇（含 `ImageTokenizer`
+> 及其 BMP 尺寸解析）已作为孤儿代码删除。BMP 支持现在仅依赖 `SUPPORTED_IMAGE_MIME_TYPES`
+> 接受清单与 converter 透传；token 计数使用 `compactionInputSlimming.ts` 中的固定
+> `DEFAULT_IMAGE_TOKEN_ESTIMATE`。下文对 BMP 路径的 E2E/人工验收要求不变。
 浏览器若不能解码缩略图，不影响附件数据传输，但 E2E 必须覆盖 Chromium 解码，
 Firefox/Linux 必须完成人工验收。
 
