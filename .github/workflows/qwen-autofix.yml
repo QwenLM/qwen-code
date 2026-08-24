@@ -4733,8 +4733,16 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           SERVER_URL: '${{ github.server_url }}'
           HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           set -uo pipefail
+          # Binary resolution: this step and the heartbeat loop it launches
+          # carry the bot PAT, and the job's own $GITHUB_PATH append keeps
+          # ${RUNNER_TEMP}/qwen-bin ahead of /usr/bin here — pin PATH from
+          # the stage-time capture BEFORE the first command word resolves
+          # (the R6-3 doctrine the sibling PAT steps apply; the loop
+          # re-pins from the same capture). Full rationale → af-148
+          export PATH="${TRUSTED_PATH}"
           # The gh calls in this step (deep-link lookup, comment upsert) and
           # the heartbeat loop launched here all carry the bot PAT: take the
           # af-112 hermetic pins BEFORE the first call — pinned host, planted
@@ -6139,13 +6147,16 @@ jobs:
           # the loop on its next self-check even if the kills miss, and the
           # sleep lets an already-dispatched tick PATCH land before the
           # terminal text goes up. Full rationale → qwen-autofix.md#af-148
-          touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+          # Command words take the gate kill block's absolute-path/builtin
+          # form: this step holds the PAT, and bare names are PATH-resolved
+          # (kill additionally shadowable by a $GITHUB_ENV BASH_FUNC plant).
+          /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
-            kill -- -"${HB_PID}" 2>/dev/null || true
-            kill "${HB_PID}" 2>/dev/null || true
-            pkill -TERM -s "${HB_PID}" 2>/dev/null || true
-            sleep 2
+            builtin kill -- -"${HB_PID}" 2>/dev/null || true
+            builtin kill "${HB_PID}" 2>/dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
+            /usr/bin/sleep 2
           fi
           MARKER='<!-- autofix-status -->'
           if [[ -z "${STATUS_ID}" ]]; then

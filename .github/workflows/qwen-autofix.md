@@ -3800,11 +3800,26 @@ planted same-UID listener then receives the tick's
 Authorization header WITH the PAT (witnessed with the
 pool's gh): exfil with no orphan, no /proc read and no
 kill miss, inside the legitimate overlap, where none of
-the trade arguments above reaches. The alternative —
-heartbeat from the schedule scan or a watcher job — lands
-every ~40-70 min in this repo (af-027) and would re-derive
-comment id, run identity and liveness remotely: too slow
-and too much machinery for a pulse.
+the trade arguments above reaches. RESOLUTION: the af-112
+pins close gh's CONFIG channel; the binary-resolution
+channel is closed separately. The PAT-bearing step and
+the loop both pin PATH from the stage-time TRUSTED_PATH
+capture BEFORE the first command word resolves (the R6-3
+doctrine): the job's own $GITHUB_PATH append keeps
+${RUNNER_TEMP}/qwen-bin ahead of /usr/bin, and a same-UID
+plant of gh/timeout/setsid/touch in any writable dir on
+the ambient PATH would otherwise be resolved with the PAT
+in env — witnessed: a planted setsid at launch and a
+planted gh mid-tick both received the token; the pinned
+forms never reached the plant. The loop validates the
+capture like any other launch input and fails fast
+without it; the killers in PAT-bearing steps take the
+same absolute-path/builtin command words as the gate's
+kill block. The alternative — heartbeat from the schedule
+scan or a watcher job — lands every ~40-70 min in this
+repo (af-027) and would re-derive comment id, run
+identity and liveness remotely: too slow and too much
+machinery for a pulse.
 
 ORPHAN DISCIPLINE on the persistent pool: the loop
 self-exits when the pid file no longer holds ITS OWN pid.

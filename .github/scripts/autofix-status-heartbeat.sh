@@ -17,9 +17,11 @@
 #
 # Environment (both): HB_ROUND (display round, already +1'd by the step),
 # HB_CAP, HB_URL, HB_WORKDIR, HB_START_EPOCH; NOW_EPOCH overrides the
-# clock for tests. loop additionally needs: HB_REPO, HB_COMMENT_ID, and
-# GITHUB_TOKEN for gh; HB_INTERVAL_SECONDS (default 600) and
-# HB_MAX_AGE_SECONDS (default 20400) bound the pulse.
+# clock for tests. loop additionally needs: HB_REPO, HB_COMMENT_ID,
+# GITHUB_TOKEN for gh, and TRUSTED_PATH (the launcher's stage-time PATH
+# capture the tick re-pins; a launch without it fails fast);
+# HB_INTERVAL_SECONDS (default 600) and HB_MAX_AGE_SECONDS (default
+# 20400) bound the pulse.
 #
 # Kill contract: the loop writes heartbeat.pid (diagnostics + its own
 # self-exit check), checks heartbeat-stop, and exits on either signal or
@@ -86,7 +88,7 @@ run_loop() {
   # launch missing a body var would otherwise produce an immortal loop
   # that never pulses — the exact "healthy round looks dead" failure this
   # feature eliminates. Fail fast instead.
-  require HB_REPO HB_COMMENT_ID HB_WORKDIR HB_ROUND HB_CAP HB_URL HB_START_EPOCH
+  require HB_REPO HB_COMMENT_ID HB_WORKDIR HB_ROUND HB_CAP HB_URL HB_START_EPOCH TRUSTED_PATH
   # gh auth rides on the step-level GITHUB_TOKEN only: the hermetic pins
   # below drop any planted GH_TOKEN/GH_ENTERPRISE_TOKEN (a planted channel
   # must not outrank the inline token), so accepting them here would admit
@@ -96,6 +98,18 @@ run_loop() {
     echo "autofix-status-heartbeat: GITHUB_TOKEN is required" >&2
     exit 2
   }
+  # Binary-resolution channel: the tick resolves its externals (gh,
+  # timeout, sleep, date, cat — and the mktemp below) by name, and the
+  # ambient PATH carries same-UID-writable dirs ahead of the system ones
+  # (the job's own $GITHUB_PATH append puts ${RUNNER_TEMP}/qwen-bin
+  # there), so a plant in one of them would be resolved by the next tick
+  # with the PAT in env. Pin PATH from the launcher's step-level
+  # TRUSTED_PATH instead — the R6-3 doctrine: expression-context
+  # derived, and step env outranks $GITHUB_ENV plants. post_status pins
+  # its own PATH the same way before the launch; the loop re-pins so no
+  # future launcher can hand it an ambient PATH.
+  # Full rationale → qwen-autofix.md#af-148
+  export PATH="${TRUSTED_PATH}"
   # Hermetic pins for every gh call this loop makes (the af-112 doctrine):
   # pinned host, planted tokens dropped, and a fresh empty GH_CONFIG_DIR
   # instead of the default ~/.config/gh on the shared attacker-writable

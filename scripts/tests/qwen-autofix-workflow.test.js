@@ -10635,8 +10635,15 @@ exit 1
     expect(patBlockOf(publishPrStep)).toBeTruthy();
     expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
     expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
-    // Each PAT step carries the trusted-PATH env wiring.
-    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+    // Each PAT step carries the trusted-PATH env wiring. post_status's
+    // covers the step's own externals AND seeds the heartbeat loop's pin:
+    // the loop re-pins its tick PATH from this capture (af-148).
+    for (const step of [
+      publishPrStep,
+      pushAndReportStep,
+      prepareStep,
+      postStatusCommentStep,
+    ]) {
       expect(step).toContain(
         "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
       );
@@ -10665,6 +10672,15 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // post_status pins PATH BEFORE its first external resolves (the
+    // mktemp minting the gh config dir): every command word after it —
+    // gh, jq, date, and the setsid/bash of the heartbeat launch —
+    // resolves under the stage-time capture, never the ambient PATH the
+    // job's own $GITHUB_PATH append keeps plantable (af-148).
+    expect(postStatusCommentStep).toContain('export PATH="${TRUSTED_PATH}"');
+    expect(
+      postStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(postStatusCommentStep.indexOf('mktemp'));
     // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
     // cannot reach the privileged work is the `env -i` clean child, pinned
     // separately below; no regex over source text can be that guarantee,
@@ -15764,6 +15780,16 @@ exit 1
     // planted GH_TOKEN, so the fail-fast check must not admit it.
     expect(heartbeatScript).toContain('GITHUB_TOKEN is required');
     expect(heartbeatScript).not.toContain('${GITHUB_TOKEN:-}${GH_TOKEN:-}');
+    // The tick's externals (gh, timeout, sleep, date, cat) resolve by
+    // name while the loop holds the PAT, and the ambient PATH carries
+    // same-UID-writable dirs ahead of the system ones — so the loop
+    // re-pins PATH from the launcher's step-level TRUSTED_PATH capture
+    // and fails fast on a launch without it (af-148).
+    expect(heartbeatScript).toContain('export PATH="${TRUSTED_PATH}"');
+    // The capture is validated with the other launch inputs, so a launch
+    // without it fails fast before registering anything (pinned
+    // behaviorally by the script's own suite).
+    expect(heartbeatScript).toContain('HB_START_EPOCH TRUSTED_PATH');
     // A failed PATCH skips one tick, never the pulse.
     expect(heartbeatScript).toContain('PATCH failed; continuing');
     // The loop must not hold the launching step's pipes or the step never
@@ -15914,16 +15940,25 @@ exit 1
     expect(gateStep).toContain('heartbeat-stop');
     expect(gateStep).toContain(`HB_PID="${killTarget}"`);
     expect(gateStep).toContain('kill -- -"${HB_PID}"');
-    expect(finalizeStatusCommentStep).toContain('heartbeat-stop');
+    // Finalize holds the PAT like the gate, so its kill block takes the
+    // same absolute-path/builtin form: bare names are PATH-resolved (the
+    // job's own $GITHUB_PATH append keeps ${RUNNER_TEMP}/qwen-bin ahead
+    // of /usr/bin here) and bare kill is shadowable by a $GITHUB_ENV
+    // BASH_FUNC plant (af-148).
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
+    );
     expect(finalizeStatusCommentStep).toContain(`HB_PID="${killTarget}"`);
-    expect(finalizeStatusCommentStep).toContain('kill -- -"${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill -- -"${HB_PID}" 2>/dev/null || true',
+    );
     expect(finalizeStatusCommentStep.indexOf('heartbeat-stop')).toBeLessThan(
       finalizeStatusCommentStep.indexOf('--method PATCH'),
     );
     // A tick already dispatched when the kill lands can still be applied
     // server-side after the terminal text: finalize sleeps past one PATCH
     // round-trip before its own PATCH.
-    expect(finalizeStatusCommentStep).toContain('sleep 2');
+    expect(finalizeStatusCommentStep).toContain('/usr/bin/sleep 2');
     const cleanupStep =
       reviewAddressJob.match(
         /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
@@ -15933,10 +15968,14 @@ exit 1
     expect(cleanupStep.indexOf('kill -- -"${HB_PID}"')).toBeLessThan(
       cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
     );
-    // Same-round killers also carry the bare-pid fallback; the gate uses
-    // the builtin form of the step's shadowing doctrine.
+    // Same-round killers also carry the bare-pid fallback. The gate and
+    // finalize hold the PAT and take the builtin form of the step's
+    // shadowing doctrine; cleanup carries no token and keeps the bare
+    // form.
     expect(gateStep).toContain('builtin kill "${HB_PID}"');
-    expect(finalizeStatusCommentStep).toContain('kill "${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill "${HB_PID}" 2>/dev/null || true',
+    );
     expect(cleanupStep).toContain('kill "${HB_PID}"');
     // A kill landing MID-TICK must reach the tick too: each tick's
     // `timeout 60 gh` subtree runs in its OWN process group (coreutils
@@ -15947,7 +15986,9 @@ exit 1
     // absolute-path form of its shadowing doctrine — and it must land
     // where the others do: before the terminal PATCH (finalize) and before
     // the workdir wipe (cleanup).
-    expect(finalizeStatusCommentStep).toContain('pkill -TERM -s "${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true',
+    );
     expect(cleanupStep).toContain('pkill -TERM -s "${HB_PID}"');
     expect(
       finalizeStatusCommentStep.indexOf('pkill -TERM -s "${HB_PID}"'),

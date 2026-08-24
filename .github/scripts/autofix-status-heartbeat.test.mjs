@@ -193,10 +193,15 @@ describe('autofix-status-heartbeat loop', () => {
   function loopEnv(dir, gh, overrides = {}) {
     const workdir = join(dir, 'work');
     mkdirSync(workdir, { recursive: true });
+    // The loop pins its tick PATH from the launcher-supplied TRUSTED_PATH
+    // (af-148): the fakes travel through that capture, never through an
+    // ambient PATH the tick no longer trusts.
+    const trustedPath = `${gh.bin}:${process.env.PATH}`;
     return {
       env: {
         ...process.env,
-        PATH: `${gh.bin}:${process.env.PATH}`,
+        PATH: trustedPath,
+        TRUSTED_PATH: trustedPath,
         GH_RECORD_DIR: gh.records,
         GITHUB_TOKEN: 'fake',
         HB_REPO: 'octo/repo',
@@ -364,10 +369,18 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      const ok = await waitFor(
-        () => existsSync(join(workdir, 'heartbeat.log')),
-        8000,
-      );
+      // Gate on CONTENT, not existence: `exec >> heartbeat.log` creates
+      // the file empty and the first line forks `date -u` before writing,
+      // so an existence-gated poll can land in the exists-but-empty
+      // window, read '' and throw on the match below — a red lane with
+      // no product defect.
+      const ok = await waitFor(() => {
+        const log = join(workdir, 'heartbeat.log');
+        return (
+          existsSync(log) &&
+          readFileSync(log, 'utf8').includes('heartbeat started')
+        );
+      }, 8000);
       assert.ok(ok, 'the loop must start and log its parameters');
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /interval 600s max_age 20400s/);
@@ -474,6 +487,32 @@ describe('autofix-status-heartbeat loop', () => {
     assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
   });
 
+  it('refuses to loop without TRUSTED_PATH — no tick on an unpinned PATH', async () => {
+    // The tick's PATH pin comes from the launcher's step-level capture;
+    // a launch without it must fail fast like any other missing input,
+    // never run its ticks resolving externals through an ambient,
+    // plantable PATH.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    delete env.TRUSTED_PATH;
+    const child = spawn('bash', [script, 'loop'], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    const code = await awaitExit(child, 8000);
+    assert.equal(code, 2);
+    assert.match(stderr, /TRUSTED_PATH is required/);
+    // Fail fast BEFORE registering anything: no pid file, no log.
+    assert.ok(!existsSync(join(workdir, 'heartbeat.pid')));
+    assert.ok(!existsSync(join(workdir, 'heartbeat.log')));
+  });
+
   it('refuses to loop when a BODY var is missing — no immortal unpulsing loop', async () => {
     // A launch missing a body var (HB_ROUND here) must fail fast, not
     // produce a loop that lives to the age cap logging "body composition
@@ -539,6 +578,44 @@ describe('autofix-status-heartbeat loop', () => {
       assert.ok(child.exitCode === null, 'loop must still be alive');
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /PATCH failed; continuing/);
+    } finally {
+      killGroup(child);
+    }
+  });
+
+  it('pins the tick PATH from TRUSTED_PATH — a plant ahead of it is never resolved', async () => {
+    // The loop holds the bot PAT and resolves its tick externals by name;
+    // the ambient PATH carries same-UID-writable dirs ahead of the system
+    // ones (the job's own $GITHUB_PATH append puts ${RUNNER_TEMP}/qwen-bin
+    // there; pool hosts carry writable _work/_temp entries). Witness the
+    // pin from the tick's own resolution: a planted gh FIRST on the
+    // ambient PATH (outside TRUSTED_PATH) must never run, while the gh
+    // inside TRUSTED_PATH still serves every tick.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const plantDir = join(dir, 'plant');
+    mkdirSync(plantDir, { recursive: true });
+    const plantLog = join(dir, 'plant-exfil.log');
+    writeFileSync(
+      join(plantDir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        `printf 'PLANTED_GH_EXECUTED GITHUB_TOKEN=%s\\n' "\${GITHUB_TOKEN:-}" >> "${plantLog}"`,
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(join(plantDir, 'gh'), 0o755);
+    const { env } = loopEnv(dir, gh, {
+      PATH: `${plantDir}:${gh.bin}:${process.env.PATH}`,
+    });
+    const child = startLoop(env);
+    try {
+      const ok = await waitFor(() => readCalls(gh.records).length >= 1, 8000);
+      assert.ok(ok, 'the gh inside TRUSTED_PATH must serve the tick');
+      assert.ok(
+        !existsSync(plantLog),
+        'a plant on the ambient PATH must never be resolved',
+      );
     } finally {
       killGroup(child);
     }
