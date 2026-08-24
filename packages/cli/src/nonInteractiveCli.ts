@@ -1355,6 +1355,15 @@ export async function runNonInteractive(
         }
       };
       let inlineModelOverrideResolutionFailed = false;
+      // The first-turn fail-closed capability probe's verdict for the inline
+      // override, reused by the tool-result media gate when the override
+      // persists BARE (no media survived to earn the NUL stamp, R46-3): a
+      // gate-time re-probe of a bare selector resolves without fail-closed
+      // semantics and could invert the verdict this run already acted on.
+      let inlineOverrideProbeSelector: string | undefined;
+      let inlineOverrideProbeVerdict:
+        | { supportsAudio: boolean; supportsImage: boolean }
+        | undefined;
       // Capability-check ANY media against the inline override, not only
       // audio: raw images exact-routed to a target that cannot see them are
       // placeholder-substituted by the route's slimming — the model would
@@ -1413,6 +1422,8 @@ export async function runNonInteractive(
             runtimeView.contentGeneratorConfig.modalities?.audio === true;
           supportsImage =
             runtimeView.contentGeneratorConfig.modalities?.image === true;
+          inlineOverrideProbeSelector = inlineModelOverride;
+          inlineOverrideProbeVerdict = { supportsAudio, supportsImage };
         } catch (error) {
           routeResolutionFailed = true;
           debugLogger.warn(
@@ -1423,8 +1434,14 @@ export async function runNonInteractive(
         }
         if (routeResolutionFailed) {
           // The route cannot be capability-checked: drop the override so
-          // audio is bridged on the primary route and images flow through
-          // the clamp + vision-bridge path below (fail-closed either way).
+          // audio is bridged on the primary route. Images flow through the
+          // clamp path below and then either the vision bridge (when one is
+          // configured) or the visible fail-closed marker branch under it —
+          // mirrors the interactive twin's R33-2 block. With no bridge and a
+          // text-only session model they must NOT ride the session route:
+          // core would placeholder-substitute them against the session
+          // modalities with only a debugLogger.warn, and the model would
+          // answer about an image it never received.
           inlineModelOverrideResolutionFailed = true;
           inlineModelOverride = undefined;
         } else {
@@ -1477,6 +1494,25 @@ export async function runNonInteractive(
         hasImageParts(initialParts)
       ) {
         initialParts = initialParts.map((part) => clampInlineMediaPart(part));
+      }
+      if (
+        inlineModelOverrideResolutionFailed &&
+        !shouldRunVisionBridge(config) &&
+        config.getEffectiveInputModalities?.()?.image !== true &&
+        hasImageParts(initialParts)
+      ) {
+        // Headless twin of the interactive R33-2 branch: the override could
+        // not be resolved, no vision bridge is configured to describe the
+        // images, and the session model cannot view them. Forwarding the
+        // clamped images on the session route would have core's slimming
+        // placeholder-substitute them silently — fail closed visibly instead.
+        const reason =
+          'the active model override could not be resolved, and the session model cannot view images';
+        emitBridgeNotice('vision_bridge', `Image was not sent: ${reason}.`);
+        initialParts = [
+          ...splitImageParts(initialParts).nonImageParts,
+          { text: `[Image was not sent: ${reason}.]` },
+        ];
       }
       if (
         inlineModelOverride === undefined &&
@@ -1862,37 +1898,55 @@ export async function runNonInteractive(
       // stream. Detect nested media, fail-closed-resolve the selector,
       // substitute unsupported modalities with a visible "was not sent" marker
       // (disclosed via emitBridgeNotice), and clamp whatever survives.
+      //
+      // The gate polices ANY persisted override selector, not only
+      // NUL-terminated ones (R46-3): a fail-closed or text-only slash override
+      // persists BARE for the whole turn when no media survives the first-turn
+      // gate (nothing to earn the NUL stamp), and the continuation still sends
+      // under that override — nested tool-result media would reach the same
+      // target this run already proved cannot view it and be
+      // placeholder-substituted silently. Bare selectors are fail-close-
+      // resolved here too, reusing the first-turn probe verdict when the
+      // selector matches the inline override.
       const applyToolResultMediaGate = async (
         parts: Part[],
         overrideSelector: string | undefined,
       ): Promise<Part[]> => {
         const nested = detectNestedFunctionResponseMedia(parts);
         if (!nested.hasImage && !nested.hasAudio) return parts;
-        // Only a NUL-terminated selector exact-routes the continuation; a bare
-        // override or none at all sends on the session route, where ordinary
-        // bridging/slimming applies. The NUL marker is NOT a bypass: strip it
-        // and fail-close-resolve the underlying selector.
-        if (!overrideSelector?.endsWith('\0')) return parts;
-        const routeSelector = overrideSelector.slice(0, -1);
+        if (!overrideSelector) return parts;
+        const routeSelector = overrideSelector.endsWith('\0')
+          ? overrideSelector.slice(0, -1)
+          : overrideSelector;
         let supportsImage = false;
         let supportsAudio = false;
-        try {
-          const runtimeView = await config
-            .getBaseLlmClient()
-            .resolveForModel(routeSelector, { failClosed: true });
-          supportsImage =
-            runtimeView.contentGeneratorConfig.modalities?.image === true;
-          supportsAudio =
-            runtimeView.contentGeneratorConfig.modalities?.audio === true;
-        } catch (error) {
-          // Fail closed: exact-routing an unresolvable selector would drop the
-          // media silently, so treat it as supporting nothing and surface the
-          // omission below.
-          debugLogger.warn(
-            `tool-result media gate could not resolve override '${routeSelector}': ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
+        const firstTurnProbe =
+          inlineOverrideProbeVerdict !== undefined &&
+          routeSelector === inlineOverrideProbeSelector
+            ? inlineOverrideProbeVerdict
+            : undefined;
+        if (firstTurnProbe) {
+          supportsImage = firstTurnProbe.supportsImage;
+          supportsAudio = firstTurnProbe.supportsAudio;
+        } else {
+          try {
+            const runtimeView = await config
+              .getBaseLlmClient()
+              .resolveForModel(routeSelector, { failClosed: true });
+            supportsImage =
+              runtimeView.contentGeneratorConfig.modalities?.image === true;
+            supportsAudio =
+              runtimeView.contentGeneratorConfig.modalities?.audio === true;
+          } catch (error) {
+            // Fail closed: sending under an unresolvable selector would drop
+            // the media silently, so treat it as supporting nothing and
+            // surface the omission below.
+            debugLogger.warn(
+              `tool-result media gate could not resolve override '${routeSelector}': ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
         }
         let result: PartListUnion = parts;
         if (nested.hasImage && !supportsImage) {

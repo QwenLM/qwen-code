@@ -2422,6 +2422,76 @@ describe('runNonInteractive', () => {
     ).toBeUndefined();
   });
 
+  it('fails closed visibly when a rejected route leaves images with no bridge and a text-only session model', async () => {
+    // R46-2: resolution failure clears the override; with no vision bridge
+    // and a text-only session model there is nothing left to carry the
+    // images, so they must be replaced with the visible "was not sent"
+    // marker plus a bridge notice (mirrors the interactive R33-2 branch)
+    // instead of riding the session route into silent placeholder
+    // substitution.
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'AAAA' },
+    };
+    const mockCommand = {
+      name: 'flaky-model',
+      description: 'submit an image through a flaky route',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'flaky-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'flaky-model', authType: AuthType.QWEN_OAUTH }]);
+    mockConfig = {
+      ...mockConfig,
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+      getBaseLlmClient: vi.fn().mockReturnValue({
+        resolveForModel: vi
+          .fn()
+          .mockRejectedValue(new Error('route unavailable')),
+      }),
+    } as unknown as Config;
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/flaky-model',
+      'prompt-rejected-route-text-only-session',
+    );
+
+    expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(sentParts).toEqual([
+      { text: 'inspect this image' },
+      {
+        text: '[Image was not sent: the active model override could not be resolved, and the session model cannot view images.]',
+      },
+    ]);
+    expect(JSON.stringify(sentParts)).not.toContain('inlineData');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Image was not sent: the active model override could not be resolved, and the session model cannot view images',
+      ),
+    );
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+  });
+
   it('gates nested tool-result media against the persisted exact-route override', async () => {
     // The trailing-NUL inline-override selector persists across every headless
     // continuation send for the whole turn. A tool that returns media nested
@@ -2521,6 +2591,126 @@ describe('runNonInteractive', () => {
     expect(continuationSent).not.toContain(nestedImageData);
     expect(continuationSent).toContain('was not sent');
     // The omission is disclosed on stderr, not silent.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Image returned by a tool was not sent'),
+    );
+  });
+
+  it('gates nested tool-result media against a bare fail-closed override', async () => {
+    // R46-3: a text-only slash override whose first-turn media was
+    // fail-closed persists BARE for the whole turn (nothing survived to earn
+    // the NUL stamp), yet every continuation still sends under it. A tool
+    // returning media nested in functionResponse.parts must be gated against
+    // that selector too — fail-close-resolved via the first-turn probe
+    // verdict — instead of riding raw to the target this same run already
+    // proved cannot view it.
+    setupMetricsMock();
+    const firstTurnImageData = 'RklSU1RVUk5JTUFHRQ==';
+    const nestedImageData = 'TkVTVEVESU1BR0Uy';
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit an image to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [
+          { text: 'inspect this image' },
+          { inlineData: { mimeType: 'image/png', data: firstTurnImageData } },
+        ],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    // The override resolves (no rejection) to text-only modalities: the
+    // first-turn image is fail-closed and dropped, no media survives, so the
+    // override persists bare.
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    // Mid-turn the tool returns a functionResponse nesting an image.
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-call-nested-image-bare',
+            name: 'custom_tool',
+            response: { output: 'screenshot attached' },
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: nestedImageData },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-call-nested-image-bare',
+              name: 'custom_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-bare-gate',
+            },
+          },
+        ]);
+      }
+      return createStreamFromEvents(finishedEvents);
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-bare-gate',
+    );
+
+    // First send: the top-level image was fail-closed and the override
+    // persists BARE (no media survived to earn the NUL stamp).
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('text-model');
+    expect(
+      JSON.stringify(mockGeminiClient.sendMessageStream.mock.calls[0]?.[0]),
+    ).not.toContain(firstTurnImageData);
+    // The gate reuses the first-turn probe verdict for the bare selector it
+    // persisted — no second resolution probe.
+    expect(resolveForModel).toHaveBeenCalledTimes(1);
+    expect(resolveForModel).toHaveBeenCalledWith('text-model', {
+      failClosed: true,
+    });
+    // Second send: the tool-result continuation under the bare override. The
+    // nested image must be fail-closed, not shipped raw into silent slimming.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const continuationSent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[0],
+    );
+    expect(continuationSent).not.toContain(nestedImageData);
+    expect(continuationSent).toContain('was not sent');
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[3]?.modelOverride,
+    ).toBe('text-model');
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Image returned by a tool was not sent'),
     );
