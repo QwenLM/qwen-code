@@ -515,6 +515,11 @@ describe('package scripts', () => {
         'release-sdk',
         'Publish @qwen-code/sdk',
       ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-sdk',
+        'Publish immutable SDK tarball',
+      ],
       ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
     ]) {
       const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
