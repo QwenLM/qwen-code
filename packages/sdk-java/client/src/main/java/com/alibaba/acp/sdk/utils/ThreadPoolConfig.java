@@ -30,7 +30,7 @@ public class ThreadPoolConfig {
                 @Override
                 public Thread newThread(Runnable r) {
                     Thread t = new Thread(r, "acp-client-pool-" + threadNumber.getAndIncrement());
-                    t.setDaemon(false);
+                    t.setDaemon(true);
                     return t;
                 }
             },
