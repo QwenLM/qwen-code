@@ -87,7 +87,7 @@ import {
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
-import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import { loadHierarchicalMemory } from '../config/config.js';
 import {
   profileCheckpoint,
   finalizeStartupProfile,
@@ -2093,7 +2093,7 @@ export const AppContainer = (props: AppContainerProps) => {
         contextFilePaths,
         conditionalRules,
         projectRoot,
-      } = await loadHierarchicalGeminiMemory(
+      } = await loadHierarchicalMemory(
         config.getWorkingDir(),
         settings.merged.context?.loadFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()

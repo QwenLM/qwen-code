@@ -25,7 +25,10 @@ Rename the local `Gemini` identifiers to `Llm`, with these exceptions:
 
 1. **Memory filename** — `GeminiMdFilename` (+ `set/get/getAll/getCurrent`,
    `GeminiMdFileCount`) is the project memory file (`QWEN.md`), a memory
-   concept, not an LLM client. → `Memory*`.
+   concept, not an LLM client. → `Memory*`. The loader
+   `loadHierarchicalGeminiMemory` (a thin wrapper around core's
+   `loadServerHierarchicalMemory`) belongs to the same family: →
+   `loadHierarchicalMemory`.
 2. **UI spinners** — `GeminiRespondingSpinner` / `GeminiSpinner` drop the
    prefix. → `RespondingSpinner` / `Spinner`.
 3. **Gemini extension format (keep as-is)** — `packages/core/src/extension/
@@ -73,7 +76,8 @@ camelCase functions/variables (token-infix, → `Llm*`), highest-frequency first
 | `newGeminiMessageBuffer` / `makeGeminiHistoryItem` / `extractGeminiContent` / `buildGeminiChunk` / `recordGeminiChunk`             | `newLlmMessageBuffer` / `makeLlmHistoryItem` / `extractLlmContent` / `buildLlmChunk` / `recordLlmChunk`                  |
 | `createInitializedGeminiClient` / `createGeminiContentGenerator`                                                                   | `createInitializedLlmClient` / `createLlmContentGenerator`                                                               |
 | `mapAnthropicFinishReasonToGemini` / `convertAnthropicResponseToGemini`                                                            | `mapAnthropicFinishReasonToLlm` / `convertAnthropicResponseToLlm`                                                        |
-| `pendingGeminiHistoryItems` / `skipGeminiInitialization` / `loadHierarchicalGeminiMemory`                                          | `pendingLlmHistoryItems` / `skipLlmInitialization` / `loadHierarchicalMemory`                                            |
+| `pendingGeminiHistoryItems` / `skipGeminiInitialization`                                                                           | `pendingLlmHistoryItems` / `skipLlmInitialization`                                                                       |
+| `loadHierarchicalGeminiMemory`                                                                                                     | `loadHierarchicalMemory` (memory family, exception #1)                                                                   |
 
 ## File renames
 
@@ -97,7 +101,9 @@ move as one atomic PR.
 
 **PR 1 — independent small families** (no cross-package risk, small diff):
 
-- Memory filename: `GeminiMdFilename` family → `Memory*`.
+- Memory filename: `GeminiMdFilename` family → `Memory*`, and
+  `loadHierarchicalGeminiMemory` → `loadHierarchicalMemory` (memory loader,
+  exception #1).
 - UI spinners: `GeminiRespondingSpinner` / `GeminiSpinner` →
   `RespondingSpinner` / `Spinner`, and `GeminiRespondingSpinner.tsx` →
   `RespondingSpinner.tsx`.
