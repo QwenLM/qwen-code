@@ -20,7 +20,7 @@ are not competing protocol choices.
 | Surface                    | Consumer                                                  | Public shape                                        | What provides runtime portability                                                                                              |
 | -------------------------- | --------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | Cua as an agent MCP or CLI | Codex, Claude Code, another agent, or a shell             | `qwen-cua-driver mcp` and `qwen-cua-driver call`    | MCP and the executable protocol already work from any capable runtime.                                                         |
-| Cua as an imported SDK     | Python, TypeScript, Swift, Kotlin, or another application | `cua_driver` or `@trycua/cua-driver`                | Python and Node call a shared Rust daemon-client implementation through experimental UniFFI bindings.                          |
+| Cua as an imported SDK     | Python, TypeScript, Swift, Kotlin, or another application | `cua_driver` or `@qwen-code/cua-sdk`        | Python and Node call a shared Rust daemon-client implementation through experimental UniFFI bindings.                          |
 
 The [Codex and Claude Agent SDK examples](../examples/agent-sdks/README.md)
 make the first surface concrete. Each agent SDK receives the same stdio MCP
@@ -31,7 +31,7 @@ imports a generated Cua client.
 
 1. Keep MCP and the CLI as the canonical agent boundary. Do not require a Cua
    language package merely to connect an MCP-capable agent.
-2. Make `cua-driver` and `@trycua/cua-driver` application SDK packages backed
+2. Make `cua-driver` and `@qwen-code/cua-sdk` application SDK packages backed
    by UniFFI. Remove their language-native MCP facades because those duplicate
    a runtime-neutral protocol client that agent runtimes already provide. This
    deliberately makes the package API breaking before publication.
@@ -122,7 +122,7 @@ The package name is the SDK entrypoint; no transport suffix is required:
 | Runtime | Rust-backed application SDK | Agent integration |
 | --- | --- | --- |
 | Python | `cua_driver` | Configure `qwen-cua-driver mcp` in the agent runtime |
-| TypeScript | `@trycua/cua-driver` | Configure `qwen-cua-driver mcp` in the agent runtime |
+| TypeScript | `@qwen-code/cua-sdk` | Configure `qwen-cua-driver mcp` in the agent runtime |
 
 There is no public `/sdk`, `/mcp`, or `/native` entrypoint. “Native” describes
 the private generated loader and platform library, not the product API. The
@@ -330,7 +330,7 @@ architecture is described in the [contract README](../contract/README.md).
 Mozilla UniFFI `0.31.0` generates Python from the compiled `cdylib` metadata.
 Node generation uses the separately maintained
 `uniffi-bindgen-react-native`/UBRN `0.31.0-3` N-API target plus pinned
-`@ubjs/core` and `@ubjs/node` runtimes. The checked-in outputs are regenerated
+`@ubjs/core`. The checked-in outputs are regenerated
 into temporary roots, tracked by ownership manifests, and compared byte for
 byte in CI.
 
@@ -345,12 +345,12 @@ Python wheels are platform-specific and the Rust release workflow
 places the matching SDK library beside the CLI in each release runtime archive.
 The wheel builder moves that library next to the generated Python modules, and
 CI inspects the wheel and runs it across the FFI boundary. The public Node
-package uses generated platform resolution and optional native packages for
-macOS arm64/x64, Linux glibc arm64/x64, and Windows arm64/x64. Release CI builds
-those packages from the already verified Cua Driver assets, smoke-tests the
-installed root plus matching native package, publishes native packages first,
-then publishes the root. Python, npm, and Rust versions come from one release
-tag and are attached to the same GitHub release.
+package is the single platform-neutral `@qwen-code/cua-sdk`. Its postinstall
+selects the matching macOS, glibc Linux, or Windows release archive, verifies
+the archive checksum, and caches the SDK library plus Node runtime. Release CI
+smoke-tests the installed npm tarball against the native release payload and
+publishes npm only after the GitHub Release exists. Python, npm, and Rust
+versions come from one release tag.
 
 ## UniFFI follow-up gates
 
@@ -359,7 +359,7 @@ Evaluate the two SDK targets separately.
 Before expanding the UniFFI path to another runtime or platform:
 
 1. Load-test the native artifact on the added release OS and architecture.
-2. Add the platform package to generated resolution and the release matrix.
+2. Add the target archive to native resolution and the release matrix.
 3. Preserve release signing/notarization evidence for the native library everywhere
    the platform requires it.
 4. Run the executable MCP boundary and imported SDK through the same daemon

@@ -440,6 +440,93 @@ describe('tool group summary logic', () => {
     expect(summary?.textContent).not.toContain('timeout: 30000ms');
   });
 
+  it('opens a completed MCP App result in the session transcript', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    ]);
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
+  it('keeps an MCP App open when multiple tools share a summary', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'read', toolName: 'read_file' }),
+      makeTool({
+        callId: 'app',
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    ]);
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
+  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '',
+          toolResult: {},
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+  });
+
+  it('keeps an MCP App open in a summary-only row', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+      { summaryOnly: true },
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
       makeTool({
@@ -1387,6 +1474,89 @@ describe('tool row rendering', () => {
     act(() => {
       (
         container.querySelector('[class*="lineExpandable"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('keeps the agent row static while its launch approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: { subagent_type: 'Explore' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-1',
+                toolCallId: tool.callId,
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // No expand affordance while the launch approval is unanswered: the row
+    // must not open details for an agent that has not started yet.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+    act(() => {
+      (container.querySelector('[class*="lineButton"]') as HTMLElement).click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('keeps the agent row openable while a sub-tool approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [{ callId: 'sub-1', toolName: 'web_fetch', status: 'pending' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-sub',
+                toolCallId: 'sub-1',
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // A sub-tool approval is not the agent's own launch approval: the row
+    // stays openable so the pending sub-tool stays reachable in the details
+    // panel.
+    expect(
+      container.querySelector('button[class*="lineButton"]'),
+    ).not.toBeNull();
+    act(() => {
+      (
+        container.querySelector('button[class*="lineButton"]') as HTMLElement
       ).click();
     });
     expect(onOpen).toHaveBeenCalledWith(tool);

@@ -175,6 +175,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
    * Read a live session's `/goal` state. The active goal lives only in the
@@ -517,6 +518,7 @@ export interface ServeWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface ServeWorkspaceProviderStatus extends ServeStatusCell {
@@ -1078,7 +1080,8 @@ export type ServeExtensionInstallType =
   | 'link'
   | 'github-release'
   | 'npm'
-  | 'archive-url';
+  | 'archive-url'
+  | 'snapshot';
 
 export type ServeExtensionOriginSource =
   | 'QwenCode'
@@ -1133,6 +1136,7 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
   details?: ServeExtensionDetails;
