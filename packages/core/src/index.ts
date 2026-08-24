@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
   type ModelGenerationConfig,
@@ -46,6 +47,7 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  VERTEX_ADC_HINT,
 } from './models/index.js';
 
 // Output formatting
@@ -147,6 +149,7 @@ export {
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
+export { isWsl } from './utils/terminal-env.js';
 export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -230,6 +233,7 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,

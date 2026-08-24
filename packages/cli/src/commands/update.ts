@@ -24,7 +24,7 @@ export const updateCommand: CommandModule = {
       import('../config/settings.js'),
       import('../ui/utils/updateCheck.js'),
       import('../utils/installationInfo.js'),
-      import('../utils/standalone-update.js'),
+      import('../ui/standalone-update.js'),
       import('../utils/stdioHelpers.js'),
       import('../utils/updateEventEmitter.js'),
     ]);
