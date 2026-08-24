@@ -296,9 +296,10 @@ describe('qwen serve — capabilities envelope', () => {
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
-    // `workspace_trust`, `workspace_github_setup`, and
-    // `workspace_reload`. The CLI serve path always wires `persistSetting`, the
-    // workspace service, and route-local workspace helpers).
+    // `workspace_trust`, `workspace_github_setup`, `workspace_reload`, and
+    // `scheduled_task_session_reuse`. The CLI serve path always wires
+    // `persistSetting`, the workspace service, route-local workspace helpers,
+    // and the managed scheduled-task bridge callback.
     expect(caps.features).toEqual([
       'health',
       'daemon_status',
@@ -347,6 +348,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
+      'scheduled_task_session_reuse',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
