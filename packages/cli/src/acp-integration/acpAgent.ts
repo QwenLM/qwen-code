@@ -12016,6 +12016,12 @@ class QwenAgent implements Agent {
                   const derivedBaseName = sourceCustomTitle
                     ? normalizeDerivedBranchTitle(sourceCustomTitle)
                     : sourceDisplayName;
+                  // A title that normalizes to empty (it was exactly a suffix
+                  // token) falls back to the session-id prefix here, while
+                  // CLI /branch falls back to the first prompt. Deliberate:
+                  // no picker name survives to anchor the family to, and one
+                  // shared fallback would need a prompt-only display-name
+                  // read on this route.
                   const baseName =
                     requestedName ?? derivedBaseName ?? sessionId.slice(0, 8);
 
