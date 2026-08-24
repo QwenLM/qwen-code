@@ -35,18 +35,18 @@ import {
   createForkedChat,
   runForkedAgent,
   runWithForkedChatModel,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../utils/tool-response-finalizer.js';
+} from '../tools/tool-response-finalizer.js';
 import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -247,7 +247,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../agents/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const modelSelector =

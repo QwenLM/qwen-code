@@ -55,7 +55,7 @@ import {
 } from '../../utils/invocation-context.js';
 import { GeminiChat, StreamEventType } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
-import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../../tools/tool-result-boundary-diagnostics.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -71,10 +71,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../../utils/tool-result-boundary-diagnostics.js',
+  '../../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),
@@ -1799,6 +1799,7 @@ describe('extractParentToolNames', () => {
           functionDeclarations: [
             { name: ToolNames.WORKFLOW },
             { name: ToolNames.AGENT },
+            { name: ToolNames.REQUEST_SHUTDOWN },
             { name: ToolNames.READ_FILE },
           ],
         },
@@ -1807,6 +1808,9 @@ describe('extractParentToolNames', () => {
     expect(names).toEqual([ToolNames.READ_FILE]);
     expect(names).not.toContain(ToolNames.WORKFLOW);
     expect(names).not.toContain(ToolNames.AGENT);
+    // Leader-only team control: a subagent must never impersonate the
+    // leader by requesting a teammate shutdown (#9401).
+    expect(names).not.toContain(ToolNames.REQUEST_SHUTDOWN);
   });
 
   it('filters out empty and non-string declaration names', () => {

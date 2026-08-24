@@ -202,6 +202,7 @@ These settings are read from operator scopes only (User, System, and SystemDefau
   "model": {
     "generationConfig": {
       "timeout": 60000,
+      "streamIdleTimeoutMs": 300000,
       "contextWindowSize": 128000,
       "modalities": {
         "image": true
@@ -232,10 +233,10 @@ These settings are read from operator scopes only (User, System, and SystemDefau
 
 Two guards bound a streaming response, each accepting `0` to disable. Neither is implemented by the Anthropic/Gemini generators, which leave the drip-fed shape below unbounded.
 
-- `QWEN_STREAM_IDLE_TIMEOUT_MS` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`.
+- `streamIdleTimeoutMs` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`. For provider-backed models, set it under the matching `modelProviders[providerId][].generationConfig`; for runtime models, use `model.generationConfig`. An explicit model value takes precedence over `QWEN_STREAM_IDLE_TIMEOUT_MS`, and `0` disables the idle guard.
 - `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ upstream-wait time of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
 
-These are **environment variables (or, for embedders, `ContentGeneratorConfig.streamIdleTimeoutMs` / `streamMaxLifetimeMs`) only — there is no settings.json key**; writing `"streamMaxLifetimeMs"` into settings.json has no effect. Upgrade notes: a deployment that previously set `QWEN_STREAM_IDLE_TIMEOUT_MS=0` — or passed `streamIdleTimeoutMs: 0` in `ContentGeneratorConfig` — to opt out of stream aborts now also needs `QWEN_STREAM_MAX_LIFETIME_MS=0` (or `streamMaxLifetimeMs: 0`) to keep that; and the 15-minute lifetime cap bounds even a stream whose idle timeout you raised above it (e.g. `QWEN_STREAM_IDLE_TIMEOUT_MS=1800000`) — raise the cap likewise, or set it to `0`, if you rely on a longer window.
+`streamMaxLifetimeMs` remains available only through `QWEN_STREAM_MAX_LIFETIME_MS` or, for embedders, `ContentGeneratorConfig.streamMaxLifetimeMs`; writing it into `settings.json` has no effect. The 15-minute lifetime cap still bounds a stream whose idle timeout you raise above it. Raise the lifetime environment variable likewise, or set it to `0`, if you rely on a longer window. Disabling `streamIdleTimeoutMs` alone does not disable this lifetime cap.
 
 **max_tokens (output token limit):**
 

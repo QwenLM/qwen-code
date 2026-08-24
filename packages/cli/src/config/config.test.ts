@@ -290,6 +290,27 @@ describe('parseArguments', () => {
     process.argv = originalArgv;
   });
 
+  it('includes every approval mode description in --help', async () => {
+    process.argv = ['node', 'script.js', '--help'];
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      output.push(args.join(' '));
+    });
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      const help = output.join('');
+      for (const mode of ServerConfig.APPROVAL_MODES) {
+        expect(help).toContain(
+          `${mode} (${ServerConfig.APPROVAL_MODE_INFO[mode].description})`,
+        );
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('should throw an error when both --prompt and --prompt-interactive are used together', async () => {
     process.argv = [
       'node',
@@ -4478,9 +4499,19 @@ describe('loadCliConfig approval mode', () => {
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const settings: Settings = {
-      tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
-    };
+    const settings = {
+      tools: { approvalMode: 'auto_edit' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should normalize legacy autoedit approval mode from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'autoedit' },
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });

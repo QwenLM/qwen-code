@@ -12,8 +12,8 @@ import {
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
-import type { CacheSafeParams } from '../utils/forkedAgent.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { CacheSafeParams } from '../agents/forkedAgent.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -33,16 +33,16 @@ const boundaryMocks = vi.hoisted(() => ({
 }));
 
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryMocks.observe,
   }),
 );
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   getCacheSafeParams: forkedAgentMocks.getCacheSafeParams,
   createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
     () => ({

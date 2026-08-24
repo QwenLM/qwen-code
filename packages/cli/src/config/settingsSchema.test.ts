@@ -293,6 +293,21 @@ describe('SettingsSchema', () => {
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
     });
 
+    it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
+      const streamIdleTimeout =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.streamIdleTimeoutMs;
+
+      expect(streamIdleTimeout).toMatchObject({
+        type: 'integer',
+        default: undefined,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
