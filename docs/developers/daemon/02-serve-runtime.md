@@ -61,6 +61,8 @@
 
 ### Boot sequence
 
+Before `runQwenServe()` starts this sequence, the CLI-only `--open-with-auth` mode validates loopback/Web Shell eligibility and fills `ServeOptions.token` with the selected configured token, or with 32 random bytes encoded as base64url when that selection is empty. Direct embedders and invocations without that default-off flag do not generate a token.
+
 1. **Resolve and trim token** from `opts.token` or `QWEN_SERVER_TOKEN`; this
    avoids a trailing newline from `cat token.txt` silently breaking bearer
    comparison.
@@ -124,6 +126,7 @@ Calling `createServeApp` directly still returns only an `Application`. An embedd
 | Env             | `QWEN_SERVE_DEBUG=1`                                                                                       | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                                   |
 | Flags           | `--hostname`, `--port`                                                                                     | Listen binding.                                                                                            |
 | Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                                      | Bearer token, loopback auth hardening, and explicit shell execution switch.                                |
+| CLI flags       | `--open-with-auth`                                                                                         | Default-off loopback Web Shell launch that reuses or generates a process-lifetime bearer before runtime.   |
 | Flag            | `--workspace`                                                                                              | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                      |
 | Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size`            | Bridge / Express caps.                                                                                     |
 | Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                            | Forwarded to the ACP child.                                                                                |

@@ -93,6 +93,90 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('context');
   });
 
+  it('restores workspace model previews after clearing session context models', () => {
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models: [
+          {
+            id: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            label: 'Qwen 3.8 Max',
+          },
+        ],
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          current: { modelId: 'qwen3.8-max' },
+          providers: [
+            {
+              kind: 'model_provider',
+              status: 'ok',
+              authType: 'qwen-oauth',
+              current: true,
+              models: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                  isCurrent: true,
+                  isRuntime: false,
+                  configOptions: [
+                    {
+                      id: 'reasoning_effort',
+                      currentValue: 'xhigh',
+                      options: [
+                        { value: 'none' },
+                        { value: 'low' },
+                        { value: 'medium' },
+                        { value: 'xhigh' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('keeps the prior model list when no workspace providers are loaded', () => {
+    // Older daemons without workspaceProviders support (or a rejected fetch)
+    // leave `providers` undefined; the pre-clear list must survive the clear.
+    const models = [
+      {
+        id: 'qwen3.8-max',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+      },
+    ];
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models,
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models).toEqual(models);
+  });
+
   it('preserves a concurrently loaded session', () => {
     const next = getConnectionAfterSessionClear(
       {

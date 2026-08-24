@@ -35,7 +35,8 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createDebugLogger: () => mockDebugLogger,
 }));
 
