@@ -248,6 +248,65 @@ export function nestedAgentToolsForTool(
   return result;
 }
 
+/**
+ * The execution status observed for every agent under one tool: the tool's
+ * own execution, every nested live task, and every nested transcript agent.
+ * An agent observed through BOTH a live task and a persisted transcript tool
+ * (a nested task whose toolUseId matches the nested tool's callId) counts
+ * once, keeping the actionable observation: getAttentionAgentTool opens the
+ * failed/cancelled surface when either reports one, so the tally must agree
+ * with the affordance. getPlanNodeStateFromIndex decides attention on
+ * exactly these statuses and the cockpit's attention stats tally them, so
+ * the triage strip and the queue can never contradict each other.
+ */
+function attentionAgentStatuses(
+  tool: ACPToolCall,
+  taskIndex: TaskExecutionIndex,
+): string[] {
+  const byAgent = new Map<string, string>();
+  const record = (agentKey: string, status: string) => {
+    const existing = byAgent.get(agentKey);
+    if (
+      existing === undefined ||
+      (existing !== 'failed' &&
+        existing !== 'cancelled' &&
+        (status === 'failed' || status === 'cancelled'))
+    ) {
+      byAgent.set(agentKey, status);
+    }
+  };
+  const root = taskForTool(tool, taskIndex);
+  record(
+    root ? `task:${root.id}` : `tool:${tool.callId}`,
+    executionStatus(tool, taskIndex),
+  );
+  const liveTaskIdByToolCallId = new Map<string, string>();
+  for (const { task } of nestedTasksFromIndex(tool, taskIndex)) {
+    record(`task:${task.id}`, task.status);
+    if (task.toolUseId) liveTaskIdByToolCallId.set(task.toolUseId, task.id);
+  }
+  for (const { tool: nestedTool } of nestedAgentToolsForTool(tool)) {
+    const liveTaskId = liveTaskIdByToolCallId.get(nestedTool.callId);
+    record(
+      liveTaskId ? `task:${liveTaskId}` : `tool:${nestedTool.callId}`,
+      executionStatus(nestedTool, taskIndex),
+    );
+  }
+  return [...byAgent.values()];
+}
+
+/**
+ * Same agent-status walk as {@link attentionAgentStatuses}, for callers that
+ * hold the raw task list instead of a prebuilt index (the cockpit's stats
+ * strip, which must tally exactly what the attention queue shows).
+ */
+export function getAttentionAgentStatuses(
+  tool: ACPToolCall,
+  tasks: readonly DaemonSessionTaskStatus[],
+): string[] {
+  return attentionAgentStatuses(tool, createTaskExecutionIndex(tasks));
+}
+
 function getPlanNodeStateFromIndex(
   todo: TodoItem,
   todosById: ReadonlyMap<string, TodoItem>,
@@ -257,14 +316,10 @@ function getPlanNodeStateFromIndex(
   const executionStatuses = tools.map((tool) =>
     executionStatus(tool, taskIndex),
   );
-  const descendantStatuses = tools.flatMap((tool) => [
-    ...nestedTasksFromIndex(tool, taskIndex).map(({ task }) => task.status),
-    ...nestedAgentToolsForTool(tool).map(({ tool: nestedTool }) =>
-      executionStatus(nestedTool, taskIndex),
+  const attention = tools.some((tool) =>
+    attentionAgentStatuses(tool, taskIndex).some(
+      (status) => status === 'failed' || status === 'cancelled',
     ),
-  ]);
-  const attention = [...executionStatuses, ...descendantStatuses].some(
-    (status) => status === 'failed' || status === 'cancelled',
   );
   if (
     executionStatuses.includes('running') ||

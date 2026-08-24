@@ -17,6 +17,15 @@ const todos: TodoItem[] = [
   },
 ];
 
+/** The number shown in the attention stats strip under a labelled cell. */
+function statValue(container: HTMLElement, label: string): string {
+  const spans = Array.from(container.querySelectorAll('span')).filter(
+    (span) => span.textContent === label,
+  );
+  expect(spans).toHaveLength(1);
+  return spans[0]!.previousElementSibling?.textContent ?? '';
+}
+
 describe('SessionWorkflowCockpit', () => {
   it('renders localized completion hierarchy and preserves the full title', () => {
     const container = document.createElement('div');
@@ -267,6 +276,174 @@ describe('SessionWorkflowCockpit', () => {
     expect(document.activeElement).toBe(
       container.querySelector('button[aria-label="Needs attention"]'),
     );
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps the attention stats at zero when a completed step hides failures', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const failedChild: ACPToolCall = {
+      callId: 'failed-child',
+      toolName: 'Agent',
+      title: 'Failed child',
+      status: 'failed',
+      parentToolCallId: 'root-agent',
+    };
+    const cancelledChild: ACPToolCall = {
+      callId: 'cancelled-child',
+      toolName: 'Agent',
+      title: 'Cancelled child',
+      status: 'completed',
+      rawOutput: { status: 'cancelled' },
+      parentToolCallId: 'root-agent',
+    };
+    const tools: ACPToolCall[] = [
+      {
+        callId: 'root-agent',
+        toolName: 'Agent',
+        status: 'completed',
+        args: { todo_id: 'work' },
+        subTools: [failedChild, cancelledChild],
+      },
+    ];
+    const tasks = [
+      {
+        kind: 'agent' as const,
+        id: 'root-task',
+        label: 'Root agent',
+        description: 'Coordinate work',
+        status: 'completed' as const,
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'root-agent',
+      },
+      {
+        kind: 'agent' as const,
+        id: 'failed-task',
+        label: 'Failed child',
+        description: 'Inspect failure',
+        status: 'failed' as const,
+        startTime: 2,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'failed-child',
+      },
+      {
+        kind: 'agent' as const,
+        id: 'cancelled-task',
+        label: 'Cancelled child',
+        description: 'Cancelled work',
+        status: 'cancelled' as const,
+        startTime: 3,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'cancelled-child',
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowCockpit
+            sessionId="session-1"
+            connected
+            todos={[{ id: 'work', content: 'Work', status: 'completed' }]}
+            tools={tools}
+            tasks={tasks}
+            onBackToChat={() => undefined}
+            onOpenSubagent={() => undefined}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The overview activity still lists both agents: the failure is real and
+    // linked; only the triage surface must not contradict its own queue.
+    expect(container.textContent).toContain('Failed child');
+    expect(container.textContent).toContain('Cancelled child');
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Needs attention"]',
+        )
+        ?.click();
+    });
+
+    // A completed step's attention is forced off, so the queue is empty and
+    // offers no way to inspect these agents — the strip must agree with the
+    // queue instead of counting linked tasks the page cannot open.
+    expect(container.textContent).toContain(
+      'Nothing currently needs your attention',
+    );
+    expect(statValue(container, 'Needs action')).toBe('0');
+    expect(statValue(container, 'Agent failures')).toBe('0');
+    expect(statValue(container, 'Cancelled')).toBe('0');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('counts a persisted sub-agent failure the queue opens without a task entry', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const failedChild: ACPToolCall = {
+      callId: 'persisted-failure',
+      toolName: 'Agent',
+      title: 'Persisted failure',
+      status: 'failed',
+      parentToolCallId: 'wrapper',
+    };
+    const tools: ACPToolCall[] = [
+      {
+        // Sub-agent evidenced only by subTools: the plan can queue it, but
+        // no environment task entry is synthesized for this shape, so the
+        // old task-tallying strip read 0 above the open button.
+        callId: 'wrapper',
+        toolName: 'workflow_step',
+        status: 'completed',
+        args: { todo_id: 'work' },
+        subTools: [failedChild],
+      },
+    ];
+    const onOpenSubagent = vi.fn();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowCockpit
+            sessionId="session-1"
+            connected
+            todos={[{ id: 'work', content: 'Work', status: 'in_progress' }]}
+            tools={tools}
+            tasks={[]}
+            onBackToChat={() => undefined}
+            onOpenSubagent={onOpenSubagent}
+          />
+        </I18nProvider>,
+      );
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Needs attention"]',
+        )
+        ?.click();
+    });
+
+    expect(statValue(container, 'Needs action')).toBe('1');
+    expect(statValue(container, 'Agent failures')).toBe('1');
+    const openOutput = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'View full Agent output',
+    );
+    expect(openOutput).toBeTruthy();
+    act(() => openOutput?.click());
+    expect(onOpenSubagent).toHaveBeenCalledWith(failedChild);
 
     act(() => root.unmount());
     container.remove();

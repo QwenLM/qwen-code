@@ -8,6 +8,7 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import {
+  getAttentionAgentStatuses,
   getAttentionAgentTool,
   getPlanNodeState,
   nestedAgentToolsForTool,
@@ -215,6 +216,22 @@ export function SessionWorkflowCockpit({
     () => todos.filter((todo) => states.get(todo.id)?.attention),
     [states, todos],
   );
+  // The stats strip must tally the same surface as the queue below it: the
+  // agent statuses observed for the todos the queue shows. Tallying every
+  // linked agent task instead contradicted the queue in both directions — a
+  // failure under a completed step (whose attention is forced off) counted
+  // directly above the "Nothing needs attention" empty state with no way to
+  // open it, and a persisted sub-agent without a live task entry queued with
+  // an open button while the strip read 0.
+  const attentionAgentStatusList = useMemo(() => {
+    const statuses: string[] = [];
+    for (const todo of attentionTodos) {
+      for (const tool of toolsByTodo.get(todo.id) ?? []) {
+        statuses.push(...getAttentionAgentStatuses(tool, tasks));
+      }
+    }
+    return statuses;
+  }, [attentionTodos, tasks, toolsByTodo]);
 
   useEffect(() => {
     if (
@@ -404,13 +421,21 @@ export function SessionWorkflowCockpit({
               </div>
               <div>
                 <strong>
-                  {agents.filter((task) => task.status === 'failed').length}
+                  {
+                    attentionAgentStatusList.filter(
+                      (status) => status === 'failed',
+                    ).length
+                  }
                 </strong>
                 <span>{t('workflow.attention.failed')}</span>
               </div>
               <div>
                 <strong>
-                  {agents.filter((task) => task.status === 'cancelled').length}
+                  {
+                    attentionAgentStatusList.filter(
+                      (status) => status === 'cancelled',
+                    ).length
+                  }
                 </strong>
                 <span>{t('workflow.attention.cancelled')}</span>
               </div>
