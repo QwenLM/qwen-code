@@ -155,6 +155,8 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
+      # checkout needs contents even though the job only files an issue.
+      contents: 'read'
       issues: 'write'
     steps:
       - name: 'Checkout repository'

@@ -11,10 +11,15 @@ set -euo pipefail
 # Tag pushes name the version through the tag; manual recovery dispatches
 # carry it in the version input.
 if [[ "${EVENT_NAME}" == 'push' ]]; then
-  version="${TAG_NAME#v}"
+  version="${TAG_NAME}"
 else
   version="${INPUT_VERSION}"
 fi
+# Both paths may carry a leading `v` (tag names always do; a dispatcher may
+# type one). Normalize once so the dedup marker and the image tag — which the
+# build job publishes without a `v` — always agree, instead of filing a
+# duplicate issue for a `v`-prefixed tag that can never exist.
+version="${version#v}"
 if [[ -z "${version}" ]]; then
   echo "::error::No version resolved for the image-build failure issue."
   exit 1
