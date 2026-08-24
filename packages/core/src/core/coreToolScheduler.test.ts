@@ -42,6 +42,8 @@ import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
+import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -3565,6 +3567,84 @@ describe('CoreToolScheduler', () => {
       expect(completedCall.response.error?.message).toBe(
         'Qwen Code requires permission to use "send_message", but that permission was declined.',
       );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps a memory-scoped shim rejection on the allowlist permission path instead of throwing (#9827)', async () => {
+    // Production installs the memory-scoped PermissionManager shim via
+    // `as unknown as PermissionManager` (memory-scoped-agent-config.ts);
+    // the cast used to hide that the shim lacked
+    // `isPermissionsAllowListActive`, so a shim-rejected call under an
+    // active allowlist threw TypeError in the message branch below and
+    // surfaced as an UNHANDLED_EXCEPTION tool error instead of the
+    // designed permission error. Drive the REAL shim through the
+    // scheduler to pin the end-to-end path.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const basePm = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      hasRelevantRules: vi.fn().mockReturnValue(false),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+    };
+    const scopedConfig = createMemoryScopedAgentConfig(
+      {
+        getPermissionManager: () => basePm as unknown as PermissionManager,
+      } as Config,
+      os.tmpdir(),
+    );
+    const shimPm = scopedConfig.getPermissionManager();
+    if (!shimPm) {
+      throw new Error(
+        'createMemoryScopedAgentConfig must install a PermissionManager',
+      );
+    }
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager: shimPm as unknown as {
+          isToolEnabled: (name: string) => Promise<boolean>;
+          findMatchingDenyRule: (ctx: unknown) => string | undefined;
+          isPermissionsAllowListActive: () => boolean;
+        },
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shim-allowlist-miss',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-shim-allowlist-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toContain('permissions.allow');
+      expect(message).not.toContain('UNHANDLED_EXCEPTION');
     }
     expect(execute).not.toHaveBeenCalled();
   });
