@@ -4302,7 +4302,13 @@ async function runQwenServeImpl(
         getBridge: () => AcpSessionBridge | undefined,
         assertGenerationOpen: () => void,
       ): CurrentSessionScheduledTaskCreateHandler =>
-      async ({ callerSessionId, cron, prompt, recurring }) => {
+      async ({
+        callerSessionId,
+        cron,
+        prompt,
+        recurring,
+        assertCallerPromptActive,
+      }) => {
         const targetBridge = getBridge();
         if (!targetBridge) {
           throw new Error(
@@ -4329,7 +4335,7 @@ async function runQwenServeImpl(
               prompt,
               recurring,
             },
-            { source: 'cron-tool' },
+            { source: 'cron-tool', assertCallerPromptActive },
           );
         return { id: task.id, cron: task.cron };
       };
@@ -6455,7 +6461,7 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
-    currentSessionSchedulingAvailable: deps.bridge === undefined,
+    currentSessionSchedulingAvailable: false,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,

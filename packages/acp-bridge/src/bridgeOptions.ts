@@ -686,6 +686,7 @@ export interface CurrentSessionScheduledTaskCreateInfo {
   cron: string;
   prompt: string;
   recurring: boolean;
+  assertCallerPromptActive: () => void;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {

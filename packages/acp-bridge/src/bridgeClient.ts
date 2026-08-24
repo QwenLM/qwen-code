@@ -1938,6 +1938,19 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      assertCallerPromptActive: () => {
+        const currentEntry = this.resolveEntry(callerSessionId);
+        if (
+          currentEntry !== entry ||
+          currentEntry.promptActive !== true ||
+          currentEntry.activePromptId !== promptId
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'The caller session no longer owns the active prompt',
+          );
+        }
+      },
     });
     if (
       typeof result.id !== 'string' ||

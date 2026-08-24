@@ -594,6 +594,9 @@ export function ScheduledTasksDialog({
   const [sessionMode, setSessionMode] = useState<'dedicated' | 'current'>(
     'dedicated',
   );
+  useEffect(() => {
+    if (!currentSessionSchedulingAvailable) setSessionMode('dedicated');
+  }, [currentSessionSchedulingAvailable]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(

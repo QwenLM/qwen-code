@@ -66,7 +66,10 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
-import type { ClientMcpMessageSender } from './bridgeOptions.js';
+import type {
+  ClientMcpMessageSender,
+  CurrentSessionScheduledTaskCreateInfo,
+} from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
@@ -1685,14 +1688,19 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       activePromptId: 'prompt-1',
       ...overrides,
     };
-    const handler = vi.fn(async () => ({ id: 'cron-1', cron: request.cron }));
+    const handler = vi.fn(
+      async (_info: CurrentSessionScheduledTaskCreateInfo) => ({
+        id: 'cron-1',
+        cron: request.cron,
+      }),
+    );
     const client = makeClient(undefined, undefined, {
       resolveEntry: (sessionId) =>
         sessionId === entry.sessionId ? entry : undefined,
       ownsSession,
       handler,
     });
-    return { client, handler };
+    return { client, entry, handler };
   }
 
   it('forwards only the bridge-owned active prompt', async () => {
@@ -1704,7 +1712,27 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
         request,
       ),
     ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
-    expect(handler).toHaveBeenCalledWith(request);
+    expect(handler).toHaveBeenCalledWith({
+      ...request,
+      assertCallerPromptActive: expect.any(Function),
+    });
+  });
+
+  it('lets the host revalidate the exact prompt before committing', async () => {
+    const { client, entry, handler } = makeCurrentSessionClient();
+    handler.mockImplementation(async (info) => {
+      info.assertCallerPromptActive();
+      entry.activePromptId = 'prompt-2';
+      expect(() => info.assertCallerPromptActive()).toThrow(/active prompt/i);
+      throw new Error('stale prompt');
+    });
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).rejects.toThrow('stale prompt');
   });
 
   it('rejects a forged session or prompt identity', async () => {

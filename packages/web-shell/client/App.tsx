@@ -2405,6 +2405,7 @@ export function App({
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
     setSessionBranch(undefined);
@@ -2420,6 +2421,7 @@ export function App({
     const sid = connection.sessionId;
     const sessionKey = logicalSessionKey;
     const owner = sessionOwnerGuard.capture();
+    const requestId = ++sessionStatusRequestRef.current;
     worktreeSessionKeyRef.current = sessionKey;
     if (!sid) {
       setSessionWorktree(undefined);
@@ -2438,7 +2440,11 @@ export function App({
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
+        if (
+          sessionStatusRequestRef.current === requestId &&
+          worktreeSessionKeyRef.current === sessionKey &&
+          owner.isCurrent()
+        ) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
           setSessionStatusDisplayName(summary.displayName);
@@ -2456,6 +2462,7 @@ export function App({
           .then((page) => {
             if (
               worktreeSessionKeyRef.current !== sessionKey ||
+              sessionStatusRequestRef.current !== requestId ||
               !owner.isCurrent()
             ) {
               return;
@@ -2470,7 +2477,11 @@ export function App({
           .catch(() => undefined);
       })
       .catch(() => {
-        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
+        if (
+          sessionStatusRequestRef.current === requestId &&
+          worktreeSessionKeyRef.current === sessionKey &&
+          owner.isCurrent()
+        ) {
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
           setSessionStatusDisplayName(undefined);
@@ -2486,6 +2497,7 @@ export function App({
     connection.workspaceCwd,
     logicalSessionKey,
     sessionOwnerGuard,
+    sessionHasActivePrompt,
     workspace.client,
   ]);
   // Active workspace: the connected session's workspace, else the workspace

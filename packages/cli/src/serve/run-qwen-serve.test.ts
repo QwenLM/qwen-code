@@ -5956,6 +5956,13 @@ describe('runQwenServe runtime startup failures', () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(resolveTelemetrySettings).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
+      const bootstrapCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(bootstrapCapabilities.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
+      expect(createBridge).not.toHaveBeenCalled();
       const healthRes = await fetch(`${handle.url}/health`);
       expect(healthRes.status).toBe(200);
       expect(await healthRes.json()).toEqual({ status: 'ok' });
@@ -5965,6 +5972,12 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+      const runtimeCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(runtimeCapabilities.features).toContain(
+        'scheduled_task_session_reuse',
+      );
       await handle.close();
       closed = true;
 
@@ -7942,6 +7955,9 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
+      expect(capabilitiesBody.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
 
       const port = new URL(handle.url).port;
       for (const origin of [

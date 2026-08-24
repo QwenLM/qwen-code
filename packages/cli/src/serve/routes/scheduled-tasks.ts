@@ -186,6 +186,7 @@ function assertReusableScheduledTaskSession(
   target: ScheduledTaskTarget,
   sessionId: string,
   allowActivePrompt: boolean,
+  assertCallerPromptActive?: () => void,
 ): void {
   const { bridge, workspaceCwd } = target;
   if (!bridge) {
@@ -195,7 +196,22 @@ function assertReusableScheduledTaskSession(
       'Session management is not available for this workspace',
     );
   }
-  const owner = target.resolveLiveSessionOwner?.(sessionId);
+  assertCallerPromptActive?.();
+  let owner:
+    | ReturnType<NonNullable<ScheduledTaskTarget['resolveLiveSessionOwner']>>
+    | undefined;
+  try {
+    owner = target.resolveLiveSessionOwner?.(sessionId);
+  } catch (error) {
+    writeStderrLine(
+      `qwen serve: failed to resolve scheduled-task session owner '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
   if (owner?.kind === 'unavailable') {
     throw new ExistingSessionScheduledTaskCreateError(
       503,
@@ -280,7 +296,9 @@ function assertReusableScheduledTaskSession(
 export async function createScheduledTaskWithExistingSession(
   target: ScheduledTaskTarget,
   input: ExistingSessionScheduledTaskCreateInput,
-  options: { source: 'rest' | 'cron-tool' },
+  options:
+    | { source: 'rest' }
+    | { source: 'cron-tool'; assertCallerPromptActive: () => void },
 ): Promise<DurableCronTask> {
   if (
     input.cron.length === 0 ||
@@ -302,10 +320,15 @@ export async function createScheduledTaskWithExistingSession(
     );
   }
   const allowActivePrompt = options.source === 'cron-tool';
+  const assertCallerPromptActive =
+    options.source === 'cron-tool'
+      ? options.assertCallerPromptActive
+      : undefined;
   assertReusableScheduledTaskSession(
     target,
     input.sessionId,
     allowActivePrompt,
+    assertCallerPromptActive,
   );
   target.assertGenerationOpen?.();
 
@@ -333,6 +356,7 @@ export async function createScheduledTaskWithExistingSession(
           target,
           input.sessionId,
           allowActivePrompt,
+          assertCallerPromptActive,
         );
         if (
           tasks.some((candidate) => candidate.sessionId === input.sessionId)
@@ -801,6 +825,9 @@ function registerScheduledTaskCrudRoutes(
           res.status(201).json(toView(task));
         } catch (error) {
           if (error instanceof ExistingSessionScheduledTaskCreateError) {
+            if (error.code === 'workspace_runtime_unavailable') {
+              res.set('Retry-After', '1');
+            }
             res
               .status(error.status)
               .json({ error: error.message, code: error.code });

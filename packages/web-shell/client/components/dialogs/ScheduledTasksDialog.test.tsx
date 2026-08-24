@@ -109,26 +109,35 @@ async function mount(
   document.body.appendChild(container);
   document.body.appendChild(portalRoot);
   root = createRoot(container);
-  await act(async () => {
-    root!.render(
-      <WebShellPortalRootContext.Provider value={portalRoot}>
-        <I18nProvider language="en">
-          <ScheduledTasksDialog
-            onRunPrompt={opts.onRunPrompt ?? vi.fn()}
-            onCreateViaChat={vi.fn()}
-            onOpenSession={opts.onOpenSession}
-            currentSession={opts.currentSession}
-            currentSessionSchedulingAvailable={
-              opts.currentSessionSchedulingAvailable
-            }
-            lockedWorkspace={opts.lockedWorkspace}
-            onError={opts.onError ?? vi.fn()}
-          />
-        </I18nProvider>
-      </WebShellPortalRootContext.Provider>,
-    );
-  });
+  const render = async (nextOpts: typeof opts) => {
+    await act(async () => {
+      root!.render(
+        <WebShellPortalRootContext.Provider value={portalRoot}>
+          <I18nProvider language="en">
+            <ScheduledTasksDialog
+              onRunPrompt={nextOpts.onRunPrompt ?? vi.fn()}
+              onCreateViaChat={vi.fn()}
+              onOpenSession={nextOpts.onOpenSession}
+              currentSession={nextOpts.currentSession}
+              currentSessionSchedulingAvailable={
+                nextOpts.currentSessionSchedulingAvailable
+              }
+              lockedWorkspace={nextOpts.lockedWorkspace}
+              onError={nextOpts.onError ?? vi.fn()}
+            />
+          </I18nProvider>
+        </WebShellPortalRootContext.Provider>,
+      );
+    });
+  };
+  await render(opts);
   await flush();
+  return {
+    rerender: async (nextOpts: typeof opts) => {
+      await render(nextOpts);
+      await flush();
+    },
+  };
 }
 
 // Flush the async list load (and any post-action reload) so state settles.
@@ -279,6 +288,52 @@ describe('ScheduledTasksDialog editing', () => {
       expect.objectContaining({ sessionId: currentSession.sessionId }),
       undefined,
     );
+  });
+
+  it('returns to a dedicated session when the capability disappears', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    const { rerender } = await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    act(() => {
+      sessionSelect!.value = 'current';
+      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await rerender({ currentSession });
+    expect(document.querySelector('option[value="current"]')).toBeNull();
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.not.objectContaining({ sessionId: expect.anything() }),
+      undefined,
+    );
+  });
+
+  it('reenables the current conversation when its interaction resolves', async () => {
+    const { rerender } = await mount([], {
+      currentSession: { ...currentSession, pendingInteractionCount: 1 },
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    expect(
+      document.querySelector<HTMLOptionElement>('option[value="current"]')
+        ?.disabled,
+    ).toBe(true);
+    await rerender({
+      currentSession: { ...currentSession, pendingInteractionCount: 0 },
+      currentSessionSchedulingAvailable: true,
+    });
+    expect(
+      document.querySelector<HTMLOptionElement>('option[value="current"]')
+        ?.disabled,
+    ).toBe(false);
   });
 
   it.each([
