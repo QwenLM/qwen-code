@@ -12037,7 +12037,6 @@ describe('CoreToolScheduler telemetry spans', () => {
       getIdeMode: () => false,
       getShouldAvoidPermissionPrompts: () =>
         options.shouldAvoidPermissionPrompts ?? false,
-      getIdeMode: () => false,
       getTelemetryIncludeSensitiveSpanAttributes: () =>
         options.includeSensitiveSpanAttributes ?? false,
       getTelemetrySensitiveSpanAttributeMaxLength: () =>
