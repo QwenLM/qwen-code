@@ -11138,9 +11138,10 @@ class QwenAgent implements Agent {
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
-        const settings = loadSettings(cwd);
+        const coreSettingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = loadSettings(coreSettingsCwd);
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, coreSettingsCwd);
       }
       case 'qwen/settings/setCoreValue': {
         const key = params['key'];
@@ -11153,7 +11154,8 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
-        const settings = loadSettings(cwd);
+        const coreSettingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = loadSettings(coreSettingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(
           settingKey,
@@ -11183,7 +11185,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, coreSettingsCwd);
       }
       case 'qwen/settings/setMcpServer': {
         const name = params['name'];

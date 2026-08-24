@@ -11014,6 +11014,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   // Shared boot helper for the qwen/settings/* handler tests below.
   async function bootCoreSettingsAgent(settings: LoadedSettings) {
+    if (typeof mockConfig.getTargetDir !== 'function') {
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(process.cwd());
+    }
     vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11081,6 +11084,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspace: expect.objectContaining({ values: expect.anything() }),
       merged: expect.objectContaining({ values: expect.anything() }),
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore falls back to config target dir when cwd is omitted', async () => {
+    const targetDir = '/worktree/.qwen';
+    mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/getCore', {});
+
+    expect(loadSettings).toHaveBeenCalledWith(targetDir);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setCoreValue falls back to config target dir when cwd is omitted', async () => {
+    const targetDir = '/worktree/.qwen';
+    mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'workspace',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    expect(loadSettings).toHaveBeenCalledWith(targetDir);
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'Workspace',
+      'general.outputLanguage',
+      'Japanese',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
