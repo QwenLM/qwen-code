@@ -94,6 +94,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       hasToolActivity: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
+    expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         tools: [

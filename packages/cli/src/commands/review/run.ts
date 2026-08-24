@@ -803,8 +803,11 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // open Critical is compared against its own file's recorded identity (or
   // the cached round's HEAD tree, for a file that round reviewed without
   // hashing), never against the whole cached state. A fix that moves no
-  // cached byte still clears the gate, because a file ADDED since the
-  // cached round withholds every blocker — the fix may be the new file. The
+  // cached byte still clears the gate, because — when the cached round
+  // enumerated the whole population — a file ADDED since it withholds every
+  // blocker: the fix may be the new file. (A scoped capture, `--file` or
+  // `--no-untracked`, cannot reconstruct a population it only partially
+  // saw, so there the date keys on the blocker's own file alone.) The
   // residual is a false PASS — an unrelated new file withholds a standing
   // blocker, and an undatable blocker leans the same way — never a false
   // failure no action clears, and the stop's rendered blocker list still

@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { gitOpt, gitRaw, gitWithInput, gitWithInputRaw } from './git.js';
+import { LITERAL_PATHSPECS } from './diff-flags.js';
 
 /**
  * Per-file identity for a path whose state CANNOT be captured: a directory
@@ -105,6 +106,13 @@ export function hashWorktreeFiles(
   repoRoot: string,
   paths: readonly string[],
 ): Record<string, string> {
+  // Dedup at the module boundary: `check-attr` answers once per input
+  // OCCURRENCE, so a caller that lists a path twice — two open Criticals
+  // cite the same file in an ordinary ledger — appends the rendering suffix
+  // once per listing and forges an identity that never matches the cache's
+  // single-suffix one. The blocker date then reads that file as "moved"
+  // under every possible tree state, for ever.
+  paths = [...new Set(paths)];
   // Null prototype: a file legally named `__proto__` must store and read as
   // an ordinary own key. On a plain object the assignment hits the inherited
   // setter (a silent no-op) and the read returns Object.prototype — the file
@@ -411,7 +419,20 @@ export function revisionIdentities(
   if (headSha === null || paths.length === 0) return out;
   let raw: Buffer;
   try {
-    raw = gitRaw('-C', repoRoot, 'ls-tree', '-z', headSha, '--', ...paths);
+    // LITERAL_PATHSPECS like every sibling pathspec-taking call: the paths
+    // come from the model-written ledger, an untrusted-input boundary, and a
+    // name beginning `:(` is pathspec magic — one such path fatals the WHOLE
+    // batch, and the catch would read every sibling in it as undatable too.
+    raw = gitRaw(
+      '-C',
+      repoRoot,
+      LITERAL_PATHSPECS,
+      'ls-tree',
+      '-z',
+      headSha,
+      '--',
+      ...paths,
+    );
   } catch {
     return out;
   }

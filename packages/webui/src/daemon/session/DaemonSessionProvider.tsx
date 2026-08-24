@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
+  getWorkspaceModelsAfterSessionClear,
   getPromptSettledKey,
   normalizeWorkspaceIdentity,
   resolveSessionRestoreTimeouts,
@@ -677,6 +678,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   agentsVersion: 0,
   toolsVersion: 0,
   settingsVersion: 0,
+  skillsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
@@ -2137,6 +2139,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
               );
             }
             if (replayExceededCapacity) {
@@ -2616,7 +2619,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
+              bumpWorkspaceEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -2924,6 +2931,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -3070,6 +3080,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                context: undefined,
+                reasoning: undefined,
+                models: getWorkspaceModelsAfterSessionClear(current),
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -3096,6 +3109,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -3426,6 +3442,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        context: undefined,
+                        reasoning: undefined,
+                        models: getWorkspaceModelsAfterSessionClear(current),
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
@@ -4452,11 +4471,16 @@ function getNumber(
 function bumpWorkspaceEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
+  workspaceCwd: string,
 ): void {
   let memory = 0;
   let agents = 0;
   let tools = 0;
   let settings = 0;
+  const skillMutations: Array<
+    NonNullable<DaemonWorkspaceEventSignals['lastSkillMutation']>
+  > = [];
+  const seenSkillMutationIds = new Set<string>();
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
@@ -4478,7 +4502,14 @@ function bumpWorkspaceEventSignals(
         tools += 1;
         break;
       case 'workspace.settings.changed':
-        settings += 1;
+        if (event.mutation?.kind === 'skill_toggle') {
+          if (!seenSkillMutationIds.has(event.mutation.id)) {
+            seenSkillMutationIds.add(event.mutation.id);
+            skillMutations.push(event.mutation);
+          }
+        } else {
+          settings += 1;
+        }
         break;
       case 'workspace.mcp.budget_warning':
       case 'workspace.mcp.child_refused':
@@ -4527,22 +4558,61 @@ function bumpWorkspaceEventSignals(
       artifacts +
       init +
       auth ===
-    0
+      0 &&
+    skillMutations.length === 0
   )
     return;
 
-  setSignals((current) => ({
-    memoryVersion: current.memoryVersion + memory,
-    agentsVersion: current.agentsVersion + agents,
-    toolsVersion: current.toolsVersion + tools,
-    settingsVersion: current.settingsVersion + settings,
-    mcpVersion: current.mcpVersion + mcp,
-    extensionsVersion: current.extensionsVersion + extensions,
-    artifactsVersion: current.artifactsVersion + artifacts,
-    ...(lastExtensionChange ? { lastExtensionChange } : {}),
-    initVersion: current.initVersion + init,
-    authVersion: current.authVersion + auth,
-  }));
+  setSignals((current) => {
+    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existingIds = new Set(existing.map((mutation) => mutation.id));
+    const newSkillMutations = skillMutations.filter(
+      (mutation) => !existingIds.has(mutation.id),
+    );
+    if (
+      memory +
+        agents +
+        tools +
+        settings +
+        mcp +
+        extensions +
+        artifacts +
+        init +
+        auth ===
+        0 &&
+      newSkillMutations.length === 0
+    ) {
+      return current;
+    }
+    return {
+      memoryVersion: current.memoryVersion + memory,
+      agentsVersion: current.agentsVersion + agents,
+      toolsVersion: current.toolsVersion + tools,
+      settingsVersion: current.settingsVersion + settings,
+      skillsVersion: current.skillsVersion + newSkillMutations.length,
+      mcpVersion: current.mcpVersion + mcp,
+      extensionsVersion: current.extensionsVersion + extensions,
+      artifactsVersion: current.artifactsVersion + artifacts,
+      ...(newSkillMutations.length > 0
+        ? { lastSkillMutation: newSkillMutations.at(-1) }
+        : current.lastSkillMutation
+          ? { lastSkillMutation: current.lastSkillMutation }
+          : {}),
+      ...(newSkillMutations.length > 0
+        ? {
+            skillMutationsByCwd: {
+              ...current.skillMutationsByCwd,
+              [workspaceCwd]: [...existing, ...newSkillMutations],
+            },
+          }
+        : current.skillMutationsByCwd
+          ? { skillMutationsByCwd: current.skillMutationsByCwd }
+          : {}),
+      ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      initVersion: current.initVersion + init,
+      authVersion: current.authVersion + auth,
+    };
+  });
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
