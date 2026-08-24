@@ -11,7 +11,7 @@ import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import {
   normalizeForEchoCompare,
   sanitizeTitle,

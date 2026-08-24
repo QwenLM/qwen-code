@@ -18,7 +18,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -109,7 +109,7 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import {
   getCustomSystemPrompt,
@@ -1942,8 +1942,7 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-    | null = null;
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -3038,6 +3037,24 @@ export class GeminiChat {
         let protocolTagLeakRetryCount = 0;
         const totalInvalidStreamRetryCount = () =>
           transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
+        // The armed attempt can be rescheduled by a competing retry path
+        // (rate limit, transport replay/continuation, reactive compression)
+        // before its outcome is known; the rescheduled attempt is still the
+        // last one the exhausted invalid-stream budget allows, so keep the
+        // one-shot quiet-completion acceptance armed for it (#9026).
+        const rearmQuietAcceptanceIfBudgetSpent = () => {
+          // Keyed to the transient bucket only: quiet completions surface
+          // as NO_TOOL_RESULT_PROGRESS (a transient type), so only a spent
+          // transient budget entitles the next attempt to acceptance. A
+          // tag-leak-only exhaustion must not arm — a quiet ending still
+          // has its full retry-first budget ahead of it (#7039).
+          if (
+            transientInvalidStreamRetryCount >=
+            INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+          ) {
+            acceptQuietToolResultCompletionOnNextAttempt = true;
+          }
+        };
         let transportStreamRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
@@ -3171,6 +3188,7 @@ export class GeminiChat {
           transportAttemptText = '';
         };
 
+        let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptText = '';
           let streamYieldedChunk = false;
@@ -3199,6 +3217,9 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY };
             }
 
+            const acceptQuietToolResultCompletion =
+              acceptQuietToolResultCompletionOnNextAttempt;
+            acceptQuietToolResultCompletionOnNextAttempt = false;
             const stream = await self.makeApiCallAndProcessStream(
               model,
               buildAttemptContents(),
@@ -3213,6 +3234,7 @@ export class GeminiChat {
               transportContinuationPrefix.length > 0
                 ? transportContinuationPrefix
                 : undefined,
+              acceptQuietToolResultCompletion,
             );
 
             lastFinishReason = undefined;
@@ -3338,6 +3360,7 @@ export class GeminiChat {
                   },
                 };
                 await delayPromise;
+                rearmQuietAcceptanceIfBudgetSpent();
                 continue;
               }
 
@@ -3404,6 +3427,7 @@ export class GeminiChat {
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
+              rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
             // Continuation recovery (issue #7832). Once answer text has been
@@ -3461,6 +3485,7 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY, isContinuation: true };
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
+              rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
             if (isRetryableStreamTransportError) {
@@ -3563,6 +3588,7 @@ export class GeminiChat {
                     // the delivered text.
                     resetTransportContinuation();
                     suppressNextRetryEvent = true;
+                    rearmQuietAcceptanceIfBudgetSpent();
                     continue;
                   }
 
@@ -3644,6 +3670,13 @@ export class GeminiChat {
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
               }
+              // The armed attempt itself can fail with an invalid-stream
+              // error and be rescheduled here; rearm so the acceptance is
+              // not lost across error types (a tag-leak retry scheduled
+              // after the transient budget is spent must still land armed).
+              // Transient-keyed, so a tag-leak-only exhaustion never arms
+              // prematurely (#9026, #7039 retry-first).
+              rearmQuietAcceptanceIfBudgetSpent();
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
@@ -3730,9 +3763,13 @@ export class GeminiChat {
         ): AsyncGenerator<InvalidStreamRetryEvent> {
           let transientRetryCount = 0;
           let protocolTagLeakRetryCount = 0;
+          let acceptQuietToolResultCompletionOnNextAttempt = false;
           for (;;) {
             const attemptState = buildAttempt();
             try {
+              const acceptQuietToolResultCompletion =
+                acceptQuietToolResultCompletionOnNextAttempt;
+              acceptQuietToolResultCompletionOnNextAttempt = false;
               const stream = await self.makeApiCallAndProcessStream(
                 model,
                 attemptState.requestContents,
@@ -3741,6 +3778,8 @@ export class GeminiChat {
                 requestOverrides,
                 requestRouteKey,
                 turnGoalContext,
+                undefined,
+                acceptQuietToolResultCompletion,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3767,6 +3806,16 @@ export class GeminiChat {
                 protocolTagLeakRetryCount = nextContinuationRetryCount;
               } else {
                 transientRetryCount = nextContinuationRetryCount;
+              }
+              // Same arming rule as the main send loop (#9026): keyed to
+              // the transient bucket only (quiet completions surface as a
+              // transient-type error), so a tag-leak-only exhaustion does
+              // not arm prematurely (#7039 retry-first).
+              if (
+                transientRetryCount >=
+                INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+              ) {
+                acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -4325,6 +4374,7 @@ export class GeminiChat {
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -4407,6 +4457,7 @@ export class GeminiChat {
       routeKey,
       goalContext,
       transportContinuationPrefix,
+      acceptQuietToolResultCompletion,
     );
   }
 
@@ -4924,6 +4975,7 @@ export class GeminiChat {
     routeKey: string,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -5344,12 +5396,17 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Thought-only responses remain valid for ordinary user turns. After a tool
-    // result, they do not advance the agent without text or another tool call.
+    // Thought-only responses remain valid for ordinary user turns. After a
+    // tool result, they do not advance the agent without text or another
+    // tool call, so they retry (#7039) — and once that retry budget is
+    // exhausted the quiet completion is accepted rather than failing the
+    // run (#9026): some model families legitimately end turns silently
+    // after a tool result.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&
       !hasToolCall &&
@@ -5362,17 +5419,44 @@ export class GeminiChat {
         );
       }
       if (lacksVisibleToolResultProgress) {
+        const truncatedAtMaxTokens =
+          deferredFinishReason === FinishReason.MAX_TOKENS;
+        // Only STOP is a complete, non-truncated, non-blocked quiet turn end.
+        // Unknown converter fall-through values such as
+        // FINISH_REASON_UNSPECIFIED must fail closed instead of being accepted
+        // as an empty model turn.
+        const unsupportedQuietFinishReason =
+          deferredFinishReason !== FinishReason.STOP;
+        if (
+          truncatedAtMaxTokens ||
+          unsupportedQuietFinishReason ||
+          !acceptQuietToolResultCompletion
+        ) {
+          throw new InvalidStreamError(
+            'Model stream ended after a tool result without visible progress.',
+            truncatedAtMaxTokens
+              ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+              : 'NO_TOOL_RESULT_PROGRESS',
+          );
+        }
+        // Retry budget exhausted and the model still ends the turn quietly
+        // with a valid finish reason (#9026). Accept it as completion.
+        // When the attempt produced nothing at all, the canonical
+        // placeholder is appended to `acceptedTurnParts` below — the
+        // single source for both the JSONL record and the history push,
+        // keeping user/model alternation well-formed for the next request
+        // while transcript and history agree.
+        acceptedQuietToolResultCompletion = true;
+        debugLogger.warn(
+          'Accepting quiet post-tool-result completion after retry budget ' +
+            'exhaustion (#9026)',
+        );
+      } else {
         throw new InvalidStreamError(
-          'Model stream ended after a tool result without visible progress.',
-          deferredFinishReason === FinishReason.MAX_TOKENS
-            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
-            : 'NO_TOOL_RESULT_PROGRESS',
+          'Model stream ended with empty response text.',
+          'NO_RESPONSE_TEXT',
         );
       }
-      throw new InvalidStreamError(
-        'Model stream ended with empty response text.',
-        'NO_RESPONSE_TEXT',
-      );
     }
 
     if (recoveredChunk) {
@@ -5447,28 +5531,48 @@ export class GeminiChat {
         .join('')
         .trim();
     }
+    // The exact parts the accepted turn will carry into `this.history.push`
+    // below — computed once, before the JSONL record, so an accepted quiet
+    // completion records exactly what history keeps (including non-text
+    // parts like inlineData, which have no slot in the text/toolCall
+    // assembly and would otherwise desync transcript from history on
+    // `--resume`).
+    const acceptedTurnParts: Part[] = [
+      ...(thoughtContentPart ? [thoughtContentPart] : []),
+      ...consolidatedHistoryParts,
+    ];
+    if (acceptedQuietToolResultCompletion && acceptedTurnParts.length === 0) {
+      acceptedTurnParts.push({ text: GEMINI_EMPTY_CONTENT_PLACEHOLDER });
+    }
     if (
       willPersistToHistory &&
-      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+      (acceptedQuietToolResultCompletion ||
+        thoughtContentPart ||
+        contentText ||
+        hasToolCall ||
+        usageMetadata)
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       const recordArgs = {
         model,
-        message: [
-          ...(thoughtContentPart ? [thoughtContentPart] : []),
-          ...(contentText ? [{ text: contentText }] : []),
-          ...(hasToolCall
-            ? contentParts
-                .map(redactStructuredOutputArgsForRecording)
-                .filter(
-                  (
-                    p,
-                  ): p is { functionCall: NonNullable<Part['functionCall']> } =>
-                    p !== null,
-                )
-            : []),
-        ],
+        message: acceptedQuietToolResultCompletion
+          ? acceptedTurnParts
+          : [
+              ...(thoughtContentPart ? [thoughtContentPart] : []),
+              ...(contentText ? [{ text: contentText }] : []),
+              ...(hasToolCall
+                ? contentParts
+                    .map(redactStructuredOutputArgsForRecording)
+                    .filter(
+                      (
+                        p,
+                      ): p is {
+                        functionCall: NonNullable<Part['functionCall']>;
+                      } => p !== null,
+                    )
+                : []),
+            ],
         tokens: coercedUsage
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
@@ -5556,10 +5660,7 @@ export class GeminiChat {
 
     this.history.push({
       role: 'model',
-      parts: [
-        ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...consolidatedHistoryParts,
-      ],
+      parts: acceptedTurnParts,
     });
     if (deferredFinishReason) {
       yield {

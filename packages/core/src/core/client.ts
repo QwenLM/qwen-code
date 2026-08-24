@@ -112,7 +112,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Utilities
 import {
@@ -124,7 +124,7 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   type AgentAvailabilityEntry,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
@@ -346,6 +346,31 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,
 ]);
+
+type MainSessionPromptConfig = Pick<
+  Config,
+  | 'getSystemPrompt'
+  | 'getModel'
+  | 'getOutputStyle'
+  | 'getExperimentalZedIntegration'
+  | 'getInputFormat'
+  | 'isInteractive'
+>;
+
+export function getMainSessionBaseSystemPrompt(
+  config: MainSessionPromptConfig,
+): string {
+  const overrideSystemPrompt = config.getSystemPrompt();
+  return overrideSystemPrompt
+    ? getCustomSystemPrompt(overrideSystemPrompt)
+    : getCoreSystemPrompt(
+        undefined,
+        config.getModel(),
+        undefined,
+        resolveInteractionMode(config),
+        config.getOutputStyle(),
+      );
+}
 
 export class GeminiClient {
   private chat?: GeminiChat;
@@ -1165,15 +1190,7 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const overrideSystemPrompt = this.config.getSystemPrompt();
-    const base = overrideSystemPrompt
-      ? getCustomSystemPrompt(overrideSystemPrompt)
-      : getCoreSystemPrompt(
-          undefined,
-          this.config.getModel(),
-          undefined,
-          resolveInteractionMode(this.config),
-        );
+    const base = getMainSessionBaseSystemPrompt(this.config);
     const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
