@@ -67,7 +67,7 @@ import {
 import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { getStartupContextLength } from '../../utils/environmentContext.js';
+import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
   getCurrentAgentId,
@@ -125,6 +125,7 @@ import {
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import type {
+  AgentTask,
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
@@ -384,6 +385,43 @@ export function resolveSubagentApprovalMode(
 }
 
 /**
+ * Walks a foreground launch's registry lineage (parentAgentId links) to the
+ * nearest BACKGROUNDED, still-running ancestor entry.
+ *
+ * Why: a nested foreground agent has no inline UI. Its scheduler's
+ * TOOL_WAITING_APPROVAL fires on the invocation's own emitter, which nothing
+ * bridges — the call would wait forever (the batch promise only resolves on
+ * completion or abort). When such an ancestor exists, the launch path bridges
+ * the nested emitter to that ancestor's Background-tasks entry, parking the
+ * approval exactly where the ancestor's own approvals go. No ancestor (a
+ * top-level foreground launch from the main session) → undefined → no bridge,
+ * and the existing inline confirmation path applies unchanged.
+ *
+ * Foreground entries stay registered while running and carry parentAgentId
+ * (register() in the launch path), so the chain is walkable mid-execution.
+ * The walk must reach the ancestor on ANY supported lineage depth
+ * (maxSubagentDepth is configurable up to MAX_SUBAGENT_DEPTH_LIMIT), so
+ * cycle protection comes from a visited set rather than a hop budget.
+ */
+export function findBackgroundedAncestorAgentId(
+  registry: { get(agentId: string): AgentTask | undefined },
+  startAgentId: string | null | undefined,
+): string | undefined {
+  const seen = new Set<string>();
+  let id = startAgentId ?? undefined;
+  while (id !== undefined && !seen.has(id)) {
+    seen.add(id);
+    const entry = registry.get(id);
+    if (!entry) return undefined;
+    if (entry.isBackgrounded) {
+      return entry.status === 'running' ? id : undefined;
+    }
+    id = entry.parentAgentId ?? undefined;
+  }
+  return undefined;
+}
+
+/**
  * Maps PermissionMode back to ApprovalMode.
  */
 function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
@@ -423,8 +461,8 @@ export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
  *
  * Used by spawn sites that may be called with a wrapper-on-wrapper
  * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
- * receiving `bgConfig = Object.create(agentConfig)` from the
- * background-agent path) to skip a redundant rebuild.
+ * receiving the stamped `createApprovalModeOverride` override passed
+ * directly from the background-agent path) to skip a redundant rebuild.
  */
 export function hasRebuiltToolRegistry(config: Config): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -681,6 +719,30 @@ export async function createApprovalModeOverride(
   }
 
   return { config: override as Config, cleanup };
+}
+
+/**
+ * Stamps a background agent's prompt-avoidance policy onto its per-launch /
+ * per-resume override config. Background agents have no inline UI, so their
+ * scheduler auto-denies calls that still need confirmation — unless the
+ * agent opts into permission bubbling (`shouldBubble`), in which case
+ * prompts surface in the parent session's Background-tasks UI instead.
+ *
+ * The stamp MUST land on the config the rebuilt tool registry's tools
+ * (including any nested AgentTool) are bound to — not on a wrapper above
+ * it. Nested launches branch their own configs off that config via
+ * Object.create, so the policy must sit where their prototype chains can
+ * reach it: stamped only on a wrapper, a nested scheduler resolved
+ * Config.prototype's `false`, believed it could prompt, and waited forever
+ * on a TOOL_WAITING_APPROVAL nobody could see or answer. Both callers pass
+ * a config freshly created by {@link createApprovalModeOverride}, so the
+ * stamp leaks nowhere.
+ */
+export function stampBackgroundPromptPolicy(
+  config: Config,
+  shouldBubble: boolean,
+): void {
+  config.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 }
 
 /**
@@ -2601,17 +2663,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } catch {
             // Listing is best-effort; the bare message is still actionable.
           }
-          return {
-            llmContent: notFoundMessage,
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: effectiveSubagentType,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: notFoundMessage,
-            },
-          };
+          return this.buildSpawnBlockedResult(notFoundMessage, notFoundMessage);
         }
         subagentConfig = loadedConfig;
       }
@@ -2773,6 +2825,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         return {
           llmContent: reason,
+          // `error` marks the call failed in the scheduler (see
+          // buildSpawnBlockedResult): a launch that never ran must not
+          // count as a successful agent call. The failure path forwards
+          // only `error.message` to the model, so it carries the full
+          // provisioning reason.
+          error: { message: reason },
           returnDisplay: this.currentDisplay,
         };
       };
@@ -2996,15 +3054,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // Background agents have no inline UI. Preserve the resolved approval
-      // mode while overriding only the prompt-avoidance policy used by their
-      // scheduler.
-      const subagentRuntimeConfig = shouldRunInBackground
-        ? (Object.create(agentConfig) as Config)
-        : agentConfig;
       if (shouldRunInBackground) {
-        subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
-          !shouldBubble;
+        stampBackgroundPromptPolicy(agentConfig, shouldBubble);
       }
 
       // Background agents need a dedicated emitter so their transcript never
@@ -3033,7 +3084,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
         const fork = await this.createForkSubagent(
-          subagentRuntimeConfig as Config,
+          agentConfig,
           backgroundEventEmitter,
         );
         subagent = fork.subagent;
@@ -3043,7 +3094,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
-          subagentRuntimeConfig as Config,
+          agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
             ...(shouldRunInBackground && subagentModelId
@@ -3247,6 +3298,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           restoreParentPM();
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
+            error: { message: `${errorMessage}${wtSuffix}` },
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4018,6 +4070,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
+      // Nested foreground launches under a backgrounded ancestor (a fork or
+      // any background agent that spawns sub-agents) have no inline UI:
+      // their TOOL_WAITING_APPROVAL fires on this invocation's emitter,
+      // which nothing else bridges. Park those approvals on the ancestor's
+      // Background-tasks entry — the same place the ancestor's own approvals
+      // go — so the user can answer them from the dialog instead of the
+      // nested call hanging forever. Top-level foreground launches have no
+      // such ancestor and keep the inline confirmation path unchanged.
+      // Double answers (dialog + any inline path) are deduped by the
+      // runtime's per-call responded guard.
+      const approvalAncestorId = findBackgroundedAncestorAgentId(
+        registry,
+        getCurrentAgentId(),
+      );
+      // Gated like the sibling bridges: under an auto-denying ancestor
+      // this launch inherits prompt-avoidance through its config chain, so
+      // no TOOL_WAITING_APPROVAL can fire and the subscription would be
+      // dead.
+      const cleanupNestedApprovalBridge =
+        approvalAncestorId && !this.config.getShouldAvoidPermissionPrompts?.()
+          ? registry.bridgeApprovalEvents(
+              approvalAncestorId,
+              this.eventEmitter,
+              { nestedSource: true },
+            )
+          : undefined;
+
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
@@ -4135,6 +4214,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        cleanupNestedApprovalBridge?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before
@@ -4237,6 +4317,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       return {
         llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        error: {
+          message: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        },
         returnDisplay: errorDisplay,
       };
     }
