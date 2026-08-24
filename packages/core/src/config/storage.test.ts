@@ -1224,6 +1224,56 @@ describe('Storage – ensureAuditFallbackDir', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a listed file raced into a symlink inside the re-run content check',
+    () => {
+      // The pre-return re-validation re-runs the content check, but that
+      // re-run decides entry types from its own readdir snapshot: a same-UID
+      // process can swap a listed regular file for a symlink between that
+      // snapshot and the loop reaching the entry (the landing is reused
+      // across runs and its entry names are predictable). Every arm must
+      // decide from the loop's own fresh lstat, not the snapshot's dirents.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-swap');
+      const name = '2026-01-01-000000-mod.md';
+      actualFs.writeFileSync(path.join(leaf, name), '# report\n');
+      const escape = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-swap-'),
+      );
+      const audits = path.join(home, 'audits');
+      let adoptionCalls = 0;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (String(args[0]) === audits) {
+            adoptionCalls += 1;
+            if (adoptionCalls === 2) {
+              // Swap the listed file for a symlink, then feed the re-run
+              // content check a snapshot whose dirent still says regular
+              // file — the exact state the race leaves behind.
+              actualFs.rmSync(path.join(leaf, name));
+              actualFs.symlinkSync(escape, path.join(leaf, name));
+              mockReaddirSync.mockImplementationOnce(() => [
+                {
+                  name,
+                  isSymbolicLink: () => false,
+                  isFile: () => true,
+                  isDirectory: () => false,
+                },
+              ]);
+            }
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-swap')).toThrow(
+          /contains a symlink/,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('surfaces the actionable refusal when audits is planted as a regular file', () => {
     // A non-directory `audits` makes the containment check's realpath fail
     // with ENOTDIR; that must fall through to the adoption checks and their

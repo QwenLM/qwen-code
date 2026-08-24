@@ -495,34 +495,32 @@ export class Storage {
       );
     }
     for (const entry of entries) {
-      // Some filesystems return an unknown dirent type, and then BOTH
-      // isSymbolicLink() and isFile() answer false — the entry would slip
-      // past every arm below. Ask the kernel directly for those.
-      const typed =
-        entry.isSymbolicLink() || entry.isFile() || entry.isDirectory();
-      let stat: fs.Stats | undefined;
-      if (!typed) {
-        try {
-          stat = fs.lstatSync(path.join(dir, entry.name));
-        } catch {
-          continue; // vanished between readdir and lstat
-        }
+      // The dirent type is a snapshot from the readdir above, and the
+      // landing is reused across runs with predictable entry names: a
+      // same-UID process can swap what a typed dirent names between the
+      // snapshot and this loop reaching it. Lstat every entry fresh and
+      // drive every arm — type AND nlink — from that one stat.
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(path.join(dir, entry.name));
+      } catch {
+        continue; // vanished between readdir and lstat
       }
-      if (entry.isSymbolicLink() || stat?.isSymbolicLink()) {
+      if (stat.isSymbolicLink()) {
         throw new FatalConfigError(
           `audit: the fallback landing ${dir} contains a symlink ` +
             `(${entry.name}) — artifacts written under it would land outside ` +
             `the landing. Remove it and re-run.`,
         );
       }
-      if (entry.isDirectory() || stat?.isDirectory()) {
+      if (stat.isDirectory()) {
         // Artifacts nest BELOW the leaf, so a directory child is validated
         // like the leaf itself — a planted real subdirectory holding a
         // symlinked file is the same escape.
         Storage.assertAuditLandingIsClean(path.join(dir, entry.name));
         continue;
       }
-      if (!(entry.isFile() || stat?.isFile())) {
+      if (!stat.isFile()) {
         throw new FatalConfigError(
           `audit: the fallback landing ${dir} contains a special file ` +
             `(${entry.name}) — a write to it would block or be captured by ` +
@@ -531,13 +529,7 @@ export class Storage {
       }
       // A hardlink twin proves another name for the same inode exists
       // somewhere this check can never see.
-      let links: number;
-      try {
-        links = (stat ?? fs.lstatSync(path.join(dir, entry.name))).nlink;
-      } catch {
-        continue; // vanished between readdir and lstat
-      }
-      if (links > 1) {
+      if (stat.nlink > 1) {
         throw new FatalConfigError(
           `audit: the fallback landing ${dir} contains a hardlinked file ` +
             `(${entry.name}) — a write to it would also write through its ` +
