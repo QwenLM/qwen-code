@@ -147,8 +147,6 @@ export function resolveOrchestration(
 
   return {
     mode: 'workflow',
-    reason:
-      'workflows are enabled, this review is a Step 3A roster, and it needs ' +
-      'no worktree pin.',
+    reason: 'workflows are enabled, and this review is a Step 3A roster.',
   };
 }

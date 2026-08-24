@@ -120,6 +120,9 @@ describe('resolveOrchestration — the gates', () => {
       ON,
     );
     expect(worktree.mode).toBe('workflow');
+    // The pin travels with the generated script; the retired claim that the
+    // path needs none must not survive in the verdict.
+    expect(worktree.reason).not.toMatch(/no worktree pin/);
   });
 });
 

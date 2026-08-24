@@ -76,7 +76,6 @@ export interface FileMetric {
   binary: boolean;
 }
 
-/** Everything a review plan says about a diff, regardless of where it came from. */
 /**
  * Read a plan report, or throw naming the command, the path and the reason.
  *
@@ -95,6 +94,7 @@ export function readPlanReport(command: string, planPath: string): PlanReport {
   }
 }
 
+/** Everything a review plan says about a diff, regardless of where it came from. */
 export interface PlanReport {
   diffLines: number;
   diffChars: number;

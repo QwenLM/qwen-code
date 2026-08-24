@@ -36,7 +36,7 @@ import {
 } from './emit-workflow.js';
 import { buildLaunch } from './agent-prompt.js';
 import { briefPath, readRecordedPrompts } from './lib/prompt-record.js';
-import { worktreeResidue } from './lib/worktree.js';
+import { RESIDUE_PATH_CAP, worktreeResidue } from './lib/worktree.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import { reviewWorkflowScriptPath } from './lib/paths.js';
@@ -425,6 +425,7 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
   // fixture could not measure the healthy path.
   let repo: string;
   let tree: string;
+  let headSha: string;
   let dir: string;
   let planPath: string;
   let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
@@ -438,6 +439,13 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
     writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
     execFileSync('git', ['add', '-A'], { cwd: repo });
     execFileSync('git', ['commit', '-qm', 'head'], { cwd: repo });
+    // Every worktree-mode fetch records the fetched head sha in the plan,
+    // and the residue probe fails closed without a usable one — so the
+    // fixture anchors like a real plan.
+    headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
     tree = join(repo, '.qwen', 'tmp', 'review-wt');
     mkdirSync(dirname(tree), { recursive: true });
     execFileSync('git', ['worktree', 'add', '--detach', '-q', tree, 'HEAD'], {
@@ -450,7 +458,7 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
     planPath = join(dir, 'plan.json');
     writeFileSync(
       planPath,
-      JSON.stringify(localPlan({ worktreePath: tree })),
+      JSON.stringify(localPlan({ worktreePath: tree, fetchedSha: headSha })),
       'utf8',
     );
   });
@@ -468,8 +476,8 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
   // agent reading the brief, and the launch prompt only points at it — a
   // prompt-level comparison passes with the block silently dropped.
   it('bakes the same residue evidence the hand-launched roster would', () => {
-    const plan = localPlan({ worktreePath: tree });
-    const residue = worktreeResidue(tree);
+    const plan = localPlan({ worktreePath: tree, fetchedSha: headSha });
+    const residue = worktreeResidue(tree, RESIDUE_PATH_CAP, headSha);
     expect(residue.paths.length).toBeGreaterThan(0);
 
     const agents = buildFanOutRoster(plan, planPath);
@@ -509,7 +517,10 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
   // against is not the commit the plan says it is. The hand-launched path
   // prints it; this command owes the same.
   it('warns on stderr like the hand-launched path, naming the dirty paths', () => {
-    buildFanOutRoster(localPlan({ worktreePath: tree }), planPath);
+    buildFanOutRoster(
+      localPlan({ worktreePath: tree, fetchedSha: headSha }),
+      planPath,
+    );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'the review worktree carries changes its commit does not',
@@ -522,7 +533,10 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
 
   it('warns that an unmeasured tree is not a clean one', () => {
     buildFanOutRoster(
-      localPlan({ worktreePath: join(dir, 'not-a-worktree') }),
+      localPlan({
+        worktreePath: join(dir, 'not-a-worktree'),
+        fetchedSha: headSha,
+      }),
       planPath,
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
