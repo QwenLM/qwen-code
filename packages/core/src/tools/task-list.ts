@@ -66,9 +66,12 @@ class TaskListInvocation extends BaseToolInvocation<
       };
     }
 
+    const ownerParam = this.params.owner?.trim() || undefined;
+    const blockedByParam = this.params.blockedBy?.trim() || undefined;
+
     let ownerFilter: string | undefined;
-    if (this.params.owner !== undefined) {
-      ownerFilter = sanitizeName(this.params.owner);
+    if (ownerParam !== undefined) {
+      ownerFilter = sanitizeName(ownerParam);
       if (!ownerFilter) {
         const msg =
           'Cannot filter by owner: owner must include at least one ' +
@@ -84,7 +87,7 @@ class TaskListInvocation extends BaseToolInvocation<
     const tasks = await listTasks(teamName, {
       status: this.params.status,
       owner: ownerFilter,
-      blockedBy: this.params.blockedBy,
+      blockedBy: blockedByParam,
     });
 
     if (tasks.length === 0) {

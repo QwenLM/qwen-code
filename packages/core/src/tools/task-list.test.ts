@@ -130,6 +130,36 @@ describe('TaskListTool', () => {
     expect(result.llmContent).toContain('Legacy');
   });
 
+  it('treats a blank owner filter as omitted', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Owned',
+      description: 'desc',
+    });
+    await updateTask(TEAM, t.id, { owner: 'alice' });
+
+    const invocation = tool.build({ owner: '   ' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Owned');
+    expect(result.llmContent).not.toContain('No tasks found');
+  });
+
+  it('treats a blank blockedBy filter as omitted', async () => {
+    const dependency = await createTask(TEAM, {
+      subject: 'Dependency',
+      description: 'desc',
+    });
+    const blocked = await createTask(TEAM, {
+      subject: 'Blocked',
+      description: 'desc',
+    });
+    await updateTask(TEAM, blocked.id, { addBlockedBy: [dependency.id] });
+
+    const invocation = tool.build({ blockedBy: '' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Blocked');
+    expect(result.llmContent).not.toContain('No tasks found');
+  });
+
   it('rejects owner filters that sanitize to empty', async () => {
     const invocation = tool.build({ owner: '!!!' });
     const result = await invocation.execute(new AbortController().signal);
