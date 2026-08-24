@@ -13,6 +13,7 @@ import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import {
   getDisplayableImageMimeType,
   MAX_IMAGE_SIZE,
+  splitMessageContentForImages,
   type ImageAttachment,
 } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
@@ -667,14 +668,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // echo on the SSE bus). Posted before the prompt is dispatched so
       // the user block renders ahead of this turn's assistant frames.
       const transcriptEchoSessionId = this.agentManager.currentSessionId;
-      if (transcriptEchoSessionId && displayText) {
+      const transcriptDisplayText =
+        splitMessageContentForImages(displayText).text;
+      if (transcriptEchoSessionId && transcriptDisplayText) {
         this.sendToWebView({
           type: 'transcriptUpdate',
           data: {
             sessionId: transcriptEchoSessionId,
             update: {
               sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text: displayText },
+              content: { type: 'text', text: transcriptDisplayText },
             },
           },
         });

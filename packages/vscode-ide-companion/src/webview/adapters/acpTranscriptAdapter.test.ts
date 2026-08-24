@@ -78,6 +78,29 @@ describe('cachedMessageToNotification', () => {
     });
   });
 
+  it('strips persisted image references from restored user text', () => {
+    expect(
+      cachedMessageToNotification(
+        {
+          role: 'user',
+          content: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+        },
+        'session-1',
+      ),
+    ).toMatchObject({
+      update: {
+        content: { type: 'text', text: 'look at this' },
+      },
+    });
+
+    expect(
+      cachedMessageToNotification(
+        { role: 'user', content: '@/tmp/clipboard/clipboard-1.png' },
+        'session-1',
+      ),
+    ).toBeNull();
+  });
+
   it('stamps every cached role as a discrete message', () => {
     for (const role of ['user', 'assistant', 'thinking']) {
       const notification = cachedMessageToNotification(

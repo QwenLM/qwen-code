@@ -15,6 +15,7 @@ import {
   reduceDaemonTranscriptEvents,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonEvent, DaemonTranscriptState } from '@qwen-code/sdk/daemon';
+import { splitMessageContentForImages } from '../../utils/imageSupport.js';
 
 /** Reduce one ACP notification into the transcript state. */
 export function reduceSessionNotification(
@@ -61,7 +62,14 @@ export function cachedMessageToNotification(
   ) {
     return null;
   }
-  const content = { type: 'text' as const, text: message.content };
+  const text =
+    message.role === 'user'
+      ? splitMessageContentForImages(message.content).text
+      : message.content;
+  if (text.trim().length === 0) {
+    return null;
+  }
+  const content = { type: 'text' as const, text };
   switch (message.role) {
     case 'user':
       return {

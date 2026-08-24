@@ -198,6 +198,7 @@ describe('SessionMessageHandler', () => {
         },
       ],
     });
+    mockReadFile.mockResolvedValue(Buffer.from('abc'));
 
     const agentManager = {
       isConnected: true,
@@ -369,6 +370,16 @@ describe('SessionMessageHandler', () => {
         sessionId: 'session-1',
         update: {
           sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'look at this' },
+        },
+      },
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
           content: {
             type: 'image',
             data: Buffer.from([1, 2, 3]).toString('base64'),
@@ -452,7 +463,7 @@ describe('SessionMessageHandler', () => {
           sessionUpdate: 'user_message_chunk',
           content: {
             type: 'text',
-            text: 'look at this\n\n@/tmp/clipboard/clipboard-1.png',
+            text: 'look at this',
           },
         },
       },
