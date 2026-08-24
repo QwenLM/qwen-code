@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -1493,7 +1494,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     // is launched, which makes this the one place the pipeline can notice that
     // the tree those agents are about to read is not the commit they think it
     // is. A real git worktree, because `git status` is the oracle.
-    const dir = mkdtempSync(join(tmpdir(), 'ap-residue-'));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ap-residue-')));
     // Ambient host git config (a global `commit.gpgsign` with no key, a
     // `core.hooksPath` that fails) makes the fixture commit throw and reddens
     // this test for reasons the branch never touched — the incident
@@ -1518,15 +1519,18 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
 
       const plan = join(dir, 'plan.json');
-      writeFileSync(
-        plan,
-        JSON.stringify({
-          ...PLAN,
-          worktreePath: wt,
-          prNumber: '9207',
-          ownerRepo: 'QwenLM/qwen-code',
-        }),
-      );
+      const writePlan = (fields: Record<string, unknown>) =>
+        writeFileSync(
+          plan,
+          JSON.stringify({
+            ...PLAN,
+            worktreePath: wt,
+            prNumber: '9207',
+            ownerRepo: 'QwenLM/qwen-code',
+            ...fields,
+          }),
+        );
+      writePlan({ fetchedSha: git('rev-parse', 'HEAD').trim() });
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan,
         roster: true,
@@ -1547,11 +1551,134 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(readFileSync(briefPath(plan, '1b'), 'utf8')).toContain(
         'And right now it is not clean',
       );
+
+      // The handover is the wiring under test: drop it and the brief degrades
+      // in one of two ways, both refused — a WRONG sha (the forge's own)
+      // reaches the pin and is refused there, a MISSING one fails closed
+      // before the probe runs, because every worktree-mode fetch writes the
+      // field and its absence means the plan was tampered with. Either way
+      // the brief carries the unmeasured sentence, never a clean verdict.
+      const briefOf = (fields: Record<string, unknown>) => {
+        writePlan(fields);
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        });
+        return readFileSync(briefPath(plan, '1a'), 'utf8');
+      };
+      const wrongSha = briefOf({ fetchedSha: `deadbeef${'0'.repeat(32)}` });
+      expect(wrongSha).toContain('Whether it is clean could not be measured');
+      expect(wrongSha).toContain('not the fetched PR head');
+      // The framing names a reason, not a failed `git status` — the status
+      // never ran for these refusals, and a triager sent to debug the git
+      // environment would find nothing to fix.
+      expect(wrongSha).toContain('(reason: ');
+      expect(wrongSha).not.toContain('(`git status` failed');
+      const noSha = briefOf({});
+      expect(noSha).toContain('Whether it is clean could not be measured');
+      expect(noSha).toContain('no usable record of the fetched head sha');
+      // The stderr warning the handler prints for the same state carries the
+      // same neutral framing.
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('(reason: '),
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
       gitIsolation.dispose();
     }
   });
+
+  // A SHA-256 repository is the shape the record validators must admit:
+  // fetch-pr writes `git rev-parse` verbatim, and in that repository class
+  // the answer is 64 hex. Git grew the format late, so probe for support and
+  // skip where it is absent rather than fail a host that cannot build the
+  // fixture.
+  const gitSha256Supported = (() => {
+    try {
+      const probe = mkdtempSync(join(tmpdir(), 'qwen-sha256-probe-'));
+      try {
+        execFileSync('git', ['init', '-q', '--object-format=sha256', probe], {
+          stdio: 'pipe',
+        });
+        return true;
+      } finally {
+        rmSync(probe, { recursive: true, force: true });
+      }
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!gitSha256Supported)(
+    'pins a SHA-256 review worktree with the plan’s 64-hex record',
+    () => {
+      // A validator matching only 40-hex shas drops the record this
+      // repository class writes: every worktree-mode round then fails
+      // closed as though the plan were tampered with, and the verifier's
+      // scratch-tree command is built without `--fetched-sha`. The 64-hex
+      // record must reach BOTH the residue pin and the welded command.
+      const gitIsolation = isolateHostGitConfig();
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ap-sha256-')));
+      try {
+        const git = (...args: string[]) =>
+          execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+        git('init', '-q', '-b', 'main', '--object-format=sha256');
+        git('config', 'user.email', 't@t.t');
+        git('config', 'user.name', 't');
+        writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+        git('add', '-A');
+        git('commit', '-qm', 'head');
+        const sha64 = git('rev-parse', 'HEAD').trim();
+        expect(sha64).toMatch(/^[0-9a-f]{64}$/);
+        const wt = join(dir, '.qwen', 'tmp', 'review-pr-sha256');
+        git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+        const plan = join(dir, 'plan.json');
+        writeFileSync(
+          plan,
+          JSON.stringify({
+            ...PLAN,
+            worktreePath: wt,
+            prNumber: '256',
+            ownerRepo: 'QwenLM/qwen-code',
+            fetchedSha: sha64,
+          }),
+        );
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        });
+
+        // The record reached the residue pin: the tree at the recorded sha
+        // measures clean instead of being refused for a missing record.
+        const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
+        expect(brief).not.toContain(
+          'Whether it is clean could not be measured',
+        );
+        expect(brief).not.toContain('no usable record of the fetched head');
+        // And it reached the scratch-tree command welded into a verifier
+        // shard's brief — shards launch through the single-role path with
+        // their record key, exactly as the orchestrator runs them.
+        const findings = join(dir, 'findings.md');
+        writeFileSync(findings, '- **[Critical]** probe');
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'verify',
+          findings,
+        });
+        const recorded = readRecordedPrompts(plan);
+        const verifyKey = [...recorded.keys()].find((k) =>
+          k.startsWith('verify--'),
+        );
+        expect(verifyKey).toBeDefined();
+        expect(
+          readFileSync(briefPath(plan, verifyKey ?? ''), 'utf8'),
+        ).toContain(`--fetched-sha ${sha64}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        gitIsolation.dispose();
+      }
+    },
+  );
 
   it('builds and records the whole 3A roster', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-roster-'));
@@ -2884,6 +3011,42 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(
       buildRoleBrief(PR_PLAN, 'verify', { key: 'verify; rm -rf /' }),
     ).toContain('--label verify__rm_-rf__');
+    // The plan's fetched sha rides along when the plan carries a usable one:
+    // it is the shared-tree residue check's identity anchor, and without it
+    // the check would refuse every healthy run (#9742). Absent or malformed,
+    // nothing is welded — the record-less refusal is the fail-closed shape.
+    const sha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    // Pin the JOINED fragment, not the bare flag: without the continuation
+    // after `--label` the snippet is two statements — the command runs
+    // unpinned and the sha line dies as command-not-found — while
+    // `toContain('--fetched-sha …')` still passes.
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).toContain(
+      `--label verify--round-2--deadbeef1234 \\
+  --fetched-sha ${sha}`,
+    );
+    // A SHA-256 repository records a 64-hex commit; the pipeline's own
+    // shape contract admits both full object-ID lengths, so that record
+    // welds in too — a validator that only matched 40 hex would leave
+    // every SHA-256 review's command unpinned.
+    const sha256 = 'ab'.repeat(32);
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha256 }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).toContain(`--fetched-sha ${sha256}`);
+    // And the sha-less brief must not carry a continuation after the label
+    // either — a dangling one would glue the closing fence onto the command.
+    expect(p).not.toMatch(/--label verify--round-2--deadbeef1234 \\/);
+    expect(p).not.toContain('--fetched-sha');
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: 'not-a-sha' }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).not.toContain('--fetched-sha');
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');

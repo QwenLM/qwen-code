@@ -49,9 +49,7 @@ describe('CUA SDK release workflow', () => {
   });
 
   it('keeps installer version assignments machine-rewritable', () => {
-    expect(shellInstaller).toMatch(
-      /^CUA_DRIVER_RS_BAKED_VERSION="[^"\n]+"$/mu,
-    );
+    expect(shellInstaller).toMatch(/^CUA_DRIVER_RS_BAKED_VERSION="[^"\n]+"$/mu);
     expect(powershellInstaller).toMatch(
       /^\$Script:CuaDriverRsBakedVersion = "[^"\n]+"$/mu,
     );

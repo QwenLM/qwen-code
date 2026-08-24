@@ -16,6 +16,7 @@ import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
   LOOP_DETECTED_TURN_ERROR_MESSAGE,
+  registerCreateSubSessionTool,
   resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
@@ -418,6 +419,7 @@ describe('Session', () => {
   let currentModel: string;
   let currentAuthType: AuthType;
   let originalProcessGuardMode: string | undefined;
+  let originalServeStamp: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
@@ -480,6 +482,8 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    revealDeferredTool: ReturnType<typeof vi.fn>;
+    pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
@@ -589,6 +593,11 @@ describe('Session', () => {
     originalProcessGuardMode =
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
     process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
+    // Sessions under test are daemon sessions: the sub-session spawner (and
+    // with it the create_sub_session tool) is wired only when the daemon's
+    // env stamp is present.
+    originalServeStamp = process.env['QWEN_CODE_SERVE'];
+    process.env['QWEN_CODE_SERVE'] = '1';
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
@@ -753,6 +762,8 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      revealDeferredTool: vi.fn(),
+      pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         names.map((name) => ({ name })),
@@ -893,6 +904,11 @@ describe('Session', () => {
     } else {
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] =
         originalProcessGuardMode;
+    }
+    if (originalServeStamp === undefined) {
+      delete process.env['QWEN_CODE_SERVE'];
+    } else {
+      process.env['QWEN_CODE_SERVE'] = originalServeStamp;
     }
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
@@ -7532,6 +7548,132 @@ describe('Session', () => {
           continuesTodoStopGuardWorkChain: true,
         }),
       );
+    });
+
+    it('registers the create_sub_session tool on the daemon session registry', async () => {
+      // The tool is daemon-only: it must exist on every session the daemon
+      // creates so the model can call it, and nowhere else.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+    });
+
+    it('reveals the deferred tool and refreshes the declarations after registering', async () => {
+      // The registration lands after `startChat()` froze the declaration
+      // snapshot, and the tool is deferred — without a reveal + refresh the
+      // model is never offered it for the rest of the session.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+      // The reveal is session-setup state, not ToolSearch discovery: it must
+      // be pinned so a `/clear` re-run re-declares the tool even when the
+      // budget-based startup preload withholds it.
+      expect(mockToolRegistry.pinDeferredToolReveal).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+      expect(mockGeminiClient.setTools).toHaveBeenCalledTimes(1);
+      // Order is load-bearing: reveal before the declaration refresh, both
+      // after the registration.
+      const registerOrder =
+        mockToolRegistry.registerTool.mock.invocationCallOrder[0];
+      const revealOrder =
+        mockToolRegistry.revealDeferredTool.mock.invocationCallOrder[0];
+      const setToolsOrder =
+        mockGeminiClient.setTools.mock.invocationCallOrder[0];
+      expect(registerOrder).toBeLessThan(revealOrder);
+      expect(revealOrder).toBeLessThan(setToolsOrder);
+    });
+
+    it('skips create_sub_session when no sub-session spawner is wired', async () => {
+      // No spawner means the peer cannot reach the daemon bridge (standalone
+      // `--acp` editor session, or any non-daemon path): declaring the tool
+      // there would only advertise an action that always fails with
+      // JSON-RPC -32601.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(undefined);
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setTools).not.toHaveBeenCalled();
+    });
+
+    it('skips create_sub_session when the permission manager disables it', async () => {
+      // A `tools.core` allowlist that omits the tool, or a whole-tool deny
+      // rule, must keep it out of the declarations too — advertising a tool
+      // whose every call ends in EXECUTION_DENIED is the pollution the
+      // daemon-only gate exists to remove.
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+    });
+
+    it('registers create_sub_session when the permission manager enables it', async () => {
+      // The PM-present path must consult the manager and then register: a
+      // gate that skips whenever a manager exists would drop the tool from
+      // every daemon session that runs with permission management on.
+      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+    });
+
+    it('wires the sub-session spawner only on daemon-backed sessions', () => {
+      // The daemon stamps every child it spawns with QWEN_CODE_SERVE=1. A
+      // standalone `--acp` session (an editor companion spawning the same
+      // command line) lacks the stamp, and its peer answers the bridge's
+      // `qwen/control/*` ext methods with JSON-RPC -32601 — so no spawner
+      // may be wired there.
+      expect(mockConfig.setSubSessionSpawner).toHaveBeenCalledTimes(1); // beforeEach session, stamp set
+
+      delete process.env['QWEN_CODE_SERVE'];
+      vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      const standalone = new Session(
+        'standalone-acp-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      expect(standalone).toBeDefined();
+      expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
     });
 
     it('drops oldest background notifications when the queue reaches its cap', () => {
@@ -18429,6 +18571,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          verifierFeedback: 'Need independent evidence',
         });
 
         await vi.waitFor(() => {
@@ -18441,6 +18584,16 @@ describe('Session', () => {
               expect.objectContaining({
                 text: expect.stringContaining(
                   'Continue working on the active Goal.',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Runtime continuation context: check weather',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Verifier feedback: Need independent evidence',
                 ),
               }),
             ]),

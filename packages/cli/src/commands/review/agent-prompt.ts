@@ -99,7 +99,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   isPositivePrNumber,
@@ -152,6 +156,8 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
@@ -1322,6 +1328,27 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
+ * The plan's fetched head sha when it carries a usable one. Absent or
+ * malformed answers nothing rather than a broken anchor: every worktree-mode
+ * fetch writes the field, so both call sites fail closed on that absence,
+ * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
+ */
+function fetchedShaOf(report: PlanReport): string | undefined {
+  const sha = report.fetchedSha;
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
+    ? sha
+    : undefined;
+}
+
+/**
  * The review worktree's residue, or nothing at all when there is no worktree to
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
@@ -1330,7 +1357,28 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt));
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
+  const sha = fetchedShaOf(report);
+  if (sha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
 }
 
 /**
@@ -1385,7 +1433,7 @@ function worktreeEvidenceBlock(
   if (residue?.unmeasured) {
     parts.push(
       '',
-      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+      `**Whether it is clean could not be measured** (reason: ` +
         `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
         'anything that surprises you in this tree as unverified until you have ' +
         'checked it against `git show HEAD:<path>`.',
@@ -1660,6 +1708,11 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
+      // The identity anchor fetch-pr recorded, when the plan carries a usable
+      // one: with it the probe pins the shared tree and a healthy run measures
+      // clean — without it the no-record refusal fires on every run, and a
+      // tampering note that fires always is a note nobody reads.
+      const sha = fetchedShaOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1678,7 +1731,8 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
@@ -3296,7 +3350,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const residue = worktreeResidueOf(report);
   if (residue.unmeasured) {
     writeStderrLine(
-      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+      `warning: could not measure whether the review worktree is clean (reason: ` +
         `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
         'not a clean one.',
     );
