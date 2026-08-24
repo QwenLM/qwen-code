@@ -13,6 +13,31 @@ const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
 } as unknown as LoadedSettings;
 
+/**
+ * Stateful fake of the real client's single swap-slot contract (see
+ * beginTelemetrySwap's JSDoc in core client.ts): one open transaction at a
+ * time, commit/abort release the slot. Unlike `{ initialize: vi.fn() }`,
+ * it lets a test observe "the slot was released" as "the next begin is
+ * accepted" (#9844).
+ */
+function makeSwapSlotClient() {
+  let open = false;
+  return {
+    initialize: vi.fn().mockResolvedValue(undefined),
+    beginTelemetrySwap: vi.fn(() => {
+      if (open) return false;
+      open = true;
+      return true;
+    }),
+    commitTelemetrySwap: vi.fn(() => {
+      open = false;
+    }),
+    abortTelemetrySwap: vi.fn(() => {
+      open = false;
+    }),
+  };
+}
+
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
   let loadSession: ReturnType<typeof vi.fn>;
@@ -556,6 +581,58 @@ describe('useBranchCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('settles the swap slot when the branch fails before the core swap', async () => {
+    // The latch opened in step 0 means this attempt owns the slot even when
+    // the pre-core-swap work (flush / fork / title persistence) fails. The
+    // catch must settle that transaction so the next swap is not rejected
+    // with "already in progress" (#9844). The default client mock
+    // ({ initialize: vi.fn() }) has no commitTelemetrySwap, so the settle
+    // there is an optional-chained no-op — observe the release through a
+    // stateful slot fake instead.
+    forkSession.mockRejectedValue(new Error('disk full'));
+    const geminiClient = makeSwapSlotClient();
+    config.getGeminiClient = () => geminiClient;
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    // The failure surfaced before any core/UI swap...
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to branch conversation.*disk full/),
+      }),
+      expect.any(Number),
+    );
+    // ...and the catch settled (committed, never aborted) the transaction
+    // this attempt opened.
+    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+
+    // The released slot admits the next attempt: the retry is NOT rejected
+    // with "already in progress" and completes the full swap.
+    forkSession.mockResolvedValue({
+      filePath: '/tmp/new.jsonl',
+      copiedCount: 2,
+    });
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(1);
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
   });
 
   it.each([

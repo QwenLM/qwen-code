@@ -25,10 +25,73 @@ const mockSettings = {
   },
 } as unknown as LoadedSettings;
 
+/**
+ * Stateful fake of the real client's single swap-slot contract (see
+ * beginTelemetrySwap's JSDoc in core client.ts): one open transaction at a
+ * time, commit/abort release the slot. It lets a test observe "the catch
+ * block settled the slot" as "the next begin is accepted" (#9844).
+ */
+function makeSwapSlotClient() {
+  let open = false;
+  return {
+    initialize: vi.fn().mockResolvedValue(undefined),
+    beginTelemetrySwap: vi.fn(() => {
+      if (open) return false;
+      open = true;
+      return true;
+    }),
+    commitTelemetrySwap: vi.fn(() => {
+      open = false;
+    }),
+    abortTelemetrySwap: vi.fn(() => {
+      open = false;
+    }),
+  };
+}
+
+/** Minimal Config mock shaped like the other failure tests in this file. */
+function makeSwapSlotConfig(
+  geminiClient: ReturnType<typeof makeSwapSlotClient>,
+) {
+  return {
+    getSessionId: () => 'old-session-id',
+    getTargetDir: () => '/tmp',
+    getGeminiClient: () => geminiClient,
+    startNewSession: vi.fn(),
+    getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+    getBackgroundTaskRegistry: () => ({
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    }),
+    getBackgroundShellRegistry: () => ({
+      getAll: vi.fn().mockReturnValue([]),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    }),
+    getMonitorRegistry: () => ({
+      getRunning: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    }),
+    getWorkflowRunRegistry: () => ({
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+      abortAll: vi.fn(),
+    }),
+    loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+    getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+    getDebugLogger: () => ({
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+    }),
+  } as unknown as import('@qwen-code/qwen-code-core').Config;
+}
+
 const resumeMocks = vi.hoisted(() => {
   let resolveLoadSession:
     | ((value: { conversation: unknown } | undefined) => void)
     | undefined;
+  let rejectLoadSession: ((error: Error) => void) | undefined;
   let pendingLoadSession:
     | Promise<{ conversation: unknown } | undefined>
     | undefined;
@@ -53,19 +116,24 @@ const resumeMocks = vi.hoisted(() => {
       };
     },
     createPendingLoadSession() {
-      pendingLoadSession = new Promise((resolve) => {
+      pendingLoadSession = new Promise((resolve, reject) => {
         resolveLoadSession = resolve;
+        rejectLoadSession = reject;
       });
       return pendingLoadSession;
     },
     resolvePendingLoadSession(value: { conversation: unknown } | undefined) {
       resolveLoadSession?.(value);
     },
+    rejectPendingLoadSession(error: Error) {
+      rejectLoadSession?.(error);
+    },
     getPendingLoadSession() {
       return pendingLoadSession;
     },
     reset() {
       resolveLoadSession = undefined;
+      rejectLoadSession = undefined;
       pendingLoadSession = undefined;
     },
   };
@@ -908,5 +976,143 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
     expect(geminiClient.initialize).not.toHaveBeenCalled();
+  });
+
+  it('settles the swap slot when resume fails before the core swap', async () => {
+    // The latch opens BEFORE the incoming session loads. If that pre-core-
+    // swap work rejects, the catch must still settle the transaction this
+    // attempt opened — forgetting the settle leaves the single slot
+    // occupied and every later swap rejected with "already in progress"
+    // (#9844).
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+
+    const geminiClient = makeSwapSlotClient();
+    const config = makeSwapSlotConfig(geminiClient);
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-2');
+    });
+    await act(async () => {
+      resumeMocks.rejectPendingLoadSession(new Error('session load failed'));
+      await resumePromise;
+    });
+
+    // The failure surfaced, and nothing swapped.
+    expect(config.startNewSession).not.toHaveBeenCalled();
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(
+          /Failed to resume session.*session load failed/,
+        ),
+      }),
+      expect.any(Number),
+    );
+    // The catch settled (committed, never aborted) the transaction this
+    // attempt opened.
+    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+
+    // The released slot admits the next swap: it is NOT rejected with
+    // "already in progress" and completes the full swap.
+    resumeMocks.reset();
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(config.startNewSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ conversation: expect.anything() }),
+    );
+  });
+
+  it('settles the swap slot when resume fails after the UI commit', async () => {
+    // Once the UI swap commits, a later failure (here: loadHistory) must
+    // not roll core back or abort the committed replay — the catch settles
+    // the transaction on top of the forward commit instead (#9844).
+    resumeMocks.reset();
+
+    const geminiClient = makeSwapSlotClient();
+    const config = makeSwapSlotConfig(geminiClient);
+    const loadHistory = vi.fn().mockImplementation(() => {
+      throw new Error('history items failed after commit');
+    });
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory,
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+
+    // The failure surfaced...
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(
+          /Failed to resume session.*history items failed after commit/,
+        ),
+      }),
+      expect.any(Number),
+    );
+    // ...but the swap stands: UI swapped, core did NOT roll back (a second
+    // startNewSession call with the old id would be the rollback).
+    expect(startNewSession).toHaveBeenCalledTimes(1);
+    expect(startNewSession).toHaveBeenCalledWith('session-2');
+    expect(config.startNewSession).toHaveBeenCalledTimes(1);
+    // Never an abort (which would drop the committed session's replay), and
+    // the catch's settle ran on top of the forward commit.
+    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(2);
+
+    // The slot is free for the next swap: NOT rejected with "already in
+    // progress".
+    loadHistory.mockReset();
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
   });
 });

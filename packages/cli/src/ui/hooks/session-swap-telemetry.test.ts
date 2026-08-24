@@ -331,12 +331,18 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(totalRequests()).toBe(2);
     // The fork's replay-created bucket must be gone; A's bucket intact.
     // Assert on the fork's actual id — the randomUUID() the branch hook
-    // derived and the replay keyed its events by. (An unrelated session id
-    // would pass unconditionally: getMetricsForSession returns fresh empty
-    // metrics for any unknown id.)
-    const forkId = [...sessionServiceMocks.sessions.keys()].find(
+    // derived and the replay keyed its events by. getMetricsForSession
+    // returns fresh empty metrics for ANY unknown id, so a missing or
+    // unrelated forkId would pass the bucket assertion vacuously: require
+    // the fork key to actually exist in the session store before asserting
+    // on it (e.g. a realistic removeSession that deleted the fork from the
+    // store must fail this test loudly, not silently) (#9844).
+    const forkIds = [...sessionServiceMocks.sessions.keys()].filter(
       (id) => id !== SESSION_A,
-    )!;
+    );
+    expect(forkIds).toHaveLength(1);
+    const forkId = forkIds[0];
+    expect(typeof forkId).toBe('string');
     expect(uiTelemetryService.getMetricsForSession(forkId).models).toEqual({});
     expect(
       uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
