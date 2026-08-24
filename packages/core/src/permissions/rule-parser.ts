@@ -247,6 +247,8 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Artifact: 'artifact',
   record_artifact: 'record_artifact',
   RecordArtifact: 'record_artifact',
+  request_shutdown: 'request_shutdown',
+  RequestShutdown: 'request_shutdown',
 
   // Display image tool
   display_image: 'display_image',
