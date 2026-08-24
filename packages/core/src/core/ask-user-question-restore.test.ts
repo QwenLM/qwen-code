@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
 import {
   findRestorableAskUserQuestion,
+  lastHistoryContentFromRecords,
   parseAskUserQuestionParams,
   restorableAskUserQuestionCallIds,
 } from './ask-user-question-restore.js';
@@ -142,5 +143,39 @@ describe('findRestorableAskUserQuestion', () => {
     };
     expect(findRestorableAskUserQuestion(last)).toBeUndefined();
     expect(restorableAskUserQuestionCallIds(last)).toBeUndefined();
+  });
+});
+
+describe('lastHistoryContentFromRecords', () => {
+  it('returns the last non-system message', () => {
+    const last = lastHistoryContentFromRecords([
+      { type: 'user', message: { role: 'user', parts: [{ text: 'pick' }] } },
+      {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: AUQ_ARGS,
+              },
+            },
+          ],
+        },
+      },
+      { type: 'system', message: { role: 'user', parts: [{ text: 'noise' }] } },
+    ]);
+    expect(last?.role).toBe('model');
+    expect(restorableAskUserQuestionCallIds(last)).toEqual(
+      new Set(['call-auq']),
+    );
+  });
+
+  it('returns undefined when there is no API-facing message', () => {
+    expect(
+      lastHistoryContentFromRecords([{ type: 'system' }, { type: 'user' }]),
+    ).toBeUndefined();
   });
 });

@@ -99,7 +99,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -151,6 +155,8 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
@@ -374,6 +380,7 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
+- **Fix witness:** <the test that must go RED if that fix is removed — the test file and the behaviour it pins — or "N/A" when the fix adds no guard, branch or behaviour a test can pin>
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 
@@ -386,7 +393,9 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
-**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
+**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.
+
+**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.`;
 
 /**
  * What not to report.
@@ -1314,6 +1323,27 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
+ * The plan's fetched head sha when it carries a usable one. Absent or
+ * malformed answers nothing rather than a broken anchor: every worktree-mode
+ * fetch writes the field, so both call sites fail closed on that absence,
+ * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
+ */
+function fetchedShaOf(report: PlanReport): string | undefined {
+  const sha = report.fetchedSha;
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
+    ? sha
+    : undefined;
+}
+
+/**
  * The review worktree's residue, or nothing at all when there is no worktree to
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
@@ -1322,7 +1352,28 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt));
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
+  const sha = fetchedShaOf(report);
+  if (sha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
 }
 
 /**
@@ -1377,7 +1428,7 @@ function worktreeEvidenceBlock(
   if (residue?.unmeasured) {
     parts.push(
       '',
-      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+      `**Whether it is clean could not be measured** (reason: ` +
         `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
         'anything that surprises you in this tree as unverified until you have ' +
         'checked it against `git show HEAD:<path>`.',
@@ -1646,6 +1697,11 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
+      // The identity anchor fetch-pr recorded, when the plan carries a usable
+      // one: with it the probe pins the shared tree and a healthy run measures
+      // clean — without it the no-record refusal fires on every run, and a
+      // tampering note that fires always is a note nobody reads.
+      const sha = fetchedShaOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1664,7 +1720,8 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
@@ -3209,7 +3266,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const residue = worktreeResidueOf(report);
   if (residue.unmeasured) {
     writeStderrLine(
-      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+      `warning: could not measure whether the review worktree is clean (reason: ` +
         `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
         'not a clean one.',
     );
