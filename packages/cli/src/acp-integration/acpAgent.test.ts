@@ -2125,6 +2125,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue(undefined),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
     vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
 
