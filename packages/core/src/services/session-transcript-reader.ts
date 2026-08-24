@@ -2233,7 +2233,7 @@ export class SessionTranscriptReader {
     const dispatchRecord = (record: ChatRecord): void => {
       if (modelSet.has(record.uuid)) apiHistory.add(record);
       if (record.uuid === tokenUuid) resumeTokenCounts.add(record);
-      if (uiTelemetrySet.has(record.uuid)) {
+      if (uiTelemetrySet.has(record.uuid) && !record.forkedFrom) {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;

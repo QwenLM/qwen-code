@@ -9,6 +9,11 @@ import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
+const mockFlushSessionUsageSnapshot = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/session-usage.js', () => ({
+  flushSessionUsageSnapshot: mockFlushSessionUsageSnapshot,
+}));
+
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
 } as unknown as LoadedSettings;
@@ -80,6 +85,7 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
+    mockFlushSessionUsageSnapshot.mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -300,6 +306,7 @@ describe('useBranchCommand', () => {
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
@@ -618,6 +625,7 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
     expect(setSessionName).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(1);
     expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
     // User sees the failure.
     expect(addItem).toHaveBeenCalledWith(

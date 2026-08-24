@@ -3004,6 +3004,7 @@ export function replayUiTelemetryFromConversation(
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
       continue;
     }
+    if (record.forkedFrom) continue;
     const payload = record.systemPayload as
       | UiTelemetryRecordPayload
       | undefined;

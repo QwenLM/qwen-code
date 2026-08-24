@@ -1107,9 +1107,14 @@ describe('UiTelemetryService', () => {
     const SESSION_A = 'session-aaa';
     const SESSION_B = 'session-bbb';
 
-    const makeApiEvent = (model: string, inputTokens: number) =>
+    const makeApiEvent = (
+      model: string,
+      inputTokens: number,
+      timestamp?: string,
+    ) =>
       ({
         'event.name': EVENT_API_RESPONSE,
+        ...(timestamp ? { 'event.timestamp': timestamp } : {}),
         model,
         duration_ms: 100,
         input_token_count: inputTokens,
@@ -1141,6 +1146,28 @@ describe('UiTelemetryService', () => {
 
       expect(metricsB.models['model-b']?.tokens.prompt).toBe(200);
       expect(metricsB.models['model-a']).toBeUndefined();
+    });
+
+    it('tracks the earliest telemetry timestamp for each session', () => {
+      service.addEvent(
+        makeApiEvent('model-a', 100, '2026-07-01T00:02:00.000Z'),
+        SESSION_A,
+      );
+      service.addEvent(
+        makeApiEvent('model-a', 50, '2026-07-01T00:01:00.000Z'),
+        SESSION_A,
+      );
+      service.addEvent(
+        makeApiEvent('model-b', 100, '2026-07-02T00:00:00.000Z'),
+        SESSION_B,
+      );
+
+      expect(service.getSessionStartTimeForSession(SESSION_A)).toEqual(
+        new Date('2026-07-01T00:01:00.000Z'),
+      );
+      expect(service.getSessionStartTimeForSession(SESSION_B)).toEqual(
+        new Date('2026-07-02T00:00:00.000Z'),
+      );
     });
 
     it('should still accumulate to global metrics', () => {
