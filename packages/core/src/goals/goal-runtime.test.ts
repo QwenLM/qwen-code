@@ -330,6 +330,9 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal?.tokenBudget).toBe(
       GOAL_DEFAULT_TOKEN_BUDGET,
     );
+    // The wiring assertion above moves with the constant, so only this
+    // literal pin catches a silent rescale of the production default.
+    expect(GOAL_DEFAULT_TOKEN_BUDGET).toBe(30_000_000);
   });
 
   it('stops autonomous continuation when the budget is spent, and resume re-arms it', async () => {
@@ -388,6 +391,83 @@ describe('goal runtime', () => {
     });
     expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
     expect(host.started).toHaveLength(2);
+  });
+
+  it('stops at an exact-ceiling spend without minting another turn', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => {
+          const tokens = spend.get(turnId) ?? 0;
+          spend.delete(turnId);
+          return tokens;
+        },
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    // Spend lands exactly on the ceiling: still spent, no further turn.
+    spend.set(host.started[0]!.turnId, 1_000);
+    await runtime.finishTurn(host.started[0]!);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      tokensUsed: 1_000,
+      tokenBudget: 1_000,
+    });
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('shows the budget stop even when the settle write fails', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, undefined, new Error('writer unavailable')],
+    });
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => {
+          const tokens = spend.get(turnId) ?? 0;
+          spend.delete(turnId);
+          return tokens;
+        },
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    // The failed write never reaches the journal, but the visible state
+    // still settles: the gate refuses continuations either way, and the
+    // user's next action surfaces the persistence loss.
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+    ]);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      tokensUsed: 1_500,
+      tokenBudget: 1_000,
+    });
+    expect(causes).toContain('usage_limited');
+    expect(host.started).toHaveLength(1);
   });
 
   it('never arms a budget when the runtime opts out with an unbounded grant', async () => {

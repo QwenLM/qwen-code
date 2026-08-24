@@ -13,6 +13,7 @@ import {
   goalLimitKindForReason,
   isGoalEvidenceProofKind,
   isGoalLimitKind,
+  isGoalTokenBudgetSpent,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -32,9 +33,10 @@ export interface GoalControlTransition {
   cursor: TranscriptCursor;
   /**
    * The autonomous spend window the caller is arming, in `tokensUsed` tokens.
-   * A create or replace stamps it as the new Goal's `tokenBudget`; a resume of
-   * a budget-stopped Goal re-arms `tokensUsed + grant`. Absent means the
-   * transition arms nothing -- a created Goal is then unbounded.
+   * A create or replace stamps it as the new Goal's `tokenBudget`; a resume
+   * or edit of a Goal whose ceiling is spent re-arms `tokensUsed + grant`.
+   * Absent means the transition arms nothing -- a created Goal is then
+   * unbounded.
    */
   tokenBudgetGrant?: number;
 }
@@ -419,8 +421,8 @@ function isEvidenceLimited(goal: GoalRecord): boolean {
 }
 
 /**
- * The budget change an explicit user action (edit, or a resume of a
- * budget-stopped Goal) arms: a finite grant moves a spent ceiling to
+ * The budget change an explicit user action (edit, or a resume of a Goal
+ * whose ceiling is spent) arms: a finite grant moves a spent ceiling to
  * `tokensUsed + grant`, while a non-finite opt-out clears it. An unspent
  * ceiling is left alone, and a Goal with no ceiling stays unbounded -- budgets
  * are armed at creation, never retrofitted.
@@ -429,11 +431,7 @@ function rearmedTokenBudget(
   current: GoalRecord,
   grant: number | undefined,
 ): Partial<GoalRecord> {
-  if (
-    grant === undefined ||
-    current.tokenBudget === undefined ||
-    current.tokensUsed < current.tokenBudget
-  ) {
+  if (grant === undefined || !isGoalTokenBudgetSpent(current)) {
     return {};
   }
   return Number.isFinite(grant)

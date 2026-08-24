@@ -36,6 +36,19 @@ export function goalTokenBudgetReason(tokenBudget: number): string {
 }
 
 /**
+ * Whether `tokensUsed` has reached the armed ceiling. One predicate serves
+ * both the runtime's stop condition and the reducer's re-arm condition, so
+ * the stop/re-arm cycle cannot desynchronize.
+ */
+export function isGoalTokenBudgetSpent(
+  goal: Pick<GoalRecord, 'tokensUsed' | 'tokenBudget'>,
+): goal is Pick<GoalRecord, 'tokensUsed' | 'tokenBudget'> & {
+  tokenBudget: number;
+} {
+  return goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
+}
+
+/**
  * Which bound a `usage_limited` Goal ran into.
  *
  * Only the enumerated bounds are typed: they are the ones a caller has to
@@ -142,9 +155,9 @@ export interface GoalRecord {
   /**
    * The ceiling `tokensUsed` may reach before autonomous continuation stops
    * and the Goal waits for the user. Armed at creation from the runtime's
-   * grant; a resume of a budget-stopped Goal moves it forward
-   * (`tokensUsed + grant`) -- the spent meter itself is never reset. Absent on
-   * Goals persisted before budgets existed: those stay unbounded.
+   * grant; a resume or edit of a Goal whose ceiling is spent moves it forward
+   * (`tokensUsed + grant`) -- the spent meter itself is never reset. Absent
+   * on Goals persisted before budgets existed: those stay unbounded.
    */
   tokenBudget?: number;
   createdAt: number;

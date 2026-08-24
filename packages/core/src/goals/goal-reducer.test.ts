@@ -1043,6 +1043,21 @@ describe('token budget transitions', () => {
     expect(resumed).toMatchObject({ status: 'active', tokenBudget: 1_000 });
   });
 
+  it('re-arms when the spend lands exactly on the ceiling', () => {
+    const resumed = reduceGoalControl(
+      budgetStopped({ tokensUsed: 1_000, tokenBudget: 1_000 }),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({
+      status: 'active',
+      tokensUsed: 1_000,
+      tokenBudget: 2_000,
+    });
+  });
+
   it.each(['paused', 'blocked'] as const)(
     're-arms a spent ceiling when resuming a %s Goal',
     (status) => {
