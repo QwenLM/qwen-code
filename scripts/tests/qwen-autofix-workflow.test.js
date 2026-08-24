@@ -7731,19 +7731,24 @@ exit 1
     expect(pushAndReportScript.match(bothSyntaxes) ?? []).toHaveLength(1);
     // No single-syntax neutralizer may survive anywhere in the family: the
     // old `::`-only sed is exactly what #9761 slipped through, a `##[`-only
-    // sed is the mirror blind spot (and the natural half-copy of the
-    // canonical form), and a bare bash `//::/;;` expansion is the third
-    // half-guard shape (the census cannot see syntax coverage inside an
-    // expansion, so the family keeps ONE spelling — the canonical sed).
-    // New echo sites must use both expressions.
+    // sed is the mirror blind spot, and a bare bash `//::/;;` expansion is
+    // the third half-guard shape. Assert the PAIRING property instead of
+    // enumerating half-guard spellings — every occurrence of either
+    // substitution expression must belong to the canonical pair, so a
+    // half-copy in ANY spelling (`sed 's/::/;;/g'`, `sed -e 's/::/;;/g'`
+    // alone, or the `##[`-only mirrors) unbalances the count and fails here
+    // (the shape bans only caught the no-`-e` spellings; the canonical
+    // line itself begins with `sed -e`, so its natural half-copy contained
+    // none of the banned substrings).
     for (const src of [
       workflow,
       reviewVerificationRunner,
       upsertDeferredScript,
       pushAndReportScript,
     ]) {
-      expect(src).not.toContain("sed 's/::/;;/g'");
-      expect(src).not.toContain("sed 's/##\\[/##［/g'");
+      const pairs = (src.match(bothSyntaxes) ?? []).length;
+      expect((src.match(/s\/::\/;;\/g/g) ?? []).length).toBe(pairs);
+      expect((src.match(/s\/##\\\[\/##［\/g/g) ?? []).length).toBe(pairs);
       expect(src).not.toContain('//::/;;');
     }
   });
