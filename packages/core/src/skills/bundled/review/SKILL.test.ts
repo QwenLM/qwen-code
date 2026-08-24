@@ -584,6 +584,9 @@ describe('bundled review skill', () => {
     // refuses and runs fresh at high) rather than silently pinned — dropping
     // the `forced-by-comment` arm re-creates the "comment at medium" state.
     expect(body).toContain('`forced-by-comment`');
+    expect(body).toContain(
+      '`explicit`, `last_used`, `configured`, or `forced-by-comment`',
+    );
     // R15-11: a resumed run must NOT re-take the incremental decision — the
     // previous attempt's `incremental` field is history, so the continuation
     // never enters the `upToDate` stop/cleanup branch that would destroy the
@@ -596,6 +599,13 @@ describe('bundled review skill', () => {
     expect(body).toContain('One slice of this fact survives a resume');
     expect(body).toContain(
       "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
+  it('relays a remembered effort notice before the review starts', () => {
+    const body = skillBody();
+    expect(body).toContain(
+      'When a warning says the last explicitly typed effort was reused, relay it as the opening line before starting the review.',
     );
   });
 
