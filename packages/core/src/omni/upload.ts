@@ -27,6 +27,29 @@ export interface DashScopeUploadPolicy {
 /** Injectable fetch so tests never hit the network. */
 export type FetchFn = typeof fetch;
 
+/**
+ * One media upload request. `sha256` is the caller's already-computed
+ * content hash — both call sites hash before uploading, and the
+ * self-hosted channel keys objects by it so a re-run of the same instance
+ * overwrites its objects instead of accumulating copies.
+ */
+export interface OmniUploadParams {
+  filePath: string;
+  model: string;
+  mimeType: string;
+  sha256: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * A delivery channel for omni media. Returns a URL the model endpoint can
+ * read: an `oss://` reference DashScope resolves server-side, or a
+ * presigned https URL for endpoints that only accept fetchable URLs.
+ */
+export interface OmniUploader {
+  uploadFile(params: OmniUploadParams): Promise<string>;
+}
+
 export interface DashScopeUploaderOptions {
   /** DashScope API key (Bearer). */
   apiKey: string;
@@ -67,7 +90,7 @@ export function resetCredentialCacheForTests(): void {
 }
 
 /** Strip everything but safe filename characters for the OSS object key. */
-function sanitizeFileName(name: string): string {
+export function sanitizeFileName(name: string): string {
   const cleaned = name.replace(/[^\w.-]+/g, '_').replace(/^\.+/, '');
   return cleaned.length > 0 ? cleaned.slice(-100) : 'file';
 }
@@ -86,7 +109,7 @@ function uploadsOriginFromBaseUrl(baseUrl: string | undefined): string {
  * body is deliberately NOT echoed (it can reach model-visible error text);
  * only the status plus parsed `code`/`message` fields survive, truncated.
  */
-async function summarizeHttpFailure(res: Response): Promise<string> {
+export async function summarizeHttpFailure(res: Response): Promise<string> {
   const body = await res.text().catch(() => '');
   try {
     const parsed = JSON.parse(body) as {

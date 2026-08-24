@@ -16,6 +16,7 @@ import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isSelfHostedOssConfigured } from './oss-upload.js';
 
 const debugLogger = createDebugLogger('omni:delivery-gate');
 
@@ -38,7 +39,10 @@ const QWEN_OAUTH_PLACEHOLDER_API_KEY = 'QWEN_OAUTH_DYNAMIC_TOKEN';
  *    is not accepted by the uploads channel;
  * 4. an explicit baseUrl (the uploads origin is derived from it — never
  *    send the configured credential to an origin the user didn't set);
- * 5. a DashScope-compatible provider.
+ * 5. a DashScope-compatible provider, OR a fully configured self-hosted
+ *    delivery bucket (OMNI_OSS_*) — provider detection is hostname-based,
+ *    so an endpoint on a bare IP is never DashScope-compatible, yet it can
+ *    still read presigned URLs from our own bucket.
  *
  * Any failed condition falls back to the pre-omni inline behavior.
  * Modality support is checked by the caller (fileUtils) alongside the
@@ -70,5 +74,8 @@ export function isOmniDeliveryActive(config: Config): boolean {
     );
     return false;
   }
-  return DashScopeOpenAICompatibleProvider.isDashScopeProvider(cgc);
+  return (
+    DashScopeOpenAICompatibleProvider.isDashScopeProvider(cgc) ||
+    isSelfHostedOssConfigured()
+  );
 }

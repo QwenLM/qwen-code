@@ -31,7 +31,7 @@ import {
   type RecognizedMedia,
 } from './recognition.js';
 import { OmniObjectStore } from './storage.js';
-import { DashScopeUploader } from './upload.js';
+import { createOmniUploader } from './oss-upload.js';
 import {
   OmniUploadCache,
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
@@ -765,7 +765,7 @@ export async function processMediaForOmniDelivery(
       );
     }
 
-    const uploader = new DashScopeUploader({
+    const uploader = createOmniUploader({
       apiKey: cgc.apiKey ?? '',
       baseUrl: cgc.baseUrl,
     });
@@ -775,6 +775,7 @@ export async function processMediaForOmniDelivery(
         filePath: objectPath,
         model,
         mimeType: item.recognized.detectedMimeType,
+        sha256,
         signal,
       });
     } catch (err) {

@@ -42,7 +42,7 @@ import {
   OmniUploadCache,
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
 } from './upload-cache.js';
-import { DashScopeUploader, OSS_URL_PREFIX } from './upload.js';
+import { createOmniUploader, isOmniDeliveredUri } from './oss-upload.js';
 import {
   recognizeMediaFile,
   hashFileSha256,
@@ -160,18 +160,19 @@ function* iterateParts(content: Content): Generator<Part> {
   }
 }
 
-/** Collect the distinct oss:// media deliveries present in `contents`. */
+/** Collect the distinct uploaded media deliveries present in `contents`. */
 export function collectOssMediaRefs(contents: Content[]): OssMediaRef[] {
   const byUri = new Map<string, OssMediaRef>();
   for (const content of contents) {
     for (const part of iterateParts(content)) {
       const fileData = part.fileData;
-      if (!fileData?.fileUri?.startsWith(OSS_URL_PREFIX)) continue;
-      if (byUri.has(fileData.fileUri)) continue;
-      byUri.set(fileData.fileUri, {
-        fileUri: fileData.fileUri,
-        mimeType: fileData.mimeType ?? '',
-        displayName: fileData.displayName ?? path.basename(fileData.fileUri),
+      const fileUri = fileData?.fileUri;
+      if (!fileUri || !isOmniDeliveredUri(fileUri)) continue;
+      if (byUri.has(fileUri)) continue;
+      byUri.set(fileUri, {
+        fileUri,
+        mimeType: fileData?.mimeType ?? '',
+        displayName: fileData?.displayName ?? path.basename(fileUri),
       });
     }
   }
@@ -182,7 +183,7 @@ export function collectOssMediaRefs(contents: Content[]): OssMediaRef[] {
 export function contentsHaveOssMedia(contents: Content[]): boolean {
   return contents.some((content) => {
     for (const part of iterateParts(content)) {
-      if (part.fileData?.fileUri?.startsWith(OSS_URL_PREFIX)) return true;
+      if (isOmniDeliveredUri(part.fileData?.fileUri)) return true;
     }
     return false;
   });
@@ -441,7 +442,7 @@ export async function degradeOmniMediaAfterServerReject(
           extensionForMime(delivery.recognized.detectedMimeType),
           signal,
         );
-        const uploader = new DashScopeUploader({
+        const uploader = createOmniUploader({
           apiKey: cgc.apiKey ?? '',
           baseUrl: cgc.baseUrl,
         });
@@ -449,6 +450,7 @@ export async function degradeOmniMediaAfterServerReject(
           filePath: derivedPath,
           model,
           mimeType: delivery.recognized.detectedMimeType,
+          sha256: derivedSha,
           signal,
         });
         await uploadCache.put(derivedSha, model, fileUri);

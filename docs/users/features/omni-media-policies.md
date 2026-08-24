@@ -250,7 +250,7 @@ extract-audio (origins:[user],  reprocessMedia:true, source:keep)
 ## 缓存与存储
 
 - **内容寻址库** `.qwen/omni/objects/sha256/<xx>/<hash>.<ext>` —— 所有派生产物按内容哈希入库,同输入同策略永不重复派生(降质缓存键 = 源哈希 + 策略身份);
-- **上传缓存** —— DashScope 临时上传的 `oss://` URL 按 `urlTtlHours`(≤ 48h)复用,重复投递不重复上传;
+- **上传缓存** —— 投递 URL 按 `urlTtlHours`(≤ 48h)复用,重复投递不重复上传。默认走 DashScope 临时上传通道拿 `oss://` URL(仅 DashScope 自己能解析);配齐 `OMNI_OSS_*` 环境变量(endpoint / bucket / prefix / AK / SK)后改走自建 OSS 直传,返回预签名 https URL,供只接受可直接下载 URL 的自建推理端点使用;
 - **隔离区** `quarantine/<invocationId>/` —— 失败派生的暂存残留连同 `reason.json` 移入隔离区,按保留天数和体积预算惰性清扫;崩溃留下的未提交 staging 超过 1 小时宽限窗后被回收。
 
 ---

@@ -1210,16 +1210,19 @@ export class ContentGenerationPipeline {
       // (and some providers phrase quota errors as RESOURCE_EXHAUSTED).
       if (getErrorStatus(error) === 429) return;
       const message = getErrorMessage(error);
-      // Dead-media provider errors either quote the oss URL — the cached
-      // URLs always carry the scheme — or describe the media download step
-      // (DashScope: "Download the media resource timed out"). Require the
-      // full "oss://" scheme rather than the bare word so messages like
-      // "connection loss" or "across" cannot nuke healthy cache entries.
-      // This trades conservative false negatives: a phrasing like "Failed
-      // to fetch the media resource" (no URL, no "download") is
-      // deliberately missed.
+      const { isOmniDeliveredUri, mentionsOmniDeliveredUri } = await import(
+        '../../omni/oss-upload.js'
+      );
+      // Dead-media provider errors either quote the delivered URL — the
+      // cached URLs always carry the oss:// scheme or the delivery bucket's
+      // host — or describe the media download step (DashScope: "Download
+      // the media resource timed out"). Matching the full scheme/host
+      // rather than a bare word keeps messages like "connection loss" or
+      // "across" from nuking healthy cache entries. This trades
+      // conservative false negatives: a phrasing like "Failed to fetch the
+      // media resource" (no URL, no "download") is deliberately missed.
       if (
-        !/oss:\/\//i.test(message) &&
+        !mentionsOmniDeliveredUri(message) &&
         !(/download/i.test(message) && /resource|media/i.test(message))
       ) {
         return;
@@ -1239,7 +1242,7 @@ export class ContentGenerationPipeline {
             p.video_url?.url,
             p.input_audio?.data,
           ]) {
-            if (typeof u === 'string' && u.startsWith('oss://')) urls.add(u);
+            if (typeof u === 'string' && isOmniDeliveredUri(u)) urls.add(u);
           }
         }
       }
