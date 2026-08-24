@@ -11,6 +11,10 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
+import {
+  makeSwapSlotClient,
+  type SwapSlotClient,
+} from '../../test-utils/mock-swap-slot-client.js';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -25,34 +29,8 @@ const mockSettings = {
   },
 } as unknown as LoadedSettings;
 
-/**
- * Stateful fake of the real client's single swap-slot contract (see
- * beginTelemetrySwap's JSDoc in core client.ts): one open transaction at a
- * time, commit/abort release the slot. It lets a test observe "the catch
- * block settled the slot" as "the next begin is accepted" (#9844).
- */
-function makeSwapSlotClient() {
-  let open = false;
-  return {
-    initialize: vi.fn().mockResolvedValue(undefined),
-    beginTelemetrySwap: vi.fn(() => {
-      if (open) return false;
-      open = true;
-      return true;
-    }),
-    commitTelemetrySwap: vi.fn(() => {
-      open = false;
-    }),
-    abortTelemetrySwap: vi.fn(() => {
-      open = false;
-    }),
-  };
-}
-
 /** Minimal Config mock shaped like the other failure tests in this file. */
-function makeSwapSlotConfig(
-  geminiClient: ReturnType<typeof makeSwapSlotClient>,
-) {
+function makeSwapSlotConfig(geminiClient: SwapSlotClient) {
   return {
     getSessionId: () => 'old-session-id',
     getTargetDir: () => '/tmp',
@@ -890,9 +868,7 @@ describe('useResumeCommand', () => {
 
   it('rolls core back when persisted Goal state is malformed', async () => {
     const startNewSession = vi.fn();
-    const geminiClient = {
-      initialize: vi.fn().mockResolvedValue(undefined),
-    };
+    const geminiClient = makeSwapSlotClient();
     const goalFailure = new Error('unsupported Goal lifecycle record');
 
     const config = {
@@ -976,6 +952,13 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
     expect(geminiClient.initialize).not.toHaveBeenCalled();
+    // The rollback aborted the transaction this attempt opened. The fake
+    // models the real boolean return, so "abort ran and restored" (true) is
+    // observable here — and "abort ran but restored nothing" (false) would
+    // be caught if the settle ever degraded to a no-op (#9844 review).
+    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
+    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
   });
 
   it('settles the swap slot when resume fails before the core swap', async () => {

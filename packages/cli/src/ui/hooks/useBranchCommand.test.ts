@@ -7,36 +7,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
+import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
 } as unknown as LoadedSettings;
-
-/**
- * Stateful fake of the real client's single swap-slot contract (see
- * beginTelemetrySwap's JSDoc in core client.ts): one open transaction at a
- * time, commit/abort release the slot. Unlike `{ initialize: vi.fn() }`,
- * it lets a test observe "the slot was released" as "the next begin is
- * accepted" (#9844).
- */
-function makeSwapSlotClient() {
-  let open = false;
-  return {
-    initialize: vi.fn().mockResolvedValue(undefined),
-    beginTelemetrySwap: vi.fn(() => {
-      if (open) return false;
-      open = true;
-      return true;
-    }),
-    commitTelemetrySwap: vi.fn(() => {
-      open = false;
-    }),
-    abortTelemetrySwap: vi.fn(() => {
-      open = false;
-    }),
-  };
-}
 
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
@@ -704,11 +680,11 @@ describe('useBranchCommand', () => {
       sid === oldSessionId ? parentResumed : forkResumed,
     );
 
-    const initialize = vi
-      .fn()
+    const geminiClient = makeSwapSlotClient();
+    geminiClient.initialize
       .mockRejectedValueOnce(new Error('init boom')) // fork init fails
       .mockResolvedValueOnce(undefined); // rollback re-init succeeds
-    config.getGeminiClient = () => ({ initialize });
+    config.getGeminiClient = () => geminiClient;
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -728,7 +704,14 @@ describe('useBranchCommand', () => {
     );
     // Client was re-initialized after rollback so chat history re-hydrates
     // against the parent session.
-    expect(initialize).toHaveBeenCalledTimes(2);
+    expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
+    // The rollback aborted the transaction this attempt opened — never
+    // committed it. The fake models the real boolean return, so "abort ran
+    // and restored" (true) is observable here; a false return would mean
+    // "abort ran but restored nothing" (#9844 review).
+    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
+    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
     // UI never switched — no cleared history, no UI sessionId swap.
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
