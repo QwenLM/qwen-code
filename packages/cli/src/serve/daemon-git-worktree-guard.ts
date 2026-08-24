@@ -219,17 +219,6 @@ const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
 // is checked while `bait` is still the original directory.
 const PATH_RELINKING_PROGRAMS = new Set(['cp', 'ln', 'mv']);
 
-// The cmd.exe spellings of the same capability (`mklink` also covers
-// junctions/hardlinks, which point a name at another volume entirely).
-const WIN32_PATH_RELINKING_PROGRAMS = new Set([
-  ...PATH_RELINKING_PROGRAMS,
-  'copy',
-  'mklink',
-  'move',
-  'robocopy',
-  'xcopy',
-]);
-
 // Archive extractors do not name the paths they write: the archive decides.
 // Everything under their extraction directory is therefore suspect, which is
 // the directory itself rather than any operand.
@@ -813,9 +802,9 @@ const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
-  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 
 // Assignments that decide WHICH git binary the run executes. The guard
 // classifies the program word `git` and then reasons about paths; if the
@@ -1216,18 +1205,11 @@ function findChdirTarget(
   run: GuardToken[],
   start: number,
   variant: 'cd' | 'popd' | 'pushd',
-  windows = false,
 ): GuardToken | undefined {
   let index = start;
   while (index < run.length) {
     const token = run[index]!;
     if (token.text === '--') return run[index + 1];
-    // cmd.exe `cd /D <dir>` also switches the drive; `/D` is an option, not
-    // the directory.
-    if (windows && /^\/[dD]$/.test(token.text)) {
-      index++;
-      continue;
-    }
     if (variant === 'cd' && CHDIR_OPTION_PATTERN.test(token.text)) {
       index++;
       continue;
@@ -1391,55 +1373,6 @@ function analyzeRun(
       for (const operand of operands) recordEnvAssignment(operand, state);
       return { kind: 'export', state, operands };
     }
-    if (
-      platform === 'win32' &&
-      getShellConfiguration().shell !== 'bash' &&
-      (program === 'path' || program === 'doskey')
-    ) {
-      // cmd.exe builtins that change how every later chained command
-      // resolves: `path` rewrites the executable search path (so which
-      // `git` runs is no longer provable) and `doskey` installs macros.
-      state.unresolved = true;
-      return { kind: 'export', state, operands: [] };
-    }
-    if (
-      platform === 'win32' &&
-      getShellConfiguration().shell !== 'bash' &&
-      (program === 'set' || program === 'setx')
-    ) {
-      // cmd.exe `set VAR=value` — and `setx VAR value`, which persists past
-      // the session — mutate the environment every later `&&`-chained command
-      // executes under, so they carry the same semantics as a POSIX
-      // `export VAR=value`; route the assignments through that machinery.
-      // Anything that is not a plain assignment (bare `set`, `/p`/`/a`,
-      // dynamic operands) is undecidable and fails closed.
-      const operands = run.slice(index + 1);
-      if (program === 'setx') {
-        const [name, value] = operands;
-        if (
-          operands.length === 2 &&
-          !name!.dynamic &&
-          !value!.dynamic &&
-          /^[A-Za-z_][A-Za-z0-9_]*$/.test(name!.text)
-        ) {
-          recordEnvAssignment(
-            { text: `${name!.text}=${value!.text}`, dynamic: false },
-            state,
-          );
-          return { kind: 'export', state, operands };
-        }
-        state.unresolved = true;
-        return { kind: 'export', state, operands: [] };
-      }
-      for (const operand of operands) {
-        if (operand.dynamic || leadingEnvAssignmentKey(operand.text) === null) {
-          state.unresolved = true;
-          return { kind: 'export', state, operands: [] };
-        }
-        recordEnvAssignment(operand, state);
-      }
-      return { kind: 'export', state, operands };
-    }
     if (program === 'set') {
       if (requestsAllExport(run, index + 1)) {
         return { kind: 'all-export', state };
@@ -1517,17 +1450,11 @@ function analyzeRun(
     if (program === 'git') {
       return { kind: 'git', tokens: run.slice(index), state };
     }
-    if (
-      program === 'cd' ||
-      program === 'pushd' ||
-      program === 'popd' ||
-      (platform === 'win32' && program === 'chdir')
-    ) {
-      const variant = program === 'chdir' ? 'cd' : program;
+    if (program === 'cd' || program === 'pushd' || program === 'popd') {
       return {
         kind: 'cd',
-        variant,
-        target: findChdirTarget(run, index + 1, variant, platform === 'win32'),
+        variant: program,
+        target: findChdirTarget(run, index + 1, program),
         // `cd -P` resolves each component through its symlinks before
         // applying `..`, which a lexical resolve cannot reproduce.
         physical: run
@@ -3036,16 +2963,14 @@ async function evaluateCommandWithCwd(
             // symlink race rather than denying every `tar && git commit`.
             if (trackedCwd !== undefined) relinkedTargets.push(trackedCwd);
           }
-          const relinkPrograms =
-            platformNow === 'win32'
-              ? WIN32_PATH_RELINKING_PROGRAMS
-              : PATH_RELINKING_PROGRAMS;
-          if (run.some((t) => relinkPrograms.has(executableBaseName(t)))) {
+          if (
+            run.some((t) => PATH_RELINKING_PROGRAMS.has(executableBaseName(t)))
+          ) {
             // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
             // the relinking program out of run[0], so scan the whole run.
             for (const operand of run) {
               if (operand.text.startsWith('-')) continue;
-              if (relinkPrograms.has(executableBaseName(operand))) {
+              if (PATH_RELINKING_PROGRAMS.has(executableBaseName(operand))) {
                 continue;
               }
               if (operand.dynamic || trackedCwd === undefined) {
