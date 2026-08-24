@@ -1593,6 +1593,7 @@ export default {
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  'from nested agent': "de l'agent imbricat",
   Running: 'En execució',
   Pausing: 'Pausant',
   Paused: 'En pausa',

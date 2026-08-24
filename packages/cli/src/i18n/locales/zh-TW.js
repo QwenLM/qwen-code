@@ -2129,6 +2129,7 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
   Pausing: '暫停中',
   Paused: '已暫停',

@@ -2608,6 +2608,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -5516,6 +5518,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,

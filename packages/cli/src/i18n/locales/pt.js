@@ -1563,6 +1563,7 @@ export default {
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
+  'from nested agent': 'do agent aninhado',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
   Pausing: 'Pausando',

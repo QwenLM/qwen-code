@@ -7900,6 +7900,62 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.ZOOM_IMAGE);
     });
 
+    it('does not register create_sub_session without a wired spawner', async () => {
+      // The tool only works under `qwen serve`, where the ACP session wires a
+      // spawner. Declaring it in every session used to pollute the action space
+      // of interactive/headless runs with a tool that can never succeed there.
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const { registerFactory, registerTool } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: { registerFactory: Mock; registerTool: Mock };
+          };
+        }
+      ).ToolRegistry.prototype;
+      // Both entry points: a regression that re-adds the tool eagerly via
+      // `registry.registerTool(new CreateSubSessionTool(this))` never touches
+      // `registerFactory`.
+      expect(registerFactory.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+      expect(
+        registerTool.mock.calls.map((call) => call[0]?.name),
+      ).not.toContain(ToolNames.CREATE_SUB_SESSION);
+    });
+
+    it('registers create_sub_session on a subagent registry rebuilt after the spawner is wired', async () => {
+      // The daemon ACP session wires the spawner only after its own registry
+      // exists, so a subagent registry rebuilt later must pick the tool up here
+      // — `copyDiscoveredToolsFrom` never carries built-ins. The rebuild runs on
+      // an `Object.create(base)` override, which reaches the spawner through
+      // prototype delegation.
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerFactory = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(registerFactory.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+
+      config.setSubSessionSpawner(async () => ({ sessionId: 'sub' }));
+      registerFactory.mockClear();
+      const override = Object.create(config) as Config;
+      await override.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      expect(registerFactory.mock.calls.map((call) => call[0])).toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+    });
+
     it('does not register list_directory by default (opt-in tool)', async () => {
       const config = new Config(baseParams);
       await config.initialize();

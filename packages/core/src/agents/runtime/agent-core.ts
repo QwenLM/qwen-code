@@ -228,8 +228,7 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
-          | undefined
+          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -1045,7 +1044,14 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
-            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+            if (
+              checkSubagentLoop({
+                type: GeminiEventType.Retry,
+                ...('isContinuation' in streamEvent
+                  ? { isContinuation: streamEvent.isContinuation }
+                  : {}),
+              })
+            ) {
               terminateMode = AgentTerminateMode.LOOP_DETECTED;
               loopDetectedInStream = true;
               break;
@@ -1589,8 +1595,7 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      | { serverName?: unknown; serverToolName?: unknown }
-      | undefined;
+      { serverName?: unknown; serverToolName?: unknown } | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'

@@ -2325,6 +2325,7 @@ export default {
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
+  'from nested agent': '来自嵌套 agent',
   Running: '运行中',
   Pausing: '暂停中',
   Paused: '已暂停',

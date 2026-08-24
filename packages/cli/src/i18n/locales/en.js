@@ -2050,6 +2050,7 @@ export default {
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
+  'from nested agent': 'from nested agent',
   Running: 'Running',
   Pausing: 'Pausing',
   Paused: 'Paused',

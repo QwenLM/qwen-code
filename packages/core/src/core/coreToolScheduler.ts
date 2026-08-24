@@ -6311,6 +6311,15 @@ export class CoreToolScheduler {
         // schedule() — can stay held across a model round trip. Every settle
         // path is bounded (context accepted, delivery failed, or the send
         // promise settling), so this delays but cannot deadlock the queue.
+        // Notify observers that the display list is empty before awaiting the
+        // completion callback: the TUI commits the finalized tool_group to
+        // history inside that callback, which may await the entire next model
+        // turn (#9121). Deferring this notify to the finally block pinned the
+        // completed group at the bottom of the virtualized list until the
+        // next tool call arrived (#9420). Placed immediately before the
+        // callback (no await in between) so the clear and the history commit
+        // land in the same React render.
+        this.notifyToolCallsUpdate();
         if (this.onAllToolCallsComplete) {
           const deliveryAccepted =
             await this.onAllToolCallsComplete(completedCalls);
