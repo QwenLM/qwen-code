@@ -12525,7 +12525,7 @@ export function App({
                             }
                           : undefined
                       }
-                      currentSessionSchedulingAvailable={workspace.capabilities?.features.includes(
+                      currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_session_reuse',
                       )}
                       onCreateViaChat={() => {
