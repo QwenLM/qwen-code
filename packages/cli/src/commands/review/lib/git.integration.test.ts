@@ -80,7 +80,7 @@ describe('releaseWorktree', () => {
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
   });
 
   it('removes an unregistered non-empty leftover git no longer tracks', () => {
@@ -91,7 +91,7 @@ describe('releaseWorktree', () => {
     mkdirSync(join(repo, 'wt', 'junk'), { recursive: true });
     writeFileSync(join(repo, 'wt', 'junk', 'f'), 'x');
     // Negative control: it is not a registered worktree.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
 
     expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
       existed: true,

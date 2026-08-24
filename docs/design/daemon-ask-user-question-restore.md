@@ -62,16 +62,23 @@ session. No settings.json key and no capability tag in v1.
 
 ## Runtime
 
-1. `startChat` skips orphan repair **only** for the eligible AUQ call ids;
-   the per-send inline repair pass does the same, so a prompt that beats
-   the restore prompt does not close the preserved call with a synthetic
-   failure.
+1. `startChat` skips orphan repair **only** for the eligible AUQ call ids,
+   and only when this load/resume will actually re-hang the question. A
+   suppressed restore (no attached client, fork) repairs Gemini history in
+   lockstep with replay finalization. The per-send inline repair pass always
+   closes a dangling call: an ordinary prompt that beats the restore prompt
+   must not send `model[functionCall] → user[text]` (Anthropic-compatible
+   providers reject that shape). Restore itself sends the real
+   functionResponse, so that pass is a no-op on the restore path.
 2. Transcript replay `finalize()` skips those call ids so the UI stays
-   in-progress. Skip and re-hang stay in lockstep: when the daemon already
-   knows it will decline (no attached client, fork restore), the
+   in-progress. Skip ids come from live chat when it is initialized, otherwise
+   from the transcript tail (cold bulk `historyReplay: 'response'` runs
+   before `startChat`). Skip and re-hang stay in lockstep: when the daemon
+   already knows it will decline (no attached client, fork restore), the
    child-bound request carries
    `qwen.daemon.suppressRestoreAskUserQuestion` and the child neither hints
-   nor skips — the replay finalizes the question as failed.
+   nor skips — the replay finalizes the question as failed. Read-only
+   `qwen/session/loadUpdates` always finalizes; it never re-hangs.
 3. Child load/resume `_meta` includes `qwen.daemon.restoreAskUserQuestion`
    when the argv switch is on and the session is eligible. The default-off
    path never calls the restore-only Session helper.
@@ -82,10 +89,14 @@ session. No settings.json key and no capability tag in v1.
    and `goalTurnActive` are all clear); admission failures are logged and
    swallowed — restore is a best-effort side effect of a successful load.
 5. `Session.prompt()` rebuilds the tool, `requestPermission`, then Submit
-   writes the real function response and continues the model. Cancel
-   persists a decline (live decline handling). A **timeout** on a restored
-   question persists nothing: the call stays dangling in the transcript so
-   a later load can re-hang it again.
+   writes the real function response and continues the model. Restore
+   continuations skip file-history snapshots (they are not user turns).
+   Pending worktree / recovered-agent notices are attached to the
+   post-answer message and cleared only after that message lands. Cancel
+   persists a decline (live decline handling). **Unattended** termination of
+   a restored batch (`timeout`, `session_closed`, abort) persists nothing
+   for the whole batch: the calls stay dangling in the transcript so a
+   later load can re-hang them again.
 
 `requestId` is not persisted across restarts.
 

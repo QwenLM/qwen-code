@@ -8,11 +8,13 @@ import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
+  getShellConfiguration,
   GitWorktreeService,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
+import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
   SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
@@ -136,6 +138,18 @@ const GIT_NUMBERED_CONFIG_ENV_PATTERN = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
 const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 
+// Windows shells whose own grammar parses whatever follows them — caret and
+// `%…%`/`!…!` rewriting (cmd.exe), backticks, here-strings, `-EncodedCommand`
+// (PowerShell) — none of which this guard's POSIX text model can read before
+// execution. An invocation of one carries a payload the analysis cannot
+// resolve, so it fails closed on every Windows lane — including Git Bash
+// sessions, where cmd.exe and PowerShell remain reachable programs; nested
+// spellings (`bash -c 'cmd /c …'`) reach the same rule through the payload
+// recursion. On POSIX hosts cmd.exe and Windows PowerShell do not exist and
+// `pwsh` is an ordinary interpreter the guard does not model — the same
+// stance as python or node — so the rule stays off there.
+const WINDOWS_SHELL_PROGRAMS = new Set(['cmd', 'powershell', 'pwsh']);
+
 // `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
 // argv entry as the payload. `-o`/`-O` take values, so either one earlier in
 // the bundle consumes the rest of it and `-c` is not present.
@@ -205,6 +219,17 @@ const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
 // is checked while `bait` is still the original directory.
 const PATH_RELINKING_PROGRAMS = new Set(['cp', 'ln', 'mv']);
 
+// The cmd.exe spellings of the same capability (`mklink` also covers
+// junctions/hardlinks, which point a name at another volume entirely).
+const WIN32_PATH_RELINKING_PROGRAMS = new Set([
+  ...PATH_RELINKING_PROGRAMS,
+  'copy',
+  'mklink',
+  'move',
+  'robocopy',
+  'xcopy',
+]);
+
 // Archive extractors do not name the paths they write: the archive decides.
 // Everything under their extraction directory is therefore suspect, which is
 // the directory itself rather than any operand.
@@ -241,6 +266,10 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const CMD_REWRITE_SYNTAX_DENIAL =
+  'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
+const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
+  'Daemon shell guard denied a shell command containing Windows shell syntax it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -403,8 +432,9 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
-// On Windows a backslash is a path separator, not a shell escape: the daemon
-// executes commands through cmd.exe (or a shell handed Windows paths), so
+// On Windows a backslash is a path separator, not a shell escape, when the
+// session executes through cmd.exe or PowerShell — the shell
+// getShellConfiguration() selects from the environment — so
 // `git -C C:\repo\sub` must reach the analysis with its separators intact.
 // POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
 // mangling the path into a relative word. Escape the backslash itself and
@@ -418,7 +448,10 @@ interface TokenizedSegment {
 // WITHOUT swallowing the next character; before any other character a plain
 // escaped backslash suffices. Both quoted forms already keep backslashes
 // literal under POSIX rules, so they are left alone; a `$'…'` body starts
-// with `$`, marking its token dynamic either way.
+// with `$`, marking its token dynamic either way. Git Bash sessions execute
+// through bash, whose backslash escapes the POSIX tokeniser already models,
+// so the rewrite stays off there — applying it would split words the
+// executed argv keeps glued.
 const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
   ' ',
   '\t',
@@ -431,8 +464,12 @@ const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
   ')',
 ]);
 
-function preserveWindowsPathSeparators(segment: string): string {
-  if (process.platform !== 'win32') return segment;
+export function preserveWindowsPathSeparators(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): string {
+  if (platform !== 'win32' || shell === 'bash') return segment;
   let single = false;
   let double = false;
   let out = '';
@@ -476,13 +513,130 @@ function preserveWindowsPathSeparators(segment: string): string {
   return out;
 }
 
+// cmd.exe rewrites the command line before executing it: outside double
+// quotes a caret escapes the next character (`^-C` executes as `-C`, and
+// `^"` becomes a literal quote that desyncs any quote tracking), and
+// `%…%`/`!…!` pairs expand variables at execution time — the pair forms
+// inside double quotes too. The POSIX tokeniser reads all three as literal
+// text, so the executed argv can carry a relocation the analysis never saw
+// (`git ^-C <outside> reset --hard` analyses as cwd-local but executes
+// relocated). Any command containing such syntax is denied rather than
+// guessed at. A caret inside double quotes is literal in cmd.exe as
+// it is for the tokeniser, and a lone `%` or `!` names no expansion, so
+// those stay resolvable. PowerShell keeps carets literal and does not
+// expand `%…%`/`!…!`; bash sessions execute through a shell the POSIX
+// tokeniser already models — both are exempt.
+export function containsCmdRewriteSyntax(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): boolean {
+  if (platform !== 'win32' || shell !== 'cmd') return false;
+  let doubleQuoted = false;
+  let percents = 0;
+  let bangs = 0;
+  for (const character of segment) {
+    if (character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (character === '^' && !doubleQuoted) return true;
+    if (character === '%') percents++;
+    else if (character === '!') bangs++;
+  }
+  return percents >= 2 || bangs >= 2;
+}
+
+// Syntax whose meaning in the executing Windows shell diverges from the
+// POSIX text model every analysis stage reads, so the command is denied
+// rather than parsed through a model known to misread it. The scan tracks
+// only the quote states the model and the lane agree on.
+//
+// Both lanes: a lone `&` (cmd.exe runs the next command in the SAME shell
+// where the model subshells it; PowerShell reads it as the call operator,
+// which desyncs the segment split) and `( … )` (cmd.exe grouping persists
+// `cd` changes the model scopes away; PowerShell subexpressions — including
+// `$( … )` and `@( … )` — are not the model's command substitution).
+//
+// cmd.exe only: `#` is an ordinary argv character the model truncates as a
+// comment; `;` separates arguments, never commands, but the model splits
+// commands on it; single quotes are not quotes, so the model would strip
+// them and resolve a different filesystem name than the executed argv
+// carries; and a line that both begins and ends with a double quote is
+// re-stripped by `cmd /d /s /c` before execution whenever an inner quote
+// remains. PowerShell only: `--%` hands the rest of the line to the native
+// command verbatim with `%VAR%` expansion, and `''` inside a single-quoted
+// body spells one literal quote where the model joins the two parts.
+// `&&`, `||`, `|` and paired `%`/`!`/caret forms stay out: the lanes the
+// model reads them on agree with it (the cmd.exe rewrite gate owns the
+// paired forms, and PowerShell pipelines are scoped where segments are).
+export function containsUnmodelledWindowsSyntax(
+  command: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): boolean {
+  if (platform !== 'win32' || shell === 'bash') return false;
+  const trimmed = command.trim();
+  if (
+    shell === 'cmd' &&
+    trimmed.length > 1 &&
+    trimmed.startsWith('"') &&
+    trimmed.endsWith('"') &&
+    trimmed.slice(1, -1).includes('"')
+  ) {
+    return true;
+  }
+  let single = false;
+  let double = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (single) {
+      if (character === "'") {
+        if (shell === 'powershell' && command[index + 1] === "'") return true;
+        single = false;
+      }
+      continue;
+    }
+    if (double) {
+      if (character === '"') double = false;
+      continue;
+    }
+    if (character === "'") {
+      if (shell === 'cmd') return true;
+      single = true;
+      continue;
+    }
+    if (character === '"') {
+      double = true;
+      continue;
+    }
+    if (character === '(' || character === ')') return true;
+    if (character === '&') {
+      if (command[index + 1] === '&') {
+        index++;
+        continue;
+      }
+      return true;
+    }
+    if (shell === 'cmd' && (character === '#' || character === ';')) {
+      return true;
+    }
+    if (shell === 'powershell' && command.startsWith('--%', index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
   let parsed: ReturnType<typeof parse>;
   try {
-    parsed = parse(preserveWindowsPathSeparators(segment), (key) => `$${key}`);
+    // The caller already normalized the whole command text once; re-running
+    // the Windows pre-pass per segment is what let the stages disagree.
+    parsed = parse(segment, (key) => `$${key}`);
   } catch {
     return null;
   }
@@ -659,9 +813,9 @@ const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
-  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 
 // Assignments that decide WHICH git binary the run executes. The guard
 // classifies the program word `git` and then reasons about paths; if the
@@ -1062,11 +1216,18 @@ function findChdirTarget(
   run: GuardToken[],
   start: number,
   variant: 'cd' | 'popd' | 'pushd',
+  windows = false,
 ): GuardToken | undefined {
   let index = start;
   while (index < run.length) {
     const token = run[index]!;
     if (token.text === '--') return run[index + 1];
+    // cmd.exe `cd /D <dir>` also switches the drive; `/D` is an option, not
+    // the directory.
+    if (windows && /^\/[dD]$/.test(token.text)) {
+      index++;
+      continue;
+    }
     if (variant === 'cd' && CHDIR_OPTION_PATTERN.test(token.text)) {
       index++;
       continue;
@@ -1196,7 +1357,10 @@ function readDefinition(
   return { name, body: joinArgvTexts(bodyTokens) };
 }
 
-function analyzeRun(run: GuardToken[]): RunAnalysis {
+function analyzeRun(
+  run: GuardToken[],
+  platform: string = process.platform,
+): RunAnalysis {
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
@@ -1225,6 +1389,55 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     if (EXPORT_BUILTINS.has(program)) {
       const operands = run.slice(index + 1);
       for (const operand of operands) recordEnvAssignment(operand, state);
+      return { kind: 'export', state, operands };
+    }
+    if (
+      platform === 'win32' &&
+      getShellConfiguration().shell !== 'bash' &&
+      (program === 'path' || program === 'doskey')
+    ) {
+      // cmd.exe builtins that change how every later chained command
+      // resolves: `path` rewrites the executable search path (so which
+      // `git` runs is no longer provable) and `doskey` installs macros.
+      state.unresolved = true;
+      return { kind: 'export', state, operands: [] };
+    }
+    if (
+      platform === 'win32' &&
+      getShellConfiguration().shell !== 'bash' &&
+      (program === 'set' || program === 'setx')
+    ) {
+      // cmd.exe `set VAR=value` — and `setx VAR value`, which persists past
+      // the session — mutate the environment every later `&&`-chained command
+      // executes under, so they carry the same semantics as a POSIX
+      // `export VAR=value`; route the assignments through that machinery.
+      // Anything that is not a plain assignment (bare `set`, `/p`/`/a`,
+      // dynamic operands) is undecidable and fails closed.
+      const operands = run.slice(index + 1);
+      if (program === 'setx') {
+        const [name, value] = operands;
+        if (
+          operands.length === 2 &&
+          !name!.dynamic &&
+          !value!.dynamic &&
+          /^[A-Za-z_][A-Za-z0-9_]*$/.test(name!.text)
+        ) {
+          recordEnvAssignment(
+            { text: `${name!.text}=${value!.text}`, dynamic: false },
+            state,
+          );
+          return { kind: 'export', state, operands };
+        }
+        state.unresolved = true;
+        return { kind: 'export', state, operands: [] };
+      }
+      for (const operand of operands) {
+        if (operand.dynamic || leadingEnvAssignmentKey(operand.text) === null) {
+          state.unresolved = true;
+          return { kind: 'export', state, operands: [] };
+        }
+        recordEnvAssignment(operand, state);
+      }
       return { kind: 'export', state, operands };
     }
     if (program === 'set') {
@@ -1275,6 +1488,11 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         propagatesCwd: true,
       };
     }
+    if (platform === 'win32' && WINDOWS_SHELL_PROGRAMS.has(program)) {
+      // The payload belongs to a grammar this analysis does not model; the
+      // undecidable arm fails closed on the documented reason.
+      return { kind: 'undecidable' };
+    }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
       const scan = consumeShellWrapper(run, index);
       if (scan.kind === 'none') {
@@ -1299,11 +1517,17 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     if (program === 'git') {
       return { kind: 'git', tokens: run.slice(index), state };
     }
-    if (program === 'cd' || program === 'pushd' || program === 'popd') {
+    if (
+      program === 'cd' ||
+      program === 'pushd' ||
+      program === 'popd' ||
+      (platform === 'win32' && program === 'chdir')
+    ) {
+      const variant = program === 'chdir' ? 'cd' : program;
       return {
         kind: 'cd',
-        variant: program,
-        target: findChdirTarget(run, index + 1, program),
+        variant,
+        target: findChdirTarget(run, index + 1, variant, platform === 'win32'),
         // `cd -P` resolves each component through its symlinks before
         // applying `..`, which a lexical resolve cannot reproduce.
         physical: run
@@ -2196,22 +2420,61 @@ async function evaluateCommandWithCwd(
     return undefined;
   };
 
-  const segments = splitCommands(stripHeredocBodies(command));
-  const separators = readTopLevelSeparators(stripHeredocBodies(command));
+  // A cmd rewrite pair can straddle a command separator (`%A && git -C %B`
+  // pairs across the `&&`), so the whole text is checked before splitting.
+  const platformNow = process.platform;
+  const shellNow = getShellConfiguration().shell;
+  const windowsNative = platformNow === 'win32' && shellNow !== 'bash';
+  // Heredocs are a POSIX shell construct: on the Windows lanes the marker
+  // line's body lines are separate commands, so stripping them would hide
+  // commands the executed text really runs.
+  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
+    return {
+      denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  if (containsUnmodelledWindowsSyntax(strippedCommand, platformNow, shellNow)) {
+    return {
+      denial: { allowed: false, reason: WINDOWS_UNMODELLED_SYNTAX_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  // The Windows separator pre-pass must normalize the WHOLE text once,
+  // before any stage reads it: splitCommands and readTopLevelSeparators scan
+  // it too, and a rewrite applied per stage lets the stages disagree about
+  // where one command ends (`cd <out>\&& git reset --hard`). A nested
+  // payload re-normalizes an already-normalized body; that is harmless —
+  // the `"\\"` form is a fixed point and Windows path resolution collapses
+  // duplicated separators.
+  const normalizedCommand = preserveWindowsPathSeparators(
+    strippedCommand,
+    platformNow,
+    shellNow,
+  );
+  const segments = splitCommands(normalizedCommand);
+  const separators = readTopLevelSeparators(normalizedCommand);
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;
   const isPipeComponent = (index: number): boolean =>
-    separatorsMatch
-      ? // Both sides of a pipe run in subshells; for `&` only the segment it
-        // follows (the backgrounded one) does — the next segment is
-        // foreground.
-        separators[index - 1] === '|' ||
-        separators[index] === '|' ||
-        separators[index] === '&'
-      : // Structural disagreement with `splitCommands`: scope every segment
-        // rather than guess which ones ran in a subshell.
-        separators.some((separator) => separator === '|' || separator === '&');
+    // A PowerShell pipeline runs every stage in the one session — a `cd` on
+    // either side outlives the pipe — so no segment is scoped there.
+    windowsNative && shellNow === 'powershell'
+      ? false
+      : separatorsMatch
+        ? // Both sides of a pipe run in subshells; for `&` only the segment
+          // it follows (the backgrounded one) does — the next segment is
+          // foreground.
+          separators[index - 1] === '|' ||
+          separators[index] === '|' ||
+          separators[index] === '&'
+        : // Structural disagreement with `splitCommands`: scope every segment
+          // rather than guess which ones ran in a subshell.
+          separators.some(
+            (separator) => separator === '|' || separator === '&',
+          );
   for (const [segmentIndex, segment] of segments.entries()) {
     const pipeComponent = isPipeComponent(segmentIndex);
     const cwdBeforeSegment = trackedCwd;
@@ -2248,10 +2511,14 @@ async function evaluateCommandWithCwd(
     // `name() { … }` — shell-quote reports the parentheses as operators, so
     // the header is recognised on the raw segment. The body runs wherever the
     // name is later used, which is what the recorded shape stands in for.
-    const functionHeader =
-      /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(segment) ??
-      // The `function NAME` keyword form, with the `()` optional.
-      /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/.exec(segment);
+    // `alias`/function definitions are bash semantics; on the Windows lanes
+    // the same text defines nothing, so recording a shadow there would make
+    // the replay hide the real program the shell executes.
+    const functionHeader = windowsNative
+      ? null
+      : (/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(segment) ??
+        // The `function NAME` keyword form, with the `()` optional.
+        /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/.exec(segment));
     if (functionHeader) {
       insideDefinition = functionHeader[1]!;
       // Start the body at the first `{`; the header before it is not code.
@@ -2433,7 +2700,7 @@ async function evaluateCommandWithCwd(
         if (denial) return { denial, cwdAfter: trackedCwd };
         continue;
       }
-      const analysis = analyzeRun(run);
+      const analysis = analyzeRun(run, platformNow);
       switch (analysis.kind) {
         case 'cd': {
           const target =
@@ -2709,7 +2976,9 @@ async function evaluateCommandWithCwd(
           break;
         case 'other': {
           // `alias name=body …` / `name() { body }` — record, don't execute.
-          const aliasDefinitions = readAliasDefinitions(run);
+          const aliasDefinitions = windowsNative
+            ? []
+            : readAliasDefinitions(run);
           if (aliasDefinitions.length > 0) {
             for (const definition of aliasDefinitions) {
               definedBodies.set(definition.name, {
@@ -2719,7 +2988,7 @@ async function evaluateCommandWithCwd(
             }
             break;
           }
-          const definition = readDefinition(run);
+          const definition = windowsNative ? undefined : readDefinition(run);
           if (definition) {
             definedBodies.set(definition.name, {
               body: definition.body,
@@ -2728,7 +2997,9 @@ async function evaluateCommandWithCwd(
             break;
           }
           const programToken = readProgramWord(run);
-          const definitionName = readFunctionName(run);
+          const definitionName = windowsNative
+            ? undefined
+            : readFunctionName(run);
           if (definitionName) {
             if (run.some((token) => GIT_WORD_PATTERN.test(token.text))) {
               gitShapedNames.add(definitionName);
@@ -2765,14 +3036,16 @@ async function evaluateCommandWithCwd(
             // symlink race rather than denying every `tar && git commit`.
             if (trackedCwd !== undefined) relinkedTargets.push(trackedCwd);
           }
-          if (
-            run.some((t) => PATH_RELINKING_PROGRAMS.has(executableBaseName(t)))
-          ) {
+          const relinkPrograms =
+            platformNow === 'win32'
+              ? WIN32_PATH_RELINKING_PROGRAMS
+              : PATH_RELINKING_PROGRAMS;
+          if (run.some((t) => relinkPrograms.has(executableBaseName(t)))) {
             // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
             // the relinking program out of run[0], so scan the whole run.
             for (const operand of run) {
               if (operand.text.startsWith('-')) continue;
-              if (PATH_RELINKING_PROGRAMS.has(executableBaseName(operand))) {
+              if (relinkPrograms.has(executableBaseName(operand))) {
                 continue;
               }
               if (operand.dynamic || trackedCwd === undefined) {
