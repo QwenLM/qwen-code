@@ -6,10 +6,10 @@
 
 /**
  * `PermissionMediator` — interface contract for daemon permission flow.
- * `MultiClientPermissionMediator` in `permissionMediator.ts` implements
- * the supported policies, owns pending/resolved permission state, and
- * is wired through `BridgeClient.requestPermission` plus the
- * `respondToPermission` route in `createHttpAcpBridge`.
+ * `MultiClientPermissionMediator` in `permissionMediator.ts` owns the
+ * policy dispatch and pending/resolved permission state used by
+ * `BridgeClient.requestPermission` plus the `respondToPermission` route
+ * in `createHttpAcpBridge`.
  *
  * The four policies are ordered from cheapest to strongest:
  *
@@ -29,7 +29,7 @@
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `permissionMediator.ts` for the production implementation.
+ * See `permissionMediator.ts` for the implementation details.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -143,7 +143,7 @@ export type PermissionResolution =
 
 /**
  * The contract `qwen serve`'s permission route layer talks to.
- * `MultiClientPermissionMediator` provides the production implementation.
+ * `MultiClientPermissionMediator` provides the implementation.
  */
 export interface PermissionMediator {
   /** Active policy. May be reconfigured per session in future
