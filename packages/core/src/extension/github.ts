@@ -214,11 +214,6 @@ function createPinnedGitConfig(curlResolve: string): string[] {
   ];
 }
 
-/**
- * Clones a Git repository to a specified local path.
- * @param installMetadata The metadata for the extension to install.
- * @param destination The destination path to clone the repository to.
- */
 function resolveGitRef(ref: string | undefined): string {
   const resolvedRef = ref || 'HEAD';
   if (resolvedRef.startsWith('-')) {
@@ -227,6 +222,11 @@ function resolveGitRef(ref: string | undefined): string {
   return resolvedRef;
 }
 
+/**
+ * Clones a Git repository to a specified local path.
+ * @param installMetadata The metadata for the extension to install.
+ * @param destination The destination path to clone the repository to.
+ */
 export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,

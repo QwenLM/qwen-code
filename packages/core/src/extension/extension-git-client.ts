@@ -35,6 +35,9 @@ function assertCredentialedHttpsSource(source: string): void {
   );
 }
 
+// Mirrors the unsafe config-key blocklist matchers in @simple-git/argv-parser
+// (1.1.1 via simple-git 3.36). Re-sync this table on a dependency bump: a new
+// matcher that this table misses fails credentialed installs pre-spawn.
 const generatedConfigKeyAllowances = [
   [/alias/, 'allowUnsafeAlias'],
   [/core.askpass/, 'allowUnsafeAskPass'],
