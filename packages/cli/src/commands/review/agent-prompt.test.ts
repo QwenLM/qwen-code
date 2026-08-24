@@ -2967,7 +2967,9 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // ownership, not on a capability claim: the review-agent tool table is
     // role-neutral and includes the shell, so "you have no runner" would be
     // false and must never come back.
-    expect(p).toContain('An unrung mutation is a hypothesis');
+    expect(p).toContain('An unrun mutation is a hypothesis');
+    expect(p).toContain('ships N/N green');
+    expect(p).toContain('verified N/N green');
     expect(p).toContain('witness: not run —');
     expect(p).toContain('Executed mutation verdicts belong to Agent 7');
     expect(p).not.toContain('you have no runner');
@@ -2981,6 +2983,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // same reading-based mutation analysis, so it carries the same bar on
     // execution-grade phrasing.
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
+      'you have no runner',
+    );
   });
 
   it('gives the verifier the probe capability — run a claim, self-check the probe, tag [probe]', () => {
