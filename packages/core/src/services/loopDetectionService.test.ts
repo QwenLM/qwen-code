@@ -3791,6 +3791,104 @@ describe('LoopDetectionService', () => {
       expect(capService.getLastLoopType()).toBeNull();
     });
 
+    it('does not halt a resumed task_list poller whose evidence decayed mid-streak (issue #9450)', () => {
+      // Two consecutive tool-call-free round-trips mid-streak (reachable
+      // via checkNextSpeaker "Please continue." hook turns or agent-core
+      // external-input wait rounds) decay the key's result evidence at the
+      // second Finished boundary. Pre-fix the always-on consecutive streak
+      // (lastToolCallKey / toolCallRepetitionCount) survived the decay:
+      // resultsObserved could then only ever reach count - 2, the
+      // exoneration gate stayed permanently unsatisfiable, and a
+      // changing-board poller halted at the 5th identical request after
+      // resuming — the #9450 false positive re-entering via the decay
+      // layer. The decay's "abandoned" semantics must drop the streak too
+      // so resumed polling starts fresh and is judged on its own results.
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const gapService = new LoopDetectionService(makeConfig());
+      gapService.reset('decay-resume-productive');
+
+      // Bring the streak to 3 with changing results, one poll per round
+      // (production ordering: request → Finished → result).
+      for (let i = 0; i < 3; i++) {
+        expect(
+          gapService.checkAlwaysOnSafeties(taskListEvent(`poll-${i}`)),
+        ).toBe(false);
+        gapService.checkAlwaysOnSafeties(finishedEvent);
+        expect(
+          gapService.recordToolResultByCallId(
+            `poll-${i}`,
+            taskListResult(`board state v${i}`, `poll-${i}`),
+          ),
+        ).toBe(false);
+      }
+      // Two consecutive tool-call-free round-trips: the first boundary
+      // consumes the last result's mark, the second decays the evidence.
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+
+      // Polling resumes with the board still changing: no halt. Pre-fix
+      // this fired CONSECUTIVE_IDENTICAL_TOOL_CALLS at the 5th identical
+      // request of the streak.
+      let fired = false;
+      for (let i = 3; i < 11 && !fired; i++) {
+        fired = gapService.checkAlwaysOnSafeties(taskListEvent(`poll-${i}`));
+        if (fired) break;
+        gapService.checkAlwaysOnSafeties(finishedEvent);
+        fired = gapService.recordToolResultByCallId(
+          `poll-${i}`,
+          taskListResult(`board state v${i}`, `poll-${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(gapService.getLastLoopType()).toBeNull();
+    });
+
+    it('still halts a resumed frozen poller whose evidence decayed mid-streak (fail-safe)', () => {
+      // Fail-safe twin of the decay-resume regression: after the abandoned
+      // evidence decays and polling resumes, a frozen board corroborates
+      // the loop again through the fresh streak's own results, so the
+      // guard still halts once the fresh streak is complete.
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const gapService = new LoopDetectionService(makeConfig());
+      gapService.reset('decay-resume-frozen');
+
+      for (let i = 0; i < 3; i++) {
+        expect(
+          gapService.checkAlwaysOnSafeties(taskListEvent(`poll-${i}`)),
+        ).toBe(false);
+        gapService.checkAlwaysOnSafeties(finishedEvent);
+        expect(
+          gapService.recordToolResultByCallId(
+            `poll-${i}`,
+            taskListResult('frozen board', `poll-${i}`),
+          ),
+        ).toBe(false);
+      }
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+
+      let fired = false;
+      for (let i = 3; i < 11 && !fired; i++) {
+        fired = gapService.checkAlwaysOnSafeties(taskListEvent(`poll-${i}`));
+        if (fired) break;
+        gapService.checkAlwaysOnSafeties(finishedEvent);
+        fired = gapService.recordToolResultByCallId(
+          `poll-${i}`,
+          taskListResult('frozen board', `poll-${i}`),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(gapService.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     it('does not halt a changing-board poller when a suppressed replay lands mid-streak', () => {
       // The provider re-emitted an already-handled call id mid-streak: the
       // replay streamed through the guards (incrementing the request-side

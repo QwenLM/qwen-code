@@ -1848,7 +1848,17 @@ export class LoopDetectionService {
    * still being polled would wipe its streak at the next poll's boundary,
    * disarming the stuck signal for an every-other-round frozen poller and
    * resetting resultsObserved mid-streak while toolCallRepetitionCount
-   * stands (issue #9450). lastFingerprint survives the decay: when polling
+   * stands (issue #9450). When a key's evidence is zeroed, the always-on
+   * consecutive streak is dropped too if it still belongs to that key:
+   * the exoneration gate counts resultsObserved against
+   * toolCallRepetitionCount, and zeroing the evidence while the count
+   * stands leaves the gate permanently unsatisfiable — resumed polling
+   * would halt CONSECUTIVE_IDENTICAL_TOOL_CALLS regardless of its results
+   * (the #9450 false positive re-entering via the decay layer). A resumed
+   * streak starts fresh and is judged on its own results; decay never runs
+   * for a key with requests still in flight (the requested-set skip above),
+   * so this cannot drop a streak the in-flight accounting is still
+   * deferring. lastFingerprint survives the decay: when polling
    * resumes, the first fresh result is still judged against the last
    * observed one (changed → productive, unchanged → the count
    * re-accumulates toward the halt).
@@ -1866,6 +1876,10 @@ export class LoopDetectionService {
         state.consecutiveIdenticalResults = 0;
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
+        if (this.lastToolCallKey === key) {
+          this.lastToolCallKey = null;
+          this.toolCallRepetitionCount = 0;
+        }
         decayed = true;
       }
     }
