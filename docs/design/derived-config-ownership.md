@@ -28,3 +28,5 @@ Migration order:
 The generic factory intentionally accepts public getter overrides only. Named profiles keep private field rebinding and lifecycle management inside `config.ts` without exposing arbitrary Config mutation.
 
 The approval profile owns child-local approval state and its parent permission-manager strip/restore contract. Callers remain responsible for invoking its cleanup callback when the agent lifecycle ends.
+
+Production core modules that import `Config` are linted against non-null `Object.create(...)` calls, keeping new prototype overlays behind the generic or named factories.

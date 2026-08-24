@@ -19,6 +19,7 @@ import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
 import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
 // surface-specific overrides (flat config keeps only the last
@@ -333,6 +334,27 @@ export default tseslint.config(
     },
     rules: {
       'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/core/src/**/*.ts'],
+    ignores: [
+      'packages/core/src/config/config.ts',
+      '**/*.test.ts',
+      '**/*.spec.ts',
+      '**/__tests__/**',
+      '**/generated/**',
+      '**/*.generated.ts',
+    ],
+    plugins: {
+      'qwen-code': {
+        rules: {
+          'no-config-object-create': noConfigObjectCreate,
+        },
+      },
+    },
+    rules: {
+      'qwen-code/no-config-object-create': 'error',
     },
   },
   {
