@@ -12284,6 +12284,139 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
+      it('records a Stop-hook continuation usage under the continuation request route so the next same-route send trips the gate (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+          model === 'vision-agent' ? 'route-vision' : 'route-primary',
+        );
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        const resolveForModel = vi.fn().mockResolvedValue({
+          contentGenerator: {},
+          contentGeneratorConfig: { model: 'vision-agent' },
+          model: 'vision-agent',
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel,
+        });
+        // The Stop hook blocks the first end-turn so the over-limit usage
+        // arrives on the continuation send inside #runStopContinuation; the
+        // second hook call lets the turn finish.
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        // The primary override send completes without usage metadata; the
+        // continuation send then streams the over-limit usage, which must be
+        // recorded under the continuation's request route (the override
+        // route), not the active route's.
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'response text' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        // Both sends went out under the \0 exact-route override.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1\0',
+          expect.any(Object),
+          expect.any(String),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
+        // Next same-override send: compression throws, so the gate falls
+        // back to the cached count — which must be the continuation send's
+        // 101 recorded under the override route (101 > 100 → drop). If the
+        // continuation record had gone under the active route instead, the
+        // override-route cache would be empty and this send would wrongly
+        // go out.
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'max_tokens',
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
       it('retains a returning route token count after an A-B-A switch (#9529)', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         let routeIdentity = 'route-a';
