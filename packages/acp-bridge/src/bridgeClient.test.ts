@@ -1735,6 +1735,32 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
     ).rejects.toThrow('stale prompt');
   });
 
+  it('preserves scheduled-task business rejections as structured ACP errors', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+    const rejection = new Error('The caller session has a pending interaction');
+    rejection.name = 'ExistingSessionScheduledTaskCreateError';
+    Object.assign(rejection, { status: 409, code: 'session_busy' });
+    handler.mockRejectedValueOnce(rejection);
+
+    const error = await client
+      .extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({
+      code: -32602,
+      message: 'The caller session has a pending interaction',
+      data: {
+        errorKind: 'session_busy',
+        status: 409,
+        hint: 'The caller session has a pending interaction',
+      },
+    });
+  });
+
   it('rejects a forged session or prompt identity', async () => {
     const { client, handler } = makeCurrentSessionClient(
       {},

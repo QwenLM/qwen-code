@@ -3014,6 +3014,17 @@ export class Session implements SessionContext {
             'current_session_scheduling_unavailable: The daemon does not support current-session scheduling.',
           );
         }
+        const data =
+          isRecord(error) && isRecord(error['data'])
+            ? error['data']
+            : undefined;
+        const errorKind = data?.['errorKind'];
+        if (typeof errorKind === 'string') {
+          const hint = data?.['hint'];
+          throw new Error(
+            `${errorKind}: ${typeof hint === 'string' && hint.length > 0 ? hint : 'Current-session scheduled task creation was rejected.'}`,
+          );
+        }
         throw error;
       }
       if (

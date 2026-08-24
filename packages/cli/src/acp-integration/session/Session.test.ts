@@ -7737,6 +7737,31 @@ describe('Session', () => {
       ).rejects.toThrow(/current_session_scheduling_unavailable/);
     });
 
+    it('surfaces structured daemon rejections to the current-session tool', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32602,
+        message: 'Invalid params',
+        data: {
+          errorKind: 'session_busy',
+          status: 409,
+          hint: 'The caller session has a pending interaction',
+        },
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(
+        'session_busy: The caller session has a pending interaction',
+      );
+    });
+
     it('drops oldest background notifications when the queue reaches its cap', () => {
       (
         session as unknown as {

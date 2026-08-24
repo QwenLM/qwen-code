@@ -197,6 +197,28 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
   );
 }
 
+interface ExistingSessionScheduledTaskCreateErrorShape {
+  name: 'ExistingSessionScheduledTaskCreateError';
+  message: string;
+  status: number;
+  code: string;
+}
+
+function isExistingSessionScheduledTaskCreateErrorShape(
+  err: unknown,
+): err is ExistingSessionScheduledTaskCreateErrorShape {
+  if (!(err instanceof Error)) return false;
+  const status = (err as Error & { status?: unknown }).status;
+  const code = (err as Error & { code?: unknown }).code;
+  return (
+    err.name === 'ExistingSessionScheduledTaskCreateError' &&
+    typeof status === 'number' &&
+    Number.isFinite(status) &&
+    typeof code === 'string' &&
+    code.length > 0
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -493,6 +515,17 @@ function preserveFsErrorOverAcp(err: unknown): never {
       errorKind: err.kind,
       ...(err.hint !== undefined ? { hint: err.hint } : {}),
       ...(err.status !== undefined ? { status: err.status } : {}),
+    });
+  }
+  throw err;
+}
+
+function preserveScheduledTaskCreateErrorOverAcp(err: unknown): never {
+  if (isExistingSessionScheduledTaskCreateErrorShape(err)) {
+    throw new RequestError(err.status >= 500 ? -32603 : -32602, err.message, {
+      errorKind: err.code,
+      status: err.status,
+      hint: err.message,
     });
   }
   throw err;
@@ -1951,7 +1984,9 @@ export class BridgeClient implements Client {
           );
         }
       },
-    });
+    }).catch((error: unknown) =>
+      preserveScheduledTaskCreateErrorOverAcp(error),
+    );
     if (
       typeof result.id !== 'string' ||
       result.id.length === 0 ||
