@@ -134,10 +134,6 @@ function parseApprovalModeValue(value: string): ApprovalMode {
   return approvalMode;
 }
 
-const APPROVAL_MODE_DESCRIPTION = APPROVAL_MODES.map(
-  (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
-).join(', ');
-
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
@@ -538,6 +534,9 @@ function normalizeOutputFormat(
 
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
+  const approvalModeDescription = APPROVAL_MODES.map(
+    (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
+  ).join(', ');
 
   // hack: if the first argument is the CLI entry point, remove it
   if (
@@ -707,7 +706,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('approval-mode', {
           type: 'string',
           choices: APPROVAL_MODES,
-          description: `Set the approval mode: ${APPROVAL_MODE_DESCRIPTION}`,
+          description: `Set the approval mode: ${approvalModeDescription}`,
         })
         .option('acp', {
           type: 'boolean',
