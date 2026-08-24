@@ -98,6 +98,45 @@ describe('getBlockCopyText', () => {
     );
     expect(getBlockCopyText(toolBlock('t-2', 'Ran ls'))).toBe('Ran ls');
   });
+
+  it('copies tool content text and diffs after title and details', () => {
+    const tool: DaemonTranscriptBlock = {
+      ...toolBlock('t-1', 'Edited app.ts', '{"path":"src/app.ts"}'),
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Updated 1 path.' } },
+        {
+          type: 'diff',
+          path: 'src/app.ts',
+          oldText: 'const a = 1;',
+          newText: 'const a = 2;',
+        },
+      ],
+    };
+    expect(getBlockCopyText(tool)).toBe(
+      [
+        'Edited app.ts',
+        '{"path":"src/app.ts"}',
+        'Updated 1 path.',
+        '--- src/app.ts\n+++ src/app.ts\n-const a = 1;\n+const a = 2;',
+      ].join('\n'),
+    );
+  });
+
+  it('renders creation-style diffs without an old text', () => {
+    const tool: DaemonTranscriptBlock = {
+      ...toolBlock('t-1', 'Created notes.md'),
+      content: [{ type: 'diff', path: 'notes.md', newText: 'hello' }],
+    };
+    expect(getBlockCopyText(tool)).toBe('Created notes.md\nnotes.md:\nhello');
+  });
+
+  it('ignores malformed tool content entries', () => {
+    const tool: DaemonTranscriptBlock = {
+      ...toolBlock('t-1', 'Ran ls'),
+      content: [null, { type: 'terminal', terminalId: 'x' }, 'str'],
+    };
+    expect(getBlockCopyText(tool)).toBe('Ran ls');
+  });
 });
 
 describe('formatBlocksForCopyAll', () => {
@@ -178,6 +217,22 @@ describe('findBlockByRowKey', () => {
 
   it('matches projected message keys derived from a block id', () => {
     expect(findBlockByRowKey(blocks, 'msg:a-1-ip')).toBe(blocks[1]);
+  });
+
+  it('resolves tool-group row keys carrying the tg- prefix', () => {
+    const toolBlocks = [
+      textBlock('user', 'user-1', 'question'),
+      textBlock('assistant', 'assistant-2', 'answer'),
+      toolBlock('tool-3', 'Ran ls'),
+      toolBlock('tool-4', 'Ran pwd'),
+    ];
+    // MessageList keys tool rows as msg:tg-<block id>; merged groups share
+    // the first block's key, which resolves to the group's first block.
+    expect(findBlockByRowKey(toolBlocks, 'msg:tg-tool-3')).toBe(toolBlocks[2]);
+    expect(findBlockByRowKey(toolBlocks, 'msg:tg-tool-3-ip')).toBe(
+      toolBlocks[2],
+    );
+    expect(findBlockByRowKey(toolBlocks, 'msg:tg-zz-9')).toBeNull();
   });
 
   it('ignores non-message rows and unknown keys', () => {
