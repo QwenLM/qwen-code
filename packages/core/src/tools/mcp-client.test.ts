@@ -3614,6 +3614,95 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // Cleanup the registry entry so this test doesn't leak.
       removeMCPServerStatus('healthy-server');
     });
+
+    it('disconnect() terminates a Streamable HTTP session before closing the transport (issue #9944)', async () => {
+      // The SDK's `transport.close()` only tears down local state; the
+      // server-side session stays alive unless we send the spec's DELETE
+      // (`terminateSession()`). An abandoned session keeps occupying
+      // single-session servers, which then reject every later `initialize`
+      // with "Server already initialized".
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const callOrder: string[] = [];
+      const mockedTransport = {
+        terminateSession: vi.fn().mockImplementation(async () => {
+          callOrder.push('terminateSession');
+        }),
+        close: vi.fn().mockImplementation(async () => {
+          callOrder.push('close');
+        }),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await client.disconnect();
+
+      expect(mockedTransport.terminateSession).toHaveBeenCalledTimes(1);
+      // Termination must happen while the transport can still send
+      // requests — i.e. before `close()` aborts it.
+      expect(callOrder).toEqual(['terminateSession', 'close']);
+
+      removeMCPServerStatus('http-server');
+    });
+
+    it('disconnect() swallows session-termination failures (issue #9944)', async () => {
+      // A dead server must not block teardown: the DELETE fails, but
+      // disconnect still completes and closes the transport.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const mockedTransport = {
+        terminateSession: vi
+          .fn()
+          .mockRejectedValue(new Error('ECONNREFUSED')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'dead-http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await expect(client.disconnect()).resolves.toBeUndefined();
+      expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+      removeMCPServerStatus('dead-http-server');
+    });
   });
 
   describe('hasNetworkTransport', () => {

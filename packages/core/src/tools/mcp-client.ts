@@ -743,6 +743,29 @@ export class McpClient {
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
+      // Streamable HTTP only: the SDK's `transport.close()` aborts local
+      // state but leaves the server-side session alive. Per spec, a client
+      // that no longer needs a session SHOULD terminate it explicitly
+      // (`terminateSession()` sends the DELETE). Without this, a session we
+      // abandon keeps occupying the server: single-session HTTP servers
+      // then reject every later `initialize` with "Server already
+      // initialized" (issue #9944 — e.g. the internal reconnect path or a
+      // later `qwen mcp reconnect` can never recover them), and
+      // multi-session servers accumulate orphaned sessions. Best-effort —
+      // a dead/unreachable server must not block teardown. Must run BEFORE
+      // `close()` aborts the transport's request machinery.
+      const streamableTransport = this.transport as {
+        terminateSession?: () => Promise<void>;
+      };
+      if (typeof streamableTransport.terminateSession === 'function') {
+        try {
+          await streamableTransport.terminateSession();
+        } catch (error) {
+          debugLogger.debug(
+            `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
+          );
+        }
+      }
       await this.transport.close();
     }
     this.client.close();

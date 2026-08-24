@@ -11,6 +11,8 @@ import {
   Config,
   FileDiscoveryService,
   ExtensionManager,
+  getMCPServerStatus,
+  MCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
@@ -79,7 +81,12 @@ async function createMinimalConfig(): Promise<Config> {
     ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
-  await config.initialize();
+  // This command runs its own targeted per-server discovery below
+  // (`discoverToolsForServer`); it does not need the background incremental
+  // pass `initialize()` would otherwise start. Skipping it removes the race
+  // where that background pass re-arms health-check timers after
+  // `config.shutdown()` and leaves the process hanging (issue #9944).
+  await config.initialize({ skipMcpDiscovery: true });
 
   return config;
 }
@@ -88,6 +95,15 @@ interface ReconnectError extends Error {
   exitCode: number;
 }
 
+/**
+ * The reconnect command runs in its own short-lived process: it can verify
+ * (and refresh) its own connection, but it has no channel into a running
+ * Qwen Code session. Say so plainly in the success output so it is not read
+ * as "your running session's MCP tools are back" (issue #9944).
+ */
+const SESSION_SCOPE_NOTE =
+  'Note: this command reconnects in a separate process; it cannot refresh the MCP tools of an already-running Qwen Code session. Restart that session if its tools remain unavailable.';
+
 function createReconnectError(
   message: string,
   exitCode: number = 1,
@@ -95,6 +111,28 @@ function createReconnectError(
   const error = new Error(message) as ReconnectError;
   error.exitCode = exitCode;
   return error;
+}
+
+/**
+ * Runs discovery for one server and verifies that it actually produced a
+ * live connection. `discoverToolsForServer` is best-effort and swallows
+ * connect errors, so without the status check this command would print
+ * "Reconnected successfully" for a server it never reached — e.g. a
+ * single-session HTTP server whose only session is held by a running Qwen
+ * Code session, or a server that is simply down (issue #9944).
+ */
+async function discoverAndVerifyConnection(
+  config: Config,
+  serverName: string,
+): Promise<void> {
+  const toolRegistry = config.getToolRegistry();
+  await toolRegistry.discoverToolsForServer(serverName);
+  const status = getMCPServerStatus(serverName);
+  if (status !== MCPServerStatus.CONNECTED) {
+    throw new Error(
+      `connection attempt finished without a live connection (status: ${status})`,
+    );
+  }
 }
 
 async function reconnectMcpServer(serverName: string): Promise<void> {
@@ -110,9 +148,9 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
 
   try {
     const config = await createMinimalConfig();
-    const toolRegistry = config.getToolRegistry();
-    await toolRegistry.discoverToolsForServer(serverName);
+    await discoverAndVerifyConnection(config, serverName);
     writeStdoutLine(`Successfully reconnected to server "${serverName}".`);
+    writeStdoutLine(SESSION_SCOPE_NOTE);
     await config.shutdown();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -144,17 +182,18 @@ async function reconnectAllMcpServers(): Promise<void> {
   let config: Config | undefined;
   try {
     config = await createMinimalConfig();
-    const toolRegistry = config.getToolRegistry();
 
     for (const serverName of serverNames) {
       try {
-        await toolRegistry.discoverToolsForServer(serverName);
+        await discoverAndVerifyConnection(config, serverName);
         writeStdoutLine(`✓ ${serverName}: Reconnected successfully`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         writeStdoutLine(`✗ ${serverName}: Failed - ${message}`);
       }
     }
+    writeStdoutLine('');
+    writeStdoutLine(SESSION_SCOPE_NOTE);
   } finally {
     if (config) {
       await config.shutdown();

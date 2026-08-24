@@ -2010,6 +2010,15 @@ export class McpClientManager {
     const timer = setInterval(async () => {
       await this.performHealthCheck(serverName);
     }, this.healthConfig.checkIntervalMs);
+    // Health monitoring is background bookkeeping — it must never hold the
+    // event loop open. Short-lived consumers (`qwen mcp reconnect`, other
+    // one-shot Config users) call `config.shutdown()` while an incremental
+    // discovery pass is still in flight; that pass's `finally` block then
+    // re-arms health checks AFTER `stop()` already cleared them, and a
+    // ref'd interval left the process hanging forever (issue #9944). Long-
+    // running sessions keep their own loop refs (TTY / server sockets), so
+    // unref'ing the monitor does not shorten its life where it matters.
+    timer.unref?.();
 
     this.healthCheckTimers.set(serverName, timer);
   }

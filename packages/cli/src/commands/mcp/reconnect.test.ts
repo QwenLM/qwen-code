@@ -39,11 +39,19 @@ vi.mock('../../config/mcpApprovals.js', () => ({
   getPendingGatedMcpServers: mockGetPendingGatedMcpServers,
 }));
 
+const mockGetMCPServerStatus = vi.hoisted(() => vi.fn());
+
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Config: vi.fn(),
   FileDiscoveryService: vi.fn(),
   ExtensionManager: vi.fn(),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+  getMCPServerStatus: mockGetMCPServerStatus,
+  MCPServerStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+  },
 }));
 
 const mockedLoadSettings = loadSettings as vi.Mock;
@@ -89,6 +97,10 @@ describe('mcp reconnect command', () => {
     MockedConfig.mockImplementation(() => mockConfig);
     MockedExtensionManager.mockImplementation(() => mockExtensionManager);
     mockGetPendingGatedMcpServers.mockReturnValue([]);
+    // Discovery is best-effort and swallows connect errors, so the command
+    // verifies the outcome through the status registry; default to a live
+    // connection so success-path tests stay green.
+    mockGetMCPServerStatus.mockReturnValue('connected');
     mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
     mockedIsWorkspaceTrusted.mockReturnValue({
       isTrusted: true,
@@ -328,6 +340,130 @@ describe('mcp reconnect command', () => {
       );
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '✗ server-two: Failed - Timeout',
+      );
+    });
+  });
+
+  describe('process scope (issue #9944)', () => {
+    it('initializes the throwaway config without background MCP discovery', async () => {
+      // The command runs its own targeted `discoverToolsForServer`; the
+      // background incremental pass would race `config.shutdown()` and
+      // re-arm health-check timers that keep the process alive forever.
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockConfig.initialize).toHaveBeenCalledWith({
+        skipMcpDiscovery: true,
+      });
+    });
+
+    it('clarifies that single-server success only covers this process', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot refresh the MCP tools of an already-running Qwen Code session',
+        ),
+      );
+    });
+
+    it('clarifies that --all success only covers this process', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot refresh the MCP tools of an already-running Qwen Code session',
+        ),
+      );
+    });
+  });
+
+  describe('connection verification (issue #9944)', () => {
+    // `discoverToolsForServer` swallows connect errors, so a bare "it
+    // returned" is not proof the server is reachable. The command must
+    // verify the live status instead of printing a false success.
+    it('reports failure when a single server never reached CONNECTED', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { httpUrl: 'http://127.0.0.1:3939/mcp' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
+        'test-server',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect to server "test-server": connection attempt finished without a live connection (status: disconnected)',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'Successfully reconnected to server "test-server".',
+      );
+    });
+
+    it('marks --all entries failed when they never reached CONNECTED', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+            'server-two': { command: '/path/to/server2' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockImplementation((name: string) =>
+        name === 'server-one' ? 'connected' : 'disconnected',
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✓ server-one: Reconnected successfully',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✗ server-two: Failed - connection attempt finished without a live connection (status: disconnected)',
       );
     });
   });

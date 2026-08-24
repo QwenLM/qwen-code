@@ -58,6 +58,11 @@ const MCP_CONNECTION_ERROR_PATTERNS = [
   /not connected/i,
   /disconnected/i,
   /transport closed/i,
+  // The server no longer knows our session id — the canonical failure right
+  // after an HTTP server restart (it comes back with a fresh
+  // `mcp-session-id` space and answers our stale id with a `-32001`
+  // "Session not found"). Reconnect (a fresh `initialize`) is the remedy.
+  /session (not found|terminated|expired)/i,
 ];
 // The MCP SDK's generic `RequestTimeout` code. It is emitted for both
 // client-configured timeouts (`timeout` / `resetTimeoutOnProgress`) and
@@ -100,6 +105,14 @@ function isExecutionTimeoutFailure(
   // user cancellation against the timeout SLI, so the abort side wins.
   if (signal.aborted) return false;
   if (!isMcpRequestTimeout(error)) return false;
+  // `-32001` doubles as the server's "Session not found" response code when
+  // it no longer recognizes our `mcp-session-id` (typical right after an
+  // HTTP server restart). That is a dead connection `handleReconnectOnError`
+  // can repair, not an execution timeout — without this carve-out the error
+  // would be reported as a timeout whenever the client-side status has not
+  // flipped to DISCONNECTED yet (e.g. servers that keep no GET SSE stream),
+  // and the reconnect path would never run (issue #9944).
+  if (/session not found/i.test(getErrorMessage(error))) return false;
   const statuses = getAllMCPServerStatuses();
   return !(
     statuses.has(serverName) &&
@@ -393,6 +406,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     if (!this.canSafelyReplay()) {
+      // This specific call cannot be auto-replayed — its outcome is ambiguous
+      // and re-running it could apply the side effect twice. The dead
+      // connection itself is still repairable though: re-initialize the
+      // server session and reload the tool registry so the NEXT call does not
+      // inherit the stale session (issue #9944). Pre-fix, tools without
+      // `readOnlyHint`/`idempotentHint` annotations never reached
+      // `attemptReconnect`, so an HTTP server that restarted with a new
+      // `mcp-session-id` stayed unusable until a full session restart.
+      // Best-effort: if the reconnect fails we throw the same error as
+      // before.
+      await this.attemptReconnect();
       throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE);
     }
 
