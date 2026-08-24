@@ -19,6 +19,7 @@ import {
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   normalizeBaseUrlForMatching,
+  legacyEnvKeyAttribution,
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
@@ -373,6 +374,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     // Step 3: Model selection (if needed)
     let modelIds: string[];
     let preserveModels: ProviderModelConfig[] | undefined;
+    let migratedLegacyModelIds: string[] | undefined;
     if (shouldShowStep(provider, 'models')) {
       const defaults = getDefaultModelIds(provider, baseUrl);
       const defaultIdSet = new Set(defaults);
@@ -391,12 +393,34 @@ export class AuthMessageHandler extends BaseMessageHandler {
           : model.baseUrl === undefined ||
               normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
       };
+      // Endpoint attribution for baseUrl-less legacy entries (R45-4, R45-5),
+      // mirroring the CLI dialog / ACP / serve gates. An entry whose env key
+      // fails attribution (a floating key, or a fail-closed shared key naming
+      // the whole endpoint group) is NEVER seeded, stamped, or claimed on this
+      // surface: seeding it would let the submission adopt and re-home or
+      // delete an entry that belongs to no endpoint (or a sibling's), and a
+      // stamped copy could never claim the stored original — leaving a
+      // permanent duplicate. The non-merge branch below still carries the
+      // fail-closed entries through UNSTAMPED so a non-merge plan's unscoped
+      // ownsModel does not delete them.
+      const { namesSelectedEndpoint, namesSiblingEndpoint } =
+        legacyEnvKeyAttribution(
+          provider,
+          protocol ?? provider.protocol,
+          baseUrl,
+        );
       const restoredModels = (
         existing?.models.filter(isSelectedEndpointModel) ?? []
-      ).filter(
-        (model, index, models) =>
-          models.findIndex((candidate) => candidate.id === model.id) === index,
-      );
+      )
+        .filter(
+          (model) =>
+            model.baseUrl !== undefined || namesSelectedEndpoint(model),
+        )
+        .filter(
+          (model, index, models) =>
+            models.findIndex((candidate) => candidate.id === model.id) ===
+            index,
+        );
       const restoredIds = [...new Set(restoredModels.map((model) => model.id))];
       const seededModelIds = [
         ...defaults,
@@ -428,29 +452,54 @@ export class AuthMessageHandler extends BaseMessageHandler {
         return;
       }
       const selectedIdSet = new Set(modelIds);
-      preserveModels = provider.mergeModelsByIdentity
-        ? restoredModels
-            .filter(
-              (model) =>
-                !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
-            )
-            // Stamp a selected legacy model before identity merging so its
-            // rich configuration survives canonical regeneration (same as
-            // the non-merge branch below and the CLI/ACP/serve surfaces).
-            .map((model) =>
-              model.baseUrl === undefined ? { ...model, baseUrl } : model,
-            )
-        : existing?.models.flatMap((model) => {
-            if (!isSelectedEndpointModel(model)) return [model];
-            if (defaultIdSet.has(model.id) || !selectedIdSet.has(model.id)) {
-              return [];
+      if (provider.mergeModelsByIdentity) {
+        const migrated: string[] = [];
+        preserveModels = restoredModels
+          .filter(
+            (model) =>
+              !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
+          )
+          // Stamp a selected legacy model before identity merging so its
+          // rich configuration survives canonical regeneration (same as
+          // the non-merge branch below and the CLI/ACP/serve surfaces).
+          // restoredModels carries only ATTRIBUTABLE baseUrl-less entries
+          // (gated above), so stamping one migrates it to the selected
+          // endpoint: record its id so buildInstallPlan claims the stored
+          // original and collapses the pair instead of persisting both
+          // (R45-5).
+          .map((model) => {
+            if (model.baseUrl === undefined) {
+              migrated.push(model.id);
+              return { ...model, baseUrl };
             }
-            // Stamp a selected legacy model before identity merging so its
-            // rich configuration survives canonical regeneration.
-            return [
-              model.baseUrl === undefined ? { ...model, baseUrl } : model,
-            ];
+            return model;
           });
+        if (migrated.length > 0) migratedLegacyModelIds = migrated;
+      } else {
+        preserveModels = existing?.models.flatMap((model) => {
+          // A baseUrl-less legacy entry whose env key fails attribution
+          // closed (the static shared key of minimax/zai/alibaba-standard
+          // names the whole endpoint group) is untouchable: a non-merge plan
+          // carries the provider's UNSCOPED ownsModel, so stamping it would
+          // re-home it to whichever endpoint was picked and dropping it would
+          // delete it. Carry it through UNSTAMPED — the ACP/serve/CLI gate
+          // (R45-4).
+          if (
+            model.baseUrl === undefined &&
+            !namesSelectedEndpoint(model) &&
+            namesSiblingEndpoint(model)
+          ) {
+            return [model];
+          }
+          if (!isSelectedEndpointModel(model)) return [model];
+          if (defaultIdSet.has(model.id) || !selectedIdSet.has(model.id)) {
+            return [];
+          }
+          // Stamp a selected legacy model before identity merging so its
+          // rich configuration survives canonical regeneration.
+          return [model.baseUrl === undefined ? { ...model, baseUrl } : model];
+        });
+      }
     } else {
       modelIds = getDefaultModelIds(provider, baseUrl);
     }
@@ -503,6 +552,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       modelIds,
       ...(preserveModels && preserveModels.length > 0
         ? { preserveModels }
+        : {}),
+      ...(migratedLegacyModelIds && migratedLegacyModelIds.length > 0
+        ? { migratedLegacyModelIds }
         : {}),
       advancedConfig,
     });

@@ -488,6 +488,11 @@ export function buildInstallPlan(
   // legacy entries pass those ids explicitly; callers that never stamp pass
   // nothing, so no id-collision claim happens on their behalf.
   const migratedLegacyModelIds = new Set(inputs.migratedLegacyModelIds ?? []);
+  // Floating entries (env key names NO endpoint) this run explicitly adopted.
+  // They can never pass the attribution gate below, so they are claimed via
+  // this dedicated channel instead of `migratedLegacyModelIds` — keeping that
+  // set's over-claim guard intact (R45-2).
+  const adoptedFloatingModelIds = new Set(inputs.adoptedFloatingModelIds ?? []);
   const freeFormProvider = config.baseUrl === undefined;
   // A baseUrl-less entry predates baseUrl stamping, so nothing on the entry
   // itself names its endpoint — except its env key, which the provider's env
@@ -521,11 +526,8 @@ export function buildInstallPlan(
   // migrated must never claim a baseUrl-less entry whose env key names a
   // SIBLING endpoint — such an entry belongs there, and no migration here can
   // legitimately own it (R40-2).
-  const { namesSelectedEndpoint, namesSiblingEndpoint } = legacyEnvKeyAttribution(
-    config,
-    protocol,
-    baseUrl,
-  );
+  const { namesSelectedEndpoint, namesSiblingEndpoint } =
+    legacyEnvKeyAttribution(config, protocol, baseUrl);
   const ownsModel = config.mergeModelsByIdentity
     ? (Array.isArray(config.baseUrl) || freeFormProvider) && providerOwnsModel
       ? (model: ProviderModelConfig) =>
@@ -546,9 +548,13 @@ export function buildInstallPlan(
               // entry from being claimed and deleted — the namesSiblingEndpoint
               // guard does not protect it because it names no endpoint at all
               // (R44-3). Callers only ever migrate attributable entries, so
-              // this never under-claims a real migration.
+              // this never under-claims a real migration. A floating entry this
+              // run explicitly ADOPTED is claimed via its dedicated channel —
+              // distinct from migratedLegacyModelIds so the guard above stays
+              // intact (R45-2).
               ((migratedLegacyModelIds.has(model.id) &&
                 namesSelectedEndpoint(model)) ||
+                adoptedFloatingModelIds.has(model.id) ||
                 (freeFormProvider &&
                   ownsLegacyEnvKey(model.envKey) &&
                   (roundTrippedLegacyModelIds === undefined ||

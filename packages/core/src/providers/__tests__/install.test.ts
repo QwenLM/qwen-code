@@ -1357,7 +1357,10 @@ describe('applyProviderInstallPlan', () => {
     const suffixlessEntry = {
       id: 'sfx-model',
       name: 'sfx-model',
-      envKey: legacyCustomEnvKey(AuthType.USE_OPENAI, 'https://other.example/v1'),
+      envKey: legacyCustomEnvKey(
+        AuthType.USE_OPENAI,
+        'https://other.example/v1',
+      ),
     };
     const floatingEntry = {
       id: 'flt-model',
@@ -1449,6 +1452,98 @@ describe('applyProviderInstallPlan', () => {
     // ...while the floating F survives (never migrated, names no endpoint).
     expect(written).toContainEqual(
       expect.objectContaining({ id: 'my-model', envKey: floatingKey }),
+    );
+  });
+
+  it('claims an explicitly adopted floating baseUrl-less entry via adoptedFloatingModelIds (R45-2)', async () => {
+    const e1BaseUrl = 'https://e1.example/v1';
+    const e1EnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, e1BaseUrl);
+    const floatingKey = `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`;
+    // F is a floating prefix-only key naming NO endpoint. An explicit
+    // selection adopts it (stamps it at E1); because a floating key can never
+    // satisfy the id-collision claim's namesSelectedEndpoint gate, the caller
+    // threads it through adoptedFloatingModelIds so the stored original is
+    // claimed and the pair collapses to ONE entry instead of a permanent
+    // duplicate (R45-2).
+    const floatingF = {
+      id: 'floaty',
+      name: 'floaty',
+      envKey: floatingKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [floatingF],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: e1BaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['floaty'],
+      adoptedFloatingModelIds: ['floaty'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[e1EnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // Exactly ONE floaty survives — the stamped copy at E1. The floating
+    // original was claimed, so no permanent duplicate pair.
+    const floatyEntries = (written ?? []).filter(
+      (model) => model['id'] === 'floaty',
+    );
+    expect(floatyEntries).toHaveLength(1);
+    expect(floatyEntries[0]).toEqual(
+      expect.objectContaining({ id: 'floaty', baseUrl: e1BaseUrl }),
+    );
+  });
+
+  it('does NOT claim a floating entry passed only via migratedLegacyModelIds (R45-2 guard)', async () => {
+    const e1BaseUrl = 'https://e1.example/v1';
+    const e1EnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, e1BaseUrl);
+    const floatingKey = `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`;
+    // A floating entry whose id rides in migratedLegacyModelIds — but was not
+    // adopted through the dedicated channel — must NOT be claimed; the
+    // attribution gate stays the over-claim defense (R44-3 kept intact).
+    const floatingF = {
+      id: 'floaty',
+      name: 'floaty',
+      envKey: floatingKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [floatingF],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: e1BaseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['other-model'],
+      migratedLegacyModelIds: ['floaty'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[e1EnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // The floating original survives (unclaimed).
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'floaty', envKey: floatingKey }),
     );
   });
 

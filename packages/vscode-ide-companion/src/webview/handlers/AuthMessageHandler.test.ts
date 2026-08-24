@@ -23,6 +23,7 @@ vi.mock('vscode', () => ({
 }));
 
 import { AuthMessageHandler } from './AuthMessageHandler.js';
+import { AuthType, generateCustomEnvKey } from '@qwen-code/qwen-code-core';
 
 describe('AuthMessageHandler', () => {
   beforeEach(() => {
@@ -345,18 +346,20 @@ describe('AuthMessageHandler', () => {
     );
   });
 
-  it('stamps a selected baseUrl-less legacy model for a merge provider', async () => {
+  it('stamps a selected ATTRIBUTABLE baseUrl-less legacy model for a merge provider (R34-4 × R45-5)', async () => {
     // R34-4: custom-openai-compatible is mergeModelsByIdentity. A restored
     // legacy model without baseUrl must be stamped with the submitted
     // endpoint before identity merging, matching the non-merge branch and
     // the CLI/ACP/serve surfaces — otherwise buildInstallPlan writes a
     // duplicate regenerated entry and strands the rich generationConfig on
-    // an orphan.
+    // an orphan. R45-5: the entry must be ATTRIBUTABLE (its env key names the
+    // submitted endpoint) so the install plan can claim the stored original;
+    // it is then threaded through migratedLegacyModelIds for the collapse.
     const customUrl = 'https://my-proxy.example.com/v1';
     const legacyCustom = {
       id: 'legacy-custom',
       name: 'legacy-custom',
-      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, customUrl),
       generationConfig: { contextWindowSize: 54321 },
     };
     mockShowQuickPick
@@ -393,8 +396,103 @@ describe('AuthMessageHandler', () => {
             generationConfig: { contextWindowSize: 54321 },
           }),
         ],
+        migratedLegacyModelIds: ['legacy-custom'],
       }),
     );
+  });
+
+  it('does NOT seed or stamp a floating baseUrl-less legacy model for a merge provider (R45-5)', async () => {
+    // A floating env key (prefix-only, names NO endpoint) can never be claimed
+    // by buildInstallPlan, so the wizard must not seed it (the user cannot
+    // meaningfully select it) and must not stamp it — stamping it would write
+    // a copy the install plan can never reconcile with the stored original, a
+    // permanent duplicate. The entry is left untouched (merge ownsModel is
+    // scoped, so an unclaimed entry survives).
+    const customUrl = 'https://my-proxy.example.com/v1';
+    const floatingCustom = {
+      id: 'legacy-custom',
+      name: 'legacy-custom',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI', // prefix-only: names no endpoint
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce(customUrl)
+      .mockResolvedValueOnce('sk-custom-openai')
+      // The floating entry is NOT seeded, so the field shows only what the
+      // user types; they pick an unrelated model id.
+      .mockResolvedValueOnce('some-new-model');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({ openai: [floatingCustom] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    const inputs = authInteractiveHandler.mock.calls[0][1] as {
+      modelIds: string[];
+      preserveModels?: Array<Record<string, unknown>>;
+      migratedLegacyModelIds?: string[];
+    };
+    // The floating id is neither seeded (not in modelIds) nor preserved/stamped.
+    expect(inputs.modelIds).not.toContain('legacy-custom');
+    expect(inputs.preserveModels ?? []).toEqual([]);
+    expect(inputs.migratedLegacyModelIds).toBeUndefined();
+  });
+
+  it('carries a fail-closed shared-key baseUrl-less entry through UNSTAMPED on a non-merge provider (R45-4)', async () => {
+    // minimax is non-merge, array-baseUrl, and shares ONE static env key
+    // (MINIMAX_API_KEY) across both region endpoints. A baseUrl-less legacy
+    // entry carrying it fails attribution CLOSED (namesSelectedEndpoint false,
+    // namesSiblingEndpoint true), so the wizard must neither seed it nor stamp
+    // it: a non-merge plan carries the provider's UNSCOPED ownsModel, so
+    // stamping would re-home it to the picked region and dropping it would
+    // delete it. Carry it through UNSTAMPED — mirroring ACP/serve/CLI (R45-4).
+    const failClosed = {
+      id: 'my-model',
+      name: '[MiniMax] my-model',
+      envKey: 'MINIMAX_API_KEY',
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'minimax' })
+      .mockResolvedValueOnce({ value: 'https://api.minimaxi.com/v1' });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-minimax')
+      .mockResolvedValueOnce('MiniMax-M3');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({ openai: [failClosed] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    const inputs = authInteractiveHandler.mock.calls[0][1] as {
+      modelIds: string[];
+      preserveModels?: Array<Record<string, unknown>>;
+    };
+    // The fail-closed entry is NOT seeded (not offered in the models field)...
+    expect(inputs.modelIds).not.toContain('my-model');
+    // ...and is carried through UNSTAMPED (no baseUrl added) so the install's
+    // unscoped ownsModel writes it back byte-identical instead of re-homing or
+    // deleting it.
+    expect(inputs.preserveModels).toEqual([failClosed]);
   });
 
   // -- Custom provider flow ------------------------------------------------

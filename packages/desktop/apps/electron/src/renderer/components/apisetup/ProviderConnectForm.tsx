@@ -558,7 +558,18 @@ export function ProviderConnectForm({
                     baseUrl,
                   );
                   const committed = committedBaseUrlRef.current;
-                  if (!nextBaseUrl || nextBaseUrl === committed) return;
+                  if (!nextBaseUrl || nextBaseUrl === committed) {
+                    // The endpoint reconciles to the committed one, but the
+                    // field still holds the raw variant (trailing slash,
+                    // userinfo). Commit the canonical form anyway so
+                    // handleSubmit sends it — otherwise the raw text is
+                    // submitted and persisted (a divergent env key / a zombie
+                    // entry a canonical reconnect never claims, R45-3).
+                    if (nextBaseUrl && nextBaseUrl !== baseUrl) {
+                      setBaseUrl(nextBaseUrl);
+                    }
+                    return;
+                  }
                   // Same reconciliation as the endpoint-options select:
                   // save the old endpoint's edited custom ids and restore the
                   // new endpoint's saved state, so reconnecting at a

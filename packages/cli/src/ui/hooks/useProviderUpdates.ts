@@ -78,7 +78,8 @@ function getProviderMetadata(
 ): ProviderMetadata {
   const mergedSettings = settings.merged as Record<string, unknown>;
   const ns = mergedSettings[PROVIDER_METADATA_NS] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   if (!ns) return {};
   const metadata = ns[metadataKey];
   return metadata && typeof metadata === 'object'
@@ -171,7 +172,8 @@ function readInstalledModels(
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
   const modelProviders = mergedSettings['modelProviders'] as
-    Record<string, ProviderModelConfig[]> | undefined;
+    | Record<string, ProviderModelConfig[]>
+    | undefined;
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
@@ -246,7 +248,18 @@ function getInstalledOwnedModelIds(
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
   const builtinIds = new Set(getDefaultModelIds(provider, baseUrl));
-  return modelsAtBaseUrl(readInstalledModels(settings, provider), baseUrl)
+  const installed = readInstalledModels(settings, provider);
+  const atEndpoint = modelsAtBaseUrl(installed, baseUrl);
+  // A baseUrl-less legacy entry of a non-merge single-endpoint (string
+  // baseUrl) provider IS installed at that endpoint even though
+  // modelsAtBaseUrl cannot see it (its normalized baseUrl is ''). Count it so
+  // the diff does not report its built-in id as a new addition on every
+  // update (R45-6).
+  const legacyBaseUrlLess =
+    !provider.mergeModelsByIdentity && !Array.isArray(provider.baseUrl)
+      ? installed.filter((model) => model.baseUrl === undefined)
+      : [];
+  return [...atEndpoint, ...legacyBaseUrlLess]
     .map((model) => model.id)
     .filter((id) => builtinIds.has(id));
 }
@@ -469,8 +482,18 @@ export function useProviderUpdates(
           }
           // Non-merge providers replace every owned model in one patch. Keep
           // exact sibling-endpoint entries (including built-ins) and only
-          // replace the selected endpoint's built-in template.
-          return !belongsToSelectedEndpoint || !builtInIds.has(model.id);
+          // replace the selected endpoint's built-in template. A baseUrl-less
+          // legacy entry of a single-endpoint (string-baseUrl) provider
+          // belongs to that endpoint: count it as the selected endpoint's so
+          // the stamped template REPLACES it instead of being written beside
+          // it as a permanent duplicate. For sibling-endpoint (array-baseUrl)
+          // providers a baseUrl-less entry cannot be attributed to one
+          // endpoint, so it is preserved untouched (R45-6).
+          const belongsOrLegacySingleEndpoint =
+            belongsToSelectedEndpoint ||
+            (model.baseUrl === undefined &&
+              !Array.isArray(providerCfg.baseUrl));
+          return !belongsOrLegacySingleEndpoint || !builtInIds.has(model.id);
         });
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,

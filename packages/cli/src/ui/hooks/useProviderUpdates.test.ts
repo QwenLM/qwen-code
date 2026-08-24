@@ -322,6 +322,82 @@ describe('useProviderUpdates', () => {
     delete process.env[deepseekEnvKey];
   });
 
+  it('replaces a baseUrl-less legacy built-in instead of duplicating it, and does not report it as added (R45-6)', async () => {
+    // deepseek is a non-merge, single-endpoint (string baseUrl) provider. A
+    // pre-stamping legacy install keeps its BUILT-IN models without a baseUrl.
+    // The update must (a) count such an entry as installed — the diff must not
+    // claim it will be "added" — and (b) replace it with the stamped template
+    // instead of preserving it beside the copy (a permanent duplicate).
+    const deepseekBaseUrl = 'https://api.deepseek.com';
+    const deepseekEnvKey = 'DEEPSEEK_API_KEY';
+    const deepseekTemplate = buildProviderTemplate(
+      deepseekProvider,
+      deepseekBaseUrl,
+    );
+    const builtinIds = deepseekTemplate.map(
+      (model: { id: string }) => model.id,
+    );
+    expect(builtinIds.length).toBeGreaterThan(1);
+    const installedLegacyId = builtinIds[0];
+    // Legacy shape: one built-in installed WITHOUT baseUrl (the others absent,
+    // so they legitimately appear as additions).
+    const legacyEntry = {
+      id: installedLegacyId,
+      envKey: deepseekEnvKey,
+      name: `[DeepSeek] ${installedLegacyId}`,
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'deepseek'
+    ] = {
+      baseUrl: deepseekBaseUrl,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [legacyEntry],
+    };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: deepseekBaseUrl,
+      apiKeyEnvKey: deepseekEnvKey,
+    });
+    mockConfig.getModel.mockReturnValue(installedLegacyId);
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    // The installed baseUrl-less built-in is visible to the diff: it is NOT
+    // reported as an addition, while the genuinely-new ids are.
+    const diff = result.current.providerUpdateRequest!.entries[0].diff;
+    expect(diff.added).not.toContain(installedLegacyId);
+    expect(diff.added).toEqual(builtinIds.slice(1));
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    // The built-in now appears exactly once — stamped at the endpoint. The
+    // baseUrl-less original was replaced, not carried beside the copy.
+    const entries = reloaded[AuthType.USE_OPENAI].filter(
+      (model: { id: string }) => model.id === installedLegacyId,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].baseUrl).toBe(deepseekBaseUrl);
+    delete process.env[deepseekEnvKey];
+  });
+
   it('preserves owned custom models using a proxy URL during an update', async () => {
     const deepseekBaseUrl = 'https://api.deepseek.com';
     const deepseekEnvKey = 'DEEPSEEK_API_KEY';

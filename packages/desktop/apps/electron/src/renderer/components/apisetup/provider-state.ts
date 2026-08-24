@@ -31,23 +31,63 @@ function normalizeBaseUrl(value: string): string {
  * that kept its `user:pass@` here would miss the destination's sanitized
  * saved-state keys on an endpoint switch, treating it as unseen and deleting
  * its saved models via the submit's remove-owned merge (R41-7). Kept in sync
- * by construction: scheme prefix, then the authority's last `@`.
+ * by construction: same scheme/authority parsing, same `new URL` attempt, and
+ * the SAME whole-string last-`@` fallback for URLs whose password contains
+ * `/`, `?`, or `#` (which delimit the authority before the `@`, so a naive
+ * authority-scoped search misses the userinfo entirely — R45-7).
  */
 function stripUserInfo(value: string): string {
   const scheme = value.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
   if (!scheme) return value;
   const authorityStart = scheme[0].length;
-  const rest = value.slice(authorityStart);
-  const authorityEndMatch = rest.match(/[/?#]/);
-  const authorityEnd =
-    authorityEndMatch?.index === undefined ? rest.length : authorityEndMatch.index;
-  const at = rest.slice(0, authorityEnd).lastIndexOf('@');
-  if (at === -1) return value;
-  return (
-    value.slice(0, authorityStart) +
-    rest.slice(at + 1, authorityEnd) +
-    rest.slice(authorityEnd)
-  );
+  const stripAt = (at: number) =>
+    `${value.slice(0, authorityStart)}${value.slice(at + 1)}`;
+  const authorityEnd = findAuthorityEnd(value, authorityStart);
+  const authorityAt = value
+    .slice(authorityStart, authorityEnd)
+    .lastIndexOf('@');
+  const authorityAtIndex = authorityAt === -1 ? -1 : authorityStart + authorityAt;
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password) {
+      return authorityAtIndex >= authorityStart
+        ? stripAt(authorityAtIndex)
+        : value;
+    }
+    return value;
+  } catch {
+    if (authorityAtIndex >= authorityStart) return stripAt(authorityAtIndex);
+    const fallbackAt = findUnescapedUserInfoFallbackAt(
+      value,
+      authorityStart,
+      authorityEnd,
+    );
+    return fallbackAt === -1 ? value : stripAt(fallbackAt);
+  }
+}
+
+function findAuthorityEnd(value: string, authorityStart: number): number {
+  const slash = value.indexOf('/', authorityStart);
+  const query = value.indexOf('?', authorityStart);
+  const hash = value.indexOf('#', authorityStart);
+  let end = value.length;
+  if (slash !== -1) end = Math.min(end, slash);
+  if (query !== -1) end = Math.min(end, query);
+  if (hash !== -1) end = Math.min(end, hash);
+  return end;
+}
+
+function findUnescapedUserInfoFallbackAt(
+  value: string,
+  authorityStart: number,
+  authorityEnd: number,
+): number {
+  const at = value.lastIndexOf('@');
+  if (at < authorityStart || authorityEnd >= at) return -1;
+  const colon = value.indexOf(':', authorityStart);
+  if (colon === -1 || colon > authorityEnd) return -1;
+  const portCandidate = value.slice(colon + 1, authorityEnd);
+  return /^\d+$/.test(portCandidate) ? -1 : at;
 }
 
 export function canonicalBaseUrl(

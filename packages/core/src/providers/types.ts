@@ -199,6 +199,18 @@ export interface ProviderSetupInputs {
    * round-trip (CLI wizard, ACP, VS Code) unchanged.
    */
   roundTrippedLegacyModelIds?: readonly string[];
+  /**
+   * Ids of FLOATING baseUrl-less legacy entries — env keys that name NO
+   * endpoint — that this very run explicitly ADOPTED at the selected endpoint
+   * (an explicit selection requested the id, so the entry is stamped into
+   * `preserveModels` and re-keyed). Floating entries can never satisfy the
+   * id-collision claim's `namesSelectedEndpoint` attribution gate, so they
+   * are threaded through this separate channel for claiming; keeping them out
+   * of `migratedLegacyModelIds` leaves that set's over-claim guard (a floating
+   * entry whose id merely COLLIDES with a migrated attributable entry must not
+   * be claimed) intact (R45-2).
+   */
+  adoptedFloatingModelIds?: readonly string[];
   advancedConfig?: {
     enableThinking?: boolean;
     multimodal?: InputModalities;

@@ -1026,6 +1026,27 @@ describe('round-41 regressions', () => {
     );
   });
 
+  it('strips userinfo whose password contains / ? or # like the producer (R45-7)', () => {
+    // The producer's sanitizeProviderBaseUrl falls back to the whole-string
+    // last-@ when new URL() throws — which happens when the password itself
+    // contains '/', '?', or '#' (the authority delimiter lands before the @).
+    // The consumer must strip identically or it keeps the credentials and
+    // misses the sanitized saved-state keys.
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user:pa/ss@proxy.example/v1'),
+    ).toBe('https://proxy.example/v1');
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user:pa?ss@proxy.example/v1'),
+    ).toBe('https://proxy.example/v1');
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user:pa#ss@proxy.example/v1'),
+    ).toBe('https://proxy.example/v1');
+    // A base64-ish token used as a basic-auth password.
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user:dG9rZW4/vYWx1ZQ==@host.example/v1'),
+    ).toBe('https://host.example/v1');
+  });
+
   it('restores a destination saved state when the typed URL carries userinfo (R41-7)', () => {
     const provider: QwenProviderSummary = {
       ...freeForm,

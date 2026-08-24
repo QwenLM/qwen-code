@@ -2395,6 +2395,24 @@ function readExistingProviderConfig(
   const restoredEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const endpointScoped =
     config.mergeModelsByIdentity && Array.isArray(config.baseUrl);
+  // Endpoint attribution for baseUrl-less legacy entries, used to gate EVERY
+  // seeding surface below (top-level modelIds, modelIdsByBaseUrl, and the
+  // per-protocol views). A key that fails attribution — a floating key that
+  // names no endpoint, a fail-closed shared key, or a sibling endpoint's key
+  // — must never be seeded: the desktop client submits the seed back as an
+  // explicit selection, the connect handler adopts+stamps it, but the install
+  // plan can never claim the stored original — a permanent duplicate that no
+  // later connect can clean up (R45-1). Attributable entries are still seeded
+  // so a client echoing the seed back does not silently deselect them (R42-1).
+  const restoredLegacyAttribution = legacyEnvKeyAttribution(
+    config,
+    protocol,
+    baseUrl,
+  );
+  const seedableRestoredLegacy = (model: ProviderModelConfig): boolean =>
+    model.baseUrl === undefined &&
+    (config.ownsModel ? config.ownsModel(model) : true) &&
+    restoredLegacyAttribution.namesSelectedEndpoint(model);
   const modelIdsByBaseUrl =
     existing && Array.isArray(config.baseUrl)
       ? Object.fromEntries(
@@ -2405,7 +2423,7 @@ function readExistingProviderConfig(
                   normalizeBaseUrlForMatching(model.baseUrl) ===
                     normalizeBaseUrlForMatching(option.url) ||
                   (!config.mergeModelsByIdentity &&
-                    model.baseUrl === undefined &&
+                    seedableRestoredLegacy(model) &&
                     normalizeBaseUrlForMatching(option.url) ===
                       restoredEndpoint),
               )
@@ -2447,6 +2465,16 @@ function readExistingProviderConfig(
           Object.fromEntries(
             existing.models.reduce<Map<string, string[]>>(
               (byEndpoint, model) => {
+                // A baseUrl-less entry that fails attribution must not be
+                // seeded into any endpoint bucket (R45-1): the desktop client
+                // would submit it back as an explicit selection and adopt an
+                // entry the install plan can never claim back.
+                if (
+                  model.baseUrl === undefined &&
+                  !seedableRestoredLegacy(model)
+                ) {
+                  return byEndpoint;
+                }
                 // Sanitize like every other wire-bound baseUrl in this
                 // payload: a saved URL may carry basic-auth userinfo, which
                 // must not be serialized into the response map keys.
@@ -2502,8 +2530,23 @@ function readExistingProviderConfig(
       if (protoBaseUrl) {
         baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
       }
+      // Attribution for this protocol bucket's endpoint, to gate baseUrl-less
+      // seeds exactly like the top-level surfaces (R45-1).
+      const protoAttribution = protoBaseUrl
+        ? legacyEnvKeyAttribution(config, proto, protoBaseUrl)
+        : undefined;
       const byEndpoint: Record<string, string[]> = {};
       for (const model of savedForProto.models) {
+        if (
+          model.baseUrl === undefined &&
+          !(
+            protoAttribution &&
+            (config.ownsModel ? config.ownsModel(model) : true) &&
+            protoAttribution.namesSelectedEndpoint(model)
+          )
+        ) {
+          continue;
+        }
         // Sanitize like baseUrlByProtocol above so the bucket's keys and
         // baseUrl agree on the wire (a saved URL may carry basic-auth
         // userinfo).
@@ -2521,10 +2564,9 @@ function readExistingProviderConfig(
   // Attributable baseUrl-less legacy ids belong to the restored endpoint's
   // saved selection too (R42-1): seeding them keeps a client echoing the
   // seed back from silently deleting them (the connect handler treats an
-  // explicit selection as authoritative), mirroring modelIdsByBaseUrl.
-  const restoredLegacyAttribution = endpointScoped
-    ? legacyEnvKeyAttribution(config, protocol, baseUrl)
-    : undefined;
+  // explicit selection as authoritative), mirroring modelIdsByBaseUrl. The
+  // attribution + `seedableRestoredLegacy` gate are computed above (before
+  // modelIdsByBaseUrl) so every seeding surface can reuse them.
 
   return {
     protocol,
@@ -2543,14 +2585,17 @@ function readExistingProviderConfig(
                 ? (model.baseUrl !== undefined &&
                     normalizeBaseUrlForMatching(model.baseUrl) ===
                       restoredEndpoint) ||
-                  (model.baseUrl === undefined &&
-                    restoredLegacyAttribution !== undefined &&
-                    (config.ownsModel ? config.ownsModel(model) : true) &&
-                    restoredLegacyAttribution.namesSelectedEndpoint(model))
-                : model.baseUrl === undefined ||
-                  firstModel?.baseUrl === undefined ||
-                  normalizeBaseUrlForMatching(model.baseUrl) ===
-                    normalizeBaseUrlForMatching(firstModel?.baseUrl),
+                  seedableRestoredLegacy(model)
+                : model.baseUrl === undefined
+                  ? // A baseUrl-less entry that fails attribution (floating /
+                    // fail-closed shared key / sibling) must not be seeded:
+                    // the desktop client would submit it back as an explicit
+                    // selection, adopt+stamp it, and the install plan could
+                    // never claim the stored original (R45-1).
+                    seedableRestoredLegacy(model)
+                  : firstModel?.baseUrl === undefined ||
+                    normalizeBaseUrlForMatching(model.baseUrl) ===
+                      normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
           ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
@@ -2724,6 +2769,12 @@ function readProviderSetupInputs(
   // buildInstallPlan claims baseUrl-less entries by id-collision ONLY for
   // these ids (R40-2).
   const migratedLegacyModelIds: string[] = [];
+  // FLOATING baseUrl-less entries (env key names NO endpoint) that an explicit
+  // selection adopts. They can never satisfy the id-collision claim's
+  // attribution gate, so they are threaded through this dedicated channel —
+  // kept distinct from migratedLegacyModelIds so the R44-3 over-claim guard
+  // stays intact (R45-2).
+  const adoptedFloatingModelIds: string[] = [];
   const preserveModels = existingModels?.flatMap((model) => {
     const preserved =
       model.baseUrl === undefined
@@ -2775,8 +2826,11 @@ function readProviderSetupInputs(
       if (!adoptable) return [];
       if (stampedIdsAtSelectedEndpoint.has(model.id)) {
         // A stamped twin at the selected endpoint wins (R39-7); claim the
-        // stored original so the pair collapses to the twin.
-        migratedLegacyModelIds.push(model.id);
+        // stored original so the pair collapses to the twin. Attributable
+        // entries claim via migratedLegacyModelIds; a floating original can
+        // only be claimed through the dedicated adoption channel (R45-2).
+        if (attributable) migratedLegacyModelIds.push(model.id);
+        else adoptedFloatingModelIds.push(model.id);
         return [];
       }
       const shouldPreserve =
@@ -2785,7 +2839,8 @@ function readProviderSetupInputs(
           ? !hasExplicitModelIds || requestedModelIdSet.has(preserved.id)
           : hasExplicitModelIds && requestedModelIdSet.has(preserved.id));
       if (shouldPreserve) {
-        migratedLegacyModelIds.push(model.id);
+        if (attributable) migratedLegacyModelIds.push(model.id);
+        else adoptedFloatingModelIds.push(model.id);
         return [preserved];
       }
       if (attributable) {
@@ -2817,6 +2872,7 @@ function readProviderSetupInputs(
     modelIds: resolvedModelIds,
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
+    ...(adoptedFloatingModelIds.length > 0 ? { adoptedFloatingModelIds } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }

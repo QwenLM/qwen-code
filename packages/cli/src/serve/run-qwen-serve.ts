@@ -1035,6 +1035,12 @@ export function buildProviderSetupInputs(
   // (R39-7). buildInstallPlan claims baseUrl-less entries by id-collision
   // ONLY for these ids (R40-2).
   const migratedLegacyModelIds: string[] = [];
+  // FLOATING baseUrl-less entries (env key names NO endpoint) that an explicit
+  // selection adopts. They can never satisfy the id-collision claim's
+  // attribution gate, so they are threaded through this dedicated channel —
+  // kept distinct from migratedLegacyModelIds so the R44-3 over-claim guard
+  // stays intact (R45-2, twin of the ACP route).
+  const adoptedFloatingModelIds: string[] = [];
   const preserveModels = helpers.existingModels?.flatMap((model) => {
     const preserved =
       model.baseUrl === undefined
@@ -1098,7 +1104,10 @@ export function buildProviderSetupInputs(
         // A stamped twin at the selected endpoint wins (R39-7); claim the
         // stored original so the pair collapses to the twin instead of
         // persisting as two permanent duplicate (id, baseUrl) entries.
-        migratedLegacyModelIds.push(model.id);
+        // Attributable entries claim via migratedLegacyModelIds; a floating
+        // original only through the dedicated adoption channel (R45-2).
+        if (attributable) migratedLegacyModelIds.push(model.id);
+        else adoptedFloatingModelIds.push(model.id);
         return [];
       }
       const shouldPreserve =
@@ -1107,7 +1116,8 @@ export function buildProviderSetupInputs(
           ? !hasExplicitModelIds || requestedIds.has(model.id)
           : hasExplicitModelIds && requestedIds.has(model.id));
       if (shouldPreserve) {
-        migratedLegacyModelIds.push(model.id);
+        if (attributable) migratedLegacyModelIds.push(model.id);
+        else adoptedFloatingModelIds.push(model.id);
         return [preserved];
       }
       if (attributable && defaultIds.has(model.id)) {
@@ -1147,6 +1157,7 @@ export function buildProviderSetupInputs(
     modelIds,
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
+    ...(adoptedFloatingModelIds.length > 0 ? { adoptedFloatingModelIds } : {}),
     // The serve catalog exposes no existingConfig, so Web Shell/SDK selections
     // are defaults-seeded and can never carry — nor deliberately omit — a
     // saved baseUrl-less legacy id. Passing an EMPTY round-trip set tells
