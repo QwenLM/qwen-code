@@ -31,7 +31,11 @@
         "additionalProperties": false,
         "required": ["code", "severity", "count"],
         "properties": {
-          "code": { "type": "string", "maxLength": 128 },
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "severity": { "enum": ["info", "warning", "error"] },
           "count": {
             "type": "integer",
@@ -78,7 +82,11 @@
         "text": { "type": "string", "maxLength": 409600 },
         "streaming": { "const": false },
         "collapsed": { "type": "boolean" },
-        "parentToolCallId": { "type": "string", "maxLength": 200 },
+        "parentToolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
         "images": {
           "type": "array",
           "maxItems": 1000,
@@ -106,7 +114,11 @@
         "text": { "type": "string", "maxLength": 409600 },
         "streaming": { "const": false },
         "collapsed": { "type": "boolean" },
-        "parentToolCallId": { "type": "string", "maxLength": 200 },
+        "parentToolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
         "images": {
           "type": "array",
           "maxItems": 1000,
@@ -135,7 +147,11 @@
         "text": { "type": "string", "maxLength": 409600 },
         "streaming": { "const": false },
         "collapsed": { "type": "boolean" },
-        "parentToolCallId": { "type": "string", "maxLength": 200 },
+        "parentToolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
         "images": {
           "type": "array",
           "maxItems": 1000,
@@ -179,13 +195,26 @@
         "status": {
           "enum": ["completed", "failed", "cancelled", "canceled"]
         },
-        "toolName": { "type": "string", "maxLength": 200 },
-        "toolKind": { "type": "string", "maxLength": 200 },
+        "background": { "type": "boolean" },
+        "toolName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "toolKind": { "type": "string", "minLength": 1, "maxLength": 200 },
         "preview": { "$ref": "#/$defs/toolPreview" },
         "resultPreview": { "$ref": "#/$defs/toolResultPreview" },
-        "parentToolCallId": { "type": "string", "maxLength": 200 },
-        "parentBlockId": { "type": "string", "maxLength": 200 },
-        "subagentType": { "type": "string", "maxLength": 200 }
+        "parentToolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "parentBlockId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subagentType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
       }
     },
     "shellBlock": {
@@ -265,9 +294,13 @@
           "items": { "$ref": "#/$defs/permissionOption" }
         },
         "preview": { "$ref": "#/$defs/toolPreview" },
-        "toolCallId": { "type": "string", "maxLength": 200 },
-        "toolName": { "type": "string", "maxLength": 200 },
-        "toolKind": { "type": "string", "maxLength": 200 },
+        "toolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "toolName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "toolKind": { "type": "string", "minLength": 1, "maxLength": 200 },
         "resolved": {
           "enum": ["approved", "rejected", "cancelled", "expired", "resolved"]
         }
@@ -291,7 +324,7 @@
         "createdAt": { "const": 0 },
         "updatedAt": { "const": 0 },
         "text": { "type": "string", "maxLength": 409600 },
-        "code": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "errorKind": {
           "enum": [
             "missing_binary",
@@ -312,7 +345,7 @@
             "loop_detected"
           ]
         },
-        "source": { "type": "string", "maxLength": 128 }
+        "source": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "errorBlock": {
@@ -333,7 +366,7 @@
         "createdAt": { "const": 0 },
         "updatedAt": { "const": 0 },
         "text": { "type": "string", "maxLength": 409600 },
-        "code": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "errorKind": {
           "enum": [
             "missing_binary",
@@ -354,7 +387,7 @@
             "loop_detected"
           ]
         },
-        "source": { "type": "string", "maxLength": 128 }
+        "source": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "promptCancelledBlock": {
@@ -433,7 +466,7 @@
       "additionalProperties": false,
       "required": ["question", "options", "raw"],
       "properties": {
-        "header": { "type": "string", "maxLength": 200 },
+        "header": { "type": "string", "minLength": 1, "maxLength": 200 },
         "question": { "type": "string", "maxLength": 409600 },
         "options": {
           "type": "array",
@@ -542,7 +575,7 @@
           "properties": {
             "kind": { "const": "web_fetch" },
             "url": { "type": "string", "maxLength": 409600 },
-            "method": { "type": "string", "maxLength": 16 }
+            "method": { "type": "string", "minLength": 1, "maxLength": 16 }
           }
         },
         {
@@ -562,9 +595,13 @@
           "required": ["kind", "code"],
           "properties": {
             "kind": { "const": "code_block" },
-            "language": { "type": "string", "maxLength": 64 },
+            "language": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
             "code": { "type": "string", "maxLength": 409600 },
-            "origin": { "type": "string", "maxLength": 400 }
+            "origin": { "type": "string", "minLength": 1, "maxLength": 400 }
           }
         },
         {
@@ -625,7 +662,7 @@
               "maxLength": 11184835,
               "pattern": "^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}$"
             },
-            "model": { "type": "string", "maxLength": 128 }
+            "model": { "type": "string", "minLength": 1, "maxLength": 128 }
           }
         },
         {
@@ -636,7 +673,11 @@
             "kind": { "const": "subagent_delegation" },
             "agentName": { "type": "string", "maxLength": 128 },
             "task": { "type": "string", "maxLength": 409600 },
-            "parentDelegationId": { "type": "string", "maxLength": 128 }
+            "parentDelegationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
           }
         },
         {
@@ -716,7 +757,7 @@
       ],
       "required": ["exportedAt", "complete", "truncated"],
       "properties": {
-        "title": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "startedAt": {
           "type": "string",
           "format": "date-time",
@@ -729,11 +770,23 @@
         },
         "complete": { "type": "boolean" },
         "truncated": { "type": "boolean" },
-        "projectName": { "type": "string", "maxLength": 400 },
-        "repository": { "type": "string", "maxLength": 200 },
-        "gitBranch": { "type": "string", "maxLength": 200 },
-        "model": { "type": "string", "maxLength": 200 },
-        "channel": { "type": "string", "maxLength": 100 },
+        "projectName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "gitBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "channel": { "type": "string", "minLength": 1, "maxLength": 100 },
         "promptCount": {
           "type": "integer",
           "minimum": 0,

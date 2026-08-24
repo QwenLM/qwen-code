@@ -2,9 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { hasActiveAgents } from '../../adapters/toolClassification';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -92,6 +94,7 @@ function renderToolGroup(
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
+  renderMode: 'interactive' | 'readonly' | 'document' = 'interactive',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -107,19 +110,21 @@ function renderToolGroup(
     );
     root.render(
       <I18nProvider language={language}>
-        <WebShellCustomizationProvider value={customization}>
-          {onOpenMonitor ? (
-            <MonitorDetailsProvider onOpen={onOpenMonitor}>
-              {group}
-            </MonitorDetailsProvider>
-          ) : onOpenSubagent ? (
-            <SubagentDetailsProvider onOpen={onOpenSubagent}>
-              {group}
-            </SubagentDetailsProvider>
-          ) : (
-            group
-          )}
-        </WebShellCustomizationProvider>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <WebShellCustomizationProvider value={customization}>
+            {onOpenMonitor ? (
+              <MonitorDetailsProvider onOpen={onOpenMonitor}>
+                {group}
+              </MonitorDetailsProvider>
+            ) : onOpenSubagent ? (
+              <SubagentDetailsProvider onOpen={onOpenSubagent}>
+                {group}
+              </SubagentDetailsProvider>
+            ) : (
+              group
+            )}
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -745,6 +750,38 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('keeps grouped tools and thoughts fully expanded in document mode', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'shell-1',
+          rawOutput: 'first document output',
+        }),
+        makeTool({
+          callId: 'shell-2',
+          rawOutput: 'second document output',
+        }),
+      ],
+      {},
+      [{ content: 'document thought' }],
+      false,
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain('first document output');
+    expect(container.textContent).toContain('second document output');
+    expect(container.textContent).toContain('document thought');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatSummaryContentClip"]')?.className,
+    ).not.toContain('chatSummaryContentCollapsed');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({
@@ -2160,4 +2197,67 @@ describe('tool output logic', () => {
       ' same\n-old\n+new',
     );
   });
+
+  it('uses a typed file-diff preview without raw output', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+        }),
+      ),
+    ).toContain('DOCUMENT_DIFF_DETAIL');
+  });
+
+  it('does not render an attempted typed diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
+  });
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted typed diff for a %s safe projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-edit',
+        kind: 'tool',
+        toolCallId: 'edit-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: {
+          kind: 'file_diff',
+          path: 'document.ts',
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block], {
+        safeToolProjection: true,
+      });
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
 });

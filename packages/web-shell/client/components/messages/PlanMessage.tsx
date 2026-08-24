@@ -3,6 +3,7 @@ import type { TodoItem } from '../../adapters/types';
 import { TodoTimelineContext } from '../../App';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './PlanMessage.module.css';
 
@@ -27,6 +28,7 @@ export const PlanMessage = memo(function PlanMessage({
   isLocateFlashing = false,
 }: PlanMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
 
@@ -39,22 +41,31 @@ export const PlanMessage = memo(function PlanMessage({
         isLocateFlashing ? ` ${flashStyles.flash}` : ''
       }`}
     >
-      <button
-        type="button"
-        className={styles.header}
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        title={expanded ? t('todo.collapse') : t('todo.expand')}
-      >
-        <span className={styles.chevron} aria-hidden="true">
-          {expanded ? '▾' : '▸'}
-        </span>
-        <span className={styles.title}>{t('plan.title')}</span>
-        <span className={styles.progress}>
-          {completed}/{total}
-        </span>
-      </button>
-      {expanded ? (
+      {documentMode ? (
+        <div className={styles.header}>
+          <span className={styles.title}>{t('plan.title')}</span>
+          <span className={styles.progress}>
+            {completed}/{total}
+          </span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className={styles.header}
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          title={expanded ? t('todo.collapse') : t('todo.expand')}
+        >
+          <span className={styles.chevron} aria-hidden="true">
+            {expanded ? '▾' : '▸'}
+          </span>
+          <span className={styles.title}>{t('plan.title')}</span>
+          <span className={styles.progress}>
+            {completed}/{total}
+          </span>
+        </button>
+      )}
+      {documentMode || expanded ? (
         <TodoFullList todos={todos} numbered />
       ) : (
         <PlanEventSummary id={id} todos={todos} />

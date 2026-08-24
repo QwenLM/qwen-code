@@ -185,6 +185,83 @@ describe('WebShellTranscript contract', () => {
     expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
   });
 
+  it('uses the non-virtualized, expanded document boundary', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        collapseCompletedTurns
+        markdownTableMode="advanced"
+        virtualScrollThreshold={1}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.props.virtualScrollThreshold).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(observation.props.hideSessionTimeline).toBe(true);
+    expect(observation.customization.collapseCompletedTurns).toBe(false);
+    expect(observation.customization.markdownTableMode).toBe('basic');
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-transcript-render-mode'),
+    ).toBe('document');
+  });
+
+  it('uses safe tool projections only in document mode', () => {
+    const blocks: DaemonTranscriptBlock[] = [
+      {
+        id: 'write-block',
+        kind: 'tool',
+        toolCallId: 'write-call',
+        toolName: 'write_file',
+        title: 'Write file',
+        status: 'completed',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: 'RAW_CONTENT\n',
+        },
+        rawOutput: { audit: 'RAW_RESULT' },
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const view = mount(<WebShellTranscript blocks={blocks} />);
+
+    const readonlyMessage = latestObservation().props.messages[0];
+    const readonlyTool =
+      readonlyMessage?.role === 'tool_group'
+        ? readonlyMessage.tools[0]
+        : undefined;
+    expect(readonlyTool?.args).toEqual({
+      file_path: 'src/generated.ts',
+      content: 'RAW_CONTENT\n',
+    });
+    expect(readonlyTool?.rawOutput).toEqual({ audit: 'RAW_RESULT' });
+
+    view.render(<WebShellTranscript blocks={blocks} renderMode="document" />);
+    const documentMessage = latestObservation().props.messages[0];
+    const documentTool =
+      documentMessage?.role === 'tool_group'
+        ? documentMessage.tools[0]
+        : undefined;
+    expect(documentTool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_CONTENT\n',
+    });
+    expect(documentTool?.rawOutput).toBe('SAFE_RESULT');
+  });
+
   it('reconverts on language or block changes and supports an empty list', () => {
     const blocks = [block({ id: 'cancelled', kind: 'prompt_cancelled' })];
     const view = mount(<WebShellTranscript blocks={blocks} language="en" />);

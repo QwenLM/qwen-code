@@ -8079,7 +8079,7 @@ export function App({
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
-      ? MODES_CYCLE.indexOf(currentMode)
+      ? MODES_CYCLE.findIndex((mode) => mode === currentMode)
       : -1;
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);

@@ -275,6 +275,7 @@ import type {
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { TranscriptUpdateIdentityProjector } from './transcript-update-identity.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -1924,6 +1925,8 @@ export class Session implements SessionContext {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private readonly transcriptUpdateIdentity =
+    new TranscriptUpdateIdentityProjector();
   private liveScreenContextTool?: CaptureScreenContextTool;
   private liveTaskTools: readonly LiveTaskTool[] = [];
   private liveSpeakToUserTool?: SpeakToUserTool;
@@ -3130,6 +3133,9 @@ export class Session implements SessionContext {
       );
     }
     await recording.recordRealtimeConversation(entries, model);
+    promptIdContext.enterWith(
+      `${this.config.getSessionId()}########realtime${Date.now()}`,
+    );
     for (const entry of entries) {
       try {
         await this.sendUpdate({
@@ -6519,7 +6525,10 @@ export class Session implements SessionContext {
     observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update: projectedUpdate,
+      update: this.transcriptUpdateIdentity.project(
+        projectedUpdate,
+        promptIdContext.getStore(),
+      ),
     };
 
     if (update.sessionUpdate === 'plan') {
@@ -8481,6 +8490,7 @@ export class Session implements SessionContext {
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
+        promptIdContext.enterWith(promptId);
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;

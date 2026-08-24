@@ -148,6 +148,16 @@ describe('isSafeImageSrc', () => {
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
   });
+
+  it('allows only approved data images in document mode', () => {
+    expect(isSafeImageSrc('data:image/png;base64,iVBOR', true)).toBe(true);
+    expect(isSafeImageSrc('https://example.com/img.png', true)).toBe(false);
+    expect(isSafeImageSrc('/images/logo.png', true)).toBe(false);
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=', true)).toBe(false);
+    expect(
+      isSafeImageSrc('data:image/png;base64,iVBOR" onerror=alert(1)', true),
+    ).toBe(false);
+  });
 });
 
 describe('markdownUrlTransform', () => {
@@ -168,6 +178,15 @@ describe('markdownUrlTransform', () => {
     // defaultUrlTransform rewrites unsafe schemes to ''.
     expect(markdownUrlTransform('javascript:alert(1)')).toBe('');
     expect(markdownUrlTransform('data:text/html;base64,PHN2Zz4=')).toBe('');
+  });
+
+  it('allows only approved data images in document mode', () => {
+    expect(
+      markdownUrlTransform('data:image/png;base64,iVBORw0KGgo=', true),
+    ).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(
+      markdownUrlTransform('data:image/svg+xml;base64,PHN2Zz4=', true),
+    ).toBe('');
   });
 });
 
@@ -236,6 +255,57 @@ describe('qwen-session:// links', () => {
     expect(a.getAttribute('href')).toBeNull();
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();
     c.remove();
+  });
+});
+
+describe('document image policy', () => {
+  it('does not put remote Markdown image URLs into the DOM', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '![remote](https://example.com/secret.png)',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    expect(container.innerHTML).not.toContain('https://example.com');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('renders chart fences as static code in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '```echarts\n{"series":[]}\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '{"series":[]}',
+    );
+    expect(container.textContent).not.toContain('Show chart');
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 
@@ -1368,6 +1438,76 @@ describe('Markdown custom code block rendering', () => {
 });
 
 describe('Markdown code highlighting while streaming', () => {
+  it('keeps code plain in document mode without loading the highlighter', async () => {
+    __resetForTesting();
+    await getCodeHighlighter('json');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '```json\n{ "safe": true }\n```',
+            isStreaming: false,
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '"safe": true',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('drops a warmed highlight when switching to document mode', async () => {
+    __resetForTesting();
+    await getCodeHighlighter('json');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const content = '```json\n{ "safe": true }\n```';
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'interactive' },
+          createElement(Markdown, { content, isStreaming: false }),
+        ),
+      );
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, { content, isStreaming: false }),
+        ),
+      );
+    });
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '"safe": true',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('keeps streamed code content visible while streaming', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

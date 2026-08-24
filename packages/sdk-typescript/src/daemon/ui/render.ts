@@ -322,6 +322,10 @@ export function daemonToolPreviewToMarkdown(
             )}`,
         )
         .join('\n');
+    case 'todo_list':
+      return preview.summary
+        ? `_${escapeMarkdownText(preview.summary, opts)}_`
+        : '';
     case 'generic':
       return preview.summary
         ? `_${escapeMarkdownText(preview.summary, opts)}_`
@@ -535,6 +539,8 @@ function daemonToolPreviewToPlainText(
       return preview.rows
         .map((r) => `${cap(r.label)}: ${cap(r.value)}`)
         .join('\n');
+    case 'todo_list':
+      return preview.summary ? cap(preview.summary) : '';
     case 'generic':
       return preview.summary ? cap(preview.summary) : '';
     default:
