@@ -1144,7 +1144,7 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
 
     act(() => root?.unmount());
-    container?.remove();
+    if (container instanceof HTMLElement) container.remove();
     root = null;
     container = null;
 
