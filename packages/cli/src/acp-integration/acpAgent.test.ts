@@ -14545,6 +14545,115 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keys the file rewind on the resolved identity when both rewind parameters arrive', async () => {
+    // A request carrying BOTH targetTurnIndex and promptId follows the
+    // numeric target for the conversation. The file rewind and the
+    // consumed-boundary drop must key on the identity the session RESOLVED
+    // for that turn — keying on the raw client promptId rolls files back
+    // to a different turn than the conversation truncates to and consumes
+    // the wrong boundary snapshot.
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const fileHistory = innerConfig.getFileHistoryService();
+    const snap = (ordinal: number) => ({
+      promptId: `${sessionId}########${ordinal}`,
+      timestamp: new Date(`2026-06-13T00:0${ordinal}:00.000Z`),
+      trackedFileBackups: {},
+    });
+    fileHistory.getSnapshots.mockReturnValue([snap(0), snap(1), snap(2)]);
+    fileHistory.rewind.mockResolvedValue({
+      filesChanged: ['a.ts'],
+      filesFailed: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.rewindToTurn.mockReturnValueOnce({
+      targetTurnIndex: 1,
+      apiTruncateIndex: 2,
+      promptId: `${sessionId}########1`,
+    });
+
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      // A DIFFERENT turn's id than the numeric target resolves to.
+      promptId: `${sessionId}########0`,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: true,
+    });
+    expect(lastSessionMock?.rewindToPrompt).not.toHaveBeenCalled();
+    expect(fileHistory.rewind).toHaveBeenCalledWith(
+      `${sessionId}########1`,
+      true,
+    );
+    expect(fileHistory.rewind).not.toHaveBeenCalledWith(
+      `${sessionId}########0`,
+      true,
+    );
+    expect(response).toMatchObject({
+      success: true,
+      promptId: `${sessionId}########1`,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('validates the promptId format when a rewind carries both parameters', async () => {
+    // The numeric target resolves the rewind, but a malformed promptId
+    // must still fail fast with invalid_rewind_target at RPC entry instead
+    // of being silently ignored (or, pre-fix, riding into the file-history
+    // lookup unvalidated).
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('rewindSession', {
+        sessionId,
+        targetTurnIndex: 1,
+        promptId: 'not-a-session-prompt-id',
+        cwd: '/tmp',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'invalid_rewind_target' },
+    });
+    expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
+    expect(lastSessionMock?.rewindToPrompt).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession fails fast with session_busy while a turn is active', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);

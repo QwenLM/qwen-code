@@ -11770,7 +11770,11 @@ class QwenAgent implements Agent {
         const resolveFromPromptId =
           promptId !== undefined &&
           (turnIndex === undefined || turnIndex === null);
-        if (resolveFromPromptId) {
+        if (promptId !== undefined) {
+          // Validate the format even when the numeric target resolves the
+          // rewind: a request carrying both parameters must not ride a
+          // malformed promptId silently into the file-history lookup (and
+          // the conversation rewind ignores it only after this gate).
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
             throw new RequestError(-32602, 'Invalid promptId format', {
@@ -11785,7 +11789,11 @@ class QwenAgent implements Agent {
               { errorKind: 'invalid_rewind_target' },
             );
           }
-        } else if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
+        }
+        if (
+          !resolveFromPromptId &&
+          (!Number.isInteger(turnIndex) || (turnIndex as number) < 0)
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing targetTurnIndex',
@@ -11829,11 +11837,20 @@ class QwenAgent implements Agent {
             // sends only targetTurnIndex) resolve the target's identity
             // inside the session — key the file rewind and the
             // consumed-boundary drop on the RESOLVED identity so both arms
-            // run them. Without the drop the live store keeps the boundary
-            // while the conversation keeps one fewer turn, the strict
-            // legacy pairing gate fails every later rewind closed, and file
-            // rewind becomes one-shot until a session reload.
-            const fileRewindPromptId = promptId ?? rewindResult.promptId;
+            // run them. A request carrying BOTH parameters follows the
+            // numeric target for the conversation; keying the file rewind
+            // on the raw client promptId would roll files back to a
+            // different turn than the conversation truncates to, and the
+            // boundary drop would then consume the wrong snapshot.
+            // promptId-only rewinds stamp the requested id, so the two
+            // sources agree in that arm. Without the drop the live store
+            // keeps the boundary while the conversation keeps one fewer
+            // turn, the strict legacy pairing gate fails every later
+            // rewind closed, and file rewind becomes one-shot until a
+            // session reload.
+            const fileRewindPromptId = resolveFromPromptId
+              ? promptId
+              : rewindResult.promptId;
             if (rewindFiles && fileRewindPromptId) {
               const fhs = session.getConfig().getFileHistoryService();
               try {
