@@ -3099,6 +3099,73 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     expect(r.rewrittenPrompts.join(' ')).toContain('chunk 9');
     expect(r.ok).toBe(false);
   });
+
+  it('drops a stale declaration whose id collides with a planned chunk it does not describe', () => {
+    // A re-plan shrank nine chunks to two, and a launch block left behind
+    // from the old chunking says `chunk 2 of 9` — its id collides with a
+    // chunk this plan carries, so the membership check passes, but its
+    // count names a plan this one is not: chunk 2 described different
+    // lines when the declaration was written. Chunk 2's own agent was
+    // launched verbatim and made a diff call but died before returning —
+    // its told-range credit covers the chunk, yet it cannot suppress the
+    // stale declaration (`chunkSatisfied` requires a RETURNED superseder)
+    // nor refute it (no returned spanning read exists). Admitted anyway,
+    // the declaration erased the coverage the walk itself credited and
+    // capped the verdict on a chunk a relaunch could cover.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 1, text: '' });
+    transcript(
+      'stale',
+      `You are reviewing chunk 2 of 9.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      {
+        calls: 1,
+        range: [800, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    // Still disclosed as a prompt defect — the record ran on a launch the
+    // CLI did not build for this plan's chunk 2.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    expect(r.ok).toBe(false);
+  });
+
+  it('classifies a collided chunk by its live cause, not the stale declaration', () => {
+    // The same collision over a repairable failure: chunk 2's relaunch was
+    // paraphrased and mis-paged — it read lines that do not span the chunk,
+    // so the chunk is genuinely missing and its live cause is the rewrite.
+    // The stale `chunk 2 of 9` declaration passed the membership-only
+    // guard and outranked that cause (`classify()` orders the declaration
+    // first), handing the operator "no read can span it" — nothing a
+    // relaunch repairs — for a chunk a relaunch could cover.
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      { calls: 1, range: [0, 50], opens: [] },
+    );
+    transcript(
+      'stale',
+      `You are reviewing chunk 2 of 9.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      {
+        calls: 1,
+        range: [800, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('rewritten-prompt');
+  });
 });
 
 // The per-chunk ledger: the same walk's conclusions, keyed by CHUNK instead of

@@ -551,12 +551,23 @@ function readPlan(path: string): {
 const DIGEST_WINDOW_MS = 5000;
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
+export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+(\d+)\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * The chunk count this launch was written against — the plan identity of a
+ * `chunk N of M` assignment, beside the id `assignedChunk` reads. A stale
+ * declaration from a re-plan's old chunking can carry an id that collides
+ * with a planned chunk; the count is what tells the plans apart.
+ */
+function assignedChunkTotal(rec: AgentRecord): number | null {
+  const m = CHUNK_RE.exec(rec.launchPrompt);
+  return m ? Number(m[2]) : null;
 }
 
 /**
@@ -1184,8 +1195,17 @@ export function coverageFromTranscripts(
       // planned ids, can never match, taking the partition assertion down
       // on input that is stale, not contradictory. Drop it; the
       // rewritten-launch disclosure above already names the record.
+      // Membership alone does not prove the declaration is about THIS plan:
+      // a stale id can collide with a planned one — `chunk 2 of 9` left
+      // over from a nine-chunk plan over a plan that now carries two
+      // chunks. The `of M` count is the plan identity the launch was
+      // written against; a declaration whose count contradicts this plan
+      // describes different lines even when its id exists in it, and
+      // admitting it classified a chunk a relaunch could cover as
+      // `declared-uncoverable` and erased its live coverage.
       if (
         plan.chunks.some((c) => c.id === chunk) &&
+        assignedChunkTotal(rec) === plan.chunks.length &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
         !refutedByReturnedSpanningRead(chunk)
       ) {
