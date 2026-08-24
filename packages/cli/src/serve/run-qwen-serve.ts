@@ -694,6 +694,7 @@ export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
   tls = false,
+  boundFamily?: 'IPv4' | 'IPv6',
 ): string {
   const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
@@ -705,15 +706,23 @@ export function formatChannelWorkerDaemonUrl(
   // hardened hosts), it does not. Measured on this Node against a v6-only
   // `[::]` socket: `dial 127.0.0.1` -> ECONNREFUSED while `dial ::1` -> ok;
   // against a dual-stack `[::]` socket both succeed. So `::1` is the one
-  // address an IPv6 wildcard bind answers everywhere.
+  // address an IPv6 wildcard bind answers everywhere. The v4 wildcard keeps
+  // v4 loopback: measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
   //
-  // `''` belongs with the IPv6 wildcards, not with `0.0.0.0`: `listen(port,
-  // '')` — exactly how this daemon binds — reports `{address: '::', family:
-  // 'IPv6'}`, so an empty --hostname IS an IPv6 wildcard bind.
-  //
-  // The v4 wildcard keeps v4 loopback: measured against `0.0.0.0`,
-  // `dial ::1` is ECONNREFUSED.
-  if (normalized === '' || canonicalIp === '::') {
+  // An EMPTY --hostname decides by the socket that actually bound, not by
+  // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
+  // for it and falls back to `0.0.0.0` when IPv6 is unavailable, so on the
+  // fallback host the socket is IPv4 while the spelling said IPv6 — handing
+  // workers `[::1]` there dialled an address nothing listens on, and the
+  // first worker's failure exited the daemon. Explicit `::`/`[::]` and
+  // `0.0.0.0` keep their spelling-based mapping: those binds fail loud when
+  // their family is unavailable, so the spelling cannot lie about them.
+  if (normalized === '') {
+    return boundFamily === 'IPv4'
+      ? `${scheme}://127.0.0.1:${port}`
+      : `${scheme}://[::1]:${port}`;
+  }
+  if (canonicalIp === '::') {
     return `${scheme}://[::1]:${port}`;
   }
   if (canonicalIp === '0.0.0.0') {
@@ -869,6 +878,23 @@ export function describeWorkerTlsTrustGaps(opts: {
         `("unsuitable certificate purpose"). Reissue that certificate with ` +
         `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
         `chain, and restart.`,
+    );
+  } else if (anchorPath.noBasicConstraintsTerminator) {
+    const terminator = anchorPath.noBasicConstraintsTerminator;
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains up to ` +
+        `"${terminator.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is self-signed and, as an X.509 v${
+          x509Version(terminator) ?? 3
+        } certificate, carries ` +
+        `extensions but no basicConstraints at all — OpenSSL accepts only ` +
+        `X.509 v1 certificates (or a keyUsage asserting keyCertSign) ` +
+        `without basicConstraints as issuers, so it refuses to let this ` +
+        `one issue the certificates below it and every worker handshake to ` +
+        `the daemon will fail INVALID_PURPOSE ("unsuitable certificate ` +
+        `purpose"). Reissue that certificate with basicConstraints CA:TRUE, ` +
+        `or point NODE_EXTRA_CA_CERTS at a real CA that anchors the chain, ` +
+        `and restart.`,
     );
   } else if (anchorPath.incapableIssuer) {
     gaps.push(
@@ -1036,6 +1062,25 @@ function tbsCertificateOf(
   return tbs?.tag === SEQUENCE_TAG ? tbs : undefined;
 }
 
+/** `[0] EXPLICIT Version DEFAULT v1` — the optional first TBS member. */
+const VERSION_TAG = 0xa0;
+
+/** The X.509 version of `cert` (1, 2 or 3); an absent version member is v1. */
+function x509Version(cert: X509Certificate): number | undefined {
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  const first = derElementAt(cert.raw, tbs.start);
+  if (!first) return undefined;
+  if (first.tag !== VERSION_TAG) return 1;
+  const version = derElementAt(cert.raw, first.start);
+  if (version?.tag !== INTEGER_TAG) return undefined;
+  let value = 0;
+  for (let index = version.start; index < version.end; index += 1) {
+    value = value * 0x100 + (cert.raw[index] ?? 0);
+  }
+  return value + 1;
+}
+
 /**
  * The value bytes of `cert`'s `oid` extension, or `undefined` when it carries
  * none.
@@ -1108,6 +1153,31 @@ function declaresNotACa(cert: X509Certificate): boolean {
   return (
     !cert.ca && certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined
   );
+}
+
+/**
+ * Whether a self-signed terminator USED AS AN ISSUER is a v2/v3 certificate
+ * with no basicConstraints — the shape OpenSSL refuses as a CA.
+ *
+ * `declaresNotACa` cannot see it: it reads only the shape where
+ * basicConstraints is PRESENT. Measured on Node v22.23.2 / OpenSSL 3.0.13
+ * with real handshakes, a self-signed v3 root carrying other extensions
+ * (SKI/AKI) but no basicConstraints anchors this walk green while every
+ * handshake through it fails INVALID_PURPOSE — and `openssl verify` reports
+ * error 79, invalid CA certificate. The two non-CA:TRUE shapes OpenSSL does
+ * accept as issuers stay exempt: X.509 v1 certificates (no extensions — the
+ * R3-8 pin) and a keyUsage asserting keyCertSign ("probably a CA"; measured:
+ * the handshake authorizes).
+ */
+function terminatorCannotIssue(cert: X509Certificate): boolean {
+  if (cert.ca) return false;
+  const version = x509Version(cert);
+  if (version === undefined || version < 2) return false;
+  if (certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined) {
+    return false;
+  }
+  const bits = keyUsageBits(cert);
+  return !(bits && bits.includes(KEY_USAGE_KEY_CERT_SIGN));
 }
 
 /** keyUsage, 2.5.29.15, as the contents of its OBJECT IDENTIFIER. */
@@ -1303,6 +1373,11 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
   path: readonly X509Certificate[];
   /** Set when the walk terminated on a self-signed cert that is not a CA. */
   nonCaTerminator?: X509Certificate;
+  /**
+   * Set when the walk terminated on a self-signed v2/v3 cert with no
+   * basicConstraints — loadable and self-signed, but unusable as an issuer.
+   */
+  noBasicConstraintsTerminator?: X509Certificate;
   /** Set when the walk reached an issuer OpenSSL will not let issue. */
   incapableIssuer?: X509Certificate;
   /** Set when a chain member's EKU excludes TLS server use below it. */
@@ -1329,6 +1404,13 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
       // INVALID_PURPOSE — so the constraint binds only past the leaf.
       if (path.length > 1 && declaresNotACa(current)) {
         return { anchored: false, path, nonCaTerminator: current };
+      }
+      if (path.length > 1 && terminatorCannotIssue(current)) {
+        return {
+          anchored: false,
+          path,
+          noBasicConstraintsTerminator: current,
+        };
       }
       return { anchored: true, path };
     }
@@ -7931,6 +8013,11 @@ async function runQwenServeImpl(
             opts.hostname,
             actualPort,
             tlsOptions !== undefined,
+            typeof addr === 'object' &&
+              addr &&
+              (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
           );
           assertChannelWorkerDaemonUrlIsLocal(workerDaemonUrl, opts.hostname);
           if (tlsOptions && tlsCertPath) {

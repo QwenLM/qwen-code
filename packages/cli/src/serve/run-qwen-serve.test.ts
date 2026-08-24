@@ -1261,9 +1261,7 @@ describe('formatChannelWorkerDaemonUrl', () => {
 
   // R7-7: `[::]` -> 127.0.0.1 is only reachable through a dual-stack mapping
   // the kernel is free not to give (IPv6-only hosts, net.ipv6.bindv6only=1).
-  // `''` is grouped here, not with 0.0.0.0, because `listen(port, '')` — how
-  // the daemon binds — reports `{address: '::', family: 'IPv6'}`.
-  it.each(['', '::', '[::]'])(
+  it.each(['::', '[::]'])(
     'uses IPv6 loopback when the daemon binds IPv6 wildcard host %j',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
@@ -1271,6 +1269,29 @@ describe('formatChannelWorkerDaemonUrl', () => {
       );
     },
   );
+
+  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
+  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
+  // --hostname decides by the socket that actually bound, not by spelling —
+  // on the fallback host the old spelling-based rule handed workers `[::1]`,
+  // which nothing listened on, and the first worker's failure exited the
+  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
+  // binds fail loud when their family is unavailable.
+  it('uses IPv6 loopback for an empty hostname when the bound socket is IPv6', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170)).toBe('http://[::1]:4170');
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6')).toBe(
+      'http://[::1]:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
 
   it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
     'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
@@ -1290,6 +1311,11 @@ describe('formatChannelWorkerDaemonUrl', () => {
       ['::', { host: '::', port: 0, ipv6Only: true }],
       ['::', { host: '::', port: 0 }],
       ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+      // R10-1: the daemon's real bind shape for an empty --hostname. The
+      // loopback family is read from the socket that actually bound, so on a
+      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
+      // IPv4 fallback instead.
+      ['', { host: '', port: 0 }],
     ] as const) {
       let server: net.Server;
       try {
@@ -1299,14 +1325,23 @@ describe('formatChannelWorkerDaemonUrl', () => {
         continue;
       }
       try {
-        const port = (server.address() as AddressInfo).port;
-        const certified = new URL(formatChannelWorkerDaemonUrl(bind, port));
+        const addr = server.address() as AddressInfo;
+        const certified = new URL(
+          formatChannelWorkerDaemonUrl(
+            bind,
+            addr.port,
+            false,
+            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
+          ),
+        );
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
         expect({
           bind: listenOptions,
           certified: certified.host,
-          dial: await dialLoopback(dialHost, port),
+          dial: await dialLoopback(dialHost, addr.port),
         }).toEqual({
           bind: listenOptions,
           certified: certified.host,
@@ -2594,6 +2629,97 @@ YWU=
 -----END CERTIFICATE-----
 `;
 
+// R2-21 round-12 entrance 1: a self-signed X.509v3 terminator that carries
+// other extensions (SKI/AKI) but NO basicConstraints. `declaresNotACa` reads
+// only the shape where basicConstraints is present, and the incapable-issuer
+// arm skips self-signed issuers, so this anchored green while every worker
+// handshake failed INVALID_PURPOSE (measured on Node v22.23.2 / OpenSSL
+// 3.0.13: authorized=false INVALID_PURPOSE; `openssl verify` error 79,
+// invalid CA certificate). The CA:TRUE twin and the v1 root fixture above
+// authorize. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUTKC9XLZQbUv5EDlr4YdPZmM2xlEwDQYJKoZIhvcNAQEL
+BQAwFTETMBEGA1UEAwwKdjNuYmMtcm9vdDAeFw0yNjA4MjQyMjI5MTNaFw0yODEx
+MjYyMjI5MTNaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEB
+BQADggEPADCCAQoCggEBAIpqqqqcjrjXXUSi7RG5N6mVjW8NuMZWzWIZTB9xDwCE
+LLu4Sohj1lGcbG4iLBiUxlKko0bRDqWFVaMyZaxb9sr5rbC0/DoH3+w+wpXC6Cc2
+9Mu3C+ppxqLG6GBQatHd2PTABABJ/l1iARRZn/czL6f0rLwtTqCXIP8J1TpcEclp
+hOX8kmMxZjKp++enljBhBuAG4HK5ps+dG1QeyiQtJRxVWVKCAZmF83QYiyl12OdB
+mxzPtbxqxMjNlQNvvq26pQpl8s64Hc14PnuTuoCS5C3amHv0BBQ2YxdjjIA/9zES
+xIOwOVep2vTygEjrJ30YsGvdTZMPRf/Acu1w4efUrocCAwEAAaNeMFwwGgYDVR0R
+BBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQWBBSsA2WC6FXsmLZUDRrGtXgH
+xwrdMDAfBgNVHSMEGDAWgBRGu8gb8afwTBnGHQjdEESadOTsKzANBgkqhkiG9w0B
+AQsFAAOCAQEAE09VoFXqe3lWqdqGZF63SVuuutuzko7Ty4lFgAjDJ2T3nCO2rXlP
+wdq1umcV+ZzdR7zQiAFTM9WygOt7YWGC5ijCUtnIB4GM/CQbUPGXKv17+W3BNFST
+T1jpHtQYBy+RXHGQEmmXXcfa+0TU1gCKHnVvR1v1OFMfQKSwoEPUq4Jvk6SnlqpF
+oMBTfWBq2ekWVFnPuPwydKckx4PERaJqEwCp96+/frG+kXmCbpOUI0LEnXnGYuII
+3O+dzD1Hmq74UHpzSIx3Kik/GgcmuR3hGqd4CosAE8LTx+QWSlT0prlifeh8zRad
++TI02jhjEUvZeEDs6BA9wDCctjdGmeRcWA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC2TCCAcGgAwIBAgIUSyHqSLpKFx1KL2oaYGbcwmSWDGwwDQYJKoZIhvcNAQEL
+BQAwFTETMBEGA1UEAwwKdjNuYmMtcm9vdDAeFw0yNjA4MjQyMjI5MDNaFw0zNjA4
+MjEyMjI5MDNaMBUxEzARBgNVBAMMCnYzbmJjLXJvb3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDK+85DoSl6KDXAv5Tb7B9+I5MuOHj2JIQU5sYdA3Cx
+IFZST0Q3XO0h6LN8CLn2CP8vghL4c0vzCwIWlc2MourxDdR98Vum8WggOXZBPO1n
+ZZ6olW3GYUkaeAFAnUlOtOpzXNtnyxbUh6mw8xyxvWdKL1bDWAdUskdAn2kMdzYg
+MphUAz9fVdnbcXNLZSVyO3FS/umWo0uSOk+EwfRhh3Y0ntteoxNKLRVvogs6CMuO
+i4ZTDG9iYGWPfUbZHDKNSGiVniI8VYtrpno0xKcI2gjMRa1Fkjls5ZN3Aq92qfDk
+evNfm0DWNOWHOwXGS9GgBQo8qf2FsRLzmvtUs+/UTOMTAgMBAAGjITAfMB0GA1Ud
+DgQWBBRGu8gb8afwTBnGHQjdEESadOTsKzANBgkqhkiG9w0BAQsFAAOCAQEAWjvR
+DHmvIR6LLfipWQjvemQu2QgUFw07hAvMOFfvFY7gvcaL5z2c4/MNb5FGIWHTCJoj
+vpHUhS/8YS3SO0itdjTlovEEbRgD4Ce3U/2u2ODj82d8qh5Sda63fa62xPHiTlC0
+wxixy8d2Neer0G2Y9T8r1zLt/+9Dw1Jx+fJunEjBb9FhSxyQ1F9lwBMlZXpBbvqW
+7/RFxEuDWcBLVZZjoLWvehoW+wp5qUnJITKJqidAptpVfYzta08jIdKWYqxakj8u
+/qXbseIVpOZ20IxAUbeSV8snK5lLoeVsPvHU1u8AonkNXcb5KOeRxw9LFpvSb0UK
+29wcS+d3PpX+TV+oWA==
+-----END CERTIFICATE-----
+`;
+
+// The keyCertSign control for the fixture above: OpenSSL's `X509_check_ca`
+// reads a keyUsage asserting keyCertSign without basicConstraints as
+// "probably a CA" and accepts it as an issuer — measured on Node v22.23.2:
+// this chain handshakes authorized=true. The terminator check must therefore
+// exempt it while still naming the extension-bearing no-BC shape.
+const TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDEzCCAfugAwIBAgIUH2Fd5Jh4IAT+XdptqbhiiIXWItgwDQYJKoZIhvcNAQEL
+BQAwEzERMA8GA1UEAwwIa2NzLXJvb3QwHhcNMjYwODI0MjIyOTEzWhcNMjgxMTI2
+MjIyOTEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEBAQUA
+A4IBDwAwggEKAoIBAQDE8H+3zu/ytWJ92r5kYW89nAaLUhOsiuau7ujjnvvk/l3R
+L3VyWOwrPcMvh8T4SNbXNAOMF6raPV63yWXjOx/Iwh6YOlN12hRGw7Gy5Udt4zK0
+g+KOgwrBPfANtCGkoW5AJegTRP//YkWsDWsIkkEGAItZz6kFujPSKc08C54JLYKD
+oQsP0kvGsMPaefG3wMnIBY4w27iW74sYjhBvD0wQnUT5iV96X+Qn0u/F59Q6Z0k1
+fbiTNKWP0ABpAYQi2wESclpRQOVqwDNPvewBaq/ICLi6ECnQOJTozMt4UCUcfxoh
+9Ws2dPWkMjh3tfbDBmxroR3h1KXmWV2ue7duvDXrAgMBAAGjXjBcMBoGA1UdEQQT
+MBGCCWxvY2FsaG9zdIcEfwAAATAdBgNVHQ4EFgQUtikvjdPYhM6BTqnyBFICr5ni
+pXAwHwYDVR0jBBgwFoAUD/bziBdZc0J/69b0gVr79hhnp3YwDQYJKoZIhvcNAQEL
+BQADggEBAEqAZVPTLzTT1kg+CIzIkUXnC2YbCMI5C10XwIw7TGnEYEvOkpqc8QU3
+Aroc+l1vDtqBemT/0xm4XoI/MwBln6CH1LzEtRpopYON7maUBfItss7YZmyFddUY
+kRKSCYO28U94NgZHjZaCxq0dbbRGwKYIaFTkUAIbsg/H/Ds9L+d/ndgcyOI/ih4i
+NNkzNnBhXokqYICyQQ4470wfuCoJGVujddCfH/lFBn2mKk6XW5h90nGFoc/j/UNP
+iVCdi05bie+30A42TwDK0uFS3+5XXHG8mjNeKPuC5y5gCwD3tMKL+6K/X+iCpjrA
+E9ukrkH5gGnd+N5l/TSDWt1X3xeFH7U=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC5TCCAc2gAwIBAgIUFkzH3aM2pRATTAlctwDS7G1l8CUwDQYJKoZIhvcNAQEL
+BQAwEzERMA8GA1UEAwwIa2NzLXJvb3QwHhcNMjYwODI0MjIyOTA0WhcNMzYwODIx
+MjIyOTA0WjATMREwDwYDVQQDDAhrY3Mtcm9vdDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAKdS3oVJEqt+6N0Kkvt9zzMNSE/clTcH8+rb8DgEafSlY2Xv
+pSazqUmgeb5Y63/Abo9ZB8BleIPI89H0zlzmT/mfUDq8NgoeK0d+unk85w0I5tn4
+2iWG8evCX6/Qy7Xt2+9uLs4aE8zFBfoC66Ibp2ytrkKYsFbCvElsQUhDtk7HSd3X
+1TaC1vLeYtiBbtanTq6lqWPLifPcZPOHMKvy8zVyT/pIMjkdAXqr/YJnNm4QVYG3
+VgaU+g0N+I0nPfjg1NmqmKxHTFjU96OpHLUY4z0zq6HbMqysMvY++Ae4x+xaE3PQ
+oB7Y3/aBeoDYk4d1wEwG0ae/ITNj/ZY3LrtckpMCAwEAAaMxMC8wDgYDVR0PAQH/
+BAQDAgIEMB0GA1UdDgQWBBQP9vOIF1lzQn/r1vSBWvv2GGendjANBgkqhkiG9w0B
+AQsFAAOCAQEAf//g3jUAyBJw3j+K2Rgaw2BmwES0zkD/GVY5MJbYjNRrmZogeO0+
+hblA11y1QbRH1dCInfL7J67mOVPg1IpNno5aPmyKi8bUp56u18qUNat2LnVLc07E
+Zaow2vIF/YczN8GnlcAFbhGV519MeREeCHlS8BSphVi9Why7QNgb5oykd1XkidAl
+0D9i1X9mQRYTJ1wyCtfWnnyWjibiCw//PWzhldrvdi4Q4FVt2/Ubi2yaVbsqRtRR
+AcmP4fHhTzziHeyq6cW6G7B/w5kCPz6vxP9kWyflqROYsUoP75sOf680MXtqLCja
+OecFowc394YfnzdbX/IWz26I92YHQh4c/A==
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -3242,6 +3368,61 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps).toHaveLength(1);
     expect(gaps[0]).toContain('INVALID_PURPOSE');
     expect(gaps[0]).toContain('qwen non-CA test issuer');
+  });
+
+  it('names a self-signed v3 terminator that carries no basicConstraints at all', () => {
+    // R2-21 round-12 entrance 1: `declaresNotACa` reads only the shape where
+    // basicConstraints is PRESENT, and the incapable-issuer arm skips
+    // self-signed issuers, so this anchored green while every worker
+    // handshake failed INVALID_PURPOSE (measured on Node v22.23.2 / OpenSSL
+    // 3.0.20 with this exact file as the served chain and the trust store;
+    // `openssl verify` reports error 79, invalid CA certificate).
+    const root = new X509Certificate(
+      TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_ROOT.match(
+        /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+      )!.at(-1)!,
+    );
+    // Precondition pin: `.ca` false, and no basicConstraints extension to
+    // declare it with — other extensions present (v3), so not a v1 shape.
+    expect(root.ca).toBe(false);
+    expect(root.raw.includes(Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]))).toBe(
+      false,
+    );
+    expect(root.subject).toContain('CN=v3nbc-root');
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('no basicConstraints at all');
+    expect(gaps[0]).toContain('v3nbc-root');
+  });
+
+  it('keeps trusting a keyCertSign terminator that carries no basicConstraints', () => {
+    // Control for the test above: OpenSSL reads a keyUsage asserting
+    // keyCertSign without basicConstraints as "probably a CA" and accepts it
+    // as an issuer — measured on Node v22.23.2: this chain handshakes
+    // authorized=true. Same predicate inputs as the failing shape (`.ca`
+    // false, no basicConstraints OID) with keyCertSign the only variable, so
+    // the exemption is what separates the two verdicts.
+    const root = new X509Certificate(
+      TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT.match(
+        /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+      )!.at(-1)!,
+    );
+    expect(root.ca).toBe(false);
+    expect(root.raw.includes(Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]))).toBe(
+      false,
+    );
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
   });
 
   it('names a chain that passes THROUGH an issuer that is not a CA', () => {

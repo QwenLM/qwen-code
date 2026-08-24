@@ -11,8 +11,21 @@ const BEGIN_PREFIX = '-----BEGIN ';
 const END_PREFIX = '-----END ';
 const MARKER_SUFFIX = '-----';
 const CERTIFICATE_LABEL = 'CERTIFICATE';
+/**
+ * OpenSSL also accepts the legacy `PEM_STRING_X509_OLD` label for
+ * certificates (measured on Node v22.23.2: a pure-legacy file authorizes
+ * through NODE_EXTRA_CA_CERTS), so rejecting it drops an operator CA the
+ * workers would have trusted — while warning that the file holds "no PEM
+ * certificate block Node can load", which it does.
+ */
+const LEGACY_CERTIFICATE_LABEL = 'X509 CERTIFICATE';
 /** Canonical PEM wraps the body at 64 columns; so does every producer. */
 const PEM_BODY_COLUMNS = 64;
+/**
+ * A `Name: value` RFC 1421 header line. A base64 body line can never
+ * contain `:`, so inside a block this cannot eat a body line.
+ */
+const RFC1421_HEADER_LINE = /^[A-Za-z0-9-]+:.+$/;
 
 /**
  * The label of a `-----BEGIN X-----`/`-----END X-----` line, or `undefined`
@@ -121,21 +134,32 @@ export function extractCertificateBlocks(
     }
     // Ran off the end without an end line — same `bad end line` stop.
     if (cursor >= lines.length) break;
+    // RFC 1421 header lines — the `Proc-Type:`/`DEK-Info:` pair of legacy
+    // encrypted keys — sit between the BEGIN marker and the first blank
+    // line. The loader parses them, reads nothing certificate-shaped from
+    // the block, and CONTINUES with the next block; feeding the header text
+    // to the base64 judgement stopped the scan here and dropped every
+    // certificate after such a block (measured: the loader authorizes
+    // through a headered key block this scan never got past).
+    let bodyStart = 0;
+    while (
+      bodyStart < body.length &&
+      RFC1421_HEADER_LINE.test(body[bodyStart]!)
+    ) {
+      bodyStart += 1;
+    }
+    if (bodyStart > 0) {
+      if (body[bodyStart] === '') bodyStart += 1;
+      body.splice(0, bodyStart);
+    }
     // Interior whitespace in a body line is skipped by the decoder, not an
     // error, so join first and judge the alphabet afterwards. OpenSSL decodes
     // every PEM block it walks, including blocks that are not certificates.
     const encoded = body.join('').replace(/\s/g, '');
-    const decoded = Buffer.from(encoded, 'base64')
-      .toString('base64')
-      .replace(/=+$/, '');
-    if (
-      encoded.length === 0 ||
-      /[^A-Za-z0-9+/=]/.test(encoded) ||
-      decoded !== encoded.replace(/=+$/, '')
-    ) {
+    if (!pemBodyDecodes(encoded)) {
       break;
     }
-    if (label === CERTIFICATE_LABEL) {
+    if (label === CERTIFICATE_LABEL || label === LEGACY_CERTIFICATE_LABEL) {
       const block = renderCertificateBlock(encoded);
       try {
         // Shape is not loadability: a body made only of base64 *characters*
@@ -164,6 +188,45 @@ function renderCertificateBlock(encoded: string): string {
     ...wrapped,
     `${END_PREFIX}${CERTIFICATE_LABEL}${MARKER_SUFFIX}`,
   ].join('\n');
+}
+
+/** The 6-bit value of a base64 character (alphabet already checked). */
+function base64CharValue(code: number): number {
+  if (code >= 0x41 && code <= 0x5a) return code - 0x41;
+  if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 26;
+  if (code >= 0x30 && code <= 0x39) return code - 0x30 + 52;
+  if (code === 0x2b) return 62; // '+'
+  return 63; // '/'
+}
+
+/**
+ * Whether `encoded` is a base64 body the loader's decoder consumes.
+ *
+ * The decoder ignores non-zero "unused" bits in the final group — measured
+ * on Node v22.23.2 / OpenSSL 3.0.13: such a file loads and authorizes with
+ * byte-identical decoded bytes — so a straight round-trip (re-encode the
+ * decoded bytes and demand the input back) is too strict: it rejected those
+ * bodies, stopping the scan and dropping every block after them. Compare
+ * only the bits the decoder consumes: everything before the last character
+ * exactly, the last character masked to its used bits (two with `==`
+ * padding, four with `=`).
+ */
+function pemBodyDecodes(encoded: string): boolean {
+  if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) return false;
+  const bare = encoded.replace(/=+$/, '');
+  const padLength = encoded.length - bare.length;
+  if (bare.length === 0 || padLength > 2) return false;
+  const canonical = Buffer.from(bare, 'base64')
+    .toString('base64')
+    .replace(/=+$/, '');
+  if (canonical.length !== bare.length) return false;
+  if (padLength === 0) return canonical === bare;
+  if (canonical.slice(0, -1) !== bare.slice(0, -1)) return false;
+  const usedBits = padLength === 2 ? 0b110000 : 0b111100;
+  return (
+    (base64CharValue(bare.charCodeAt(bare.length - 1)) & usedBits) ===
+    (base64CharValue(canonical.charCodeAt(canonical.length - 1)) & usedBits)
+  );
 }
 
 /**

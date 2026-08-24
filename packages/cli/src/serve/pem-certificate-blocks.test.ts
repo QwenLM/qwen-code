@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   extractCertificateBlocks,
@@ -59,6 +60,86 @@ u8NhUh5uAEveCCboMETItLNM6y+LwKfBazfwbnDY6MGcURjRE4/J7P2wEyIy1Ohu
 ZcfT/LXbn1H8cBh1iqy9flUsQR3KRTHe84Btck0+O3KA3wGIpRGF1q/mitl7zCNJ
 v6SP3sMzDfFDdKbveQk7uRIdMfMMkyDuApZHDuW1YRlQBISLn3G66YOo
 -----END CERTIFICATE-----
+`;
+
+// Fixtures for the loader-parity shapes measured on Node v22.23.2 /
+// OpenSSL 3.0.20: every arm below was written to disk exactly as committed
+// here, pointed at through NODE_EXTRA_CA_CERTS in a child process, and a
+// real `tls.connect` to a server holding `LOADER_LEAF_PEM` (signed by
+// `LOADER_CA_PEM`) recorded whether the loader took the certificates.
+const LOADER_CA_PEM = `-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUG+Rzw+YrfN2SJQcFaxnJ5Wi+hd4wDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMB4XDTI2MDgyNDIyMjk0NFoX
+DTM2MDgyMTIyMjk0NFowGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvphb9G9a+LJt0jSybd7bCP/ENBIb
+qItKC8voeueokD0yIJk9crDYEW5glaJYkwrFj7czvcjOFsJz9nzkW1OA6waSTvdC
+go0t3uttoB7b7n9eLVANuJvDrZXoS/eQKQyy00Vp03e0EqgLaIs1Is5/xitMqTUx
+mC3KPpe0bibFpEgQUANGrZ9+r0DFEja14a1h5NmCH7wiCH0I5xkVK6/DTbWrtqL3
+MISBKM/Dx5V8gKlSCkWzsW1FXnG5hzG7tMjfAWhInEgszBI2f62WXBKnFgVKdYvp
+/CgFTvnTFCi4r7LMHxsfSOSdn4/G6degXHiiEbkwU32eGX8w7AilPkEx3QIDAQAB
+o1MwUTAdBgNVHQ4EFgQUduNFQxuTU9W3Egy5J86z6GKaW5QwHwYDVR0jBBgwFoAU
+duNFQxuTU9W3Egy5J86z6GKaW5QwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B
+AQsFAAOCAQEAgsvjWvK1WMPI+3/kI9AhUPpuxptPfXCEn/ejvTG2oQztT0KYIp1R
+2o4W43LMCv78WyezYJqynEz7zahoS63dA/0xMfckywzrItXIdC4lLmRpeMGUaIdw
+Lh5NxelfS1kz0tOALT2b0iJMyfMzFnrrhx1zXApnts+DYGz6u9EY5de7if+iduAI
+1jaea6X5+1UKqeZOYfhnGvyeMDptcGYbjkP26oCRnq5msETpQix+9NXwcPRNVTWH
++inYhmmvmVQwMqOhKbbXhiQibp01oSkTuTE0B0H1mtIFa8W8sbK6uJOukgp0IYD4
+hLthx7zmM4aiR4B4vbFkEEYXw2MLmigqGQ==
+-----END CERTIFICATE-----
+`;
+
+const LOADER_LEAF_PEM = `-----BEGIN CERTIFICATE-----
+MIIDGjCCAgKgAwIBAgIUHKfyEuWgffm/W0GoYcP/7NZ+7UUwDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMB4XDTI2MDgyNDIyMjk0NVoX
+DTI4MTEyNjIyMjk0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvHGvGsspbi1qcfmC7eSWtspNkJYLAQdlCf0j
+A0J/YB2Acog5V5lP5yJuXQmXxusAALn6KkyhPFly6RxoUwo2Cr2QBKe+g26kh7s/
+sJcKwwdMbdpTGDtPWmJALqRrC7lZ8NoIs6m8QVPG8aPvufve7hGP9J7ZCayIm3rR
+JuH1kIP5LR1a9F4sjLUZEXevAVAJv0FUYC0YGAMsVMgV3LXYLwWrQT+KE9J/0ufw
+1aSduHIiQ+uOPMISWFskft2/xW0CyVINDeKDWBWL/RrsPr8Jod/laEffUotOeMJC
+geEwkS/MH+EBMXtvem2KLGU5uXPDKFJ8qoGfjOIYTuf2GKdZPQIDAQABo14wXDAa
+BgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFNsVxLYLW+4/g5Uk
+JOSKp+1jfiItMB8GA1UdIwQYMBaAFHbjRUMbk1PVtxIMuSfOs+himluUMA0GCSqG
+SIb3DQEBCwUAA4IBAQBQCJ+l7rKkxCGT9I5iONMfjS5TTkgzyfYJgHkZFj3UxOz5
+uQxqWlBJelpeuI9rLxAjF1gk1HEvPG782RztTYXuivnsjB97ROS1xg1IV+WamsrS
+5uWEU5GlGc9kOWrhX6psesiA/SsAUN8mu2i/kAHCEbUEh45nGSrOEFUwZF5rXCDi
+WIIgKvrURna4Lkl4DOe9RdbZRX3ivgvxyNw5IaNuxtFGy6pqc9NsD7Mzz6pTouQe
+BN9/FHONLnCWphzl3RDWNUyebnAfKzF7C9YKpxcRQn5otS2TtY3LfkmyIVsoVQ5n
+crPxrwQkQPtzqlbJUOqJQ7nfCGdb8taT0FOWWLEB
+-----END CERTIFICATE-----
+`;
+
+/** A real `openssl genrsa -traditional -aes256` block with RFC 1421 headers. */
+const RFC1421_ENCRYPTED_KEY = `-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878
+
+J9BRN2hq4P9LNZpVMCxspGvrWTkF6WV5nkryy59GZiNz95FVQ6ZR5kL49HrCqc0u
+6DTGQfiO4C94kfG/9PKtd3BWVTqvQzcuGNeo0qe6ETwAIrzw4mNldFXJnH2h5hLS
+j4g5dflGETMUt+4DI1d9f2Odxe30fsDxd7Wnm0scAIIX+OPTG6XGtDOYT5Jv4zjX
+VuxajyMgjxPjy1l9+9DbcGe6E/yhOAGoOqc0/bpirWDw7cJYXGk5V6+BRBvWWbNo
+0D2V7A+63u/WD6yr6EtK6iMtwYrqy4lklCJ9GgzVv3lMDTC5qXUFw2j74Lhd5Y22
+D95o7uCQwCiVEPmelSe2G13MDtoRCSM/lSnz3sQSw65hQPuDh2KwNBEa3JMO5jXl
+EiL1fJnCEiM7VYx4Q4BNu6iaflGayLcdmcQr9+ncTW7XjaFiuXII+fHZ0G4CMEnV
+rG4MiMLalg18FKwu2xXS3uRgPIsOk06M/knJvwQ+rUZZKFzi/DEyBk6XCBeCGfNd
+RFVmTT0bB2V6VRchDUuWDwXmlWx175mAhck0S74eiJSzFInqzyq6kstAIHmNxb0+
+5yrxgugKX2XWhnhTMND36lJC6Qxv+GhJVreDudUmCgThxTGElPjuNE0SaGy2nwXn
+NyiiSZRxBB3/s9ksSzCSoCcl78yV1dzyuJz9rg8UnQZGLTtYYwGPo5ViqQaqV8pC
+CBZwPqWgBmVwEcBEDZTI0yM6UdI0MkxP8RxEktAaWzfZmvqUoNthnWKC4mFThg8A
+/LcP8mePil9aQFLPM01WZ2U+rVTMgUdS/MN7h49nJlLh3+biw8yhK9lKSmInZSYu
+n4/lu0XL0tDxarvlmPUnJxjBCnIOKuWHEdODwYWuqNQHKUdp1zo/UiEmpuUG644c
+hsk6rwbDrRsD2h6PVOHon9J4uJsHj+vPEfiSbS9zfkRRPsTZatnbxJTApjwbVtqm
+r6lHtT2fXZr5jPMoGh5kl2+zn4xbLoSRIQo5TVvNoxUPP+2nNpqtyS0XjUzzQ0i2
+rmJCpF0hX6eLlCNVbBX3LHAlTxd15vCKvCMg9AZWlXJxS1rB/Rr7XctdLWV7+XEg
+ro7j9o6K9rD0ShqCF5YaE6nQEIS1IkeVLTAjG3F8sbPUB3hau75HUl2SQKuCveLD
+NRaeoq8tL0bHc3Xr6BdD2vnehNzAODgTcBuqd8XLdEbuvFtmGpVDPNiNYwf5G2ya
+f4jp1/vE+BqKz5FLr0GppYiEIPNy0kMJ5T9AzqJpNT1HPvmstL+HjCe6Hw5ehPZg
+Ea4gkXjjyGpkFJjUnfiBxTEqa1uAw+suYpkUwiPhYr2lwOjUCjncsTP1BSQZh4wf
+Sf3c25iJ3dmH1Y4zECcinHpXx45kQ0Bpxdy8OzQ9TvXdC64eIVI12DCQULO3b5xe
+AJzY6XIGvucsNMLj9hKumiee0hYDsd3YOc7SM0UBrl0DbO6bxAZAeE/RvoBbcKxA
+dhlTdZjtCFXzz3qCT7+a90scjzLgT5oLxtqBtI4G85LZknD1lN8ppMpEfui98ppy
+Xhr535X9y0Bj7DHfjvNGMplAS4PZ5qtnix1hVebr4LLRwVFqJJslhTUIgLdcgJ0f
+-----END RSA PRIVATE KEY-----
 `;
 
 /** The certificate body lines of `pem`, markers stripped. */
@@ -216,6 +297,52 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(indented)).toBeUndefined();
     // The un-indented control, so this pins the indent and not the fixture.
     expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  // RFC 1421 header lines — the `Proc-Type:`/`DEK-Info:` pair between the
+  // BEGIN marker and the first blank line of a legacy encrypted key. The
+  // loader parses them, skips the block and CONTINUES: measured on Node
+  // v22.23.2 as NODE_EXTRA_CA_CERTS in both orderings, authorized=true.
+  // Feeding the header text to the base64 judgement used to break the scan
+  // here and drop every certificate after such a block.
+  it('keeps certificates that follow an RFC-1421 headered key block', () => {
+    expect(
+      extractCertificateBlocks(`${RFC1421_ENCRYPTED_KEY}\n${LOADER_CA_PEM}`),
+    ).toEqual([LOADER_CA_PEM.trim()]);
+    expect(
+      extractCertificateBlocks(
+        `${LOADER_CA_PEM}\n${RFC1421_ENCRYPTED_KEY}\n${LOADER_LEAF_PEM}`,
+      ),
+    ).toEqual([LOADER_CA_PEM.trim(), LOADER_LEAF_PEM.trim()]);
+  });
+
+  it('takes a legacy X509 CERTIFICATE-labelled block, rendered canonically', () => {
+    // Oracle: authorized=true — OpenSSL's `PEM_STRING_X509_OLD` alias is a
+    // certificate label the loader reads. Rejecting it dropped an operator
+    // CA the workers would have trusted while warning, falsely, that the
+    // file held no PEM certificate block Node can load. The merged bundle
+    // this feeds is byte-stable, so the block comes back re-rendered under
+    // the canonical label.
+    const legacy = LOADER_CA_PEM.replace(
+      '-----BEGIN CERTIFICATE-----',
+      '-----BEGIN X509 CERTIFICATE-----',
+    ).replace('-----END CERTIFICATE-----', '-----END X509 CERTIFICATE-----');
+    expect(extractCertificateBlocks(legacy)).toEqual([LOADER_CA_PEM.trim()]);
+  });
+
+  it('takes a body whose final group carries non-zero unused pad bits', () => {
+    // Oracle: authorized=true — the decoder ignores non-zero "unused" bits
+    // in the final group, and the decoded bytes are byte-identical to the
+    // canonical encoding (verified). The straight round-trip check rejected
+    // this body and, breaking the scan, dropped every block after it.
+    // `GQ==` -> `GR==` differs only in the four bits the decoder ignores.
+    expect(LOADER_CA_PEM).toContain('GQ==');
+    const mutated = LOADER_CA_PEM.replace('GQ==', 'GR==');
+    const blocks = extractCertificateBlocks(mutated);
+    expect(blocks).toHaveLength(1);
+    expect(new X509Certificate(blocks![0]!).fingerprint256).toBe(
+      new X509Certificate(LOADER_CA_PEM).fingerprint256,
+    );
   });
 });
 
