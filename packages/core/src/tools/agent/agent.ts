@@ -67,7 +67,7 @@ import {
 import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { getStartupContextLength } from '../../utils/environmentContext.js';
+import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
   getCurrentAgentId,

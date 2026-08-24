@@ -71,7 +71,7 @@ import {
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { sanitizeHookName } from '../sanitize.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 

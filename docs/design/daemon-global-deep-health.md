@@ -24,7 +24,7 @@ that are draining but have not completed bridge cleanup.
 | `pendingPermissions`  | Sum                                                      |
 | `activePrompts`       | Sum                                                      |
 | `activeWork`          | True when any managed runtime reports active work        |
-| `activeWorkReporting` | Worst grade across runtimes (`full`/`partial`/`none`)    |
+| `activeWorkReporting` | Grade once after summing coverage counts across runtimes |
 | `activeWorkStaleMs`   | Age of the oldest snapshot behind it; `0` when uncovered |
 | `connectedClients`    | Existing daemon-wide REST SSE count                      |
 | `channelAlive`        | True when any managed runtime channel is live            |

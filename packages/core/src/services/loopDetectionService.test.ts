@@ -23,14 +23,14 @@ import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
-import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   buildStub,
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
   TRUNCATION_SAVE_FAILURE_NOTE,
   truncateAndSaveToFile,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   fingerprintToolResult,

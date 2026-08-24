@@ -19,8 +19,8 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
-import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
-import { BATCH_BUDGET_FIT_PREFIX } from '../utils/tool-response-finalizer.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import { BATCH_BUDGET_FIT_PREFIX } from '../tools/tool-response-finalizer.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   OUTPUT_TOO_LARGE_PREFIX,
@@ -29,7 +29,7 @@ import {
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   TRUNCATED_PART_MARKER,
   TRUNCATION_SAVE_FAILURE_NOTE,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
