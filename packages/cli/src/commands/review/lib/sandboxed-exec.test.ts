@@ -297,10 +297,6 @@ describe('containerCommand', () => {
       // instead of leaking the stub into whichever test runs next.
       vi.stubEnv('SANDBOX_SET_UID_GID', '');
       try {
-        // The documented opt-out is a real thing an operator exports, and it
-        // removes the very flag this asserts — without pinning it off, this test
-        // reports a failure of the code in a shell where the code is correct.
-
         const cwd = join(tmpDir, 'review-pr-9');
         const rootful = containerCommand('npm ci', {
           ...base,
