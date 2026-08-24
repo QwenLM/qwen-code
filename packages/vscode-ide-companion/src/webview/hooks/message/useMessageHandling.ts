@@ -11,6 +11,13 @@ export interface TextMessage {
   content: string;
   timestamp: number;
   turnIndex?: number;
+  /**
+   * True for messages generated inside the webview itself (connection /
+   * auth / generic errors, the local "Interrupted" cancel mark). The
+   * WebShell transcript renders ACP `transcriptUpdate` frames only, so the
+   * App renders these entries in a dedicated notice slot.
+   */
+  localOnly?: boolean;
   kind?: 'image';
   imagePath?: string;
   imageSrc?: string;
@@ -31,7 +38,6 @@ export const useMessageHandling = () => {
   const [messages, setMessages] = useState<TextMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState('');
   // Track the index of the assistant placeholder message during streaming
   const streamingMessageIndexRef = useRef<number | null>(null);
   // Track the index of the current aggregated thinking message
@@ -135,9 +141,8 @@ export const useMessageHandling = () => {
   /**
    * Set waiting for response state
    */
-  const setWaitingForResponse = useCallback((message: string) => {
+  const setWaitingForResponse = useCallback(() => {
     setIsWaitingForResponse(true);
-    setLoadingMessage(message);
   }, []);
 
   /**
@@ -145,7 +150,6 @@ export const useMessageHandling = () => {
    */
   const clearWaitingForResponse = useCallback(() => {
     setIsWaitingForResponse(false);
-    setLoadingMessage('');
   }, []);
 
   return {
@@ -153,7 +157,6 @@ export const useMessageHandling = () => {
     messages,
     isStreaming,
     isWaitingForResponse,
-    loadingMessage,
 
     // Operations
     addMessage,

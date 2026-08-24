@@ -134,6 +134,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type TurnResultRecordPayload,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -244,7 +245,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  registerCreateSubSessionTool,
+} from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -1316,7 +1321,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.language': { type: 'string' },
   'tools.approvalMode': {
     type: 'enum',
-    values: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+    values: APPROVAL_MODES,
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
@@ -5260,7 +5265,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode({ ...params, sessionId });
+    return this.runInSessionContext(session, () =>
+      session.setMode({ ...params, sessionId }),
+    );
   }
 
   async unstable_setSessionModel(
@@ -5274,7 +5281,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel({ ...params, sessionId });
+    return await this.runInSessionContext(session, () =>
+      session.setModel({ ...params, sessionId }),
+    );
   }
 
   async setSessionConfigOption(
@@ -5291,92 +5300,94 @@ class QwenAgent implements Agent {
       );
     }
 
-    switch (configId) {
-      case 'mode': {
-        await this.setSessionMode({
-          sessionId,
-          modeId: value as string,
-        });
-        break;
-      }
-      case 'model': {
-        await session.setModel(
-          {
+    return this.runInSessionContext(session, async () => {
+      switch (configId) {
+        case 'mode': {
+          await this.setSessionMode({
             sessionId,
-            modelId: value as string,
-          },
-          { persistDefault: false },
-        );
-        break;
-      }
-      case 'reasoning_effort': {
-        const modelReasoning = this.getModelReasoningConfiguration(
-          session.getConfig(),
-        );
-        if (modelReasoning) {
-          const effortValues = modelReasoning.toggleOnly
-            ? undefined
-            : modelReasoning.efforts;
-          const selected =
-            value === REASONING_EFFORT_NONE
-              ? REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? value === REASONING_EFFORT_DEFAULT
-                  ? REASONING_EFFORT_DEFAULT
-                  : undefined
-                : effortValues?.find((effort) => effort === value);
-          if (!selected) {
-            const choices = [
-              REASONING_EFFORT_NONE,
-              ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
-            ];
+            modeId: value as string,
+          });
+          break;
+        }
+        case 'model': {
+          await session.setModel(
+            {
+              sessionId,
+              modelId: value as string,
+            },
+            { persistDefault: false },
+          );
+          break;
+        }
+        case 'reasoning_effort': {
+          const modelReasoning = this.getModelReasoningConfiguration(
+            session.getConfig(),
+          );
+          if (modelReasoning) {
+            const effortValues = modelReasoning.toggleOnly
+              ? undefined
+              : modelReasoning.efforts;
+            const selected =
+              value === REASONING_EFFORT_NONE
+                ? REASONING_EFFORT_NONE
+                : modelReasoning.toggleOnly
+                  ? value === REASONING_EFFORT_DEFAULT
+                    ? REASONING_EFFORT_DEFAULT
+                    : undefined
+                  : effortValues?.find((effort) => effort === value);
+            if (!selected) {
+              const choices = [
+                REASONING_EFFORT_NONE,
+                ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
+              ];
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+              );
+            }
+            const generation = session.getConfig().getContentGeneratorConfig();
+            if (selected === REASONING_EFFORT_NONE) {
+              generation.reasoning = false;
+            } else if (selected === REASONING_EFFORT_DEFAULT) {
+              generation.reasoning = undefined;
+            } else {
+              const current = generation.reasoning;
+              generation.reasoning = {
+                ...(current || {}),
+                effort: selected,
+              };
+            }
+            break;
+          }
+          const effort =
+            value === REASONING_EFFORT_DEFAULT
+              ? undefined
+              : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+          if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
             );
           }
-          const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
-          } else if (selected === REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
-          } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
+          if (!applyReasoningEffort(session.getConfig(), effort)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Reasoning effort cannot be applied while thinking is disabled',
+            );
           }
           break;
         }
-        const effort =
-          value === REASONING_EFFORT_DEFAULT
-            ? undefined
-            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
+        default:
           throw RequestError.invalidParams(
             undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+            `Unsupported configId: ${configId}`,
           );
-        }
-        if (!applyReasoningEffort(session.getConfig(), effort)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Reasoning effort cannot be applied while thinking is disabled',
-          );
-        }
-        break;
       }
-      default:
-        throw RequestError.invalidParams(
-          undefined,
-          `Unsupported configId: ${configId}`,
-        );
-    }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+      return {
+        configOptions: this.buildConfigOptions(session.getConfig()),
+      };
+    });
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -5508,20 +5519,22 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    try {
-      await session.cancelPendingPrompt();
-    } catch (error) {
-      if (!isNotCurrentlyGeneratingCancelError(error)) {
-        throw error;
+    await this.runInSessionContext(session, async () => {
+      try {
+        await session.cancelPendingPrompt();
+      } catch (error) {
+        if (!isNotCurrentlyGeneratingCancelError(error)) {
+          throw error;
+        }
       }
-    }
-    // Prompt calls still waiting at Session admission are tracked in
-    // activePromptCalls but have no session pendingPrompt yet, so
-    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
-    // cancelled prompt would run in full once admission frees.
-    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-      call.controller.abort();
-    }
+      // Prompt calls still waiting at Session admission are tracked in
+      // activePromptCalls but have no session pendingPrompt yet, so
+      // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+      // cancelled prompt would run in full once admission frees.
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        call.controller.abort();
+      }
+    });
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -7560,6 +7573,27 @@ class QwenAgent implements Agent {
     }
   }
 
+  private runInSessionContext<T>(session: Session, fn: () => T): T {
+    // Use the Config's session id spelling (not the lowercased lookup form
+    // stored on the Session object) so the context matches the binding in
+    // Session.ts and the debug log filename on disk.
+    return sessionIdContext.run(session.getConfig().getSessionId(), fn);
+  }
+
+  private isSessionScopedExtMethod(method: string): boolean {
+    return (
+      method === PROMPT_CANCEL_METHOD ||
+      method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
+      method.startsWith('qwen/control/session/') ||
+      method.startsWith('qwen/status/session/') ||
+      method.startsWith('qwen/session/') ||
+      method === 'deleteSession' ||
+      method === 'renameSession' ||
+      method === 'rewindSession' ||
+      method === 'restoreSessionHistory'
+    );
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -7582,6 +7616,17 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
+      const sessionId = normalizedParams['sessionId'];
+      const session =
+        typeof sessionId === 'string' && sessionId.length > 0
+          ? this.sessions.get(sessionId)
+          : undefined;
+      if (session && this.isSessionScopedExtMethod(method)) {
+        return await this.runInSessionContext(session, () =>
+          this.extMethodInternal(method, normalizedParams),
+        );
+      }
+
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
@@ -12125,6 +12170,10 @@ class QwenAgent implements Agent {
     );
     let published = false;
     try {
+      // After `new Session` (which wires the spawner the tool needs) and before
+      // the session is published: the permission check is async, and the tool
+      // must be declared before the first prompt can be served.
+      await registerCreateSubSessionTool(config);
       options.primeSession?.(session);
       config.hydrateSessionRestoreFileHistory?.();
       this.sessions.set(sessionId, session);

@@ -17,7 +17,7 @@
  * for the wall-clock minute boundary.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -101,6 +101,11 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Run the CLI in its own process group so cleanup can signal the
+      // whole tree. Grandchildren spawned by the CLI (MCP helpers, cron
+      // internals) otherwise survive `agent.kill()` and keep writing
+      // into QWEN_HOME while rmSync is deleting it (ENOTEMPTY flakes).
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         QWEN_HOME: qwenHome,
@@ -119,6 +124,14 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
       },
     },
   );
+
+  // The group kill in cleanup() only works if the CLI actually leads its
+  // own process group (detached above). Pin that precondition here: if it
+  // ever stops holding, fail fast instead of silently degrading to the
+  // pre-fix direct-child-only teardown and resurrecting the ENOTEMPTY flake.
+  if (process.platform !== 'win32') {
+    expect(() => process.kill(-agent.pid!, 0)).not.toThrow();
+  }
 
   agent.stderr?.on('data', (chunk: Buffer) => {
     stderr.push(chunk.toString());
@@ -288,20 +301,65 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
 
   const cleanup = async () => {
     rl.close();
-    agent.kill();
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
+    // Signal the entire process group, not just the direct child: the CLI
+    // spawns helpers that keep running after the parent dies and can drop
+    // fresh files into the fake HOME while the final rmSync walks it.
+    if (process.platform === 'win32') {
+      // No POSIX process groups: taskkill /T walks the child tree instead.
+      // Absolute System32 path per the #5873 hardening: a bare name resolves
+      // via the CreateProcess search order, where CWD (rig.testDir here)
+      // precedes System32. The sync form also means a launch failure cannot
+      // escape as an unhandled 'error' event; agent.kill() below stays as
+      // the fallback either way. taskkill /T /F terminates the root too.
+      try {
+        spawnSync(
+          join(
+            process.env['SystemRoot'] ?? 'C:\\Windows',
+            'System32',
+            'taskkill.exe',
+          ),
+          ['/t', '/f', '/pid', String(agent.pid)],
+          { windowsHide: true },
+        );
+      } catch {
+        // taskkill failed to launch — fall through to the direct kill below.
+      }
+      agent.kill();
+    } else {
+      try {
+        process.kill(-agent.pid!, 'SIGTERM');
+      } catch (e) {
+        // Only a vanished process group is benign; anything else must
+        // surface instead of silently degrading to a partial teardown.
+        if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+      }
+      agent.kill('SIGTERM');
+    }
     await waitForExit();
     // The cron job is recurring and, under QWEN_CODE_TEST_CRON_FAST, re-fires
     // every ~5s. A second fire can race cleanup and drop a fresh file into the
-    // fake HOME after the recursive walk has drained it, making the final rmdir
-    // fail with ENOTEMPTY. Retry a few times so the transient write settles.
-    rmSync(qwenHome, {
-      recursive: true,
-      force: true,
-      maxRetries: 3,
-      retryDelay: 100,
-    });
+    // fake HOME after the recursive walk has drained it, making the final
+    // rmdir fail with ENOTEMPTY. rmSync's built-in retries only repeat the
+    // failing rmdir and never re-walk for entries created mid-walk, so each
+    // attempt below starts a fresh walk instead.
+    const RM_ATTEMPTS = 5;
+    const RM_RETRY_DELAY_MS = 200;
+    for (let attempt = 0; attempt < RM_ATTEMPTS; attempt++) {
+      try {
+        rmSync(qwenHome, { recursive: true, force: true });
+        return;
+      } catch (e) {
+        if (
+          (e as NodeJS.ErrnoException).code !== 'ENOTEMPTY' ||
+          attempt === RM_ATTEMPTS - 1
+        ) {
+          throw e;
+        }
+        await delay(RM_RETRY_DELAY_MS);
+      }
+    }
   };
 
   return {
