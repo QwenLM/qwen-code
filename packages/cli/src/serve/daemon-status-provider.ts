@@ -26,7 +26,7 @@ import {
   type ServePreflightKind,
   type ServeWorkspaceEnvStatus,
 } from '@qwen-code/acp-bridge';
-import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
+import { getGitVersion, getNpmVersion } from '../ui/systemInfo.js';
 import { buildEnvStatusFromEnv, snapshotProcessEnv } from './env-snapshot.js';
 
 const REQUIRED_NODE_MAJOR = 22;

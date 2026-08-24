@@ -1261,6 +1261,24 @@ describe('fetch-pr report assembly', () => {
     );
   }
 
+  /**
+   * The ORPHANED-anchor shape, the complement of `anchorIsValid`: the
+   * anchor EXISTS and resolves to a commit, but every ancestry question
+   * answers null (exit 1) — a rebased-away GitHub anchor, or an Aone head
+   * orphaned by the AGit-Flow amend. One shape, so the tests that refuse
+   * it on GitHub and the tests that scope it on Aone cannot drift apart.
+   */
+  function serveOrphanShape(): void {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+  }
+
   it('pulls a still-clean importer of a changed file back into the scope', async () => {
     // The narrowing is sound in one direction only. `b.ts` has not changed
     // since the anchor, so the delta capture cannot show it and the narrowed
@@ -2181,15 +2199,7 @@ describe('fetch-pr report assembly', () => {
     // The `effective` clause in the partition guard: without it a round
     // whose anchor was refused for a deterministic reason gets relabelled
     // `partition-failed`, which invites re-running a dead anchor.
-    producerMocks.gitOpt.mockImplementation(
-      (...args: string[]) =>
-        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // not an ancestor
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
+    serveOrphanShape(); // not an ancestor
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
       if (typeof text === 'string' && text.trim() !== '') {
         throw new Error('chunks do not tile the diff');
@@ -2274,14 +2284,8 @@ describe('fetch-pr report assembly', () => {
   });
 
   it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
-    producerMocks.gitOpt.mockImplementation(
-      (...args: string[]) =>
-        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // every merge-base probe fails → not an ancestor
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
+    // Every merge-base probe fails → not an ancestor.
+    serveOrphanShape();
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
         ? Buffer.from(DELTA_DIFF)
@@ -2454,15 +2458,8 @@ describe('fetch-pr report assembly', () => {
     // reason announced "no diff could be captured" moments after the capture
     // succeeded and the partitioner warned, sending whoever diagnoses the
     // round at git and the network instead of at the partitioner.
-    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      // `merge-base` answers null → exit 1 → the predicate's NO.
-      args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
+    // `merge-base` answers null → exit 1 → the predicate's NO.
+    serveOrphanShape();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
       if (typeof text === 'string' && text.trim() !== '') {
         throw new Error('chunks do not tile the diff');
@@ -2695,6 +2692,91 @@ describe('fetch-pr report assembly', () => {
       seedReport('turbo');
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
+    });
+  });
+
+  describe('the Aone incremental rule (AGit-Flow, D7, #9618)', () => {
+    // An AGit-Flow update AMENDS the single CR commit in place: the new
+    // head has the cached head's parent, never the cached head itself, so
+    // the head test answers "no" for the cached anchor on EVERY update —
+    // and the clamp too once the update also rebased onto newer master.
+    // The Aone rule must not ask either — after the fetch both heads are
+    // local, and `anchor..head` is the update's delta. Driven through the
+    // real handler with the Aone reader: an explicit Aone `--host` selects
+    // it, a mocked `a1` serves auth + MR view, and the git probes answer
+    // the orphan shape (existence yes, ancestry exit 1).
+
+    function serveAone(): void {
+      producerMocks.execFileSync.mockImplementation(
+        (cmd: string, args: string[]) => {
+          if (cmd !== 'a1') return '';
+          if (args[0] === 'repo' && args[1] === 'mr' && args[2] === 'view') {
+            return JSON.stringify({
+              mergeRequest: {
+                sourceBranch: 'f00df00df00d',
+                targetBranch: 'main',
+                detailUrl:
+                  'https://code.alibaba-inc.com/acme/widgets/codereview/42',
+                description: '',
+              },
+            });
+          }
+          return ''; // `auth whoami`
+        },
+      );
+      serveOrphanShape();
+    }
+
+    it('scopes an amend-orphaned anchor instead of refusing it', async () => {
+      serveAone();
+      const report = await reportFor({
+        since: ANCHOR,
+        host: 'gitlab.alibaba-inc.com',
+      });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: true,
+        scope: SCOPE_A,
+        diffBase: BASE,
+      });
+      expect(report.diffPath).not.toBeNull();
+      // The published scope is the PR's own diff narrowed to the amend's
+      // delta — the untouched file is dropped, exactly as the GitHub
+      // incremental path narrows.
+      expect(writtenDiff()).toBe(NARROWED);
+      // ...and the diff came from the Aone ref namespace, not GitHub's.
+      expect(producerMocks.git.mock.calls).toContainEqual([
+        'fetch',
+        'origin',
+        'refs/merge-requests/42/head:qwen-review/pr-42',
+      ]);
+    });
+
+    it('never asks an ancestry question on the Aone platform', async () => {
+      serveAone();
+      await reportFor({ since: ANCHOR, host: 'gitlab.alibaba-inc.com' });
+      const ancestryCalls = producerMocks.gitOpt.mock.calls.filter(
+        (args) => args[0] === 'merge-base' && args[1] === '--is-ancestor',
+      );
+      // Neither the head test nor the clamp — a mutant re-asking either
+      // would refuse this anchor (every answer is "no") but could survive
+      // an outcome-only assertion, so pin the silence itself.
+      expect(ancestryCalls).toEqual([]);
+    });
+
+    it('keeps the ancestry tests on GitHub — an orphaned anchor there is a force-push', async () => {
+      // Same orphan shape, GitHub platform (no Aone host): the refusal
+      // stands, because on a push-based platform an anchor the head does
+      // not descend from is rewritten history, not an amend.
+      serveOrphanShape();
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: false,
+        reason: 'not-an-ancestor',
+      });
+      // The full range is the fallback.
+      expect(writtenDiff()).toBe(FULL_DIFF);
     });
   });
 });
@@ -3028,6 +3110,112 @@ describe('resolveIncrementalAnchor', () => {
       since: ANCHOR,
       effective: false,
       reason: 'unknown-commit',
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  // ---- The AGit-Flow rule (design D7, #9618) ----------------------------
+  // Under AGit-Flow an update AMENDS the single CR commit in place, so the
+  // amended head has the cached head's parent, never the cached head itself
+  // — the anchor-behind-head test refuses EVERY update's anchor (the clamp
+  // fires only when the update also rebased). The Aone rule rules without
+  // ancestry: after the fetch both heads are local, and their diff is the
+  // update's delta.
+
+  it('noAncestry scopes an orphaned anchor the ancestry test refuses', () => {
+    // isAncestor answers "no" for everything — the exact amend shape. The
+    // constant-false probe also kills the mutant that keeps asking: were
+    // the test still consulted, its answer would refuse this anchor.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+  });
+
+  it('noAncestry asks NEITHER ancestry question — not the head test, not the clamp', () => {
+    // A constant-false isAncestor passes with a dropped guard on either
+    // check, so pin the ruling to silence: the merge base is present and
+    // "older" than nothing an amend can reach — the clamp's exact trigger
+    // after a rebase onto newer master.
+    const asked: Array<[string, string]> = [];
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({
+        isAncestor: (a, b) => {
+          asked.push([a, b]);
+          return false;
+        },
+      }),
+      { sha: 'c'.repeat(40), fetchFailed: false },
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+    expect(asked).toEqual([]);
+  });
+
+  it('noAncestry keeps the existence refusals — a fresh clone cannot diff the orphan', () => {
+    // The ancestry skip is about LINEAGE, not presence: an anchor the
+    // object store does not hold (the round-1 fetch happened elsewhere)
+    // has no delta to capture, and says so with the deterministic reason.
+    const absent = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ commitExists: () => false, isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(absent.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
+    expect(absent.diffBase).toBeNull();
+    const unresolvable = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ resolveCommit: () => null, isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(unresolvable.incremental.reason).toBe('unknown-commit');
+  });
+
+  it('noAncestry rules upToDate when the anchor IS the head', () => {
+    // A re-run with no amend in between: the identity comparison is not an
+    // ancestry test, so it rules exactly as on GitHub.
+    const r = resolveIncrementalAnchor(HEAD, HEAD, probe(), null, {
+      noAncestry: true,
+    });
+    expect(r.incremental).toEqual({
+      since: HEAD,
+      effective: true,
+      upToDate: true,
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('noAncestry still refuses a possibly-stale base — base-untrusted is not an ancestry test', () => {
+    // The published scope is assembled from the base-derived full capture;
+    // a base the run flagged possibly-stale is a capture no sibling guard
+    // rules on, ancestry skip or not.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: () => false }),
+      { sha: 'c'.repeat(40), fetchFailed: true },
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
     });
     expect(r.diffBase).toBeNull();
   });
