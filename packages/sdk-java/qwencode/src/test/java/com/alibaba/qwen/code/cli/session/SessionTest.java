@@ -1,9 +1,13 @@
 package com.alibaba.qwen.code.cli.session;
 
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -35,6 +39,9 @@ import com.alibaba.qwen.code.cli.utils.Timeout;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +50,9 @@ class SessionTest {
     private static final Logger log = LoggerFactory.getLogger(SessionTest.class);
     private static final String INIT_RESPONSE = "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
             + "\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}";
+
+    @TempDir
+    Path tempDir;
 
     @Test
     @Tag("integration")
@@ -209,12 +219,36 @@ class SessionTest {
     }
 
     @Test
+    void initializationFailureThrowsSessionControlException() {
+        TestTransport transport = new TestTransport();
+        transport.setInitializeFailure(new IOException("init failed"));
+
+        assertThrows(SessionControlException.class, () -> new Session(transport));
+    }
+
+    @Test
     void newSessionWrapsCreationFailuresInRuntimeException() {
         RuntimeException failure = assertThrows(RuntimeException.class,
                 () -> QwenCodeCli.newSession(
                         new TransportOptions().setPathToQwenExecutable("/nonexistent/qwen-code")));
 
-        assertTrue(failure.getMessage().startsWith("initialized "));
+        assertTrue(failure.getMessage().startsWith("initialized ProcessTransport error!"));
+        assertInstanceOf(IOException.class, failure.getCause());
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void newSessionWrapsInitializationFailuresInRuntimeException() throws IOException {
+        Path executable = tempDir.resolve("exit-after-input.sh");
+        Files.write(executable, "#!/bin/sh\nread line\nexit 0\n".getBytes(StandardCharsets.UTF_8));
+        executable.toFile().setExecutable(true);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> QwenCodeCli.newSession(
+                        new TransportOptions().setPathToQwenExecutable(executable.toString())));
+
+        assertTrue(failure.getMessage().startsWith("initialized Session error!"));
+        assertInstanceOf(SessionControlException.class, failure.getCause());
     }
 
     @Test
@@ -231,10 +265,15 @@ class SessionTest {
 
     private static final class TestTransport implements Transport {
         private boolean available = true;
+        private IOException initializeFailure;
         private final TransportOptions transportOptions = new TransportOptions();
 
         void setAvailable(boolean available) {
             this.available = available;
+        }
+
+        void setInitializeFailure(IOException initializeFailure) {
+            this.initializeFailure = initializeFailure;
         }
 
         @Override
@@ -265,6 +304,9 @@ class SessionTest {
         @Override
         public String inputWaitForOneLine(String message)
                 throws IOException, ExecutionException, InterruptedException, TimeoutException {
+            if (initializeFailure != null) {
+                throw initializeFailure;
+            }
             return INIT_RESPONSE;
         }
 
