@@ -11,6 +11,7 @@
 // docs/design/2026-08-15-review-aone-provider.md.
 
 import { git, gitRaw } from '../git.js';
+import { INERT_GIT_ARGS, localFilterRefusal } from '../worktree.js';
 import { isOwnerRepo } from '../gh.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 import { isAoneHostFamily } from '../remote-match.js';
@@ -574,11 +575,30 @@ export const aoneReader: ReviewPlatformReader = {
     // local branch of the reserved name is force-moved by the `+` fetch,
     // then deleted, reflog and all (fsck dangling-commit recovery only).
     const ref = `__qwen-review-diff-${prNumber}-${process.pid}`;
+    // Screen BEFORE the fetches, the way fetch-pr screens its head and base
+    // fetches: these are network spawns against the user's clone and EXECUTE
+    // the command-valued repo-local config keys the screen names (a key an
+    // earlier review's probe planted in the never-wiped common dir runs
+    // during them). The spawns carry INERT_GIT_ARGS and an explicit
+    // `--no-recurse-submodules` for the absorbed-submodule plant the
+    // screen's candidate set cannot read — the same shape fetch-pr's
+    // fetches close.
+    const fetchRefusal = localFilterRefusal(
+      process.cwd(),
+      'the Aone MR diff fetches',
+    );
+    if (fetchRefusal) throw new Error(fetchRefusal);
     try {
       // Force-fetch (`+`): a stale throwaway ref left by an interrupted
       // earlier run would otherwise make this fetch fail whenever the MR head
       // was rewritten — the normal AGit-Flow iteration shape.
-      git('fetch', 'origin', `+${mrHeadRefSpec(prNumber)}:${ref}`);
+      git(
+        ...INERT_GIT_ARGS,
+        'fetch',
+        '--no-recurse-submodules',
+        'origin',
+        `+${mrHeadRefSpec(prNumber)}:${ref}`,
+      );
       // Fetch the target branch so the merge-base is current. If the fetch
       // fails (transient network, expired credential), DISCLOSE it: merge-base
       // then resolves against a possibly-stale local ref, and the diff may
@@ -590,7 +610,9 @@ export const aoneReader: ReviewPlatformReader = {
       // succeeded").
       try {
         git(
+          ...INERT_GIT_ARGS,
           'fetch',
+          '--no-recurse-submodules',
           'origin',
           `+refs/heads/${target}:refs/remotes/origin/${target}`,
         );

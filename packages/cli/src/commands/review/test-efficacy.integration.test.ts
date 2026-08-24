@@ -1831,9 +1831,12 @@ process.stdout.write(JSON.stringify({
     // never got a verdict — the one being run AND the ones never attempted —
     // must come back `inconclusive` with the reason, the revert probe must
     // still run, and the report must still be written. The fake runner passes
-    // the baseline (run 1), floods stdout past spawnSync's 64 MiB maxBuffer on
-    // run 2 (the first mutant) so the runner spawn itself errors (ENOBUFS),
-    // and passes the revert probe (run 3).
+    // the baseline (run 1), dies BY SIGNAL on run 2 (the first mutant)
+    // without writing a report — the deadline-kill shape, which runProbeSuite
+    // answers with a throw — and passes the revert probe (run 3). (This test
+    // used to flood stdout past spawnSync's maxBuffer for an ENOBUFS error;
+    // the verdict channel is a file now — a flood just writes a big file —
+    // so the faithful "runner dies mid-run" shape is the signal death.)
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
     write(
       'packages/lib/src/f.ts',
@@ -1877,9 +1880,9 @@ try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) ||
 n += 1;
 fs.writeFileSync(${JSON.stringify(callsFile)}, String(n));
 if (n === 2) {
-  const big = Buffer.alloc(8 * 1024 * 1024, 97);
-  try { for (let i = 0; i < 10; i++) fs.writeSync(1, big); } catch {}
-  process.exit(0);
+  // Die by signal mid-run, no report written: spawnSync answers the
+  // signal, the report file stays empty, and runProbeSuite throws.
+  process.kill(process.pid, 'SIGKILL');
 }
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
@@ -1909,7 +1912,7 @@ process.stdout.write(JSON.stringify({
       expect(m.verdict).toBe('inconclusive');
       expect(m.detail).toContain('mutation probe could not run');
     }
-    expect(out.mutants.probed[0].detail).toContain('ENOBUFS');
+    expect(out.mutants.probed[0].detail).toContain('SIGKILL');
     expect(out.mutants.inconclusive).toBe(2);
     expect(out.mutants.killed).toBe(0);
     expect(out.mutants.survived).toBe(0);

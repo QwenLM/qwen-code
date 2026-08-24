@@ -992,6 +992,34 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
     }
+    // The fetched ref must BE the head the platform advertised. This is the
+    // only comparison that catches a head fetch redirected away from the PR —
+    // a `remote.<name>.url` swap is outside the screen's candidate set, and
+    // an attacker mirror serves its own commit under the PR's refspec: the
+    // review would then run, and post findings, over content the platform
+    // never named. SHAs are content-addressed, so a mismatch proves the
+    // fetch landed something else whatever the redirect's mechanism; the
+    // comparison folds case because object IDs are case-insensitive. The
+    // ref is rolled back exactly like a metadata failure, and the outer
+    // catch releases the lease.
+    if (
+      meta.headRefOid &&
+      meta.headRefOid.toLowerCase() !== fetchedSha.toLowerCase()
+    ) {
+      tryRemove(() =>
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          env: sanitizedGitEnv(),
+        }),
+      );
+      throw new Error(
+        `refusing to review PR #${prNumber}: the fetch landed ` +
+          `${fetchedSha}, but the platform's head is ${meta.headRefOid} — ` +
+          `the fetched content is not the PR under review (a repo-local ` +
+          `config rewriting the fetch's remote URL is one cause), so no ` +
+          `worktree is created and no review runs`,
+      );
+    }
     // Aone does not advertise diff stats; compute them from the captured diff
     // once it exists. Tracked so the recomputed numbers replace the zeros.
     const needsLocalStats = platform.kind !== 'github';

@@ -13,6 +13,7 @@ const {
   ensureAuthMock,
   gitMock,
   gitRawMock,
+  localFilterRefusalMock,
 } = vi.hoisted(() => ({
   a1JsonMock: vi.fn(),
   a1JsonOnceMock: vi.fn(),
@@ -20,6 +21,9 @@ const {
   ensureAuthMock: vi.fn(),
   gitMock: vi.fn(),
   gitRawMock: vi.fn(),
+  // The screen is owned by lib/worktree's own suite; here it is a seam,
+  // defaulting to a clean repository the way fetch-pr.test.ts steers it.
+  localFilterRefusalMock: vi.fn((..._args: unknown[]): string | null => null),
 }));
 
 vi.mock('./aone-client.js', async (importOriginal) => {
@@ -42,6 +46,13 @@ vi.mock('../git.js', () => ({
   gitRaw: gitRawMock,
 }));
 
+// Partial mock: only the filter screen is steered from the tests; the rest
+// of the module (INERT_GIT_ARGS included) stays real.
+vi.mock('../worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../worktree.js')>();
+  return { ...actual, localFilterRefusal: localFilterRefusalMock };
+});
+
 import {
   AonePartialPostError,
   aoneAccountName,
@@ -54,6 +65,7 @@ import {
   submitAoneReview,
 } from './aone.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
+import { INERT_GIT_ARGS } from '../worktree.js';
 
 describe('parseRemoteUrl hardening', () => {
   it('discards an explicit port instead of folding it into the path', () => {
@@ -1014,6 +1026,10 @@ describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
 describe('aoneReader.fetchDiff', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks leaves implementations set by an earlier test standing;
+    // re-assert the default (a clean repository) the way fetch-pr.test.ts
+    // does for its own screen seam.
+    localFilterRefusalMock.mockReturnValue(null);
   });
 
   it('fetches the MR ref, merge-bases, and diffs via gitRaw (byte-faithful)', () => {
@@ -1046,7 +1062,9 @@ describe('aoneReader.fetchDiff', () => {
     // run must not fail the fetch when the head was rewritten), and the target
     // branch is fetched so the merge-base is current.
     expect(gitMock).toHaveBeenCalledWith(
+      ...INERT_GIT_ARGS,
       'fetch',
+      '--no-recurse-submodules',
       'origin',
       expect.stringMatching(
         /^\+refs\/merge-requests\/7\/head:__qwen-review-diff-7-\d+$/,
@@ -1057,7 +1075,9 @@ describe('aoneReader.fetchDiff', () => {
     // silent stale-base state). The head side of every read is qualified
     // (refs/heads/…) for the same shadow class.
     expect(gitMock).toHaveBeenCalledWith(
+      ...INERT_GIT_ARGS,
       'fetch',
+      '--no-recurse-submodules',
       'origin',
       '+refs/heads/master:refs/remotes/origin/master',
     );
@@ -1067,6 +1087,39 @@ describe('aoneReader.fetchDiff', () => {
       '-D',
       expect.stringMatching(refRe),
     );
+  });
+
+  it('screens the clone before either fetch and refuses on a hit — no fetch runs', () => {
+    // Both fetches are network spawns against the user's clone and EXECUTE
+    // the command-valued repo-local config keys the screen names — a key an
+    // earlier review's probe planted in the never-wiped common dir runs
+    // during them. The screen runs before EITHER fetch, the way fetch-pr
+    // screens ahead of its head/base fetches; a hit refuses before any
+    // fetch spawn.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
+      return '';
+    });
+    localFilterRefusalMock.mockReturnValue(
+      "the repository's local config names command-execution key(s) " +
+        'core.sshcommand (in /repo/.git/config) — a checkout that ' +
+        'lazy-fetches EXECUTES the commands they name',
+    );
+
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+      /command-execution key/,
+    );
+    expect(localFilterRefusalMock).toHaveBeenCalledWith(
+      process.cwd(),
+      'the Aone MR diff fetches',
+    );
+    expect(
+      gitMock.mock.calls.some((args: unknown[]) => args.includes('fetch')),
+    ).toBe(false);
+    expect(gitRawMock).not.toHaveBeenCalled();
   });
 
   it('refuses a dash-leading target branch from the MR metadata', () => {
@@ -1326,7 +1379,9 @@ describe('aoneReader.fetchDiff', () => {
     // The target fetch never dwims onto a same-named tag: explicit branch
     // refspec, both sides fully qualified.
     expect(gitMock).toHaveBeenCalledWith(
+      ...INERT_GIT_ARGS,
       'fetch',
+      '--no-recurse-submodules',
       'origin',
       '+refs/heads/master:refs/remotes/origin/master',
     );

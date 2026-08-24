@@ -632,13 +632,27 @@ function nameScreenKeys(
     : named;
 }
 
-// The destination a fetch refspec writes into, or null when it has none —
-// a refspec without a destination fetches into FETCH_HEAD alone and
-// rewrites no ref.
-function fetchRefspecDst(value: string): string | null {
-  const srcDst = value.startsWith('+') ? value.slice(1) : value;
-  const sep = srcDst.indexOf(':');
-  return sep === -1 ? null : srcDst.slice(sep + 1);
+// One part (src or dst) of a fetch refspec, at the check-ref-format grade
+// git's own refspec parser applies — false for anything git rejects with
+// `fatal: invalid refspec`, a shape that wedges every later fetch-by-
+// remote-name (measured live for each rule: whitespace, `..`, a leading or
+// trailing slash, doubled slashes, a trailing dot, a dotted or `.lock`
+// component, a backslash). A single `*` is the refspec wildcard and rides;
+// a bare `@` is admitted because git dwims it to HEAD before validating
+// (measured), so refusing it would refuse a value git fetches with.
+function refspecPartValid(part: string): boolean {
+  if (part === '@') return true;
+  if (part.length === 0) return false;
+  if (part.split('*').length > 2) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\s~^:?[\]\\\x00-\x1f\x7f]/.test(part)) return false;
+  if (part.startsWith('/') || part.endsWith('/') || part.endsWith('.')) {
+    return false;
+  }
+  if (part.includes('..') || part.includes('@{')) return false;
+  return part
+    .split('/')
+    .every((c) => c.length > 0 && !c.startsWith('.') && !c.endsWith('.lock'));
 }
 
 // Whether that destination fails the screen. `refs/remotes/` and
@@ -668,6 +682,37 @@ function fetchRefspecDstRefuses(dst: string): boolean {
     return true;
   }
   return d === 'refs/stash';
+}
+
+// Whether a configured `remote.<name>.fetch` value fails the screen. Two
+// independent classes, both measured live:
+//
+// GRAMMAR — a value git rejects with `fatal: invalid refspec` (`tag evil`,
+// a wildcard without a destination, mismatched wildcards, any part that
+// fails `refspecPartValid`) wedges every later fetch-by-remote-name: one
+// config write, persistence in the never-wiped common dir, and no checkout
+// this screen guards can run. The screen fails CLOSED on them the way it
+// does on every state it cannot certify. An EMPTY value certifies: git
+// ignores it (measured live), so refusing it would refuse a legal clone.
+//
+// DESTINATION — a value git accepts still writes whatever its destination
+// names on any fetch that applies it, so a non-empty destination also has
+// to pass the allowlist above.
+function fetchRefspecRefuses(value: string): boolean {
+  if (value.length === 0) return false;
+  const srcDst = value.startsWith('+') ? value.slice(1) : value;
+  const sep = srcDst.indexOf(':');
+  const src = sep === -1 ? srcDst : srcDst.slice(0, sep);
+  const dst = sep === -1 ? '' : srcDst.slice(sep + 1);
+  if (!refspecPartValid(src)) return true;
+  if (dst !== '' && !refspecPartValid(dst)) return true;
+  // A wildcard needs a destination to expand into (a colon-less wildcard
+  // is the invalid-refspec shape), and a coloned refspec pairs them — git
+  // rejects either mismatch (measured live).
+  const srcWild = src.includes('*');
+  const dstWild = dst.includes('*');
+  if (sep === -1 ? srcWild : srcWild !== dstWild) return true;
+  return dst !== '' && fetchRefspecDstRefuses(dst);
 }
 
 /**
@@ -721,7 +766,7 @@ function fetchRefspecDstRefuses(dst: string): boolean {
  * the user owns moves it (measured: unpushed work orphaned; a glob aimed
  * at the checked-out branch wedges every fetch), but the clone-default
  * refspec has exactly that key in every clone's local config — so it is
- * judged by VALUE (see `fetchRefspecDstRefuses`), never by the key
+ * judged by VALUE (see `fetchRefspecRefuses`), never by the key
  * itself. The `url.<base>.insteadOf` / `pushInsteadOf` rewrites ride the
  * transport refusal: one plant redirected the guarded fetches to an
  * attacker-controlled repository while the screen certified (measured
@@ -783,8 +828,18 @@ export function localFilterRefusal(
   }
   const [commonDir, gitDir] = lines;
   const common = resolve(worktree, commonDir);
+  // `<common>/config.worktree` is the MAIN worktree's per-worktree config.
+  // It joins the screened set because a checkout run in ANY worktree of the
+  // repository reads it once `extensions.worktreeConfig` is on — including
+  // the probe/scratch/base trees this screen authorises checkouts in — and
+  // neither the common `config` nor a linked worktree's own
+  // `config.worktree` names it. A filter planted there executed during a
+  // certified probe checkout while this function reported the repository
+  // clean. When the screened tree IS the main worktree this duplicates the
+  // entry below; the Set dedups it.
   const candidates = [
     join(common, 'config'),
+    join(common, 'config.worktree'),
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
@@ -808,7 +863,7 @@ export function localFilterRefusal(
       // the certified reset EXECUTED the plant through the x-only dir).
       return `the repository's linked worktrees could not be enumerated (${inertPath((e as Error).message)}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`;
     }
-    // ENOENT: no linked worktrees registered — the two candidates above are
+    // ENOENT: no linked worktrees registered — the candidates above are
     // all of it.
   }
   const filters: Array<{ key: string; file: string }> = [];
@@ -845,7 +900,7 @@ export function localFilterRefusal(
       }
     }
   }
-  for (const file of candidates) {
+  for (const file of new Set(candidates)) {
     if (!existsSync(file)) continue;
     // An unreadable file fails the screen CLOSED, asked directly: git answers
     // an unreadable `--file` with the SAME exit 1 as "no keys matched" (and a
@@ -947,9 +1002,9 @@ export function localFilterRefusal(
         if (key.startsWith('filter.')) filters.push({ key, file });
         else if (key.startsWith('include')) includes.push({ key, file });
         else if (key.startsWith('remote.') && key.endsWith('.fetch')) {
-          // Judged by VALUE below — refusing the key itself would refuse
-          // every clone, whose local config carries the clone-default
-          // refspec under it.
+          // Judged by VALUE below (destination AND grammar) — refusing
+          // the key itself would refuse every clone, whose local config
+          // carries the clone-default refspec under it.
           fetchRefCandidates.push({ key, file });
         } else transport.push({ key, file });
       }
@@ -961,11 +1016,13 @@ export function localFilterRefusal(
   // `+refs/heads/*:refs/heads/*` force-updated local branches and orphaned
   // unpushed work; aimed at the checked-out branch it wedges every fetch
   // forever; the tag, stash, unqualified and wildcard shapes each moved a
-  // user ref too (all measured live). The clone-default refspec lives under
-  // the same key in every clone and maps into `refs/remotes/`, and
-  // PR-checkout mirrors (`refs/pull/*`) are ordinary in user clones, so
-  // the KEY can never refuse — only a destination that fails
-  // `fetchRefspecDstRefuses` does.
+  // user ref too (all measured live) — and a value git rejects as a
+  // refspec (`tag evil`, a wildcard with no destination) wedges every
+  // fetch-by-remote-name all by itself (measured live). The clone-default
+  // refspec lives under the same key in every clone and maps into
+  // `refs/remotes/`, and PR-checkout mirrors (`refs/pull/*`) are ordinary
+  // in user clones, so the KEY can never refuse — only a value that fails
+  // `fetchRefspecRefuses` does.
   const refspecSeen = new Set<string>();
   for (const file of new Set(fetchRefCandidates.map((c) => c.file))) {
     const v = spawnSync(
@@ -1014,13 +1071,8 @@ export function localFilterRefusal(
       const nl = record.indexOf('\n');
       const key = nl === -1 ? record : record.slice(0, nl);
       const value = nl === -1 ? '' : record.slice(nl + 1);
-      const dst = fetchRefspecDst(value);
       const pair = `${file}\u0000${key}\u0000${value}`;
-      if (
-        dst !== null &&
-        fetchRefspecDstRefuses(dst) &&
-        !refspecSeen.has(pair)
-      ) {
+      if (fetchRefspecRefuses(value) && !refspecSeen.has(pair)) {
         refspecSeen.add(pair);
         fetchRefspecs.push({ key, file });
       }
@@ -1070,9 +1122,10 @@ export function localFilterRefusal(
       `the repository's local config names fetch refspec(s) ${nameScreenKeys(
         fetchRefspecs,
         'fetch refspec',
-      )} — a fetch that applies the configured refspec writes these ` +
-        `destinations into refs the user owns, so the screen cannot ` +
-        `certify that ${checkout} would not destroy local refs`,
+      )} — a fetch that applies the configured refspec either writes ` +
+        `these destinations into refs the user owns or dies on a value ` +
+        `git rejects as a refspec, so the screen cannot certify that ` +
+        `${checkout} would not destroy local refs`,
     );
   }
   if (unreadable.length > 0) {

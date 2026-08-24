@@ -51,6 +51,7 @@ import type { CommandModule } from 'yargs';
 import {
   spawnSync,
   type SpawnSyncOptionsWithStringEncoding,
+  type SpawnSyncReturns,
 } from 'node:child_process';
 import {
   mkdirSync,
@@ -60,7 +61,11 @@ import {
   lstatSync,
   existsSync,
   realpathSync,
+  mkdtempSync,
+  openSync,
+  closeSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -1872,6 +1877,15 @@ export function runProbeSuite(
   // must not be killable by a teardown signal, or the detached runner is
   // orphaned with its deadline enforcer (see installRunnerTeardownHook).
   installRunnerTeardownHook();
+  // The verdict channel lives in one fresh directory per run, OUTSIDE the
+  // probe tree: the suite runs with write access to everything the reviewer
+  // can reach, but it has to find the name first, and it already authors
+  // the verdicts this channel carries. Removed once read, on every path.
+  const reportDir = mkdtempSync(join(tmpdir(), 'qwen-probe-run-'));
+  const reportPath = join(reportDir, 'report.json');
+  const stderrPath = join(reportDir, 'stderr.txt');
+  const reportFd = openSync(reportPath, 'w');
+  const stderrFd = openSync(stderrPath, 'w');
   // Node honours `detached` here — it reaches the same `spawn()` the async
   // API uses — but @types/node declares it only on the async `SpawnOptions`,
   // so the option is named in an intersection instead of at the call site.
@@ -1889,10 +1903,19 @@ export function runProbeSuite(
     // cancellation was already reported (measured live). SIGKILL makes the
     // deadline's kill unconditional; the group kill below reaps the rest.
     killSignal: 'SIGKILL',
-    // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-    // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-    // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-    maxBuffer: 64 * 1024 * 1024,
+    // The verdict channel is a FILE, not a pipe: spawnSync waits for the
+    // stdout/stderr pipes to CLOSE before it returns, and a child the suite
+    // spawned into the runner's group inherits them — one that outlives the
+    // runner (the deadline kills only the runner itself) holds the spawn
+    // open until the deadline even though the runner exited with a finished
+    // report, and every probe then read ETIMEDOUT with that report thrown
+    // away (measured live). File descriptors drain nothing: the spawn
+    // returns when the runner exits, the group kill below takes the
+    // survivor, and the report it finished is read back underneath. The
+    // suite runs as the same user and could write these files too, but it
+    // already authors the verdicts they carry — a forged report changes
+    // only its own run's classification, never another probe's.
+    stdio: ['ignore', reportFd, stderrFd],
     // The timeout above signals only the runner itself: a child the suite
     // spawned into its process group survives the deadline — and a normal
     // exit — outlives every screen, and can swap config between one of them
@@ -1906,11 +1929,19 @@ export function runProbeSuite(
     // together.
     detached: true,
   };
-  const r = spawnSync(
-    process.execPath,
-    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    runnerOptions,
-  );
+  let r: SpawnSyncReturns<string>;
+  try {
+    r = spawnSync(
+      process.execPath,
+      [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+      runnerOptions,
+    );
+  } finally {
+    // The parent's copies of the channel: the child carried its own across
+    // the spawn, and the reads below need the parent's closed.
+    closeSync(reportFd);
+    closeSync(stderrFd);
+  }
   // Best effort, after EVERY outcome including the timeout: on a clean exit
   // the group is already gone. Negative-pid kills are POSIX-only; on Windows
   // this throws and the behaviour stays as it was. The pid is also what the
@@ -1926,35 +1957,55 @@ export function runProbeSuite(
     }
   }
   setRunnerTeardownGroup(undefined);
-  // `r.error` is set — and `r.status` is null — when the process never ran
-  // (vitest entry missing or unresolvable) or was killed (the timeout above
-  // fires SIGTERM). Ignoring it reports those as "the runner produced no
-  // parseable JSON", which
-  // blames the runner's output for a run that produced none.
-  // `r.error` first, as before: when both are set — ENOBUFS on a run that was
-  // also killed — the error names the actual failure and the signal only says
-  // it did not finish. Reversing them buried `ENOBUFS` under "killed by
-  // SIGTERM", which is a less useful sentence about the same event. The reason
-  // tag is derived from the whole result either way, so it does not depend on
-  // which message wins.
-  if (r.error)
-    throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
-  if (r.signal) {
-    throw new ProbeRunFailure(
-      `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
-      runnerFailureReason(r),
-    );
+  try {
+    // Read the channel back now that nothing in the group is still writing.
+    // A missing report is "the runner produced none" — classified below the
+    // way an empty capture always was — never a throw on its own. EMPTY
+    // counts as missing: the channel files are created ahead of the spawn,
+    // so a runner that never wrote left an empty file behind.
+    const readChannel = (file: string): string | null => {
+      try {
+        const content = readFileSync(file, 'utf8');
+        return content.length > 0 ? content : null;
+      } catch {
+        return null;
+      }
+    };
+    const reportOut = readChannel(reportPath);
+    const stderrOut = readChannel(stderrPath);
+    if (reportOut === null) {
+      // No report written: the runner never produced one. `r.error` is set —
+      // and `r.status` is null — when the process never ran (vitest entry
+      // missing or unresolvable) or was killed (the timeout's SIGKILL);
+      // `r.signal` marks a kill without the error object. Naming those as
+      // "no parseable JSON" would blame the runner's output for a run that
+      // produced none. `r.error` first: when both are set, the error names
+      // the actual failure and the signal only says it did not finish.
+      if (r.error)
+        throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
+      if (r.signal) {
+        throw new ProbeRunFailure(
+          `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
+          runnerFailureReason(r),
+        );
+      }
+    }
+    // A finished report outranks the spawn's error/signal: a suite whose
+    // teardown hangs after the runner writes its verdict still produced that
+    // verdict, and the deadline's kill then lands on a done run.
+    return {
+      perFile: classifyProbeRun(
+        r.status ?? 1,
+        reportOut ?? '',
+        probes,
+        stderrOut ?? '',
+      ),
+      ms: now() - started,
+      exposed,
+    };
+  } finally {
+    rmSync(reportDir, { recursive: true, force: true });
   }
-  return {
-    perFile: classifyProbeRun(
-      r.status ?? 1,
-      `${r.stdout ?? ''}`,
-      probes,
-      `${r.stderr ?? ''}`,
-    ),
-    ms: now() - started,
-    exposed,
-  };
 }
 
 /**

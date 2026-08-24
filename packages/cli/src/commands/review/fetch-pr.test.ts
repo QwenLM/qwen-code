@@ -1227,12 +1227,59 @@ describe('fetch-pr report assembly', () => {
       );
     });
 
+    it('refuses when the fetched SHA is not the head the platform advertised', async () => {
+      // A redirected head fetch lands content the platform never named: a
+      // swapped `remote.<name>.url` is outside the screen's candidate set,
+      // and an attacker mirror serves its own commit under the PR's
+      // refspec. SHAs are content-addressed, so comparing the fetched ref
+      // against the platform's head catches ANY redirect mechanism — the
+      // refusal precedes the worktree and every later step, and the ref is
+      // rolled back the way a metadata failure rolls it back.
+      producerMocks.git.mockImplementation((...args: string[]) =>
+        args[0] === 'rev-parse' ? 'deadbeefdead' : '',
+      );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /the fetched content is not the PR under review/,
+      );
+      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
+        'git',
+        ['branch', '-D', 'qwen-review/pr-42'],
+        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+      );
+      // No worktree, no report; the outer catch releases the lease.
+      expect(
+        producerMocks.git.mock.calls.some(
+          (args: unknown[]) =>
+            args.includes('worktree') && args.includes('add'),
+        ),
+      ).toBe(false);
+      const reportCall = producerMocks.writeFileSync.mock.calls.find(
+        ([path]) => path === '/tmp/fetch-report.json',
+      );
+      expect(reportCall).toBeUndefined();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
+    it('accepts the platform head whatever case the object ID arrives in', async () => {
+      // Object IDs compare case-insensitively: a platform that advertises
+      // the head in capitals is the SAME commit git prints in lowercase,
+      // and refusing it would refuse a legitimate fetch.
+      producerMocks.git.mockImplementation((...args: string[]) =>
+        args[0] === 'rev-parse' ? 'F00DF00DF00D' : '',
+      );
+
+      const report = await reportFor({});
+
+      expect(report.fetchedSha).toBe('F00DF00DF00D');
+    });
+
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
         // The creation add carries the inert `-c` overrides ahead of the
         // subcommand, so match the pair anywhere in the argv.
         if (args.includes('worktree')) throw new Error('disk full');
-        return args[0] === 'rev-parse' ? 'f00df00d' : '';
+        return args[0] === 'rev-parse' ? 'f00df00df00d' : '';
       });
 
       await expect(reportFor({})).rejects.toThrow(
@@ -4058,6 +4105,12 @@ describe('fetch-pr --resume', () => {
   });
 
   it('falls through to a fresh fetch when the head moved, and says so', async () => {
+    // The fresh fetch lands the NEW head the platform now advertises, so
+    // the fetchedSha read answers it (a stale answer is the very shape the
+    // head-cross-check refuses).
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'aaaa1111bbbb' : '',
+    );
     producerMocks.gh.mockImplementation((...args: string[]) => {
       if (args.includes('headRefOid') && !args.includes('headRefName')) {
         return JSON.stringify({ headRefOid: 'aaaa1111bbbb' });

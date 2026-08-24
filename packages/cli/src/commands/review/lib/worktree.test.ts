@@ -1911,6 +1911,30 @@ describe('localFilterRefusal', () => {
     expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
   });
 
+  it("refuses a filter in the MAIN worktree's per-worktree config — <common>/config.worktree", () => {
+    // With `extensions.worktreeConfig` on, a checkout run in ANY worktree
+    // of the repository also reads the main worktree's per-worktree config
+    // (measured live: the planted smudge EXECUTED on a checkout in a
+    // linked tree). Screened from the linked worktree the way the pipeline
+    // screens the probe/scratch/base trees, the candidates used to name
+    // only the common config, the screened tree's own per-worktree config
+    // and the sibling admin entries — never this file.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'extensions.worktreeConfig', 'true');
+    writeFileSync(
+      join(repo, '.git', 'config.worktree'),
+      `[filter "evil"]\n\tsmudge = touch ${gitConfigPath(join(repo, 'PWNED'))}\n`,
+    );
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('filter.evil.smudge');
+    expect(r).toContain(join(repo, '.git', 'config.worktree'));
+    expect(r).toContain('the probe checkout');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'fails CLOSED on a non-regular candidate file — the FIFO shape',
     () => {
@@ -2175,11 +2199,29 @@ describe('localFilterRefusal', () => {
     expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
   });
 
-  it('certifies a fetch refspec with no destination — FETCH_HEAD alone rewrites no ref', () => {
+  it('certifies a colon-less fetch refspec without a wildcard — FETCH_HEAD alone rewrites no ref', () => {
+    // A colon-less refspec without a wildcard fetches into FETCH_HEAD
+    // alone, rewrites no ref, and is a value git accepts in config
+    // (measured live), so the screen must not touch it. The colon-less
+    // WILDCARD shape this test used to certify is refused by the grammar
+    // suite below: git rejects it with `fatal: invalid refspec` (measured
+    // live), which wedges every later fetch-by-remote-name.
     const g = (...args: string[]) =>
       execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
     g('config', 'remote.origin.url', 'https://example.invalid/x');
-    g('config', 'remote.origin.fetch', '+refs/heads/*');
+    g('config', 'remote.origin.fetch', '+refs/heads/main');
+
+    expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
+  });
+
+  it('certifies an EMPTY fetch refspec value — git ignores it at fetch', () => {
+    // `git config remote.origin.fetch ''` is legal and git skips the empty
+    // value when it fetches (measured live), so refusing it would refuse a
+    // shape a user's own repository can legitimately carry.
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.url', 'https://example.invalid/x');
+    g('config', 'remote.origin.fetch', '');
 
     expect(localFilterRefusal(tree, 'the probe checkout')).toBeNull();
   });
@@ -2340,6 +2382,52 @@ describe('localFilterRefusal', () => {
     expect(r).toContain('fetch refspec');
     expect(r).toContain('remote.evil.fetch');
   });
+
+  it.each([
+    [
+      'a colon-less wildcard (git rejects: a wildcard needs a destination)',
+      '+refs/heads/*',
+    ],
+    ['a value that is not a ref name (whitespace)', 'tag evil'],
+    [
+      'a dotdot escape through the refs/remotes/ allow-prefix',
+      '+refs/heads/main:refs/remotes/../heads/pwned',
+    ],
+    [
+      'an invalid source beside a clean destination',
+      'bad src:refs/remotes/origin/x',
+    ],
+    [
+      'mismatched wildcards (source only)',
+      'refs/heads/*:refs/remotes/origin/main',
+    ],
+    [
+      'mismatched wildcards (destination only)',
+      'refs/heads/main:refs/remotes/origin/*',
+    ],
+  ])(
+    'refuses a planted fetch refspec git cannot fetch with — %s',
+    (_shape, refspec) => {
+      // A value git rejects with `fatal: invalid refspec` dies on every
+      // later fetch-by-remote-name — persistence planted by one config
+      // write into the never-wiped common dir, each shape measured live
+      // wedging before this closure. The screen fails CLOSED on the
+      // grammar the way it does on a destination that rewrites a user ref;
+      // the dotdot shape is the one the refs/remotes/ allow-prefix alone
+      // would certify.
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('config', 'remote.origin.url', 'https://example.invalid/x');
+      g('config', 'remote.evil.url', 'https://example.invalid/y');
+      g('config', 'remote.evil.fetch', refspec);
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('fetch refspec');
+      expect(r).toContain('remote.evil.fetch');
+    },
+  );
 
   it('refuses url-rewrite keys — an insteadOf plant redirects the guarded fetches', () => {
     // `url.<base>.insteadOf` rewrote the URL the pipeline's fetches run

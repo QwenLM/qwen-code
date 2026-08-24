@@ -2638,6 +2638,65 @@ describe('probe runner teardown hook', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('returns a finished report when an in-group survivor outlives the runner — the verdict channel is a file, not a pipe', () => {
+    // The verdict channel used to be stdout: spawnSync waits for the pipe
+    // to CLOSE before it returns, so a child the suite spawned into the
+    // runner's group — one that outlives the runner — held the spawn until
+    // the deadline even though the runner had exited with a finished
+    // report, and the run threw ETIMEDOUT with that report thrown away
+    // (measured live). The channel is a file now: the spawn returns when
+    // the runner exits, the group kill takes the survivor, and the report
+    // it finished is read back underneath. The fake vitest spawns a
+    // sleeper into its own group, writes the report, and exits.
+    const onSpy = vi.spyOn(process, 'on');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-verdict-'));
+    try {
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({ name: 'vitest', bin: { vitest: './runner.mjs' } }),
+      );
+      writeFileSync(
+        join(vitestDir, 'runner.mjs'),
+        "import { spawn } from 'node:child_process';\n" +
+          'const child = spawn(process.execPath, ' +
+          "['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' });\n" +
+          'child.unref();\n' +
+          "const files = process.argv.slice(2).filter((a) => a.includes('.test.'));\n" +
+          'process.stdout.write(JSON.stringify({\n' +
+          '  numPassedTests: files.length,\n' +
+          '  numFailedTests: 0,\n' +
+          '  testResults: files.map((f) => ({\n' +
+          '    name: f,\n' +
+          "    assertionResults: [{ status: 'passed' }],\n" +
+          '  })),\n' +
+          '}));\n',
+      );
+
+      // A short deadline sharpens the pin: with the old pipe channel this
+      // shape blocked until the deadline and threw ETIMEDOUT, because the
+      // spawn waited on a pipe the sleeper held; the file channel returns
+      // the finished verdict at once.
+      const started = Date.now();
+      const { perFile } = runProbeSuite(dir, ['a.test.ts'], started + 3000);
+
+      expect(perFile).toEqual([
+        {
+          file: 'a.test.ts',
+          verdict: 'inert',
+          detail: expect.stringContaining('PASSED'),
+        },
+      ]);
+    } finally {
+      for (const [sig, fn] of hookSignals(onSpy)) {
+        process.removeListener(sig as NodeJS.Signals, fn as never);
+      }
+      onSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('the probe tree identity gate, through runOneMutant', () => {
@@ -3083,27 +3142,50 @@ describe('the probe tree identity gate, through runOneMutant', () => {
     // restore included.
     const { host, tree, headSha } = fixture();
     try {
-      writeFileSync(join(tree, 'a.ts'), 'mutant dirt\n');
-      const r = runOneMutant(
-        tree,
-        mutant,
-        ['a.test.ts'],
-        undefined,
-        Date.now,
-        tree,
-        headSha,
+      // A shadow vitest whose `exports` hide `./package.json`: findVitestBin
+      // then throws deterministically on EVERY host — without it a vitest
+      // installation above os.tmpdir() resolves, runOneMutant RETURNS a
+      // result instead of throwing, and this pin silently depends on the
+      // fleet (the same defense the hook-installation tests plant).
+      const vitestDir = join(tree, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({ name: 'vitest', exports: { '.': './index.js' } }),
       );
-      // No shadow vitest in this bare fixture: the gate and restore pass,
-      // and the run dies at `findVitestBin` — the observation is that the
-      // identity checks did NOT refuse.
-      expect(r.verdict).not.toBe('inconclusive');
-    } catch (e) {
-      // findVitestBin throws on a fixture with no vitest anywhere up-tree —
-      // AFTER the gate and the restore ran, which is exactly the pin: a
-      // gate refusal would have returned an inconclusive result instead.
-      const msg = e instanceof Error ? e.message : String(e);
-      expect(msg).not.toContain('gitfile');
-      expect(msg).not.toContain('HEAD no longer points');
+      writeFileSync(join(vitestDir, 'index.js'), '');
+      writeFileSync(join(tree, 'a.ts'), 'mutant dirt\n');
+
+      // The call is separated from the assertions: a gate refusal RETURNS
+      // an inconclusive verdict and never throws, so the old shape caught
+      // its OWN failed assertion and passed on the very regression it
+      // exists to catch.
+      let r: ReturnType<typeof runOneMutant> | undefined;
+      let thrown: unknown;
+      try {
+        r = runOneMutant(
+          tree,
+          mutant,
+          ['a.test.ts'],
+          undefined,
+          Date.now,
+          tree,
+          headSha,
+        );
+      } catch (e) {
+        thrown = e;
+      }
+
+      // The only throw on this path is findVitestBin's, which runs AFTER
+      // the gate and the restore have passed — that, not a returned
+      // verdict, is the observation that the identity checks certified.
+      expect(r).toBeUndefined();
+      expect(thrown).toBeInstanceOf(Error);
+      expect(String((thrown as Error).message)).toContain('vitest');
+      // And the restore put the dirtied file back to the commit.
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const a = 1;\n',
+      );
     } finally {
       rmSync(host, { recursive: true, force: true });
     }
