@@ -94,6 +94,14 @@ export function loadPolicy(raw) {
         `${OWNERS_FILE}: area ${area.name} paths must be an array`,
       );
     }
+    // An explicitly empty list can never route the area either, yet the
+    // entry loop below cannot catch it — reject it like the sibling
+    // labels/owners checks do.
+    if (Array.isArray(area.paths) && area.paths.length === 0) {
+      throw new Error(
+        `${OWNERS_FILE}: area ${area.name} paths must not be empty; omit paths for a label-only area`,
+      );
+    }
     for (const prefix of area.paths ?? []) {
       if (!isPathPrefix(prefix)) {
         throw new Error(

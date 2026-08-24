@@ -177,6 +177,14 @@ describe('assign-issue-owner: owner map', () => {
       () => loadPolicy(JSON.stringify(notArray)),
       /paths must be an array/,
     );
+
+    // An explicitly empty list can never route the area either.
+    const emptyPaths = JSON.parse(ownersRaw);
+    emptyPaths.areas[0].paths = [];
+    assert.throws(
+      () => loadPolicy(JSON.stringify(emptyPaths)),
+      /paths must not be empty/,
+    );
   });
 });
 
