@@ -7,7 +7,7 @@ import { ToolNames } from '../tool-names.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-} from '../../utils/environmentContext.js';
+} from '../../core/environmentContext.js';
 import {
   getApiHistoryPromptId,
   getApiHistoryPromptIndexes,

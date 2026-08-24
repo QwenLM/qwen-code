@@ -146,6 +146,24 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
   'high',
 ]);
 
+/**
+ * The `--effort` option for the three capture commands (fetch-pr,
+ * capture-local, plan-diff), defined once: its describe names what `medium`
+ * drops from the roster, so a roster change edits one string, not three
+ * byte-identical copies that can silently diverge. `run` and `save-artifact`
+ * keep their own shapes (per-target defaults; a resolved value without `low`).
+ */
+export const EFFORT_OPTION = {
+  type: 'string',
+  choices: [...EFFORT_LEVELS],
+  describe:
+    'The review effort. `medium` (balanced) drops the adversarial ' +
+    'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
+    'specialists (1d/1e) from the required roster; recorded in the plan ' +
+    'so check-coverage, agent-prompt --roster and compose-review all ' +
+    'read one value. Omit for the full (high) roster.',
+} as const;
+
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
   'suggestion',

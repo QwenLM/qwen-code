@@ -463,8 +463,8 @@ describe('HookPlanner', () => {
     });
 
     it('passes through unknown tool ids without aliases', () => {
-      expect(getToolMatcherTargets('computer_use__click')).toEqual([
-        'computer_use__click',
+      expect(getToolMatcherTargets('third_party__click')).toEqual([
+        'third_party__click',
       ]);
     });
 
