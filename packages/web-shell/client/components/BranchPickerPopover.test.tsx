@@ -430,13 +430,15 @@ describe('BranchPickerPopover actions', () => {
       detached: false,
     });
     const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    workspaceGitPull.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { error: 'merge_in_progress', message: '' },
-        'POST /workspaces/:workspace/git/pull: merge_in_progress',
-      ),
+    // One queued rejection per click below: a persistent implementation
+    // would leak this 409 as the mock default into every later test.
+    const mergeInProgress = new DaemonHttpError(
+      409,
+      { error: 'merge_in_progress', message: '' },
+      'POST /workspaces/:workspace/git/pull: merge_in_progress',
     );
+    workspaceGitPull.mockRejectedValueOnce(mergeInProgress);
+    workspaceGitPull.mockRejectedValueOnce(mergeInProgress);
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);

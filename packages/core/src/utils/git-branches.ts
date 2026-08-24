@@ -674,12 +674,25 @@ async function incomingIgnoredPaths(
     await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => '')
   ).trim();
   if (!toplevel) return [];
-  const base =
-    (
-      await runGit(toplevel, ['merge-base', 'HEAD', '@{u}'], env).catch(
-        () => '',
-      )
-    ).trim() || 'HEAD';
+  // Without an upstream there is nothing incoming to collide with; the
+  // pull itself fails loudly with a classifiable error. (Also keeps the
+  // no-upstream shape out of the probe's failure path below.)
+  const hasUpstream = await runGit(
+    toplevel,
+    ['rev-parse', '-q', '--verify', '@{u}'],
+    env,
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (!hasUpstream) return [];
+  // No catches below: a probe failure (index.lock contention with a
+  // concurrent git process, the 30s timeout, a git fatal) must refuse the
+  // pull instead of masquerading as "no collision" and letting an
+  // overwriting merge through. The caller classifies these like any other
+  // pull failure.
+  const base = (
+    await runGit(toplevel, ['merge-base', 'HEAD', '@{u}'], env)
+  ).trim();
   const added = await runGit(
     toplevel,
     [
@@ -692,17 +705,31 @@ async function incomingIgnoredPaths(
       '@{u}',
     ],
     env,
-  ).catch(() => '');
+  );
   if (!added) return [];
   const paths = added.split('\0').filter(Boolean);
   if (paths.length === 0) return [];
-  const ignored = await runGitStdin(
-    toplevel,
-    ['check-ignore', '--stdin', '-z'],
-    `${paths.join('\0')}\0`,
-    env,
-  ).catch(() => '');
-  return ignored.split('\0').filter(Boolean);
+  let ignoredRaw: string;
+  try {
+    ignoredRaw = await runGitStdin(
+      toplevel,
+      ['check-ignore', '--stdin', '-z'],
+      `${paths.join('\0')}\0`,
+      env,
+    );
+  } catch (err) {
+    // check-ignore exits 1 when no path is ignored; every other non-zero
+    // exit is a probe failure, not a negative result.
+    if ((err as { code?: number })?.code === 1) return [];
+    throw err;
+  }
+  // check-ignore reports pattern matches regardless of existence; only a
+  // path present in the worktree can actually be overwritten, and refusing
+  // for an absent one names a file the user cannot move or remove.
+  return ignoredRaw
+    .split('\0')
+    .filter(Boolean)
+    .filter((p) => fs.existsSync(path.join(toplevel, p)));
 }
 
 function refusedIgnoredCollision(paths: string[]): GitPullFailure {
@@ -710,6 +737,21 @@ function refusedIgnoredCollision(paths: string[]): GitPullFailure {
     'ignored_collision',
     `cannot pull: the incoming changes add files that exist locally as ignored files and would be overwritten silently: ${paths.join(', ')}`,
   );
+}
+
+// Names where the unrestored changes live when a failure-recovery stash
+// pop fails; without the pointer the edits sit in refs/stash invisibly.
+function withStashRestoreNote(failure: unknown): unknown {
+  const note =
+    ' The auto-stashed changes were not restored; they are kept in the stash entry (git stash list).';
+  if (failure instanceof GitPullFailure) {
+    return new GitPullFailure(
+      failure.code,
+      failure.message + note,
+      failure.unmerged,
+    );
+  }
+  return new Error(`${gitFailureDetail(failure).trim()}${note}`);
 }
 
 function gitFailureDetail(err: unknown): string {
@@ -723,11 +765,34 @@ function gitFailureDetail(err: unknown): string {
 // Concurrent pulls on one repository cross-apply each other's auto-stashes
 // (they share the single refs/stash LIFO), and one pull's failure recovery
 // aborts the merge or rebase another pull started. Serialize pulls per
-// resolved cwd with a promise chain.
+// repository identity with a promise chain: everything the lock protects is
+// repository-wide, while the same repository can be addressed through any of
+// its subdirectories (or a symlinked path), so keying on the resolved cwd
+// would hand two paths into one repository independent chains.
 const pullLocks = new Map<string, Promise<void>>();
 
-function withPullLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
-  const key = path.resolve(cwd);
+async function pullLockKey(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  // --git-common-dir prints relative to cwd for the common case and is
+  // shared by linked worktrees. Fall back to the resolved cwd when the
+  // probe fails (not a repository — the pull itself fails loudly).
+  const commonDir = (
+    await runGit(cwd, ['rev-parse', '--git-common-dir'], env).catch(() => '')
+  ).trim();
+  if (!commonDir) {
+    return path.resolve(cwd);
+  }
+  const abs = path.resolve(cwd, commonDir);
+  try {
+    return fs.realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
+
+function withPullLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = pullLocks.get(key) ?? Promise.resolve();
   const run = prev.then(fn);
   const tail = run.then(
@@ -785,6 +850,25 @@ async function classifyPullFailure(
   return err;
 }
 
+// Throws when a merge or rebase this pull did not start is in progress.
+async function refuseForeignMergeOrRebase(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  if (await hasMergeHead(cwd, env)) {
+    throw new GitPullFailure(
+      'merge_in_progress',
+      'cannot pull: a merge is already in progress — finish or abort it before updating',
+    );
+  }
+  if (await hasInProgressRebase(cwd, env)) {
+    throw new GitPullFailure(
+      'rebase_in_progress',
+      'cannot pull: a rebase is already in progress — finish or abort it before updating',
+    );
+  }
+}
+
 /**
  * Pull (fetch + merge) or fetch-only from the remote.
  */
@@ -796,7 +880,9 @@ export async function gitPull(
   if (opts?.stash && opts?.force) {
     throw new Error('stash and force are mutually exclusive');
   }
-  return withPullLock(cwd, () => gitPullInner(cwd, opts, env));
+  return withPullLock(await pullLockKey(cwd, env), () =>
+    gitPullInner(cwd, opts, env),
+  );
 }
 
 async function gitPullInner(
@@ -812,19 +898,9 @@ async function gitPullInner(
   // failure recovery below aborts merge/rebase state indiscriminately and
   // would destroy the user's in-progress operation, stranding any
   // auto-stashed changes. This guard is also what makes that recovery safe
-  // — any state it aborts was started by this pull.
-  if (await hasMergeHead(cwd, env)) {
-    throw new GitPullFailure(
-      'merge_in_progress',
-      'cannot pull: a merge is already in progress — finish or abort it before updating',
-    );
-  }
-  if (await hasInProgressRebase(cwd, env)) {
-    throw new GitPullFailure(
-      'rebase_in_progress',
-      'cannot pull: a rebase is already in progress — finish or abort it before updating',
-    );
-  }
+  // — any state it aborts was started by this pull. A concurrent actor can
+  // create state at any point, so the mutating steps below re-run it.
+  await refuseForeignMergeOrRebase(cwd, env);
   if (opts?.force) {
     // `reset --hard` resets the whole repository regardless of cwd, and so
     // does the pull's merge, but `clean -fd` from a subdirectory only
@@ -871,30 +947,57 @@ async function gitPullInner(
   // Every pull shape refuses an incoming collision with local ignored
   // files: ignored paths never appear in `git status`, so the plain path
   // reads clean and would silently check the incoming file out over the
-  // local one.
-  const ignored = await incomingIgnoredPaths(cwd, env);
+  // local one. Probe failures must refuse the pull, not read as "no
+  // collision" (see incomingIgnoredPaths).
+  let ignored: string[];
+  try {
+    ignored = await incomingIgnoredPaths(cwd, env);
+  } catch (err) {
+    throw await classifyPullFailure(cwd, env, err, opts?.stash === true);
+  }
   if (ignored.length > 0) {
     throw refusedIgnoredCollision(ignored);
   }
   let stashed = false;
   if (opts?.force) {
+    await refuseForeignMergeOrRebase(cwd, env);
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   } else if (opts?.stash) {
+    await refuseForeignMergeOrRebase(cwd, env);
     // Compare refs/stash before/after instead of parsing the push output,
     // which differs between git versions and locales.
     const before = await currentStashSha(cwd, env);
-    await runGit(
-      cwd,
-      [
-        'stash',
-        'push',
-        '--include-untracked',
-        '-m',
-        'qwen-code: auto-stash before pull',
-      ],
-      env,
-    );
+    try {
+      await runGit(
+        cwd,
+        [
+          'stash',
+          'push',
+          '--include-untracked',
+          '-m',
+          'qwen-code: auto-stash before pull',
+        ],
+        env,
+      );
+    } catch (err) {
+      // Git creates the stash commit, updates refs/stash, and only then
+      // resets the worktree, so a failed push can leave the entry behind
+      // with the changes gone from the worktree. Pop it back before
+      // refusing; classify from repository state, since the push's own
+      // error text (e.g. "needs merge") is version- and locale-dependent.
+      const afterPush = await currentStashSha(cwd, env);
+      if (afterPush !== '' && afterPush !== before) {
+        await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
+          // eslint-disable-next-line no-console
+          console.error(
+            'git pull: failed to pop back a partially created auto-stash:',
+            popErr,
+          );
+        });
+      }
+      throw await classifyPullFailure(cwd, env, err, true);
+    }
     const after = await currentStashSha(cwd, env);
     stashed = after !== '' && after !== before;
   }
@@ -904,7 +1007,14 @@ async function gitPullInner(
   // the tree and the user's changes stranded in a stash entry the caller
   // never learns about.
   let output: string;
+  let restoreFailed = false;
   try {
+    // Re-run the guard immediately before the update: merge/rebase state
+    // that appeared since the pre-fetch check belongs to a concurrent
+    // actor. The recovery below aborts whatever state exists, which is
+    // only safe for state this pull started — so refuse here (restoring
+    // the auto-stash) instead of merging into the foreign state.
+    await refuseForeignMergeOrRebase(cwd, env);
     output = await runGit(
       cwd,
       opts?.rebase
@@ -913,18 +1023,46 @@ async function gitPullInner(
       env,
     );
   } catch (err) {
+    const foreignState =
+      err instanceof GitPullFailure &&
+      (err.code === 'merge_in_progress' || err.code === 'rebase_in_progress');
     if (stashed || opts?.force) {
-      // Never leave the repository wedged mid-merge: abort any partial
-      // merge/rebase (restoring the pre-pull HEAD), then bring the
-      // stashed changes back. A failed restore leaves the stash entry in
-      // place, so nothing is lost either way.
-      await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
-      await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
+      if (!foreignState) {
+        // Never leave the repository wedged mid-merge: abort the partial
+        // merge/rebase this update started (restoring the pre-pull HEAD).
+        // Only abort states that exist — the guard above ran immediately
+        // before the update, so anything present now was started by it.
+        if (await hasMergeHead(cwd, env)) {
+          await runGit(cwd, ['merge', '--abort'], env).catch((abortErr) => {
+            // eslint-disable-next-line no-console
+            console.error('git pull recovery: merge --abort failed:', abortErr);
+          });
+        }
+        if (await hasInProgressRebase(cwd, env)) {
+          await runGit(cwd, ['rebase', '--abort'], env).catch((abortErr) => {
+            // eslint-disable-next-line no-console
+            console.error(
+              'git pull recovery: rebase --abort failed:',
+              abortErr,
+            );
+          });
+        }
+      }
       if (stashed) {
-        await runGit(cwd, ['stash', 'pop'], env).catch(() => {});
+        // Bring the stashed changes back. A failed restore leaves the
+        // stash entry in place, so nothing is lost either way.
+        await runGit(cwd, ['stash', 'pop'], env).catch(() => {
+          restoreFailed = true;
+        });
       }
     }
-    throw await classifyPullFailure(cwd, env, err, opts?.stash === true);
+    const failure = await classifyPullFailure(
+      cwd,
+      env,
+      err,
+      opts?.stash === true,
+    );
+    throw restoreFailed ? withStashRestoreNote(failure) : failure;
   }
   if (stashed) {
     let stashRestoreConflict = false;
