@@ -448,6 +448,24 @@ describe('useBranchCommand', () => {
     );
   });
 
+  it.each(['', '   '])(
+    'falls back to the first prompt when the picker display name is blank (%j)',
+    async (blankDisplayName) => {
+      getSessionDisplayName.mockResolvedValue(blankDisplayName);
+
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch();
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        expect.any(String),
+        'help me fix the login bug(1)',
+        'auto',
+      );
+    },
+  );
+
   it('preserves a numeric token in an explicit branch name', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {

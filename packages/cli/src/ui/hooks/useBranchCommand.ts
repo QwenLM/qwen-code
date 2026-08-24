@@ -173,15 +173,16 @@ export function useBranchCommand(
         // 5. Persist the branch title before switching core or UI. A failed
         //    title write leaves the parent active and the catch path removes
         //    the incomplete fork.
-        // A custom title that normalizes to empty (it was exactly a suffix
-        // token) falls back to the first prompt here, while the daemon route
-        // falls back to the session-id prefix; no picker name survives either
-        // way, so each client keeps its own degradation.
+        // A base that is empty, whitespace-only, or exactly a legacy
+        // `(Branch)`/`(Branch N)` token falls back to the first prompt here,
+        // while the daemon route falls back to the session-id prefix; no
+        // picker name survives either way, so each client keeps its own
+        // degradation.
         const baseName =
           name ??
           (sourceCustomTitle
             ? normalizeDerivedBranchTitle(sourceCustomTitle)
-            : sourceDisplayName) ??
+            : sourceDisplayName?.trim() || undefined) ??
           deriveFirstPrompt(provisional.conversation.messages);
         const effectiveTitle = await computeUniqueBranchTitle(
           baseName,

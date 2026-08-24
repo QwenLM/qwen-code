@@ -704,10 +704,10 @@ Use the source session's picker display name (`customTitle || prompt`) as the
 base, remove an existing generated fork suffix, and append the lowest available
 numeric suffix: `Title(1)`, `Title(2)`, and so on. Explicitly requested names
 remain unchanged before suffix allocation. If a custom title normalizes to
-nothing (it was exactly a suffix token), no picker name survives: the daemon
-route falls back to a session-id prefix while CLI `/branch` falls back to the
-first prompt. The divergence is deliberate; both clients allocate the numeric
-suffix from their chosen base.
+nothing (it was exactly a legacy `(Branch)` or `(Branch N)` token), no picker
+name survives: the daemon route falls back to a session-id prefix while CLI
+`/branch` falls back to the first prompt. The divergence is deliberate; both
+clients allocate the numeric suffix from their chosen base.
 
 ### 14.2 Temporary resources
 

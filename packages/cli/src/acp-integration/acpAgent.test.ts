@@ -16366,6 +16366,20 @@ describe('QwenAgent extMethod renameSession routing', () => {
       persistedDisplayName: undefined,
       expectedTitle: '550e8400(1)',
     },
+    {
+      sourceTitle: '',
+      name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: '550e8400(1)',
+    },
+    {
+      sourceTitle: undefined,
+      name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: '   ',
+      expectedTitle: '550e8400(1)',
+    },
   ])(
     'derives the branch title from $sourceTitle',
     async ({
