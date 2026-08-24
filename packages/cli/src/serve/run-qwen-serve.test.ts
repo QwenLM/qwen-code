@@ -1792,6 +1792,59 @@ X4161EJQYg==
 -----END CERTIFICATE-----
 `;
 
+const TEST_TLS_CERT_ROLLOVER_ROOT = `-----BEGIN CERTIFICATE-----
+MIIBhjCCASugAwIBAgIDDlpDMAoGCCqGSM49BAMCMBcxFTATBgNVBAMMDFJvbGxv
+dmVyUm9vdDAeFw0yNjA4MjQwOTI5MzVaFw0zNjA4MjEwOTI5MzVaMBcxFTATBgNV
+BAMMDFJvbGxvdmVyUm9vdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMzau41f
+bImw0QNA5/SWdPTAwZaRNB4Gl2ja+mkLlfmoZbs0BQqCpyymSv3mcb6Ib4pqDOqL
+1XK6zmoR8n9BPd2jZjBkMB0GA1UdDgQWBBQgAOww5NxIeButKToQ7AT4iMU9DTAf
+BgNVHSMEGDAWgBQgAOww5NxIeButKToQ7AT4iMU9DTASBgNVHRMBAf8ECDAGAQH/
+AgEAMA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNJADBGAiEA0cuV/hGYbT+e
+K4L1D3sTdULaA8pRb+bSAIc4ahhBcogCIQCCQPE7yVgbwgYnU3ANwCfgodzNNJT3
+qHfyM7dk0MfjYQ==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_ROLLOVER_CA = `-----BEGIN CERTIFICATE-----
+MIIBgjCCASigAwIBAgIDDlpEMAoGCCqGSM49BAMCMBcxFTATBgNVBAMMDFJvbGxv
+dmVyUm9vdDAeFw0yNjA4MjQwOTI5MzZaFw0zNjA4MjEwOTI5MzZaMBcxFTATBgNV
+BAMMDFJvbGxvdmVyUm9vdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJRb/B/R
+Tuziw+uZhweoC8kRqqAE1evF6UlJ8ON7WPkxB3zPCfzAhQlzXrmjO7p16ImWKfYI
+t2f5/bOq/kikoVejYzBhMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEG
+MB0GA1UdDgQWBBR3fJdvQTgm3qucY/wVQjk7FdTADjAfBgNVHSMEGDAWgBQgAOww
+5NxIeButKToQ7AT4iMU9DTAKBggqhkjOPQQDAgNIADBFAiEAk0U4ukmfTSEUqsmO
+tgfL3ddEKosNw63MiXNQuRenOwcCIA3pQEVRde9gO7WlfS6kQVtcBqNvKE6Ra7nx
+aI7eF23r
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_ROLLOVER_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBrjCCAVWgAwIBAgIDDlpFMAoGCCqGSM49BAMCMBcxFTATBgNVBAMMDFJvbGxv
+dmVyUm9vdDAeFw0yNjA4MjQwOTI5MzZaFw0zNjA4MjEwOTI5MzZaMBQxEjAQBgNV
+BAMMCWxvY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGDhxXxtw2DO
+jniVb6hJgnc72v8BHrYVeYN7Ggd6PM2ijQuTJ1rIQk9VMcoBoyBUsPWGonMYhunB
+ORFOKiVk8xujgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYD
+VR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0G
+A1UdDgQWBBStnj4FalD3BRPbZCouTczVYyFDgzAfBgNVHSMEGDAWgBR3fJdvQTgm
+3qucY/wVQjk7FdTADjAKBggqhkjOPQQDAgNHADBEAiAWSuwoTjNCGnwQmBRONUNL
+QjyIhT3Bic7/ID8uEZbGyQIgCFaJHNKwa8GbBh2qR3WJkRkM+12hoPbuCediULIS
+6I0=
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_OWN_KEY_DIFFERENT_ISSUER = `-----BEGIN CERTIFICATE-----
+MIIBgDCCASegAwIBAgIDDlpGMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMMD0RpZmZl
+cmVudElzc3VlcjAeFw0yNjA4MjQwOTI5MzZaFw0zNjA4MjEwOTI5MzZaMBMxETAP
+BgNVBAMMCFN1YmplY3RBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEu7EgrQ5y
+N/nipOtYiXtx/I8XRWHdjswU1pDFoh07KnuAGXdy++gCGsvm+nOFORM6Oj41shYS
+K52AL6rTfqt7x6NjMGEwHQYDVR0OBBYEFJCJ55NZ03FmyhOpUW7AnzrFU64sMB8G
+A1UdIwQYMBaAFJCJ55NZ03FmyhOpUW7AnzrFU64sMA8GA1UdEwEB/wQFMAMBAf8w
+DgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49BAMCA0cAMEQCIEaJChCJn+YXifDT7DvU
+Nfv4Fj2FAKJQiV2KzIWnqh8tAiBuuLLW9vMMsYt9kf1ku8SULxOs2nBiutRlPPEV
+tXsQMg==
+-----END CERTIFICATE-----
+`;
+
 // R5-6: the compliant twin of the pathlen fixture below — the SAME `pathlen:0`
 // root, but signing the serving leaf DIRECTLY, so zero CAs sit below it and the
 // constraint is satisfied (`depth - 1 === 0 <= 0`). This is the boundary the
@@ -2879,6 +2932,34 @@ describe('describeWorkerTlsTrustGaps', () => {
         daemonUrl,
       }),
     ).toEqual([]);
+  });
+
+  it('does not count a self-issued rollover CA against pathlen', () => {
+    const chain = [
+      TEST_TLS_CERT_ROLLOVER_LEAF,
+      TEST_TLS_CERT_ROLLOVER_CA,
+      TEST_TLS_CERT_ROLLOVER_ROOT,
+    ].join('');
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(chain),
+        certPath: '/certs/rollover-fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('does not anchor a certificate signed by its own key but issued by another name', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_OWN_KEY_DIFFERENT_ISSUER),
+      certPath: '/certs/own-key.pem',
+      daemonUrl,
+    });
+    expect(gaps).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('UNABLE_TO_VERIFY_LEAF_SIGNATURE'),
+      ]),
+    );
   });
 
   // R2-21 entrance 5, the false-alarm direction: the walk took whichever copy
@@ -11323,6 +11404,10 @@ describe('runQwenServe channel worker supervisor', () => {
     // Skipped where this host's own name does not resolve to an address it
     // holds — the same guard the ::1 bind above carries.
     const hostDnsName = os.hostname();
+    if (isLoopbackBind(hostDnsName)) {
+      ctx.skip();
+      return;
+    }
     let resolved: string | undefined;
     try {
       resolved = (await dns.lookup(hostDnsName)).address;
@@ -11354,8 +11439,10 @@ describe('runQwenServe channel worker supervisor', () => {
     // Boot fails outright rather than settling into the green-daemon /
     // looping-worker mode: `runQwenServe` itself rejects, so there is no
     // handle to close and no listening socket left behind.
-    await expect(
-      runQwenServe(
+    let unexpectedHandle: RunHandle | undefined;
+    let rejection: unknown;
+    try {
+      unexpectedHandle = await runQwenServe(
         {
           port: 0,
           hostname: hostDnsName,
@@ -11372,8 +11459,16 @@ describe('runQwenServe channel worker supervisor', () => {
           channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
           channelServicePidfile: makePidfileDeps(),
         },
-      ),
-    ).rejects.toThrow(/does not name an address on this host/);
+      );
+    } catch (error) {
+      rejection = error;
+    } finally {
+      await unexpectedHandle?.close();
+    }
+    expect(unexpectedHandle).toBeUndefined();
+    expect(rejection).toMatchObject({
+      message: expect.stringMatching(/does not name an address on this host/),
+    });
   });
 
   it('forwards webhook tasks through the channel worker group', async () => {

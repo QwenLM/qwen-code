@@ -959,12 +959,15 @@ export function describeWorkerTlsTrustGaps(opts: {
     const member = anchorPath.path[depth];
     if (!member) continue;
     const limit = pathLenConstraint(member);
-    if (limit === undefined || depth - 1 <= limit) continue;
+    const intermediateCount = anchorPath.path
+      .slice(1, depth)
+      .filter((candidate) => !isSelfIssuedCert(candidate)).length;
+    if (limit === undefined || intermediateCount <= limit) continue;
     gaps.push(
       `--tls-cert "${opts.certPath}" chains through ` +
         `"${member.subject.replace(/\r?\n/g, ', ')}", which carries ` +
-        `basicConstraints pathlen:${limit} but has ${depth - 1} ` +
-        `intermediate CA${depth - 1 === 1 ? '' : 's'} below it — every ` +
+        `basicConstraints pathlen:${limit} but has ${intermediateCount} ` +
+        `non-self-issued intermediate CA${intermediateCount === 1 ? '' : 's'} below it — every ` +
         `worker handshake to the daemon will fail PATH_LENGTH_EXCEEDED. ` +
         `Reissue that CA with a pathlen that admits the chain, or shorten ` +
         `the chain, and restart.`,
@@ -1233,12 +1236,16 @@ function certValidAt(cert: X509Certificate, now: number): boolean {
 }
 
 function isSelfSignedCert(x509: X509Certificate): boolean {
+  if (!isSelfIssuedCert(x509)) return false;
   try {
     return x509.verify(x509.publicKey);
   } catch {
-    // Unsupported key type: assume self-signed rather than warn on a guess.
-    return true;
+    return false;
   }
+}
+
+function isSelfIssuedCert(x509: X509Certificate): boolean {
+  return x509.subject === x509.issuer;
 }
 
 // Base64 never contains `-`, so the body match cannot run past its own
@@ -7855,7 +7862,8 @@ async function runQwenServeImpl(
           );
           assertChannelWorkerDaemonUrlIsLocal(workerDaemonUrl, opts.hostname);
           if (tlsOptions && tlsCertPath) {
-            const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
+            const operatorCaCertPath =
+              daemonRuntimeBaseEnv['NODE_EXTRA_CA_CERTS'];
             let operatorCaCert: Buffer | undefined;
             if (operatorCaCertPath) {
               try {

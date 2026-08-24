@@ -207,11 +207,31 @@ describe('pickNativeDirectory', () => {
 });
 
 describe('isNativeDirectoryPickerAvailable', () => {
-  it('is available on macOS and Windows regardless of env', () => {
+  it('requires positive graphical-session evidence on macOS and Windows', () => {
     setPlatform('darwin');
-    expect(isNativeDirectoryPickerAvailable({})).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable({}, { processUid: 0, consoleUid: 501 }),
+    ).toBe(false);
+    expect(
+      isNativeDirectoryPickerAvailable(
+        {},
+        { processUid: 501, consoleUid: 501 },
+      ),
+    ).toBe(true);
+    expect(
+      isNativeDirectoryPickerAvailable(
+        { SSH_CONNECTION: 'remote' },
+        { processUid: 501, consoleUid: 501 },
+      ),
+    ).toBe(false);
     setPlatform('win32');
-    expect(isNativeDirectoryPickerAvailable({})).toBe(true);
+    expect(isNativeDirectoryPickerAvailable({})).toBe(false);
+    expect(isNativeDirectoryPickerAvailable({ SESSIONNAME: 'Console' })).toBe(
+      true,
+    );
+    expect(isNativeDirectoryPickerAvailable({ SESSIONNAME: 'Services' })).toBe(
+      false,
+    );
   });
 
   it('is unavailable on unsupported platforms', () => {
