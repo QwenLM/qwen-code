@@ -32,6 +32,7 @@ import {
 } from './recognition.js';
 import { OmniObjectStore } from './storage.js';
 import { DashScopeUploader } from './upload.js';
+import { requireEffectiveOmniUploadConfig } from './upload-config.js';
 import {
   OmniUploadCache,
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
@@ -416,13 +417,13 @@ export async function processMediaForOmniDelivery(
   }
 
   const store = new OmniObjectStore(config.storage.getQwenDir());
-  const cgc = config.getContentGeneratorConfig();
+  const uploadConfig = requireEffectiveOmniUploadConfig(config);
   // Scope the cache to the endpoint credential: an oss:// URL minted for one
   // (origin, apiKey) pair must never be served for another — switching
   // accounts or endpoints yields URLs the new credential may not own. The
   // fingerprint keeps raw key material out of the cache file.
   const cacheScope = createHash('sha256')
-    .update(`${cgc.baseUrl ?? ''}|${cgc.apiKey ?? ''}`)
+    .update(`${uploadConfig.baseUrl}|${uploadConfig.apiKey}`)
     .digest('hex')
     .slice(0, 16);
   const configuredTtl = config.getOmniUploadUrlTtlHours?.();
@@ -709,7 +710,7 @@ export async function processMediaForOmniDelivery(
   // primary deliverable and every additional media deliverable of a
   // multi-output policy. Derivatives arrive with their promotion hash;
   // sources are hashed at call time, after all guards.
-  const model = config.getModel();
+  const uploadModel = uploadConfig.model;
   const uploadResource = async (
     item: PolicyDeliveryResource,
     estimate: OmniTokenEstimate,
@@ -734,10 +735,10 @@ export async function processMediaForOmniDelivery(
     // holds these bytes for this model+endpoint, so neither the local copy
     // nor the upload is needed (zoom_image reads the original path, not the
     // store). Checking after putFile would pay a full-file copy per hit.
-    const cachedUrl = await uploadCache.get(sha256, model);
+    const cachedUrl = await uploadCache.get(sha256, uploadModel);
     if (cachedUrl) {
       debugLogger.debug(
-        `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
+        `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${uploadModel}`,
       );
       // No new copy was made: the content is already known to the system
       // (a prior delivery both stored and uploaded it).
@@ -766,14 +767,14 @@ export async function processMediaForOmniDelivery(
     }
 
     const uploader = new DashScopeUploader({
-      apiKey: cgc.apiKey ?? '',
-      baseUrl: cgc.baseUrl,
+      apiKey: uploadConfig.apiKey,
+      baseUrl: uploadConfig.baseUrl,
     });
     let fileUri: string;
     try {
       fileUri = await uploader.uploadFile({
         filePath: objectPath,
-        model,
+        model: uploadModel,
         mimeType: item.recognized.detectedMimeType,
         signal,
       });
@@ -794,7 +795,7 @@ export async function processMediaForOmniDelivery(
         `size=${item.recognized.sizeBytes} est=${estimate.estimatedTokenCount}(${estimate.status}) ` +
         `deduped=${deduped} degraded=${item.degraded === true} uri=${fileUri}`,
     );
-    await uploadCache.put(sha256, model, fileUri);
+    await uploadCache.put(sha256, uploadModel, fileUri);
     return { fileUri, sha256, deduped, uploadCacheHit: false };
   };
 

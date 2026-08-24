@@ -181,6 +181,13 @@ describe('OmniExtractKeyframesTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(4);
+      expect(result.llmContent).toContain(
+        path.join(outputDir, 'clip-keyframe-0001.jpg'),
+      );
+      expect(result.llmContent).toContain(
+        path.join(outputDir, 'clip-keyframe-0004.jpg'),
+      );
+      expect(result.llmContent).toContain('Use read_file');
       // Absolute timestamp = bucket start + showinfo pts_time (input
       // seeking resets pts to ~0 within each window).
       expect(result.artifacts?.[3]).toEqual({

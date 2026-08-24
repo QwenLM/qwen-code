@@ -57,9 +57,13 @@ vi.mock('./recognition.js', async (importOriginal) => ({
 }));
 
 const uploadFileMock = vi.hoisted(() => vi.fn());
+const uploaderOptionsMock = vi.hoisted(() => vi.fn());
 vi.mock('./upload.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./upload.js')>()),
   DashScopeUploader: class {
+    constructor(options: unknown) {
+      uploaderOptionsMock(options);
+    }
     uploadFile = uploadFileMock;
   },
 }));
@@ -348,7 +352,8 @@ describe('observed server input limits', () => {
 });
 
 describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
-  const MODEL = 'qwen3-omni-plus';
+  const INFERENCE_MODEL = 'qwen4-omni-120b-think';
+  const UPLOAD_MODEL = 'qwen3-omni-plus';
   const BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
   const API_KEY = 'test-key';
   const SOURCE_BYTES = 'original-video-bytes';
@@ -397,8 +402,16 @@ describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
     return {
       isOmniEnabled: () => true,
       isTrustedFolder: () => true,
-      getContentGeneratorConfig: () => ({ apiKey: API_KEY, baseUrl: BASE_URL }),
-      getModel: () => MODEL,
+      getContentGeneratorConfig: () => ({
+        apiKey: 'inference-key',
+        baseUrl: 'http://127.0.0.1:22002/v1',
+      }),
+      getModel: () => INFERENCE_MODEL,
+      getOmniUploadConfig: () => ({
+        apiKey: API_KEY,
+        baseUrl: BASE_URL,
+        model: UPLOAD_MODEL,
+      }),
       storage: { getQwenDir: () => path.join(tmpDir, '.qwen') },
       getOmniProcessingConfig: () => ({
         transportGuardPolicies: [videoGuardPolicy()],
@@ -481,7 +494,7 @@ describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
       .slice(0, 16);
     await new OmniUploadCache(store.getOmniRootDir(), undefined, scope).put(
       sourceSha256,
-      MODEL,
+      UPLOAD_MODEL,
       OSS_URL,
     );
 
@@ -591,5 +604,21 @@ describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
     expect(
       Object.values(snapshot.versions).map((version) => version.sha256),
     ).toEqual([sha256Of('unrelated')]);
+  });
+
+  it('uses the dedicated upload channel for the reactive replacement', async () => {
+    await degradeOmniMediaAfterServerReject(
+      degradeConfig(),
+      rejectedContents(),
+      1,
+    );
+
+    expect(uploaderOptionsMock).toHaveBeenCalledWith({
+      apiKey: API_KEY,
+      baseUrl: BASE_URL,
+    });
+    expect(uploadFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({ model: UPLOAD_MODEL }),
+    );
   });
 });

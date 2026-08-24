@@ -3370,6 +3370,21 @@
               "description": "Upload-channel delivery settings.",
               "type": "object",
               "properties": {
+                "baseUrl": {
+                  "description": "DashScope-compatible endpoint used only for temporary media uploads. Set together with apiKeyEnv and model to separate uploads from inference.",
+                  "type": "string",
+                  "default": ""
+                },
+                "apiKeyEnv": {
+                  "description": "Name of the environment variable containing the DashScope upload API key. The key itself is not stored in settings.",
+                  "type": "string",
+                  "default": ""
+                },
+                "model": {
+                  "description": "DashScope model identifier sent to the temporary-upload policy endpoint.",
+                  "type": "string",
+                  "default": ""
+                },
                 "urlTtlHours": {
                   "type": "number",
                   "minimum": 0,

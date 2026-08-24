@@ -32,6 +32,7 @@ import type {
   NormalizedOmniProcessingConfig,
   OmniPolicyToolsSettings,
 } from '../omni/policy/types.js';
+import type { OmniUploadConfig } from '../omni/upload-config.js';
 import type { NormalizedOmniMemoryConfig } from '../services/media-memory/config.js';
 import { MediaResourceRegistry } from '../services/media-memory/registry.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
@@ -1117,6 +1118,12 @@ export interface ConfigParameters {
   omniUrlDownloadMaxFileBytes?: number;
   /** Upload URL TTL in hours (0 disables the cache; default 47). */
   omniUploadUrlTtlHours?: number;
+  /** Dedicated DashScope upload endpoint, independent of inference. */
+  omniUploadBaseUrl?: string;
+  /** Environment variable containing the dedicated upload API key. */
+  omniUploadApiKeyEnv?: string;
+  /** Model sent to the DashScope upload-policy endpoint. */
+  omniUploadModel?: string;
   /** Raw `omni.processing.policyTools` map (per-tool settings/runtime/
    * modelAccess). Normalized lazily by the omni policy modules. */
   omniPolicyTools?: OmniPolicyToolsSettings;
@@ -1971,6 +1978,10 @@ export class Config {
   private readonly omniMaxDurationSeconds?: number;
   private readonly omniUrlDownloadMaxFileBytes?: number;
   private readonly omniUploadUrlTtlHours?: number;
+  private readonly omniUploadBaseUrl?: string;
+  private readonly omniUploadApiKeyEnv?: string;
+  private readonly omniUploadModel?: string;
+  private omniUploadConfig?: OmniUploadConfig;
   private readonly omniPolicyTools?: OmniPolicyToolsSettings;
   private readonly omniFixedPolicies?: Record<string, unknown>;
   private readonly omniTransportGuardPolicies?: Record<string, unknown>;
@@ -2271,6 +2282,9 @@ export class Config {
     this.omniMaxDurationSeconds = params.omniMaxDurationSeconds;
     this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
     this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
+    this.omniUploadBaseUrl = params.omniUploadBaseUrl;
+    this.omniUploadApiKeyEnv = params.omniUploadApiKeyEnv;
+    this.omniUploadModel = params.omniUploadModel;
     this.omniPolicyTools = params.omniPolicyTools;
     this.omniFixedPolicies = params.omniFixedPolicies;
     this.omniTransportGuardPolicies = params.omniTransportGuardPolicies;
@@ -2630,6 +2644,14 @@ export class Config {
     // prerequisites: fail fast at startup with an actionable message
     // instead of erroring midway through the first video interaction.
     if (this.isOmniEnabled()) {
+      const { normalizeDedicatedOmniUploadConfig } = await import(
+        '../omni/upload-config.js'
+      );
+      this.omniUploadConfig = normalizeDedicatedOmniUploadConfig({
+        baseUrl: this.omniUploadBaseUrl,
+        apiKeyEnv: this.omniUploadApiKeyEnv,
+        model: this.omniUploadModel,
+      });
       const { assertOmniRuntimeDependencies } = await import(
         '../omni/ffmpeg.js'
       );
@@ -6493,6 +6515,10 @@ export class Config {
 
   getOmniUploadUrlTtlHours(): number | undefined {
     return this.omniUploadUrlTtlHours;
+  }
+
+  getOmniUploadConfig(): OmniUploadConfig | undefined {
+    return this.omniUploadConfig;
   }
 
   getOmniPolicyToolsSettings(): OmniPolicyToolsSettings | undefined {
