@@ -123,6 +123,7 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             thoughts={message.thoughts}
+            compactSummary={compactMode && message.id.startsWith('summary-')}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}

@@ -11,7 +11,7 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
   parseSlashCommand,
-} from '../../utils/commands.js';
+} from '../commands/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { MessageType } from '../types.js';

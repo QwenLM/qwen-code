@@ -583,6 +583,30 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('reads raw bytes with a relative base URL', async () => {
+      const payload = {
+        kind: 'file_bytes' as const,
+        path: 'reports/report.pdf',
+        offset: 0,
+        sizeBytes: 2,
+        returnedBytes: 2,
+        truncated: false,
+        contentBase64: Buffer.from([1, 2]).toString('base64'),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.readWorkspaceFileBytes('reports/report.pdf', {
+          offset: 0,
+          maxBytes: 2,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        '/daemon/file/bytes?path=reports%2Freport.pdf&offset=0&maxBytes=2',
+      );
+    });
+
     it('writes and edits files with JSON bodies and client identity', async () => {
       const writeResult = {
         kind: 'file_write',

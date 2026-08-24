@@ -1096,7 +1096,7 @@ Measured with a recording endpoint, on a 6-file / 115-line diff, driving one rea
 | deferral applied to subagents          | 10             | 7,758       | 84,537    |
 | `review-agent` (explicit list)         | 6              | 3,447       | 55,897    |
 
-Of the 51, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
+Of the 51 measured at the time, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
 
 The per-turn record behind the first and last rows, so the totals above can be re-derived rather than taken on trust — `system` + `messages` + `tools` is that turn's whole prompt:
 
@@ -1140,7 +1140,7 @@ The test file is on that list for a reason that is easy to miss: it imports `REV
 
 **Per-turn token counts** (the 21,178 / 3,447 / 55,897 figures) come from pointing the product at a recording OpenAI-compatible endpoint and tokenising each captured request body with cl100k. `qwen review agent-prompt --plan <plan> --roster` builds the launch prompt; one orchestrator turn launches one dimension agent, and the endpoint answers with that agent's own scripted `read_file` calls so it walks all four turns. What matters is that the record keeps the request **whole**: `qwen review mock-provider` truncates its record at 8 KB, which is smaller than a single tool block, so its log cannot be the source for these numbers.
 
-**The environment is part of the measurement.** The 51-tool arm is the product default, not a local quirk: 35 of the 51 are `computer_use__*`, and `tools.computerUse.enabled` defaults to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
+**The environment is part of the measurement.** The 51-tool arm was the product default at the time, not a local quirk: 35 of the 51 were `computer_use__*`, and `tools.computerUse.enabled` defaulted to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
 
 **Run-level figures** (688 vs 542 calls, 59.5M vs 29.5M input, the 95%/93% cache rates) need no harness at all — they are two real reviews of one PR, read back from the product's own ledger:
 
@@ -1150,3 +1150,11 @@ QWEN_HOME=/tmp/ab/home-<arm> QWEN_CODE_CLI=/tmp/ab/dist-<arm>/cli.js \
 ```
 
 Give each arm a **fresh working tree and `QWEN_HOME`**. This is the step that is easy to skip and fatal to skip: `.qwen/review-cache/pr-<n>.json` makes a second run of the same PR an incremental re-review, so it would reuse the first arm's findings and the comparison would measure nothing. The cache file is also where each run records the `lastModelId` it actually used — worth reading back rather than trusting the settings that were meant to apply.
+
+### The fix round that wrote the next round's findings (#9578)
+
+Provenance analysis of six multi-round takeover pull requests attributed each post-first-round finding to the commit that introduced the line it anchors on. Roughly **a third** of them were introduced by the fix round immediately preceding the review that found them, and the dominant shape was a **guard or branch added with no test of its own**: the deterministic gate re-runs only the tests that exist, so an unwitnessed guard passes every gate, and its hole resurfaces as a new finding one round later. The loop is therefore not merely slow to converge — a measurable share of every round's work is work the previous round created.
+
+The fix landed first on the loop side (#9578: the autofix agent must mutation-probe each new guard before it commits), and that half reaches exactly one fixer. The reviewer-side half has to reach all of them, because most pull requests are not fixed by a bot the review can configure: whoever fixes a finding — contributor, maintainer, or agent — reads only the comment. So the acceptance criterion moves into the finding itself (`fixWitness`) and into the posted comment: name the test that must go red if the fix is removed. A fixer told the criterion closes the hole in the round they are already working; a fixer not told it ships the guard and meets the criterion as a finding next round.
+
+Two properties keep the rule from costing what it saves. It **never gates reporting** — a finding whose fix cannot be pinned is filed with `N/A`, because a bar on reporting would trade rounds for missed defects, and the reviewer's own evidence rule (`witness`) is the one that governs what confirms. And it is one sentence of ordinary prose at the end of the body, not a section: the comment budget is the scarce resource this review already trims the deferral list to protect.

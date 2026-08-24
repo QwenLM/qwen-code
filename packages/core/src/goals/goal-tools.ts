@@ -45,7 +45,13 @@ export type GoalToolResult = ToolResult;
 
 type LastGoalSummary = Pick<
   GoalRecord,
-  'goalId' | 'revision' | 'status' | 'turnCount' | 'activeTimeMs' | 'lastReason'
+  | 'goalId'
+  | 'revision'
+  | 'status'
+  | 'turnCount'
+  | 'activeTimeMs'
+  | 'tokensUsed'
+  | 'lastReason'
 >;
 
 type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker'> & {
@@ -108,7 +114,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, and lastReason when one was recorded) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
+      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, and lastReason when one was recorded) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
       Kind.Read,
       {
         type: 'object',
@@ -159,6 +165,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
       status: goal.status,
       turnCount: goal.turnCount,
       activeTimeMs: goal.activeTimeMs,
+      tokensUsed: goal.tokensUsed,
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
