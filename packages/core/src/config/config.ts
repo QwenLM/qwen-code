@@ -6918,6 +6918,41 @@ export class Config {
     return this.plansDir;
   }
 
+  /**
+   * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
+   * installed by the canonical Config constructor and inherited by derived
+   * Configs through the prototype chain. Derived agent/worktree profiles
+   * rebind `targetDir` to their own workspace, but the plan file stays in
+   * the owning base's plans directory — so the containment check must
+   * compare against the plans owner's project root, not the derived
+   * workspace. A teammate whose cwd differs from the parent project root
+   * would otherwise fail the assertion, and `savePlanBestEffort` would
+   * swallow the throw into a debug warning, silently dropping the plan.
+   */
+  private getPlansAnchorTargetDir(): string {
+    // The canonical Config owns `plansDirectoryConfigured`; a derived
+    // Config that owns it is its own anchor. Otherwise walk the prototype
+    // chain to the plans-owning base.
+    if (
+      Object.prototype.hasOwnProperty.call(this, 'plansDirectoryConfigured')
+    ) {
+      return this.targetDir;
+    }
+    let current: object | null = Object.getPrototypeOf(this);
+    while (current !== null && current !== Config.prototype) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          current,
+          'plansDirectoryConfigured',
+        )
+      ) {
+        return (current as Config).targetDir;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+    return this.targetDir;
+  }
+
   private assertPlansDirWithinTargetDir(): void {
     if (!this.plansDirectoryConfigured) {
       return;
@@ -6925,7 +6960,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       this.plansDir,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }
@@ -6937,7 +6972,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       filePath,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }

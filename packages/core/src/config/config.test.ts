@@ -15,6 +15,7 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  deriveAgentConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -9675,6 +9676,59 @@ describe('setApprovalMode with folder trust', () => {
       expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
       expect(config.loadPlan()).toBe('# My Plan');
       expect(fs.readFileSync).toHaveBeenCalledWith(filePath, 'utf-8');
+    });
+
+    it('saves a plan on a derived agent config whose cwd differs from the project root', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      // A teammate's working directory outside the parent project root.
+      // The plan file still belongs to the parent's configured plans
+      // directory, so the containment assertions must anchor at the
+      // plans-owning base Config, not at the agent's workspace.
+      const { config: agentConfig } = deriveAgentConfig(
+        config,
+        '/elsewhere/agent-cwd',
+      );
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const tmpPath = `${filePath}.tmp`;
+      const storedFiles = new Map<string, string>();
+      (fs.writeFileSync as Mock).mockImplementation((pathToWrite, contents) => {
+        storedFiles.set(pathToWrite.toString(), contents.toString());
+      });
+      (fs.renameSync as Mock).mockImplementation((fromPath, toPath) => {
+        const contents = storedFiles.get(fromPath.toString());
+        if (contents === undefined) {
+          throw new Error(`missing temp file: ${fromPath.toString()}`);
+        }
+        storedFiles.set(toPath.toString(), contents);
+        storedFiles.delete(fromPath.toString());
+      });
+      (fs.readFileSync as Mock).mockImplementation((pathToRead) => {
+        const contents = storedFiles.get(pathToRead.toString());
+        if (contents === undefined) {
+          const enoent = new Error('ENOENT') as NodeJS.ErrnoException;
+          enoent.code = 'ENOENT';
+          throw enoent;
+        }
+        return contents;
+      });
+
+      expect(() => agentConfig.savePlan('# My Plan')).not.toThrow();
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(plansDir, { recursive: true });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        tmpPath,
+        '# My Plan',
+        'utf-8',
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
+      expect(agentConfig.loadPlan()).toBe('# My Plan');
+      expect(config.getTargetDir()).toBe(targetDir);
     });
 
     it('should fall back to copyFileSync when renameSync hits EXDEV', () => {
