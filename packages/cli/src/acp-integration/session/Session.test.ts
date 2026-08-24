@@ -5805,6 +5805,9 @@ describe('Session', () => {
       );
       vi.mocked(mockClient.requestPermission).mockResolvedValue({
         outcome: { outcome: 'cancelled' },
+        _meta: {
+          'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+        },
       });
 
       const result = await session.prompt({
@@ -5817,7 +5820,9 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       expect(onConfirm).toHaveBeenCalledWith(
         core.ToolConfirmationOutcome.Cancel,
-        expect.anything(),
+        expect.objectContaining({
+          cancelMessage: 'approval_ui_unavailable',
+        }),
       );
       expect(mockChat.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({

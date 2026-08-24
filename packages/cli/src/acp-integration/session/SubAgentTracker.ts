@@ -12,6 +12,7 @@ import type {
   AgentUsageEvent,
   AgentStreamTextEvent,
   ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -38,6 +39,7 @@ import {
   resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
+import { DAEMON_PERMISSION_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 
@@ -45,6 +47,14 @@ type PermissionRequester = (
   params: RequestPermissionRequest,
   signal: AbortSignal,
 ) => Promise<RequestPermissionResponse>;
+
+function permissionCancelMessageFromResponse(
+  response: RequestPermissionResponse,
+): string | undefined {
+  const reason = (response as { _meta?: Record<string, unknown> | null })
+    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+  return typeof reason === 'string' ? reason : undefined;
+}
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.
@@ -305,13 +315,19 @@ export class SubAgentTracker {
           output,
           offeredPermissionOptions,
         );
-        // Respond to subagent with the outcome
-        await event.respond(outcome, {
+        const cancelMessage =
+          outcome === ToolConfirmationOutcome.Cancel
+            ? permissionCancelMessageFromResponse(output)
+            : undefined;
+        const confirmationPayload: ToolConfirmationPayload = {
           answers:
             'answers' in output
               ? (output.answers as Record<string, string> | undefined)
               : undefined,
-        });
+          ...(cancelMessage !== undefined ? { cancelMessage } : {}),
+        };
+        // Respond to subagent with the outcome
+        await event.respond(outcome, confirmationPayload);
         if (
           outcome === ToolConfirmationOutcome.Cancel &&
           !abortSignal.aborted
