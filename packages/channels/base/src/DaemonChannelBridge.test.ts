@@ -80,6 +80,7 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
 interface FakeSession extends DaemonChannelSessionClient {
   prompt: ReturnType<typeof vi.fn>;
   uploadAttachment: ReturnType<typeof vi.fn>;
+  removeAttachment: ReturnType<typeof vi.fn>;
   events: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
@@ -96,6 +97,7 @@ function createFakeSession(
     lastEventId: undefined,
     prompt: vi.fn().mockImplementation(async () => ({})),
     uploadAttachment: vi.fn(),
+    removeAttachment: vi.fn().mockResolvedValue(true),
     events: vi.fn((opts?: { signal?: AbortSignal }) => {
       opts?.signal?.addEventListener('abort', () => events.close(), {
         once: true,
@@ -1975,6 +1977,153 @@ describe('DaemonChannelBridge', () => {
       data: { reason: 'agent exited' },
     });
     await expect(promptPromise).rejects.toThrow('aborted');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('releases prompt state when a channel image upload fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment
+      .mockRejectedValueOnce(new Error('upload failed'))
+      .mockResolvedValueOnce({
+        type: 'image',
+        attachmentId: 'image.png',
+        mimeType: 'image/png',
+        size: 12,
+      });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(
+      bridge.prompt('session-1', 'first', {
+        images: [{ data: 'first-image', mimeType: 'image/png' }],
+      }),
+    ).rejects.toThrow('upload failed');
+    expect(bridge.listSessions()).toEqual([
+      {
+        sessionId: 'session-1',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    await expect(
+      bridge.prompt('session-1', 'second', {
+        images: [{ data: 'second-image', mimeType: 'image/png' }],
+      }),
+    ).resolves.toBe('');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('removes uploaded channel images when a later upload fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment
+      .mockResolvedValueOnce({
+        type: 'image',
+        attachmentId: 'image.png',
+        mimeType: 'image/png',
+        size: 12,
+      })
+      .mockRejectedValueOnce(new Error('second upload failed'));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(
+      bridge.prompt('session-1', 'describe', {
+        images: [
+          { data: 'first-image', mimeType: 'image/png' },
+          { data: 'second-image', mimeType: 'image/jpeg' },
+        ],
+      }),
+    ).rejects.toThrow('second upload failed');
+    expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('releases prompt state before a failed upload rollback settles', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment
+      .mockResolvedValueOnce({
+        type: 'image',
+        attachmentId: 'image.png',
+        mimeType: 'image/png',
+        size: 12,
+      })
+      .mockRejectedValueOnce(new Error('second upload failed'));
+    let resolveRemoval: (removed: boolean) => void = () => {};
+    session.removeAttachment.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        resolveRemoval = resolve;
+      }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'describe', {
+      images: [
+        { data: 'first-image', mimeType: 'image/png' },
+        { data: 'second-image', mimeType: 'image/jpeg' },
+      ],
+    });
+    await waitFor(() =>
+      expect(session.removeAttachment).toHaveBeenCalledOnce(),
+    );
+    expect(bridge.listSessions()[0]?.hasActivePrompt).toBe(false);
+    resolveRemoval(true);
+    await expect(promptPromise).rejects.toThrow('second upload failed');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('normalizes channel image MIME types before uploading', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment.mockResolvedValueOnce({
+      type: 'image',
+      attachmentId: 'image.png',
+      mimeType: 'image/png',
+      size: 12,
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await bridge.prompt('session-1', 'describe', {
+      images: [{ data: 'base64-image', mimeType: 'image/png; charset=binary' }],
+    });
+    expect(session.uploadAttachment).toHaveBeenCalledWith(
+      expect.any(Blob),
+      'image.png',
+      'image/png',
+      expect.any(AbortSignal),
+    );
 
     events.close();
     bridge.stop();

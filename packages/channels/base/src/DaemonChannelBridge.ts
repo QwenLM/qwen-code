@@ -49,6 +49,7 @@ export interface DaemonChannelSessionClient {
     mimeType: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>>;
+  removeAttachment(attachmentId: string): Promise<boolean>;
   events(opts?: {
     signal?: AbortSignal;
     lastEventId?: number;
@@ -422,38 +423,48 @@ export class DaemonChannelBridge
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
-
-    const prompt: Array<Record<string, unknown>> = [];
-    const images =
-      options?.images && options.images.length > 0
-        ? options.images
-        : options?.imageBase64 && options.imageMimeType
-          ? [
-              {
-                data: options.imageBase64,
-                mimeType: options.imageMimeType,
-              },
-            ]
-          : [];
-    for (const [index, image] of images.entries()) {
-      const mimeType = image.mimeType;
-      const attachment = await session.uploadAttachment(
-        new Blob([Buffer.from(image.data, 'base64')], {
-          type: mimeType,
-        }),
-        channelImageName(mimeType, index),
-        mimeType,
-        controller.signal,
-      );
-      prompt.push(attachment);
-    }
-    prompt.push({ type: 'text', text });
-    // Always presented: the daemon validates it for the channel-turn
-    // classification as well as the display projection, and channel
-    // prompts without display text still need the classification.
-    const promptAuthorization = this.options.promptAuthorization;
+    const uploadedAttachmentIds: string[] = [];
+    let rollbackUploadedAttachments = false;
 
     try {
+      const prompt: Array<Record<string, unknown>> = [];
+      const images =
+        options?.images && options.images.length > 0
+          ? options.images
+          : options?.imageBase64 && options.imageMimeType
+            ? [
+                {
+                  data: options.imageBase64,
+                  mimeType: options.imageMimeType,
+                },
+              ]
+            : [];
+      try {
+        for (const [index, image] of images.entries()) {
+          const mimeType =
+            image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+          const attachment = await session.uploadAttachment(
+            new Blob([Buffer.from(image.data, 'base64')], {
+              type: mimeType,
+            }),
+            channelImageName(mimeType, index),
+            mimeType,
+            controller.signal,
+          );
+          prompt.push(attachment);
+          const attachmentId = getString(attachment['attachmentId']);
+          if (attachmentId) uploadedAttachmentIds.push(attachmentId);
+        }
+      } catch (error) {
+        rollbackUploadedAttachments = true;
+        throw error;
+      }
+      prompt.push({ type: 'text', text });
+      // Always presented: the daemon validates it for the channel-turn
+      // classification as well as the display projection, and channel
+      // prompts without display text still need the classification.
+      const promptAuthorization = this.options.promptAuthorization;
+
       const result = await session.prompt(
         {
           prompt,
@@ -500,6 +511,13 @@ export class DaemonChannelBridge
         this.activePromptControllers.get(sessionId) === controllers
       ) {
         this.activePromptControllers.delete(sessionId);
+      }
+      if (rollbackUploadedAttachments) {
+        await Promise.allSettled(
+          uploadedAttachmentIds.map((attachmentId) =>
+            session.removeAttachment(attachmentId),
+          ),
+        );
       }
     }
   }
