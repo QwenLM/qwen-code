@@ -266,6 +266,17 @@ describe('assign-pr-owner: workflow invariants', () => {
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
 
+  it('bootstrap-skips on a base without the script, before running node', () => {
+    const runStep = assignJob.steps.find((step) => step.run);
+    // Pin the guard's shape and ordering: an inverted guard turns every run
+    // into a silent no-op, a non-zero exit re-breaks the bootstrap PR's own
+    // check, and a node call ahead of the guard fails on the base checkout.
+    assert.match(
+      runStep.run,
+      /if \[ ! -f \.github\/scripts\/assign-pr-owner\.mjs \]; then[\s\S]*?exit 0[\s\S]*?fi[\s\S]*?node \.github\/scripts\/assign-pr-owner\.mjs\s*$/,
+    );
+  });
+
   it('defaults a manual dispatch to dry-run', () => {
     assert.equal(triggers.workflow_dispatch.inputs.dry_run.default, true);
   });
