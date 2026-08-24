@@ -260,6 +260,27 @@ function* enumerableOwnKeys(
   }
 }
 
+/**
+ * `JSON.stringify` substitutes a value with the result of calling its own
+ * `toJSON` property when that property is callable, so a callable own
+ * `toJSON` makes structural size estimation unsound and must fail closed.
+ * An accessor-backed `toJSON` fails closed like every other accessor: the
+ * estimator never reads properties whose access can have side effects.
+ *
+ * A plain-data `toJSON` key — the only shape `JSON.parse` can produce on
+ * the inbound path — is serialized as an ordinary member, so it is
+ * estimated like any other key instead of retiring the transport.
+ */
+function hasStructuralToJSONHazard(value: object): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'toJSON');
+  if (!descriptor) return false;
+  return (
+    descriptor.get !== undefined ||
+    descriptor.set !== undefined ||
+    typeof descriptor.value === 'function'
+  );
+}
+
 export function estimateTransportValueBytes(
   value: unknown,
   limitBytes: number,
@@ -314,14 +335,14 @@ export function estimateTransportValueBytes(
     } else if (typeof current === 'boolean') {
       bytes += 5;
     } else if (Array.isArray(current)) {
-      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+      if (seen.has(current) || hasStructuralToJSONHazard(current)) {
         return limitBytes + 1;
       }
       seen.add(current);
       bytes += 2;
       stack.push({ kind: 'array', value: current, index: 0 });
     } else if (isPlainRecord(current)) {
-      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+      if (seen.has(current) || hasStructuralToJSONHazard(current)) {
         return limitBytes + 1;
       }
       seen.add(current);
