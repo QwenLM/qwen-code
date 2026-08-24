@@ -195,9 +195,11 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  *   declare optional properties (some `properties` key missing from
  *   `required`). Levels where every property is required keep the
  *   constraint — there is nothing for a gateway to promote.
- * - `$schema` / `$id` metadata is dropped at every level (some gateways
- *   reject unknown keywords).
- * - Everything else passes through untouched; client-side
+ * - `$schema` / `$id` metadata is dropped at every schema level (some
+ *   gateways reject unknown keywords).
+ * - `uniqueItems` is dropped at every schema level because some
+ *   OpenAI-compatible function-calling endpoints reject it.
+ * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
  *
@@ -206,6 +208,20 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
+  const cloneJsonValue = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.map(cloneJsonValue);
+    }
+    if (typeof value !== 'object' || value === null) {
+      return value;
+    }
+    const clone: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      clone[key] = cloneJsonValue(nestedValue);
+    }
+    return clone;
+  };
+
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
       return obj;
@@ -229,7 +245,7 @@ export function relaxSchemaForFunctionCalling(
       Object.keys(properties).some((key) => !required.includes(key));
 
     for (const [key, value] of Object.entries(source)) {
-      if (key === '$schema' || key === '$id') {
+      if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
         continue;
       }
       if (
@@ -239,10 +255,22 @@ export function relaxSchemaForFunctionCalling(
       ) {
         continue;
       }
+      // These keywords contain JSON values, not nested schemas.
+      if (
+        key === 'const' ||
+        key === 'default' ||
+        key === 'enum' ||
+        key === 'example' ||
+        key === 'examples'
+      ) {
+        target[key] = cloneJsonValue(value);
+        continue;
+      }
       // `properties` / `$defs` / `definitions` are name->schema MAPS: their
       // keys are property/definition names, not JSON Schema keywords. A
-      // property literally named `$schema` or `additionalProperties` must
-      // survive — only the VALUES are schemas to relax.
+      // property literally named `$schema`, `uniqueItems`, or
+      // `additionalProperties` must survive — only the VALUES are schemas to
+      // relax.
       if (
         (key === 'properties' || key === '$defs' || key === 'definitions') &&
         typeof value === 'object' &&
