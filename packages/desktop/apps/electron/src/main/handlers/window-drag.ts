@@ -16,7 +16,7 @@ export const GUI_HANDLED_CHANNELS = [
 ] as const;
 
 const dragStates = new Map<number, WindowDragState>();
-
+const closedCleanupRegistered = new Set<number>();
 function isFinitePoint(screenX: number, screenY: number): boolean {
   return Number.isFinite(screenX) && Number.isFinite(screenY);
 }
@@ -42,6 +42,13 @@ export function registerWindowDragGuiHandlers(
         startWindowX,
         startWindowY,
       });
+      if (!closedCleanupRegistered.has(webContentsId)) {
+        closedCleanupRegistered.add(webContentsId);
+        window.once('closed', () => {
+          dragStates.delete(webContentsId);
+          closedCleanupRegistered.delete(webContentsId);
+        });
+      }
     },
   );
 
