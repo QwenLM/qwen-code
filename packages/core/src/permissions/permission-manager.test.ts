@@ -2743,6 +2743,45 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('structured_output')).toBe(true);
     });
 
+    it('plan-mode lifecycle tools are exempt from the allowlist (#9827)', async () => {
+      // Under the exact reporter configuration the plan-mode system reminder
+      // still instructs the model to call exit_plan_mode, so the sanctioned
+      // plan-flow tools must stay registered. Same synthetic-system-tool
+      // exemption class as structured_output.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'ReadFile',
+            'WriteFile',
+            'Edit',
+            'Grep',
+            'Glob',
+            'ListFiles',
+            'Shell',
+            'WebFetch',
+          ],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(true);
+      expect(await pm.isToolEnabled('enter_plan_mode')).toBe(true);
+      expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
+      // Unrelated unlisted built-ins stay gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('a whole-tool deny rule still wins over the plan-mode exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['exit_plan_mode'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(false);
+    });
+
     it('session-granted allow rules extend membership but never activate the allowlist', async () => {
       // No configured allow rules → allowlist must stay inactive even after
       // a mid-session "Always allow" / skill allowedTools grant, or one

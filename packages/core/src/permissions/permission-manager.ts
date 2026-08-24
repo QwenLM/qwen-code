@@ -633,6 +633,22 @@ export class PermissionManager {
   ]);
 
   /**
+   * Synthetic plan-mode lifecycle tools that must stay registered even under
+   * an active `permissions.allow` registry allowlist. The plan-mode system
+   * reminder instructs the model to present its plan by calling
+   * `exit_plan_mode`, and `enter_plan_mode` / `ask_user_question` are the
+   * sanctioned plan-flow entry and clarification tools; dropping their
+   * schemas makes the plan flow impossible to complete (#9827). They belong
+   * to the same exemption class as `structured_output` and the "synthetic
+   * system tools" the CORE_TOOLS docstring names — deny rules still apply.
+   */
+  private static readonly PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
+    ToolNames.EXIT_PLAN_MODE,
+    ToolNames.ENTER_PLAN_MODE,
+    ToolNames.ASK_USER_QUESTION,
+  ]);
+
+  /**
    * Check if a tool is a core tool subject to the coreTools allowlist check.
    */
   private isCoreTool(toolName: string): boolean {
@@ -675,9 +691,14 @@ export class PermissionManager {
     // - `structured_output`: the synthetic terminal contract for
     //   `--json-schema` runs; removing it leaves such runs with no way to
     //   finish (deny rules still apply to it).
+    // - Plan-mode lifecycle tools (`exit_plan_mode` / `enter_plan_mode` /
+    //   `ask_user_question`): the plan-mode system reminder tells the model
+    //   to call `exit_plan_mode` to present a plan, so their schemas must
+    //   reach the model for the sanctioned plan flow to complete (#9827).
     if (
       this.permissionsAllowListActive &&
       canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
+      !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
       !canonicalName.startsWith('mcp__') &&
       !this.isCoveredByAllowRule(canonicalName)
     ) {
