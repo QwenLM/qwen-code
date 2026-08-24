@@ -125,6 +125,7 @@ function runAssign(dryRun, options = {}) {
     zeroLoadOwner = 'DennisYu07',
     editExit = 0,
     editErr = '',
+    expectExit = 0,
   } = options;
   const dir = mkdtempSync(join(tmpdir(), 'assign-pr-owner-'));
   tempDirs.push(dir);
@@ -162,7 +163,7 @@ esac
       DRY_RUN: String(dryRun),
     },
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, expectExit, result.stderr);
   return { log: readFileSync(log, 'utf8'), stdout: result.stdout };
 }
 
@@ -228,6 +229,15 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.doesNotMatch(stdout, /assigned @/);
     assert.match(stdout, /token cannot assign/);
+    assert.match(log, /pr edit/);
+  });
+
+  it('re-throws a non-permission pr edit failure instead of swallowing it', () => {
+    const { log } = runAssign(false, {
+      editExit: 1,
+      editErr: 'network error',
+      expectExit: 1,
+    });
     assert.match(log, /pr edit/);
   });
 });
