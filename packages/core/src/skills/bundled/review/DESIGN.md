@@ -679,7 +679,7 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 - **A `--quick` boolean:** two modes, but "quick" hides what is and isn't checked (rules? cross-file? build?).
 - **Three levels (chosen):** **low** = 3-6 directed angles (per `plan.budget.inlineAngles`) plus a gap sweep, all in the orchestrator's own context over the chunk plan — hunk-visible bugs only, ≤10 unverified findings. **medium** = the high pipeline minus its most expensive passes: the parallel finder fan-out over a reduced dimension set (no adversarial personas, no Agent 8), build & test, and a single verification pass — verified findings, Approve capped at Comment, no reverse audit. **high** = the full pipeline, unchanged.
 
-**Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
+**Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low and `--topology minimal` alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
 
 - Labeled **unverified**; no Approve/Request-changes verdict is emitted. A verdict is a claim the pipeline earns in Steps 4–5; a quick pass claims findings, not absence of findings.
 - Never posts to the PR: `--comment` forces high, and a "post comments" follow-up after a quick pass is declined.

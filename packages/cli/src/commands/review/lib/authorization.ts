@@ -355,11 +355,24 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
 
   const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
   if (!verdict.comment.effective) {
-    // The refusal must name the REAL blocker. When comment was requested —
-    // by the flag or the standing `review.comment` setting — but the target
-    // is not a PR, effective is false because the arguments name no pull
-    // request to bind the write to; blaming a missing `--comment` flag the
-    // operator never typed (and implying typing one would fix it) misdirects.
+    // The refusal must name the REAL blocker. A minimal-topology record can
+    // name its PR perfectly and still refuse here — the arm is terminal-only
+    // — so the topology is the blocker, and the target-shape wording below
+    // would send the operator to fix a target problem that does not exist.
+    if (verdict.topology === 'minimal') {
+      return {
+        ok: false,
+        why:
+          `the review arguments (${JSON.stringify(raw.trim())}) ran with ` +
+          '`--topology minimal`, which is terminal-only and cannot authorise ' +
+          'posting — re-run the review without it',
+      };
+    }
+    // When comment was requested — by the flag or the standing
+    // `review.comment` setting — but the target is not a PR, effective is
+    // false because the arguments name no pull request to bind the write to;
+    // blaming a missing `--comment` flag the operator never typed (and
+    // implying typing one would fix it) misdirects.
     const commentRequested =
       verdict.comment.requested || req.defaultComment === true;
     return {

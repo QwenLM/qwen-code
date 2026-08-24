@@ -740,15 +740,18 @@ export function parseReviewArgs(
           (k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token),
         )?.token
       : undefined;
+  // Each flag's deferred-warning list, keyed by the flag an invalid value
+  // arrived as; resolved inside the guard below, where `invalidValueOf` is
+  // known to be set.
+  const issueListFor = {
+    '--effort': effortIssues,
+    '--severity-floor': floorIssues,
+    '--topology': topologyIssues,
+  };
   let rescuedPr = false;
   for (const k of kept) {
-    const issues =
-      k.invalidValueOf === '--effort'
-        ? effortIssues
-        : k.invalidValueOf === '--severity-floor'
-          ? floorIssues
-          : topologyIssues;
     if (k.invalidValueOf !== undefined) {
+      const issues = issueListFor[k.invalidValueOf];
       const survives = isPrShaped(k.token)
         ? !hasValidCandidate && distinctPr.size === 1
         : soleCandidate;
@@ -850,9 +853,14 @@ export function parseReviewArgs(
   } else if (commentRequested && isPr && isMinimal) {
     // Only when minimal is THE reason a would-be-effective comment is
     // suppressed: on a non-PR target the comment does not apply anyway, and
-    // that case keeps its usual handling above.
+    // that case keeps its usual handling above. The text names the source
+    // the request actually came from, the same distinction the
+    // forced-by-comment warning makes: a setting-driven operator told the
+    // `--comment` flag is ignored goes hunting a flag they never typed.
     warnings.push(
-      'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
+      commentRequestedByFlag
+        ? 'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.'
+        : 'Warning: the `review.comment` setting is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
     );
   }
 

@@ -932,6 +932,74 @@ describe('parseReviewArgs — --topology (the minimal-prompt A/B arm)', () => {
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('default');
   });
+
+  it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
+    // Sibling probes pin this for --effort/--severity-floor (the round-8
+    // regression); the topology copy must not diverge. Deleting the
+    // equals-form rescue branch reviews the local tree instead of PR 6711.
+    expect(parseReviewArgs('--topology=6711').target).toEqual({
+      type: 'pr-number',
+      number: 6711,
+    });
+  });
+
+  it('a quoted-empty value is consumed as missing, never an empty-string target', () => {
+    // Deleting the consumption branch leaves '' as the sole candidate, and
+    // it classifies as an empty-string file target.
+    const bare = parseReviewArgs('--topology ""');
+    expect(bare.target).toEqual({ type: 'local' });
+    expect(
+      bare.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const afterTarget = parseReviewArgs('6711 --topology ""');
+    expect(afterTarget.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      afterTarget.warnings.some((w) =>
+        w.includes('--topology requires a value'),
+      ),
+    ).toBe(true);
+  });
+
+  it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
+    // Deleting the branch eats the following token into the kept pool, so
+    // `--comment` never registers.
+    const flagFinal = parseReviewArgs('6711 --topology');
+    expect(flagFinal.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(flagFinal.topology).toBe('auto');
+    expect(
+      flagFinal.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const followed = parseReviewArgs('6711 --topology --comment');
+    expect(followed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(followed.comment.requested).toBe(true);
+    expect(followed.topology).toBe('auto');
+    expect(
+      followed.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+  });
+
+  it('minimal gates the review.comment setting too, and the warning names it', () => {
+    // The suppression gate is written over the SETTING-OR-FLAG request, so a
+    // settings-driven comment is gated exactly like a flagged one — pinning
+    // `effective: false` here witnesses the gate itself: narrowing it to the
+    // flag alone would let the terminal-only arm post while every flag-based
+    // test stays green. And the warning must name the setting, not a flag
+    // the operator never typed — the forced-by-comment warning makes the
+    // same distinction.
+    const got = parseReviewArgs('6711 --topology minimal', { comment: true });
+    expect(got.comment.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('`review.comment` setting') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('`--comment` is ignored'))).toBe(
+      false,
+    );
+  });
 });
 
 describe('parseReviewArgs — settings-provided defaults', () => {

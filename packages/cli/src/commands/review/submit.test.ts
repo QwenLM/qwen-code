@@ -597,6 +597,33 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     );
   });
 
+  it('a minimal-topology record names the topology, not a missing PR', () => {
+    // `--topology minimal` is a third cause of `comment.effective === false`
+    // beside the two the refusal wording knew about. The record names its PR
+    // perfectly, so the target-shape message is factually wrong and sends the
+    // operator to fix a target problem that does not exist — re-running with
+    // identical arguments refuses again for the unnamed reason. The topology
+    // is the REAL blocker; name it.
+    const byFlag = authFor('123 --topology minimal --comment');
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('`--topology minimal`');
+    expect(byFlag.why).not.toContain('do not name a');
+
+    const bySetting = authFor('123 --topology minimal', {
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain('`--topology minimal`');
+    expect(bySetting.why).not.toContain('do not name a');
+
+    // No comment source at all: the topology is STILL the blocker to name —
+    // even a typed --comment would not lift the refusal, so the missing-flag
+    // wording would bury the fact that the topology bars every post.
+    const neither = authFor('123 --topology minimal');
+    expect(neither.ok).toBe(false);
+    expect(neither.why).toContain('`--topology minimal`');
+  });
+
   it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
     // With `review.comment` on, telling the operator to re-run with
     // `--comment` misdirects: the blocker is that no recorded invocation
