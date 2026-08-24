@@ -93,6 +93,19 @@ describe('build-and-publish-image workflow', () => {
     expect(workflow).toContain('PUSH_IMAGE: |-');
   });
 
+  it('pins the PUSH_IMAGE value and the login gate at the definition site', () => {
+    // Pinning only the key's existence lets `${{ false }}` pass: login is
+    // skipped, both builds run with push: false, the job concludes green,
+    // and file-failure-issue never fires — a released version would ship
+    // with no GHCR image, silently reproducing incident #9898.
+    expect(workflow).toContain(
+      "PUSH_IMAGE: |-\n        ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}",
+    );
+    expect(workflow).toContain(
+      "- name: 'Log in to the Container registry'\n        if: \"${{ env.PUSH_IMAGE == 'true' }}\"",
+    );
+  });
+
   it('gates the failure-issue job on the exported publish decision', () => {
     // The publish predicate lives only in PUSH_IMAGE. Job-level `if:` cannot
     // read the env context, so the decision reaches the reporting job through
