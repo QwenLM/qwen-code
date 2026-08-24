@@ -337,25 +337,15 @@ describe('exitCodeFor', () => {
     expect(exitCodeFor(false, 'REQUEST_CHANGES', 'request-changes')).toBe(1);
   });
 
-  it('blocks a stop round only on DATED standing blockers', () => {
-    // R8-1: a decided stop completes with `event: null`, so `--fail-on`
-    // could never fire on a stop round — including the exact stops SKILL.md
-    // defines as carrying standing blockers. A stop blocks now when the
-    // capture DATED the ledger's open Criticals against the tree
-    // (`standingBlockers` — the count the caller passes only when
-    // `blockersStand` held), never on a bare count: undated, the ledger's
-    // `open` entry survives a fix-and-commit for ever (a stop never
-    // rewrites it), and mapping it straight to REQUEST_CHANGES produced a
-    // failure no action could clear.
-    expect(exitCodeFor(true, null, 'request-changes', 2)).toBe(3);
-    expect(exitCodeFor(true, null, 'request-changes', 0)).toBe(0);
-    expect(exitCodeFor(true, null, 'none', 2)).toBe(0);
-    // An incomplete run never blocks, whatever a sidecar carried.
-    expect(exitCodeFor(false, null, 'request-changes', 2)).toBe(1);
-    // A composed verdict's round has no standing-blocker state: the count
-    // must not leak onto a non-null event.
-    expect(exitCodeFor(true, 'COMMENT', 'request-changes', 2)).toBe(0);
-    expect(exitCodeFor(true, 'REQUEST_CHANGES', 'request-changes', 0)).toBe(3);
+  it('exits 0 on a decided stop round, whatever the ledger still holds', () => {
+    // A stop completes with `event: null` and no synthesised verdict: the
+    // ledger a stop renders is rewritten only by a cache-writing round, so a
+    // blocker fixed and committed stays `open` there — an exit code keyed on
+    // it was a failure no action cleared. The rendered list still names the
+    // entries; the gate waits for a composed verdict.
+    expect(exitCodeFor(true, null, 'request-changes')).toBe(0);
+    expect(exitCodeFor(true, null, 'none')).toBe(0);
+    expect(exitCodeFor(false, null, 'request-changes')).toBe(1);
   });
 });
 
@@ -1206,7 +1196,6 @@ describe('review run (handler)', () => {
           join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
           JSON.stringify({
             reason: 'clean-tree',
-            openBlockers: 0,
             runId: opts.env['QWEN_REVIEW_RUN_ID'],
           }),
           'utf8',
@@ -1225,7 +1214,6 @@ describe('review run (handler)', () => {
       join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
       JSON.stringify({
         reason: 'scope-emptied',
-        openBlockers: 2,
         runId: 'another-run',
       }),
       'utf8',
@@ -1256,7 +1244,6 @@ describe('review run (handler)', () => {
           join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
           JSON.stringify({
             reason: 'clean-tree',
-            openBlockers: 0,
             runId: opts.env['QWEN_REVIEW_RUN_ID'],
           }),
           'utf8',
@@ -1277,14 +1264,11 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(0);
   });
 
-  it('exits 3 under --fail-on for a stop whose blockers still stand', async () => {
-    // R8-1: a decided stop completes with `event: null`, so `--fail-on`
-    // could never fire on a stop round — including the exact stops SKILL.md
-    // defines as carrying standing blockers (the common shape: a user who
-    // commits without fixing a Critical, leaving a permanently clean tree).
-    // The sidecar carries the ledger's open-Critical count DATED against
-    // the tree by the capture; a standing count blocks exactly like a
-    // REQUEST_CHANGES event.
+  it('exits 0 under --fail-on for a decided stop round', async () => {
+    // A stop composes no verdict and synthesises none: the ledger it renders
+    // is rewritten only by a cache-writing round, so a blocker fixed and
+    // committed stays `open` there — gating on it was a failure no action
+    // could clear. The gate fires only on a composed REQUEST_CHANGES.
     spawnMock.mockImplementation(
       (
         _cmd: unknown,
@@ -1298,8 +1282,6 @@ describe('review run (handler)', () => {
             join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
             JSON.stringify({
               reason: 'clean-tree',
-              openBlockers: 1,
-              blockersStand: true,
               runId: opts.env['QWEN_REVIEW_RUN_ID'],
             }),
             'utf8',
@@ -1315,48 +1297,6 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
     expect(result.event).toBeNull();
-    expect(result.openBlockers).toBe(1);
-    expect(result.blockersStand).toBe(true);
-    expect(process.exitCode).toBe(3);
-  });
-
-  it('does not block a stop whose blockers no longer match the tree', async () => {
-    // The other half of the dating: the user FIXED the blocker and
-    // committed, so the ledger still says `open` (a stop round never
-    // rewrites it) but the capture dated the recorded state as moved.
-    // Blocking here would fail the gate over code that no longer contains
-    // the defect — a false failure no action clears.
-    spawnMock.mockImplementation(
-      (
-        _cmd: unknown,
-        _argv: unknown,
-        opts: { env: Record<string, string> },
-      ) => {
-        const child = new FakeChild();
-        setImmediate(() => {
-          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-          writeFileSync(
-            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
-            JSON.stringify({
-              reason: 'clean-tree',
-              openBlockers: 1,
-              blockersStand: false,
-              runId: opts.env['QWEN_REVIEW_RUN_ID'],
-            }),
-            'utf8',
-          );
-          child.emit('close', 0);
-        });
-        return child;
-      },
-    );
-
-    await runHandler({ 'fail-on': 'request-changes' });
-
-    const result = JSON.parse(outs.join(''));
-    expect(result.completed).toBe(true);
-    expect(result.openBlockers).toBe(1);
-    expect(result.blockersStand).toBe(false);
     expect(process.exitCode).toBe(0);
   });
 });

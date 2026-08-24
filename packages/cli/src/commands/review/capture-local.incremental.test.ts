@@ -21,14 +21,12 @@ import {
   realpathSync,
   symlinkSync,
 } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stateIdOf, UNHASHABLE } from './lib/local-anchor.js';
+import { stateIdOf } from './lib/local-anchor.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
-import { safeTarget } from '../../utils/paths.js';
 import type { IncrementalScope } from './lib/report.js';
 
 // The refusal contract is "every reason is said out loud" and SKILL.md
@@ -139,32 +137,6 @@ function promoteCandidate(plan: Plan, model: string): string {
     JSON.stringify({ ...candidate, lastModelId: model }),
   );
   return cachePath;
-}
-
-/** Append an open Critical to a promoted cache's ledger. */
-function recordOpenCritical(cachePath: string): void {
-  const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
-    string,
-    unknown
-  >;
-  cache['findings'] = [
-    {
-      id: 'R1-1',
-      severity: 'Critical',
-      status: 'open',
-      file: CHANGED,
-      line: 1,
-      title: 'blocker',
-    },
-  ];
-  writeFileSync(cachePath, JSON.stringify(cache));
-}
-
-/** The stop sidecar the last capture wrote. */
-function stopSidecar(): Record<string, unknown> {
-  return JSON.parse(
-    readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
-  ) as Record<string, unknown>;
 }
 
 describe('capture-local — incremental local rounds', () => {
@@ -451,11 +423,11 @@ describe('capture-local — round-2 regressions from the stop work', () => {
   });
 
   it('stamps the stop sidecar with the run that asked for it', () => {
-    // The sidecar decides `completed` and can carry a REQUEST_CHANGES event,
-    // while its NAME is the flattened target token — which is not injective,
-    // so a concurrent review whose path flattens alike writes the same file
-    // and its blocker count would decide the other run's exit code. The epoch
-    // fence separates EARLIER runs, not concurrent ones; only a nonce does.
+    // The sidecar decides `completed`, while its NAME is the flattened
+    // target token — which is not injective, so a concurrent review whose
+    // path flattens alike writes the same file and would decide the other
+    // run's completion. The epoch fence separates EARLIER runs, not
+    // concurrent ones; only a nonce does.
     seedDirtyTree();
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'all committed');
@@ -618,32 +590,15 @@ describe('capture-local — the decided stops are machine-readable', () => {
     expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
   });
 
-  it('publishes the stop at a name the PARENT can predict, with blocker state', () => {
+  it('publishes the stop at a name the PARENT can predict', () => {
     // `--out` is the orchestrator's to choose — it must be, because the
     // CLI-derived target token does not exist yet at Step 1 — so a parent
     // polling the plan by name found nothing for every file review and
     // reported "Review did not complete" over a decided round. The sidecar is
     // named from the same target the parent derives.
-    //
-    // It carries the ledger's open blocker count too. A decided stop is not
-    // automatically a clean one: the common shape is a user who committed
-    // without fixing a Critical, and reported with no verdict at all
-    // `--fail-on request-changes` returned 0 over a blocker the round itself
-    // was calling standing.
     seedDirtyTree();
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'all committed');
-    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
-    writeFileSync(
-      join(repo, '.qwen/review-cache/local.json'),
-      JSON.stringify({
-        findings: [
-          { id: 'R1-1', severity: 'Critical', status: 'open' },
-          { id: 'R1-2', severity: 'Critical', status: 'fixed' },
-          { id: 'R1-3', severity: 'Suggestion', status: 'open' },
-        ],
-      }),
-    );
 
     // Deliberately NOT the name a parent could guess.
     const out = join(repo, 'somewhere-else.json');
@@ -657,226 +612,6 @@ describe('capture-local — the decided stops are machine-readable', () => {
       readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(sidecar['reason']).toBe('clean-tree');
-    // Only the OPEN Criticals count: a fixed one is gone and a Suggestion
-    // blocks nothing.
-    expect(sidecar['openBlockers']).toBe(1);
-    // …but NOT dated: this hand-written cache carries no `files` map, so the
-    // recorded state cannot be compared against the tree. An undatable
-    // blocker fails OPEN — a false pass beside the rendered blocker list,
-    // never a false failure no action clears.
-    expect(sidecar['blockersStand']).toBe(false);
-  });
-
-  it('dates stop blockers: standing after a commit WITHOUT the fix', () => {
-    // R8-1: round 1 records an open Critical, Step 8 promotes the cache,
-    // the user commits WITHOUT fixing it — a permanently clean tree. Every
-    // later stop rendered the blocker as standing while `qwen review run
-    // --fail-on` exited 0: the gate passed the moment the author stopped
-    // touching the tree. The sidecar must carry those blockers as STANDING
-    // — the recorded state still byte-compares equal to the tree — so the
-    // gate can block on them.
-    seedDirtyTree();
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: not standing once the fix is committed', () => {
-    // The stale-ledger half: the user FIXED the blocker and committed. The
-    // ledger still says `open` — a stop round never rewrites it — but the
-    // recorded state no longer matches the tree, so the blockers must not
-    // stand: a gate that blocked here would fail over code that no longer
-    // contains the defect, and nothing the user does would clear it.
-    seedDirtyTree();
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    write(CHANGED, 'export const v = 2;\n'); // the fix
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'fix the blocker');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    // The ledger is untouched by a stop…
-    expect(sidecar['openBlockers']).toBe(1);
-    // …but the recorded state moved, so the blockers do not stand.
-    expect(sidecar['blockersStand']).toBe(false);
-  });
-
-  it('dates stop blockers: not standing once the fix lands in a NEW file', () => {
-    // R9-1, direction 1: a blocker's fix does not have to move the blocker's
-    // own bytes — "add the missing test" adds a file. The whole-state
-    // comparison keyed on the cached bytes alone: the new file was in neither
-    // `cache.files` nor the comparison, so the blocker "stood" for ever and
-    // `--fail-on request-changes` exited 3 on every stop round — a failure
-    // no action clears. A file added since the cached round is fix material a
-    // stop cannot attribute, so it withholds every blocker.
-    seedDirtyTree();
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    write('src/changed.test.ts', 'export const t = 1;\n'); // fix = NEW file
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'fix by adding a file');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(false);
-  });
-
-  it('dates stop blockers per blocker: an unhashable sibling does not withhold them', () => {
-    // R9-1, direction 2: a path UNHASHABLE on BOTH sides (here a pending
-    // deletion) never equals itself in `changedSince`, so the whole-state
-    // comparison withheld every blocker for ever — with the blocker's own
-    // file byte-equal. `movedSince` semantics: unhashable both sides is
-    // "still unreadable", not "moved", and a blocker dates against its OWN
-    // file, never a sibling's.
-    seedDirtyTree();
-    write('src/victim.ts', 'export const victim = 0;\n');
-    git('add', 'src/victim.ts'); // commit victim ONLY; the dirt stays dirty
-    git('commit', '-q', '--no-verify', '-m', 'base with victim');
-    rmSync(join(repo, 'src/victim.ts')); // a pending deletion, seen by r1
-
-    const first = capture({ model: 'model-a' });
-    const candidate = JSON.parse(
-      readFileSync(first.cacheCandidatePath, 'utf8'),
-    ) as { files: Record<string, string> };
-    expect(candidate.files['src/victim.ts']).toBe(UNHASHABLE);
-    const cachePath = promoteCandidate(first, 'model-a');
-    recordOpenCritical(cachePath);
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: an UNHASHABLE blocker is undatable, so it does not stand for ever', () => {
-    // R10-3: no user action ever changes an UNHASHABLE↔UNHASHABLE
-    // comparison — the user's fix commits the deletion (the path is still
-    // absent), or reverts the bump (still a gitlink); `lstat` still fails on
-    // both sides. Letting such a blocker stand made `--fail-on
-    // request-changes` exit 3 on every stop round FOR EVER, over a fix that
-    // had already landed — a false failure no action clears, which the
-    // promise documented beside the date forbids. It is undatable, and an
-    // undatable blocker leans the way the others do: a false PASS beside the
-    // rendered blocker list — the stop still names it — never a permanent
-    // red gate.
-    seedDirtyTree();
-    write('src/victim.ts', 'export const victim = 0;\n');
-    git('add', 'src/victim.ts'); // commit victim ONLY; the dirt stays dirty
-    git('commit', '-q', '--no-verify', '-m', 'base with victim');
-    rmSync(join(repo, 'src/victim.ts')); // r1 hashes it UNHASHABLE
-
-    const first = capture({ model: 'model-a' });
-    const cachePath = promoteCandidate(first, 'model-a');
-    // The blocker is ON the unhashable path itself.
-    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    cache['findings'] = [
-      {
-        id: 'R1-1',
-        severity: 'Critical',
-        status: 'open',
-        file: 'src/victim.ts',
-        line: 1,
-        title: 'blocker',
-      },
-    ];
-    writeFileSync(cachePath, JSON.stringify(cache));
-    // The user's fix — commit the deletion — lands, and the tree goes clean.
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'fix: commit the deletion');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    // The ledger is untouched by a stop — the blocker still renders…
-    expect(sidecar['openBlockers']).toBe(1);
-    // …but its recorded identity is UNHASHABLE: undatable, so it does not
-    // stand, and the gate is not red for ever over the landed fix.
-    expect(sidecar['blockersStand']).toBe(false);
-  });
-
-  it('dates stop blockers: an empty files map from a no-diff whole-file review', () => {
-    // R9-1, direction 2, second arm: a file review whose capture had no diff
-    // hashes no plan paths, so Step 8 promotes `files: {}` over a round that
-    // reviewed the file WHOLE. The whole-state date returned false
-    // unconditionally on the empty map — the gate exited 0 for ever while
-    // the stop rendered the blocker as standing. A no-diff round reviewed
-    // bytes equal to the cached HEAD's tree, so a file the empty map does not
-    // name dates against that tree instead.
-    write('.gitignore', '.qwen/\nplan.json\n');
-    write('src/foo.ts', 'export const foo = 0;\n');
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'base');
-    const headSha = git('rev-parse', 'HEAD');
-    const target = safeTarget('src/foo.ts');
-    const digest = createHash('sha256')
-      .update('src/foo.ts')
-      .digest('hex')
-      .slice(0, 8);
-    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
-    writeFileSync(
-      join(repo, `.qwen/review-cache/file-${target}-${digest}.json`),
-      JSON.stringify({
-        v: 1,
-        target,
-        source: 'src/foo.ts',
-        headSha,
-        files: {},
-        stateId: stateIdOf(headSha, {}),
-        lastModelId: 'model-a',
-        untracked: true,
-        findings: [
-          {
-            id: 'R1-1',
-            severity: 'Critical',
-            status: 'open',
-            file: 'src/foo.ts',
-            line: 1,
-            title: 'blocker',
-          },
-        ],
-      }),
-    );
-
-    capture({
-      file: 'src/foo.ts',
-      cache: join(repo, '.qwen/review-cache'),
-      model: 'model-a',
-    });
-    const sidecar = JSON.parse(
-      readFileSync(
-        join(repo, `.qwen/tmp/qwen-review-${target}-stop.json`),
-        'utf8',
-      ),
-    ) as Record<string, unknown>;
-    expect(sidecar['reason']).toBe('unchanged-since-last-round');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
   });
 
   it('marks a genuinely clean tree', () => {
@@ -1460,7 +1195,7 @@ describe('capture-local — an ignore rule between rounds is visibility, not del
   });
 });
 
-describe('capture-local — round-10 blocker-date and anchor shapes', () => {
+describe('capture-local — round-10 anchor shapes', () => {
   it('refuses the anchor when a vanished tracked path\u2019s bytes diverge from HEAD', () => {
     // R10-1: `git update-index --assume-unchanged` hides the edited tracked
     // file from `git diff HEAD` while `ls-tree HEAD` still names it, so the
@@ -1490,221 +1225,5 @@ describe('capture-local — round-10 blocker-date and anchor shapes', () => {
     git('checkout', '--', CHANGED, CALLER, BYSTANDER);
     const third = capture({ cache: cachePath, model: 'model-a' });
     expect(third['nothingToReview']).toEqual({ reason: 'scope-emptied' });
-  });
-
-  it('dates stop blockers on bytes: a rendering-only move does not unseat them', () => {
-    // R10-2: the date\u2019s contract is byte equality, but it used to compare
-    // the FULL rendering-qualified identity. An `.git/info/attributes` edit
-    // is not worktree content: none of the file\u2019s bytes move and nothing
-    // appears in `git diff HEAD`, yet the identity\u2019s suffix changed, the
-    // standing blocker read as "moved", and `--fail-on request-changes`
-    // exited 0 while the stop still rendered the Critical as open.
-    seedDirtyTree();
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    expect(stopSidecar()['blockersStand']).toBe(true);
-
-    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
-    writeFileSync(
-      join(repo, '.git', 'info', 'attributes'),
-      `${CHANGED} binary\n`,
-    );
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: two open Criticals on one file both date it', () => {
-    // R10-5: one round finding two issues in a file \u2014 or a carried
-    // standing finding beside a new one \u2014 lists the same path twice, and
-    // the date passes the list straight through. `check-attr` answers per
-    // input OCCURRENCE, so the duplicate used to append the rendering
-    // suffix twice: an identity that never matches the cache\u2019s, "moved"
-    // under every possible tree state, and `--fail-on` exited 0 for ever
-    // while the stop rendered both Criticals open.
-    seedDirtyTree();
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    cache['findings'] = [
-      {
-        id: 'R1-1',
-        severity: 'Critical',
-        status: 'open',
-        file: CHANGED,
-        line: 1,
-        title: 'blocker one',
-      },
-      {
-        id: 'R1-2',
-        severity: 'Critical',
-        status: 'open',
-        file: CHANGED,
-        line: 2,
-        title: 'blocker two',
-      },
-    ];
-    writeFileSync(cachePath, JSON.stringify(cache));
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(2);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: a pathspec-magic ledger path does not clear the gate', () => {
-    // R10-6: blocker paths come from the model-written ledger, and a name
-    // beginning `:(` is pathspec magic. `revisionIdentities` is the one
-    // pathspec-taking call that did not pin LITERAL_PATHSPECS: the magic
-    // name fataled the WHOLE `ls-tree` batch, the catch answered `{}`, and
-    // every byte-identical, perfectly datable sibling in the call read
-    // undatable \u2014 one hostile path cleared the entire gate.
-    write('.gitignore', '.qwen/\nplan.json\n');
-    write(CHANGED, 'export const v = 0;\n');
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'base');
-    const headSha = git('rev-parse', 'HEAD');
-    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
-    const cachePath = join(repo, '.qwen/review-cache/local.json');
-    // An empty files map (the no-diff whole-file review shape) sends BOTH
-    // blockers through `revisionIdentities`, where the batch death lands.
-    writeFileSync(
-      cachePath,
-      JSON.stringify({
-        v: 1,
-        target: 'local',
-        headSha,
-        files: {},
-        stateId: stateIdOf(headSha, {}),
-        lastModelId: 'model-a',
-        untracked: true,
-        findings: [
-          {
-            id: 'R1-1',
-            severity: 'Critical',
-            status: 'open',
-            file: ':(glob)notes.md',
-            line: 1,
-            title: 'hostile or malformed',
-          },
-          {
-            id: 'R1-2',
-            severity: 'Critical',
-            status: 'open',
-            file: CHANGED,
-            line: 1,
-            title: 'blocker',
-          },
-        ],
-      }),
-    );
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['openBlockers']).toBe(2);
-    // The sibling dates against the cached HEAD tree and stands; the magic
-    // name is undatable, not fatal.
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: a --file cache skips the added-file veto', () => {
-    // R10-4, BYSTANDER arm: `filesAddedSince` reconstructs the population
-    // at cache time as the cache\u2019s keys plus the cached HEAD tree, but a
-    // `--file` capture pathspec-scopes BOTH halves to the single subject, so
-    // an untracked file present at cache time reads as "added since" and
-    // permanently disarmed every blocker \u2014 for file reviews the gate could
-    // effectively never fail in a working repo. A scoped cache cannot
-    // reconstruct a population it only partially saw: skip the veto there.
-    seedDirtyTree();
-    write('notes.txt', 'pre-existing untracked\n');
-    const first = capture({ file: CHANGED, model: 'model-a' });
-    const cachePath = promoteCandidate(first, 'model-a');
-    recordOpenCritical(cachePath);
-
-    const second = capture({
-      file: CHANGED,
-      cache: cachePath,
-      model: 'model-a',
-    });
-    expect(second['nothingToReview']).toEqual({
-      reason: 'unchanged-since-last-round',
-    });
-    const sidecar = JSON.parse(
-      readFileSync(
-        join(repo, `.qwen/tmp/qwen-review-${second['target']}-stop.json`),
-        'utf8',
-      ),
-    ) as Record<string, unknown>;
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: a --no-untracked cache skips the added-file veto', () => {
-    // R10-4, NO-UNTRACKED arm: the cached round never enumerated untracked
-    // files, so none of them can be dated against it \u2014 the same skip, the
-    // same reason.
-    seedDirtyTree();
-    write('notes.txt', 'pre-existing untracked\n');
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a', untracked: false }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    // `-a` stages tracked modifications only: notes.txt stays untracked.
-    git('commit', '-a', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    // The second round keeps untracked capture off — with it on, the
-    // full-capture fallback would review notes.txt as new content and never
-    // reach a stop. The veto skip under test keys on the CACHE's population,
-    // which this round's flag does not change.
-    capture({ cache: cachePath, model: 'model-a', untracked: false });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
-  });
-
-  it('dates stop blockers: the review plumbing never counts as added files', () => {
-    // R10-4, PLUMBING arm: the capture excludes its own plumbing from the
-    // hashed population, so the veto\u2019s population reconstruction must too.
-    // In a repo that does not gitignore `.qwen` the review\u2019s artifacts \u2014
-    // the cache file Step 8 wrote among them \u2014 are
-    // untracked-and-not-ignored, and counting them as "added" disarmed
-    // every blocker in every round.
-    write('.gitignore', 'plan.json\n'); // NOTE: does NOT cover .qwen/
-    write(CHANGED, 'export const v = 0;\n');
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'base');
-    write(CHANGED, 'export const v = 1;\n');
-    const cachePath = promoteCandidate(
-      capture({ model: 'model-a' }),
-      'model-a',
-    );
-    recordOpenCritical(cachePath);
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'commit without the fix');
-
-    capture({ cache: cachePath, model: 'model-a' });
-    const sidecar = stopSidecar();
-    expect(sidecar['reason']).toBe('clean-tree');
-    expect(sidecar['openBlockers']).toBe(1);
-    expect(sidecar['blockersStand']).toBe(true);
   });
 });
