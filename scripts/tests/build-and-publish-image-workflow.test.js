@@ -252,7 +252,8 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
         issues: [
           {
             number: 42,
-            title: 'Sandbox image for 1.2.3 not published: image build failed',
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
             body: '<!-- image-build-failure:1.2.3 -->\n\nHand-written note.',
           },
           { number: 43, title: 'unrelated', body: 'no marker here' },
@@ -274,7 +275,8 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
         issues: [
           {
             number: 42,
-            title: 'Sandbox image for 1.2.3 not published: image build failed',
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
             body: '<!-- image-build-failure:1.2.3 -->',
           },
         ],
@@ -283,7 +285,7 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       expect(result.calls).toContain('gh issue create');
       expect(result.calls).not.toContain('issue edit');
       expect(result.calls).toContain(
-        'Sandbox image for 4.5.6 not published: image build failed',
+        'Sandbox image for 4.5.6 not published: release build job failed',
       );
       expect(result.body).toContain('<!-- image-build-failure:4.5.6 -->');
     });

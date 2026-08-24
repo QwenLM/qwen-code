@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# File (or update) one issue per version when a sandbox image build fails.
+# File (or update) one issue per version when the sandbox image build job
+# fails. The job gate is the WHOLE build job — checkout, version processing,
+# QEMU/buildx setup, metadata extraction, registry login, or either build
+# step — so the wording below must not assert which step failed.
 #
 # The body below is the 'File or update the image-build failure issue' step
 # of the file-failure-issue job in .github/workflows/build-and-publish-image.yml.
@@ -49,13 +52,13 @@ body_file="${RUNNER_TEMP}/image-build-failure.md"
 {
   printf '%s\n' "${marker_html}"
   printf '\n'
-  printf 'The sandbox image build for release `%s` failed, so `ghcr.io/qwenlm/qwen-code:%s` was **not published**.\n' "${version}" "${version}"
+  printf 'The release build job for `%s` failed before `ghcr.io/qwenlm/qwen-code:%s` could be published.\n' "${version}" "${version}"
   printf '\n'
   printf 'Until the image exists, every sandbox-based CI lane (`/resolve`, sandboxed review, autofix) crashes with `manifest unknown` when it installs the matching npm version.\n'
   printf '\n'
   printf 'Failed run: %s\n' "${RUN_URL}"
   printf '\n'
-  printf 'Fix: rerun the failed jobs of the run above (transient buildx races such as `ETXTBSY` usually pass on retry), or dispatch `Build and Publish Docker Image` with `version=%s`, `publish=true`.\n' "${version}"
+  printf 'Fix: open the run above to see which step failed, then rerun the failed jobs (transient failures — for example buildx `ETXTBSY` races during the build steps — usually pass on retry), or dispatch `Build and Publish Docker Image` with `version=%s`, `publish=true`.\n' "${version}"
 } > "${body_file}"
 
 if [[ -n "${existing}" ]]; then
@@ -68,7 +71,7 @@ fi
 
 gh issue create \
   --repo "${REPO}" \
-  --title "Sandbox image for ${version} not published: image build failed" \
+  --title "Sandbox image for ${version} not published: release build job failed" \
   --body-file "${body_file}" \
   --label 'type/bug' \
   --label "${DEDUP_LABEL}"

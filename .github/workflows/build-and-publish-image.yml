@@ -157,9 +157,11 @@ jobs:
           build-args: |
             CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}
 
-  # One issue per version when both build attempts fail — a released npm
-  # version without a sandbox image silently breaks every sandbox-based CI
-  # lane. Covers publishing dispatches too: that is the recovery path the
+  # One issue per version when the release build job fails (the gate covers
+  # the whole job, not only the build steps — the issue wording stays
+  # step-agnostic for the same reason). A released npm version without a
+  # sandbox image silently breaks every sandbox-based CI lane. Covers
+  # publishing dispatches too: that is the recovery path the
   # issue body recommends. Logic lives in the script named below. A
   # publishing dispatch without a version input is skipped by design: the
   # build job tags such runs with its branch/sha fallback, but this job
