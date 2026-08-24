@@ -52,6 +52,16 @@ export const TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
 export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
 
 /**
+ * Trailing note `truncateAndSaveToFile` appends on its save-failure
+ * fallback shape (digest label + head/tail payload, no spilled file).
+ * Exported so consumers that recognize stub shapes (the loop guards, the
+ * batch-budget finalizer's nesting gate) parse the producer's constant
+ * instead of a hand-mirrored literal that can drift.
+ */
+export const TRUNCATION_SAVE_FAILURE_NOTE =
+  '[Note: Could not save full output to file]';
+
+/**
  * Extracts the sha256 digest a stub producer embedded for the FULL
  * pre-truncation output, anchored to a producer line: the label must start
  * its line and be followed by exactly 64 hex chars ending the line. A
@@ -87,20 +97,29 @@ export function extractAnchoredStubDigest(value: string): string | null {
 /**
  * Returns the embedded full-output digest when `text` itself is an
  * oversized-result stub produced by this module: a `<persisted-output>`
- * envelope, an unwrapped `Output too large (...)` stub, or a
- * `truncateAndSaveToFile` wrapper. Returns null for any other text. Used by
- * the batch-budget finalizer's fitText to make stub reduction idempotent
- * across nesting: the scheduler persists oversized results BEFORE the batch
- * budget runs, so a fit wrapping an already-persisted stub must carry the
- * stub's inner digest into its header instead of hashing the stub envelope,
- * which embeds a per-call unique `<toolResultsDir>/<callId>.txt` path and
- * would fingerprint every poll of an unchanged board uniquely (issue #9450).
+ * envelope, an unwrapped `Output too large (...)` stub, a
+ * `truncateAndSaveToFile` wrapper, or a digest-carrying shape that starts
+ * with the digest label itself — the save-failure fallback of
+ * `truncateAndSaveToFile` (label + head/tail payload + save-failure note)
+ * and the batch-budget finalizer's degenerate digest-line-only fits.
+ * Returns null for any other text (the anchored extraction below still
+ * requires a line-anchored full 64-hex digest, so text that merely starts
+ * with the label without one is not treated as a stub). Used by the
+ * batch-budget finalizer's fitText to make stub reduction idempotent across
+ * nesting: the scheduler persists oversized results BEFORE the batch budget
+ * runs, so a fit wrapping an already-persisted stub must carry the stub's
+ * inner digest into its header instead of hashing the stub envelope, which
+ * embeds a per-call unique `<toolResultsDir>/<callId>.txt` path (or, for
+ * the label-starting shapes, drops the digest that is the only part of the
+ * shape that survives a further fit) and would fingerprint every poll of an
+ * unchanged board uniquely (issue #9450).
  */
 export function extractPersistedStubDigest(text: string): string | null {
   const isProducerStub =
     text.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
     text.startsWith(OUTPUT_TOO_LARGE_PREFIX) ||
-    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX);
+    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX) ||
+    text.startsWith(FULL_OUTPUT_DIGEST_LABEL);
   if (!isProducerStub) return null;
   return extractAnchoredStubDigest(text);
 }
@@ -298,7 +317,7 @@ ${TRUNCATED_PART_MARKER}${truncatedContent}`;
     // Keep the digest even on the unsaved path: the fingerprinting
     // consumers must not regress to the head+tail-only payload here.
     return {
-      content: `${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}\n${truncatedContent}\n[Note: Could not save full output to file]`,
+      content: `${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}\n${truncatedContent}\n${TRUNCATION_SAVE_FAILURE_NOTE}`,
     };
   }
 }

@@ -167,6 +167,19 @@ function allocateTextBudget(lengths: number[], budget: number): number[] {
     const share = Math.floor(remaining / active.length);
     const fixed = active.filter((index) => lengths[index] <= share);
     if (fixed.length === 0) {
+      if (share === 0) {
+        // Budget smaller than the active-slot count: a zero-char slot fits
+        // to '' regardless of content, and hashing that constant would
+        // fingerprint every over-budget result identically — a CHANGING
+        // board would false-halt on the result-aware guards (issue #9450).
+        // Keep every active slot at >= 1 char (digest chars, content-
+        // dependent from the first char) even when that overshoots a
+        // sub-slot-count budget by less than one char per slot.
+        for (const index of active) {
+          allocations[index] = 1;
+        }
+        break;
+      }
       for (const index of active) {
         allocations[index] = share;
       }

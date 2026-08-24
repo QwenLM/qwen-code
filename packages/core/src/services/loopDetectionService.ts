@@ -28,6 +28,7 @@ import {
   PERSISTED_PREVIEW_MARKER,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   TRUNCATED_PART_MARKER,
+  TRUNCATION_SAVE_FAILURE_NOTE,
 } from '../utils/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
@@ -298,7 +299,28 @@ function stripPersistenceEnvelope(value: string): string {
   const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
     value.startsWith(prefix),
   );
-  if (!isProducerStub) {
+  // Digest-carrying shapes that start with the digest label itself, so no
+  // producer prefix recognizes them: the batch-budget finalizer's
+  // degenerate band that returns exactly the `Full output sha256: <64-hex>`
+  // line when the per-slot allocation holds the digest line but not the
+  // full fit header, and truncateAndSaveToFile's save-failure fallback
+  // (label + head/tail payload + save-failure note). Both carry the full
+  // pre-truncation digest and must reduce to it exactly like the prefixed
+  // stubs, or an over-budget representation of a board never collides with
+  // its under-budget (or successfully-spilled) representation: a frozen
+  // board oscillating across the budget boundary would fingerprint
+  // differently per poll despite byte-identical content, the
+  // consecutive-identical streak would never accumulate, and the cap's
+  // stuck signal would never arm (issue #9450). Recognition stays
+  // shape-exact — the label alone is not enough: board content merely
+  // STARTING with the label carries no producer digest and must keep
+  // fingerprinting as ordinary content (the injection rationale above).
+  const isDigestCarryingShape =
+    !isProducerStub &&
+    value.startsWith(FULL_OUTPUT_DIGEST_LABEL) &&
+    (value.length === FULL_OUTPUT_DIGEST_LABEL.length + 64 ||
+      value.endsWith(TRUNCATION_SAVE_FAILURE_NOTE));
+  if (!isProducerStub && !isDigestCarryingShape) {
     return `<persisted-stub>sha256:${createHash('sha256')
       .update(value)
       .digest('hex')}`;
@@ -307,6 +329,15 @@ function stripPersistenceEnvelope(value: string): string {
   const digest = extractAnchoredStubDigest(value);
   if (digest !== null) {
     return `<persisted-stub>sha256:${digest}`;
+  }
+  if (!isProducerStub) {
+    // A digest-carrying shape whose label is not followed by a full
+    // line-anchored 64-hex digest (should not happen for the producers,
+    // which always embed one): fall back to hashing the whole value like
+    // ordinary content instead of returning it verbatim.
+    return `<persisted-stub>sha256:${createHash('sha256')
+      .update(value)
+      .digest('hex')}`;
   }
 
   const isPreviewStub =

@@ -21,6 +21,7 @@ import {
   buildStub,
   FULL_OUTPUT_DIGEST_LABEL,
   persistAndTruncateToolResult,
+  TRUNCATION_SAVE_FAILURE_NOTE,
 } from './truncation.js';
 
 const debugLogger = vi.hoisted(() => ({
@@ -912,6 +913,44 @@ describe('tool response finalization', () => {
       expect(secondFit).toContain(BATCH_BUDGET_FIT_PREFIX);
       expect(fittedDigest(secondFit)).toBe(boardDigest(board));
     });
+
+    it('carries the inner digest when fitting the save-failure fallback shape', async () => {
+      // truncateAndSaveToFile's save-failure shape starts with the digest
+      // label itself (no producer prefix) and embeds the full-output
+      // digest; a fit wrapping it must carry that digest instead of
+      // hashing the whole shape, or the fit's digest-reduction never
+      // collides with the unfitted shape's own digest reduction and a
+      // board oscillating across the budget boundary counts every poll as
+      // "changed" (issue #9450).
+      const board = `#4 [in_progress] @peer-d — save failed\n${'board line\n'.repeat(300)}`;
+      const digest = boardDigest(board);
+      const saveFailureShape =
+        `${FULL_OUTPUT_DIGEST_LABEL}${digest}\n` +
+        'head line\n... [CONTENT TRUNCATED] ...\ntail line\n' +
+        TRUNCATION_SAVE_FAILURE_NOTE;
+      expect(saveFailureShape.length).toBeGreaterThan(150);
+
+      const finalized = await finalizeToolResponses(
+        config(150),
+        [
+          entry('call-a', [
+            {
+              functionResponse: {
+                id: 'call-a',
+                name: 'task_list',
+                response: { output: saveFailureShape },
+              },
+            },
+          ]),
+        ],
+        new Map(),
+      );
+      const output = finalized[0].responseParts[0].functionResponse?.response?.[
+        'output'
+      ] as string;
+      expect(output).toContain(BATCH_BUDGET_FIT_PREFIX);
+      expect(fittedDigest(output)).toBe(digest);
+    });
   });
 
   describe('degenerate batch-budget fits stay content-dependent (issue #9450)', () => {
@@ -1070,6 +1109,41 @@ describe('tool response finalization', () => {
         enforceFunctionResponseBudget([oversizedEntry('b', board)], 12),
       ) as string;
       expect(fitOne).toBe(fitTwo);
+    });
+
+    it('keeps every slot content-dependent when the budget is smaller than the slot count', () => {
+      // Budget 5 over 12 oversized slots: pre-fix the allocator gave 1
+      // char to five slots and 0 to the rest, and fitText returns '' for
+      // a zero allocation — a content-independent constant, so every
+      // zero-allocation result fingerprinted identically no matter its
+      // content and a CHANGING board false-halted on the result-aware
+      // guards. Every active slot must keep >= 1 char even when that
+      // overshoots a sub-slot-count budget.
+      const boards = Array.from(
+        { length: 12 },
+        (_, index) => `board variant ${index} — distinct`,
+      );
+      const entries = boards.map((board, index) =>
+        oversizedEntry(`call-${index}`, board),
+      );
+      const fitted = enforceFunctionResponseBudget(entries, 5).map(
+        (fittedEntry) =>
+          fittedEntry.responseParts[0].functionResponse?.response?.[
+            'output'
+          ] as string,
+      );
+      expect(fitted.every((text) => text.length >= 1)).toBe(true);
+      // Content-dependent from the first char: each fit is the first char
+      // of its own board's full-output digest (1-char allocations cannot
+      // carry more), never the shared '' constant.
+      fitted.forEach((text, index) => {
+        expect(text).toBe(
+          createHash('sha256')
+            .update(`${boards[index]}\n${'board line\n'.repeat(300)}`)
+            .digest('hex')
+            .slice(0, 1),
+        );
+      });
     });
   });
 });

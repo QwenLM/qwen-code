@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,7 +26,9 @@ import type { DebugLogger } from '../utils/debugLogger.js';
 import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   buildStub,
+  FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
+  TRUNCATION_SAVE_FAILURE_NOTE,
   truncateAndSaveToFile,
 } from '../utils/truncation.js';
 import {
@@ -4478,6 +4481,169 @@ describe('LoopDetectionService', () => {
         expect(service.getLastLoopType()).toBe(
           LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
         );
+      });
+
+      // fitText's degenerate band: when the per-slot allocation holds the
+      // 84-char digest line but not the 107-char minimal header (budgets
+      // 84..106 for a single slot), the fit is EXACTLY the line
+      // `Full output sha256: <64-hex>` — no producer prefix recognizes
+      // that shape, so the guard must reduce it structurally or it never
+      // collides with the raw under-budget representation of the same
+      // board and a frozen board oscillating across the budget boundary
+      // counts every poll as "changed" (issue #9450).
+      const degenerateFitResult = (callId: string, board: string): Part[] => {
+        const fitted = enforceFunctionResponseBudget(
+          [
+            {
+              callId,
+              toolName: 'task_list',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: callId,
+                    name: 'task_list',
+                    response: { output: board },
+                  },
+                },
+              ],
+              persistedOutputFiles: [`/tmp/qwen/tool-results/${callId}.txt`],
+            },
+          ],
+          100,
+        );
+        return fitted[0].responseParts;
+      };
+
+      it('collides the raw and degenerate digest-line-only fingerprints of identical content', () => {
+        const fittedOutput = degenerateFitResult('fitted', FROZEN_BOARD)[0]
+          .functionResponse?.response?.['output'];
+        // Shape witness: the budget 100 fit is exactly the digest line.
+        expect(fittedOutput).toBe(
+          `${FULL_OUTPUT_DIGEST_LABEL}${createHash('sha256')
+            .update(FROZEN_BOARD)
+            .digest('hex')}`,
+        );
+        expect(fingerprintToolResult(taskListResult(FROZEN_BOARD, 'raw'))).toBe(
+          fingerprintToolResult(degenerateFitResult('fitted', FROZEN_BOARD)),
+        );
+        // A changed board stays distinct in both representations.
+        expect(
+          fingerprintToolResult(taskListResult(FROZEN_BOARD, 'raw')),
+        ).not.toBe(
+          fingerprintToolResult(
+            degenerateFitResult('fitted', `${FROZEN_BOARD}new row`),
+          ),
+        );
+      });
+
+      it('halts a frozen board whose representation alternates raw/degenerate-fit across the budget boundary', () => {
+        let fired = false;
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD + 1 && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            i % 2 === 0
+              ? taskListResult(FROZEN_BOARD, `poll_${i}`)
+              : degenerateFitResult(`poll_${i}`, FROZEN_BOARD),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('collides the save-failure and successfully-spilled fingerprints of identical content', async () =>
+        // truncateAndSaveToFile's save-failure fallback starts with the
+        // digest label itself (no producer prefix) and carries the
+        // head/tail payload plus the save-failure note. It must reduce to
+        // its embedded full-output digest exactly like the successfully
+        // spilled shape, or a board whose spill oscillates between success
+        // and failure counts every poll as "changed".
+        {
+          const spillDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'loop-detection-stub-'),
+          );
+          try {
+            const { content: spilled } = await truncateAndSaveToFile(
+              FROZEN_BOARD,
+              'task_list_ok',
+              spillDir,
+              1024,
+              20,
+            );
+            // Force the save-failure path: mkdir(recursive) throws ENOTDIR
+            // when an ancestor path component is a regular file.
+            const blocker = path.join(spillDir, 'blocker');
+            await fs.writeFile(blocker, 'x');
+            const { content: unsaved } = await truncateAndSaveToFile(
+              FROZEN_BOARD,
+              'task_list_fail',
+              path.join(blocker, 'sub'),
+              1024,
+              20,
+            );
+            expect(unsaved.endsWith(TRUNCATION_SAVE_FAILURE_NOTE)).toBe(true);
+            expect(fingerprintToolResult(taskListResult(spilled, 'ok'))).toBe(
+              fingerprintToolResult(taskListResult(unsaved, 'fail')),
+            );
+          } finally {
+            await fs.rm(spillDir, { recursive: true, force: true });
+          }
+        });
+
+      it('halts a frozen board whose spill success alternates across polls', async () => {
+        const spillDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-detection-stub-'),
+        );
+        try {
+          const blocker = path.join(spillDir, 'blocker');
+          await fs.writeFile(blocker, 'x');
+          const failDir = path.join(blocker, 'sub');
+          let fired = false;
+          for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD && !fired; i++) {
+            fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+            if (fired) break;
+            const { content } = await truncateAndSaveToFile(
+              FROZEN_BOARD,
+              `task_list_poll_${i}`,
+              i % 2 === 0 ? spillDir : failDir,
+              1024,
+              20,
+            );
+            service.recordToolResult(
+              { name: 'task_list', args: TASK_LIST_ARGS },
+              taskListResult(content, `poll_${i}`),
+            );
+          }
+          expect(fired).toBe(true);
+          expect(service.getLastLoopType()).toBe(
+            LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+          );
+        } finally {
+          await fs.rm(spillDir, { recursive: true, force: true });
+        }
+      });
+
+      it('does not collapse content that merely starts with the digest label', () => {
+        // Shape-exact recognition only: a board whose first line quotes
+        // the label without a full producer digest line (no 64-hex payload
+        // of the right length, no save-failure note) carries no producer
+        // digest and must keep fingerprinting as ordinary content, so its
+        // mutations stay visible to the result-aware guards.
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          const board = `${FULL_OUTPUT_DIGEST_LABEL}pending\nrow v${i}`;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(board, `poll_${i}`),
+          );
+        }
+        expect(fired).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
       });
     });
   });
