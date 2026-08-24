@@ -2608,6 +2608,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -3195,6 +3197,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -5515,6 +5518,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
@@ -5984,9 +5988,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
