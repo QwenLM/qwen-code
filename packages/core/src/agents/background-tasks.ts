@@ -479,9 +479,20 @@ interface BackgroundSlotWaiter {
   readonly signal?: AbortSignal;
   /** Concrete model ID the waiter needs a slot for (per-model cap check). */
   readonly model?: string;
+  /**
+   * Owner whose notification should count this launch. Undefined preserves
+   * the legacy behavior for callers that do not provide owner information.
+   */
+  readonly ownerId: string | null | undefined;
   readonly resolve: (reservation: BackgroundSlotReservation) => void;
   readonly reject: (error: Error) => void;
   readonly onAbort: () => void;
+}
+
+interface BackgroundSlotClaim {
+  readonly model: string | undefined;
+  /** Undefined means the caller did not opt into owner tracking. */
+  readonly ownerId: string | null | undefined;
 }
 
 const BACKGROUND_SLOT_WAIT_CANCELLED =
@@ -497,13 +508,13 @@ export class BackgroundTaskRegistry {
     Set<(settled: boolean) => void>
   >();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
-  // Maps each outstanding slot reservation to the concrete model ID it was
-  // reserved for (undefined when unresolved). A Map rather than a Set so the
-  // per-model cap can count reservations against the same model the running
-  // agents are tallied under.
+  // Maps each outstanding slot reservation to the concrete model ID and the
+  // owner that initiated it. A Map rather than a Set lets concurrency checks
+  // count the model while owner-scoped notifications count launches that have
+  // not reached register() yet.
   private readonly reservedBackgroundSlots = new Map<
     symbol,
-    string | undefined
+    BackgroundSlotClaim
   >();
   private readonly maxConcurrentBackgroundAgents: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
@@ -596,11 +607,12 @@ export class BackgroundTaskRegistry {
   async waitForBackgroundSlot(
     signal?: AbortSignal,
     model?: string,
+    ownerId?: string | null,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
       throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
     }
-    const reservation = this.tryReserveBackgroundSlot(model);
+    const reservation = this.tryReserveBackgroundSlot(model, ownerId);
     if (reservation) {
       return reservation;
     }
@@ -616,6 +628,7 @@ export class BackgroundTaskRegistry {
       const waiter: BackgroundSlotWaiter = {
         signal,
         model,
+        ownerId,
         resolve,
         reject,
         onAbort,
@@ -627,11 +640,12 @@ export class BackgroundTaskRegistry {
 
   tryReserveBackgroundSlot(
     model?: string,
+    ownerId?: string | null,
   ): BackgroundSlotReservation | undefined {
     if (!this.canStartBackgroundAgent(model)) {
       return undefined;
     }
-    return this.reserveBackgroundSlot(model);
+    return this.reserveBackgroundSlot(model, ownerId);
   }
 
   getQueuedCount(): number {
@@ -1218,8 +1232,8 @@ export class BackgroundTaskRegistry {
       return this.reservedBackgroundSlots.size;
     }
     let count = 0;
-    for (const slotModel of this.reservedBackgroundSlots.values()) {
-      if (slotModel === model) {
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.model === model) {
         count++;
       }
     }
@@ -1233,9 +1247,27 @@ export class BackgroundTaskRegistry {
     );
   }
 
-  private reserveBackgroundSlot(model?: string): BackgroundSlotReservation {
+  private getOutstandingBackgroundLaunchCount(ownerId: string | null): number {
+    let count = 0;
+    for (const waiter of this.waitQueue) {
+      if (waiter.ownerId !== undefined && waiter.ownerId === ownerId) {
+        count++;
+      }
+    }
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.ownerId !== undefined && claim.ownerId === ownerId) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private reserveBackgroundSlot(
+    model?: string,
+    ownerId?: string | null,
+  ): BackgroundSlotReservation {
     const id = Symbol('background-slot');
-    this.reservedBackgroundSlots.set(id, model);
+    this.reservedBackgroundSlots.set(id, { model, ownerId });
     return { id, model };
   }
 
@@ -1270,7 +1302,7 @@ export class BackgroundTaskRegistry {
         waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
         continue;
       }
-      waiter.resolve(this.reserveBackgroundSlot(waiter.model));
+      waiter.resolve(this.reserveBackgroundSlot(waiter.model, waiter.ownerId));
     }
   }
 
@@ -1607,6 +1639,19 @@ export class BackgroundTaskRegistry {
     const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
+    const ownerId = entry.parentAgentId ?? null;
+    let remaining = 0;
+    for (const candidate of this.agents.values()) {
+      if (
+        candidate.isBackgrounded &&
+        (candidate.parentAgentId ?? null) === ownerId &&
+        (candidate.status === 'running' || candidate.status === 'paused')
+      ) {
+        remaining++;
+      }
+    }
+    remaining += this.getOutstandingBackgroundLaunchCount(ownerId);
+
     const xmlParts: string[] = [
       '<task-notification>',
       `<task-id>${escapeXml(entry.agentId)}</task-id>`,
@@ -1617,6 +1662,8 @@ export class BackgroundTaskRegistry {
     xmlParts.push(
       `<status>${escapeXml(entry.status)}</status>`,
       `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
+      `<remaining>${remaining}</remaining>`,
+      `<all-terminal>${remaining === 0}</all-terminal>`,
     );
     if (entry.result) {
       xmlParts.push(`<result>${escapeXml(entry.result)}</result>`);
