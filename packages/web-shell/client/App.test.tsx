@@ -5673,13 +5673,14 @@ describe('App session workflow', () => {
       container.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
     expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
-    expect(replaceState).toHaveBeenCalled();
+    expect(replaceState).not.toHaveBeenCalled();
 
     window.history.pushState(null, '', '/?view=cockpit');
     act(() => window.dispatchEvent(new PopStateEvent('popstate')));
     await flush();
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
     expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(replaceState).toHaveBeenCalledOnce();
 
     act(() => testState.latestTodoPanelOnOpen?.());
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();

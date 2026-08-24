@@ -22506,6 +22506,7 @@ describe('Session', () => {
       'cancels a revision-bound plan exit when the %s',
       async (_label, invalidateRevision) => {
         enableSessionWorkflowRevisionContext();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         let resolvePermission!: (
           response: Awaited<
             ReturnType<AgentSideConnection['requestPermission']>
@@ -22586,6 +22587,7 @@ describe('Session', () => {
 
     it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {
       enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       let resolvePreToolUse!: (result: { shouldProceed: boolean }) => void;
       const preToolUseSpy = vi
         .spyOn(core, 'firePreToolUseHook')
