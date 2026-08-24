@@ -149,7 +149,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
-        'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -162,6 +161,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:VITEST_WORKER_ID': 1,
         whole: 5,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/serve-token.ts',
+    {
+      reason:
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
     },
   ],
   [
