@@ -607,6 +607,49 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('builds workspace file helper URLs with a relative base URL', async () => {
+      const filePayload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'export {}\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 10,
+        returnedBytes: 10,
+        truncated: false,
+        hash: 'sha256:' + 'a'.repeat(64),
+        matchedIgnore: null,
+        originalLineCount: null,
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.startsWith('/daemon/file?')) {
+          return jsonResponse(200, filePayload);
+        }
+        return jsonResponse(200, { ok: true });
+      });
+      const client = new DaemonClient({ baseUrl: '/daemon/', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', { line: 2, limit: 3 }, 'client-1'),
+      ).resolves.toEqual(filePayload);
+      await expect(client.fileStat('src/a.ts')).resolves.toEqual({ ok: true });
+      await expect(client.dirList('src')).resolves.toEqual({ ok: true });
+      await expect(client.workspacePathSuggestions('/repo/s')).resolves.toEqual(
+        { ok: true },
+      );
+      await expect(client.glob('src/**/*.ts')).resolves.toEqual({ ok: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        '/daemon/file?path=src%2Fa.ts&line=2&limit=3',
+        '/daemon/stat?path=src%2Fa.ts',
+        '/daemon/list?path=src',
+        '/daemon/workspace-path-suggestions?prefix=%2Frepo%2Fs',
+        '/daemon/glob?pattern=src%2F**%2F*.ts',
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('writes and edits files with JSON bodies and client identity', async () => {
       const writeResult = {
         kind: 'file_write',

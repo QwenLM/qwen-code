@@ -124,6 +124,22 @@ describe('uploadWorkspaceFile', () => {
     expect(url.searchParams.get('path')).toBe('a&b+c=d #1 数据 %b.txt');
   });
 
+  it('uploads with a relative base URL', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(201, uploadResult),
+    );
+    const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+    await expect(
+      client.uploadWorkspaceFile({
+        path: 'blob.bin',
+        data: new Uint8Array([1, 2, 3, 4]),
+      }),
+    ).resolves.toEqual(uploadResult);
+
+    expect(calls[0]?.url).toBe('/daemon/file/upload?path=blob.bin');
+  });
+
   it('sends the raw bytes as the request body', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(201, uploadResult),
