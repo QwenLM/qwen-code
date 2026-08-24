@@ -1843,6 +1843,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'Grok (xAI) API Key',
         'Idealab API Key',
         'Kimi',
+        'Kimi (Moonshot AI) API Key',
         'MiniMax API Key',
         'ModelScope API Key',
         'OpenRouter',

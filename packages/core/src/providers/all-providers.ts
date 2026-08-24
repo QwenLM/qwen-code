@@ -88,14 +88,29 @@ export function findProviderById(id: string): ProviderConfig | undefined {
   return ALL_PROVIDERS.find((p) => p.id === id);
 }
 
-/** Find a provider by model credentials (baseUrl + envKey). */
+/**
+ * Find a provider by model credentials (baseUrl + envKey).
+ *
+ * When several presets match the same (baseUrl, envKey) pair, a preset that
+ * declares `envKey` as a static string is the canonical owner of that
+ * credential space and beats presets that only derive the same key from
+ * (protocol, baseUrl) via a function envKey. This keeps ownership
+ * deterministic and independent of registration order — e.g. moonshot
+ * (static MOONSHOT_API_KEY) wins over kimi (which derives MOONSHOT_API_KEY
+ * for its regional API endpoints) on api.moonshot.{ai,cn}/v1, mirroring the
+ * telemetry attribution for that key.
+ */
 export function findProviderByCredentials(
   baseUrl: string | undefined,
   envKey: string | undefined,
 ): ProviderConfig | undefined {
-  return ALL_PROVIDERS.find((p) =>
-    providerMatchesCredentials(p, baseUrl, envKey),
-  );
+  let derivedMatch: ProviderConfig | undefined;
+  for (const provider of ALL_PROVIDERS) {
+    if (!providerMatchesCredentials(provider, baseUrl, envKey)) continue;
+    if (typeof provider.envKey === 'string') return provider;
+    derivedMatch ??= provider;
+  }
+  return derivedMatch;
 }
 
 /** All known provider base URLs (for preconnect, validation, etc.). */

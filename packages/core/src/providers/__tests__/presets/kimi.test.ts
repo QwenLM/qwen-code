@@ -20,6 +20,7 @@ import {
   findProviderById,
   getAllProviderBaseUrls,
   kimiProvider,
+  moonshotProvider,
   normalizeBaseUrlForMatching,
   resolveProviderModels,
 } from '@qwen-code/qwen-code-core';
@@ -474,12 +475,22 @@ describe('kimiProvider', () => {
         'https://api.moonshot.ai/v1',
       ]),
     );
+    // The shared MOONSHOT_API_KEY + api.moonshot.{ai,cn}/v1 credential space
+    // resolves to the upstream moonshot provider: registry discovery yields
+    // to it (matching the telemetry attribution for MOONSHOT_API_KEY), while
+    // Kimi uniquely owns its Coding Plan credential space.
     expect(
       findProviderByCredentials(
         'https://api.moonshot.ai/v1',
         'MOONSHOT_API_KEY',
       ),
-    ).toBe(kimiProvider);
+    ).toBe(moonshotProvider);
+    expect(
+      findProviderByCredentials(
+        'https://api.moonshot.cn/v1',
+        'MOONSHOT_API_KEY',
+      ),
+    ).toBe(moonshotProvider);
     expect(
       findProviderByCredentials(
         'https://api.kimi.com/coding/v1',
