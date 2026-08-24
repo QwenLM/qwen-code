@@ -7137,7 +7137,13 @@ export class Config {
    * is disabled by default and turns on through the
    * `tools.listDirectory.enabled` setting, by being explicitly listed in the
    * `coreTools` allowlist, or by being covered by an allow OR ask rule while
-   * the `permissions.allow` registry allowlist is active (#9827). Entries are
+   * the `permissions.allow` registry allowlist is active (#9827). Coverage
+   * scans the merged allow set (`getPermissionsAllow()` — settings +
+   * `--allowed-tools` + SDK `allowedTools` + legacy `tools.allowed`) so it
+   * counts exactly what `PermissionManager.isToolEnabled()` counts, while
+   * activation still comes only from `settings.permissions.allow` rules
+   * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
+   * same way `PermissionManager.initialize`'s `parseRules` does. Entries are
    * normalised with `parseRule` — the same parser `PermissionManager` uses —
    * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
    * match; the check honours meta-categories (`Read`) via
@@ -7155,8 +7161,8 @@ export class Config {
     ) {
       return true;
     }
-    // `permissions.allow` registry allowlist (#9827): without this branch the
-    // allowlisted tool passes `PermissionManager.isToolEnabled()` but the
+    // `permissions.allow` registry allowlist (#9827): without these branches
+    // an allowlisted tool passes `PermissionManager.isToolEnabled()` but the
     // registry never registers it, so it silently vanishes from `/tools` and
     // the model request while calls to it fail with TOOL_NOT_REGISTERED.
     const coveredByPermissionRule = (raw: string): boolean => {
@@ -7165,21 +7171,27 @@ export class Config {
         !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
       );
     };
-    if (this.getRegistryAllowList().some(coveredByPermissionRule)) {
-      return true;
-    }
-    // Ask-only coverage counts for exactly the same reason it counts in
-    // `PermissionManager.isCoveredByAllowOrAskRule`: under an active
-    // allowlist `isToolEnabled('list_directory')` returns true for it, so
-    // the gate must offer the tool to `registerLazy` too — otherwise the
-    // ask rule can never fire and arriving calls fail TOOL_NOT_REGISTERED
-    // (#9827). Gated on the allowlist actually being active so an ask rule
-    // alone never changes the default opt-in behaviour.
+    // Activation comes only from settings `permissions.allow` rules and
+    // requires at least one non-empty valid entry — exactly how
+    // `PermissionManager.initialize` computes it (`parseRules` filters empty
+    // entries before parsing, and `parseRule('')` carries no `invalid` flag),
+    // so a degenerate `[""]` leaves the allowlist inactive in both places
+    // (#9827).
     const allowListActive = this.getRegistryAllowList().some(
-      (raw) => !parseRule(raw).invalid,
+      (raw) => raw.trim() !== '' && !parseRule(raw).invalid,
     );
+    if (!allowListActive) return false;
+    // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow
+    // set and ask rules both count while the allowlist is active, so a tool
+    // the permission system reports as enabled is genuinely offered to
+    // `registerLazy` (#9827). Ask-only coverage counts for exactly the same
+    // reason it counts in `PermissionManager.isCoveredByAllowOrAskRule` —
+    // otherwise the ask rule could never fire and arriving calls would fail
+    // TOOL_NOT_REGISTERED. Gating both on the allowlist actually being
+    // active keeps the default opt-in behaviour when it is not.
     return (
-      allowListActive && this.getPermissionsAsk().some(coveredByPermissionRule)
+      this.getPermissionsAllow().some(coveredByPermissionRule) ||
+      this.getPermissionsAsk().some(coveredByPermissionRule)
     );
   }
 
