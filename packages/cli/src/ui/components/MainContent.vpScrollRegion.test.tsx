@@ -5,21 +5,24 @@
  */
 
 // `VpScrollRegion` composes the real ScrollableList (-> VirtualizedList) and
-// the real ShowMoreLines exactly as MainContent.tsx's VP branch does, so
-// this exercises the real render tree rather than a mocked ScrollableList
+// the real ShowMoreLines the way MainContent's VP branch does, so this
+// exercises the real render tree rather than a mocked ScrollableList
 // (MainContent.test.tsx mocks ScrollableList to test data-wiring; it cannot
 // exercise the height math these tests cover).
+//
+// The overflow condition is produced by a real MaxSizedBox — the only
+// component in the codebase that registers an overflow id — rather than by
+// calling addOverflowingId directly, so these tests cannot pass on a
+// condition production never creates.
 
-import { useEffect } from 'react';
+import type React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { Text } from 'ink';
+import { Box, Text } from 'ink';
 import { VpScrollRegion } from './MainContent.js';
+import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import type { HistoryItem } from '../types.js';
-import {
-  useOverflowActions,
-  OverflowProvider,
-} from '../contexts/OverflowContext.js';
+import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { StreamingContext } from '../contexts/StreamingContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { StreamingState } from '../types.js';
@@ -28,130 +31,100 @@ vi.mock('../selection/use-text-selection.js', () => ({
   TextSelectionController: () => null,
 }));
 
-// One-line stub per item. The item flagged `registersOverflow` calls the
-// exact same `addOverflowingId` a real MaxSizedBox calls when ITS OWN
-// content (e.g. a long /about block) is truncated to fit its per-item
-// height budget — this is what makes <ShowMoreLines> render its hint.
-function StubItem({
-  item,
-}: {
-  item: { id: number; registersOverflow?: boolean };
-}) {
-  const overflowActions = useOverflowActions();
-  useEffect(() => {
-    if (item.registersOverflow) {
-      overflowActions?.addOverflowingId(`item-${item.id}`);
-    }
-  }, [item.registersOverflow, overflowActions, item.id]);
-  return <Text>{`HISTORY:${item.id}`}</Text>;
-}
+const BUDGET = 8;
 
-const renderVpScrollRegion = (data: HistoryItem[], containerHeight: number) =>
-  render(
+// Enough one-line items that the list fills its whole height budget — the
+// only regime in which the budget can be exceeded at all, since
+// VirtualizedList collapses its root to the content height when the content
+// is shorter than the budget.
+const items = Array.from({ length: 12 }, (_, i) => ({
+  id: i + 1,
+  type: 'user',
+  text: `item ${i + 1}`,
+})) as unknown as HistoryItem[];
+
+const OVERFLOWING_ITEM_ID = 12;
+
+const renderRegion = (opts: { withOverflowingItem: boolean }) => {
+  const tree = (
     <KeypressProvider kittyProtocolEnabled={false}>
       <StreamingContext.Provider value={StreamingState.Idle}>
         <OverflowProvider>
           <VpScrollRegion
-            data={data}
-            renderItem={({ item }) => (
-              <StubItem
-                item={
-                  item as unknown as {
-                    id: number;
-                    registersOverflow?: boolean;
-                  }
-                }
-              />
-            )}
+            data={items}
+            renderItem={({ item }) => {
+              const id = (item as unknown as { id: number }).id;
+              if (opts.withOverflowingItem && id === OVERFLOWING_ITEM_ID) {
+                // Truncates its content, so it registers a real overflow id
+                // and ShowMoreLines renders — exactly what a long tool
+                // output does in a real session.
+                return (
+                  <MaxSizedBox maxHeight={3} maxWidth={60}>
+                    {Array.from({ length: 20 }, (_, i) => (
+                      <Box key={i}>
+                        <Text>{`out ${i}`}</Text>
+                      </Box>
+                    ))}
+                  </MaxSizedBox>
+                );
+              }
+              return <Text>{`ITEM${id}`}</Text>;
+            }}
             hasFocus={true}
-            containerHeight={containerHeight}
+            containerHeight={BUDGET}
             measureAtFullHeight={false}
             showScrollbar={false}
             constrainHeight={true}
           />
         </OverflowProvider>
       </StreamingContext.Provider>
-    </KeypressProvider>,
+    </KeypressProvider>
   );
+  return { tree, ...render(tree) };
+};
 
-describe('VpScrollRegion height budget (issue #8239)', () => {
-  it('keeps total rendered rows within containerHeight when an item overflows and the ctrl-s hint shows', async () => {
-    const BUDGET = 5;
-    const data = Array.from({ length: 10 }, (_, i) => ({
-      id: i,
-      // The last item — guaranteed to be in the visible window once
-      // scrolled to the end — registers overflow, mirroring a long /about
-      // block sitting at the bottom of history.
-      registersOverflow: i === 9,
-    })) as unknown as HistoryItem[];
+const settle = async (
+  rerender: (t: React.ReactElement) => void,
+  tree: React.ReactElement,
+) => {
+  const tick = () => new Promise<void>((r) => setImmediate(r));
+  await tick();
+  rerender(tree);
+  await tick();
+  await tick();
+};
 
-    const { lastFrame, rerender } = renderVpScrollRegion(data, BUDGET);
-    // Let the mounted item's useEffect (addOverflowingId) flush and the
-    // resulting re-render settle.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    rerender(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StreamingContext.Provider value={StreamingState.Idle}>
-          <OverflowProvider>
-            <VpScrollRegion
-              data={data}
-              renderItem={({ item }) => (
-                <StubItem
-                  item={
-                    item as unknown as {
-                      id: number;
-                      registersOverflow?: boolean;
-                    }
-                  }
-                />
-              )}
-              hasFocus={true}
-              containerHeight={BUDGET}
-              measureAtFullHeight={false}
-              showScrollbar={false}
-              constrainHeight={true}
-            />
-          </OverflowProvider>
-        </StreamingContext.Provider>
-      </KeypressProvider>,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+describe('VpScrollRegion height budget', () => {
+  it('stays within containerHeight when a truncated item makes the ctrl-s hint render', async () => {
+    const { tree, lastFrame, rerender } = renderRegion({
+      withOverflowingItem: true,
+    });
+    await settle(rerender, tree);
 
     const frame = lastFrame() ?? '';
     const lines = frame.split('\n');
 
-    // The contract AppContainer relies on: this region must never render
-    // more than `containerHeight` rows, because AppContainer computed the
-    // footer's position assuming exactly that many rows are consumed above
-    // it, and VP mode's alternate screen has no scrollback to reveal a row
-    // that does not fit.
-    expect({
-      lineCount: lines.length,
-      containsHint: frame.includes('Press ctrl-s to show more lines'),
-    }).toEqual({
-      lineCount: BUDGET,
-      containsHint: true,
-    });
+    // The hint must actually be on screen — otherwise this test would pass
+    // trivially without exercising the reservation at all.
+    expect(frame).toContain('Press ctrl-s to show more lines');
+    // AppContainer positions the composer assuming this region consumes at
+    // most `containerHeight` rows, and VP mode's alternate screen has no
+    // scrollback to reveal a row that does not fit. Without the reservation
+    // this renders BUDGET + 1.
+    expect(lines.length).toBeLessThanOrEqual(BUDGET);
   });
 
-  it('does not waste a row reserving for the hint when nothing overflows', () => {
-    const BUDGET = 5;
-    const data = Array.from({ length: 10 }, (_, i) => ({
-      id: i,
-    })) as unknown as HistoryItem[];
+  it('uses the full budget when nothing overflows', async () => {
+    const { tree, lastFrame, rerender } = renderRegion({
+      withOverflowingItem: false,
+    });
+    await settle(rerender, tree);
 
-    const { lastFrame } = renderVpScrollRegion(data, BUDGET);
     const frame = lastFrame() ?? '';
     const lines = frame.split('\n');
 
-    // No overflow registered, so <ShowMoreLines> never renders — the list
-    // should get the full budget, not budget-minus-one.
-    expect({
-      lineCount: lines.length,
-      containsHint: frame.includes('Press ctrl-s to show more lines'),
-    }).toEqual({
-      lineCount: BUDGET,
-      containsHint: false,
-    });
+    // No overflow registered, so no hint and no row reserved for one.
+    expect(frame).not.toContain('Press ctrl-s to show more lines');
+    expect(lines.length).toBe(BUDGET);
   });
 });
