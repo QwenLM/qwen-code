@@ -13,6 +13,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { join, sep } from 'node:path';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -81,30 +82,35 @@ describe('values a repository must not be able to set', () => {
     }
   });
 
-  it('ignores a repo-shipped SANDBOX_SET_UID_GID=false', () => {
-    // Left honoured, a committed opt-out puts the container back to root and
-    // leaves root-owned residue the host pipeline cannot sweep.
-    if (process.getuid === undefined) return;
-    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
-    const spy = vi
-      .spyOn(environment, 'isFileSourcedEnvKey')
-      .mockImplementation((k) => k === 'SANDBOX_SET_UID_GID');
-    try {
-      const { args } = containerCommand('npm ci', {
-        cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'),
-        tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
-        kind: 'install',
-        runtime: 'docker',
-        image: 'example/image:tag',
-        rootless: false,
-        name: 'qwen-review-test',
-      });
-      expect(args).toContain('--user');
-    } finally {
-      spy.mockRestore();
-      vi.unstubAllEnvs();
-    }
-  });
+  // Skipped, not returned early: an early return reports PASSED with zero
+  // assertions, which reads on the Windows lane as "this held" when nothing
+  // was checked.
+  it.skipIf(process.getuid === undefined)(
+    'ignores a repo-shipped SANDBOX_SET_UID_GID=false',
+    () => {
+      // Left honoured, a committed opt-out puts the container back to root and
+      // leaves root-owned residue the host pipeline cannot sweep.
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      const spy = vi
+        .spyOn(environment, 'isFileSourcedEnvKey')
+        .mockImplementation((k) => k === 'SANDBOX_SET_UID_GID');
+      try {
+        const { args } = containerCommand('npm ci', {
+          cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'),
+          tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
+          kind: 'install',
+          runtime: 'docker',
+          image: 'example/image:tag',
+          rootless: false,
+          name: 'qwen-review-test',
+        });
+        expect(args).toContain('--user');
+      } finally {
+        spy.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('drops a repo-shipped DOCKER_HOST from the runtime client env', () => {
     // It decides WHICH daemon answers: a repository that ships one points the
@@ -389,6 +395,10 @@ describe('containerCommand', () => {
       cwd,
       kind: 'install',
     });
+    // Both argv shapes: the separated form this builds, and the joined
+    // `--network=none` a refactor could switch to, which `not.toContain('none')`
+    // alone would not see.
+    expect(install.args.some((a) => a.startsWith('--network'))).toBe(false);
     expect(install.args).not.toContain('none');
 
     for (const kind of ['build', 'test'] as const) {
@@ -640,9 +650,15 @@ describe('mountRootFor', () => {
       // skipped rather than deleted: containment is unavailable on Windows —
       // this mount uses one path as both source and target, and the container
       // side has no `C:` — so refusing is the honest answer, not a casualty.
-      expect(mountRootFor(join(tmpdir(), '.qwen', 'tmp', 'review-pr-1'))).toBe(
-        null,
-      );
+      const root = tmp();
+      const tree = join(root, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(tree, { recursive: true });
+      // The layout has to EXIST first. Named at a path that does not, this
+      // returns null out of the realpath catch and says nothing at all about
+      // the drive letter — the first version of this test did exactly that,
+      // and a build with the colon check deleted passed it.
+      expect(existsSync(tree)).toBe(true);
+      expect(mountRootFor(tree)).toBe(null);
     },
   );
 
