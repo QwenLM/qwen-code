@@ -3101,4 +3101,266 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(restored).toContain(RETIRED_ID);
     expect(restored).toContain(RETIRED_ID + suffix);
   });
+
+  it('keeps a frozen default banked when the buffer held duplicate customs at resolve', async () => {
+    // R22-1, round 29, entrance 7. A duplicate custom segment sits in the
+    // buffer when the lookup resolves. The reseed kept every copy while
+    // the step's re-derive collapses duplicates on screen, so the latch
+    // diffed the next keystroke against a phantom twin, could not account
+    // for it, and cleared a freeze that legitimately grew — the commit
+    // delta dropped the frozen built-in from the baseline, and the next
+    // pair change restored a selection silently missing a default the
+    // user never unchecked.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // The buffer carries a duplicate custom segment beside the token being
+    // typed; the lookup resolves on that keystroke.
+    act(() =>
+      result.current.changeModelIds(
+        [...BUILT_IN_IDS, RETIRED_ID, 'priv', 'priv'].join(', '),
+        {
+          customModelIds: [RETIRED_ID, 'priv', 'priv'],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The re-derive collapses the duplicate on screen; the user grows the
+    // frozen token.
+    const grown = `${RETIRED_ID}-x`;
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, grown, 'priv'].join(', ')).join(', '),
+        {
+          customModelIds: [grown, 'priv'],
+          activeCustomModelId: grown,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain(RETIRED_ID);
+    expect(restored).toContain(grown);
+  });
+
+  it('banks the deletion of a shielded token whose twin was grown instead', async () => {
+    // R22-1, round 29, entrance 8. The frozen value sits in the buffer
+    // twice and the user grows the NON-frozen copy. The latch must not
+    // reassign the freeze to the edited twin while another copy still
+    // holds the frozen value: deleting the shielded copy afterwards is a
+    // genuine deletion, and the commit exemption keyed on the frozen id
+    // must not exclude it — otherwise the deleted default resurrects on
+    // the next pair change beside the grown twin.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    act(() =>
+      result.current.changeModelIds([...BUILT_IN_IDS, RETIRED_ID].join(', '), {
+        customModelIds: [RETIRED_ID],
+        activeCustomModelId: RETIRED_ID,
+        activeCustomModelSegment: 0,
+      }),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    const grown = `${RETIRED_ID}-x`;
+    // The user duplicates the frozen token...
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, RETIRED_ID].join(', ')).join(', '),
+        {
+          customModelIds: [RETIRED_ID, RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 1,
+        },
+      ),
+    );
+    // ...grows the second copy...
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, RETIRED_ID, grown].join(', ')).join(
+          ', ',
+        ),
+        {
+          customModelIds: [RETIRED_ID, grown],
+          activeCustomModelId: grown,
+          activeCustomModelSegment: 1,
+        },
+      ),
+    );
+    // ...and deletes the originally shielded copy.
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, grown].join(', ')).join(', '),
+        {
+          customModelIds: [grown],
+          activeCustomModelId: grown,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).not.toContain(RETIRED_ID);
+    expect(restored).toContain(grown);
+  });
+
+  it('banks the replacement of a shielded token retyped to a divergent id', async () => {
+    // R22-1, round 29, entrance 9. The shrink-follow accepts shrinks and
+    // the commit exemption keyed on the immutable frozen id: backspacing
+    // below the id boundary and retyping a divergent continuation passes
+    // the prefix test at every keystroke, so the freeze reached commit
+    // even though the on-screen selection no longer contained the frozen
+    // id — the replaced built-in resurrected beside the user's
+    // replacement on the next pair change.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    act(() =>
+      result.current.changeModelIds([...BUILT_IN_IDS, RETIRED_ID].join(', '), {
+        customModelIds: [RETIRED_ID],
+        activeCustomModelId: RETIRED_ID,
+        activeCustomModelSegment: 0,
+      }),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // One backspace below the id boundary...
+    const dipped = RETIRED_ID.slice(0, -1);
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, dipped].join(', ')).join(', '),
+        {
+          customModelIds: [dipped],
+          activeCustomModelId: dipped,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    // ...and a divergent continuation retyped in its place.
+    const divergent = `${dipped}x`;
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, divergent].join(', ')).join(', '),
+        {
+          customModelIds: [divergent],
+          activeCustomModelId: divergent,
+          activeCustomModelSegment: 0,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).not.toContain(RETIRED_ID);
+    expect(restored).toContain(divergent);
+  });
 });

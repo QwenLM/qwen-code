@@ -133,27 +133,67 @@ export interface ProviderSetupState {
 }
 
 /**
- * Follow the frozen occurrence through one edit and return the value it
- * holds afterwards, or `null` when the edit destroyed it.
+ * Follow the frozen occurrence through one edit and return the value and
+ * segment it holds afterwards, or `null` when the edit destroyed it.
  *
  * The occurrence is one comma segment among possible twins, and the ids
- * alone cannot say which copy it is — so survival is established in two
- * ways. Identity: some segment still holds the occurrence's value. That is
- * proof enough on its own; whichever copy the user edits or deletes next
- * decides the freeze's fate on that edit. Evolution: the caret report names
- * the edited token, so a value adjacent to the occurrence's — one extends
- * the other — is the occurrence edited onward, but only when the edit
- * touched that one segment alone: the segment count holds and every other
- * previous segment survives by identity. A comma merge absorbs a neighbour
- * and a buffer-replacing edit rewrites several segments at once; both
- * change more than the occurrence's slot, so neither reads as growth.
+ * alone cannot say which copy it is — so the freeze records the segment
+ * the occurrence sat in and follows that position. While the tracked
+ * segment still holds the occurrence's value, the occurrence survives by
+ * identity no matter what its twins do, and a twin's growth is not its
+ * growth. It evolves only when the tracked segment itself came to hold an
+ * adjacent value — one extends the other — in an edit that touched that
+ * segment alone: every other previous segment survives by identity and
+ * nothing is added beside it, which is also the proof that the edit sat
+ * in the tracked slot, whatever the caret reports. A comma merge absorbs
+ * a neighbour and a buffer-replacing edit rewrites several segments at
+ * once; both change more than the occurrence's slot, so neither reads as
+ * growth. An edit can shift the positions — a segment inserted or deleted
+ * ahead — so when the tracked slot no longer holds the value but some
+ * segment still does, the position is re-adopted at the first surviving
+ * copy; with twins in flight that is the one distinction the ids cannot
+ * make, and the next edit decides the freeze's fate.
+ *
+ * A freeze with no recorded position falls back to value-only tracking:
+ * evolution is credited when the caret names an adjacent value and the
+ * edit left exactly one unexplained segment holding it.
  */
 function followFrozenOccurrence(
   previous: string[],
   current: string[],
   value: string,
+  segment: number | undefined,
   activeId: string | undefined,
-): string | null {
+): { value: string; segment: number | undefined } | null {
+  if (segment !== undefined) {
+    if (current[segment] === value) {
+      return { value, segment };
+    }
+    const candidate = current[segment];
+    if (
+      candidate !== undefined &&
+      (candidate.startsWith(value) || value.startsWith(candidate))
+    ) {
+      const slots = current.filter((_, index) => index !== segment);
+      let othersSurvive = true;
+      for (const [index, other] of previous.entries()) {
+        if (index === segment) {
+          continue;
+        }
+        const at = slots.indexOf(other);
+        if (at < 0) {
+          othersSurvive = false;
+          break;
+        }
+        slots.splice(at, 1);
+      }
+      if (othersSurvive && slots.length === 0) {
+        return { value: candidate, segment };
+      }
+    }
+    const at = current.indexOf(value);
+    return at < 0 ? null : { value, segment: at };
+  }
   if (
     activeId !== undefined &&
     (activeId.startsWith(value) || value.startsWith(activeId))
@@ -161,12 +201,12 @@ function followFrozenOccurrence(
     const slots = [...current];
     let skippedOccurrence = false;
     let othersSurvive = true;
-    for (const segment of previous) {
-      if (!skippedOccurrence && segment === value) {
+    for (const previousSegment of previous) {
+      if (!skippedOccurrence && previousSegment === value) {
         skippedOccurrence = true;
         continue;
       }
-      const at = slots.indexOf(segment);
+      const at = slots.indexOf(previousSegment);
       if (at < 0) {
         othersSurvive = false;
         break;
@@ -174,11 +214,11 @@ function followFrozenOccurrence(
       slots.splice(at, 1);
     }
     if (othersSurvive && slots.length === 1 && slots[0] === activeId) {
-      return activeId;
+      return { value: activeId, segment: undefined };
     }
   }
   if (current.includes(value)) {
-    return value;
+    return { value, segment: undefined };
   }
   return null;
 }
@@ -265,20 +305,22 @@ export function useProviderSetupFlow(
   // of any edit before that edit becomes the authored baseline.
   const injectedModelIdRef = useRef<string | null>(null);
   // The id the keep clause shielded during an in-flight edit, plus the
-  // value the shielded occurrence has held since. The shield freezes it
-  // into the authorship reference point; typing on past it drops it from
-  // the committed selection, and the commit delta must not read that as a
-  // removal. The user can also DELETE the shielded token though, which is
-  // one — so the exemption is limited to growth, and growth is latched
-  // into the edit stream by following the OCCURRENCE, not buffer-wide
-  // membership: the same value can sit in the buffer twice, and the
-  // membership lists collapse the copies, so they cannot say which one the
-  // user is typing. `editModelIds` tracks the occurrence's value edit by
-  // edit and clears the freeze at the first edit that occurrence does not
+  // value the shielded occurrence has held since and the comma segment it
+  // sat in last. The shield freezes it into the authorship reference
+  // point; typing on past it drops it from the committed selection, and
+  // the commit delta must not read that as a removal. The user can also
+  // DELETE the shielded token though, which is one — so the exemption is
+  // limited to growth, and growth is latched into the edit stream by
+  // following the OCCURRENCE, not buffer-wide membership: the same value
+  // can sit in the buffer twice, and the membership lists collapse the
+  // copies, so they cannot say which one the user is typing.
+  // `editModelIds` tracks the occurrence's segment and value edit by edit
+  // and clears the freeze at the first edit that occurrence does not
   // survive.
   const frozenTokenRef = useRef<{
     id: string;
     value: string;
+    segment: number | undefined;
   } | null>(null);
   // Ids the user deleted from the screen during an edit a resolve then
   // advanced the reference point over. Such a deletion carries no
@@ -313,16 +355,18 @@ export function useProviderSetupFlow(
       // retype cannot read as growth the freeze never saw.
       const frozen = frozenTokenRef.current;
       if (frozen !== null) {
-        const nextValue = followFrozenOccurrence(
+        const next = followFrozenOccurrence(
           prevCustoms,
           customModelIds,
           frozen.value,
+          frozen.segment,
           context?.activeCustomModelId,
         );
-        if (nextValue === null) {
+        if (next === null) {
           frozenTokenRef.current = null;
         } else {
-          frozen.value = nextValue;
+          frozen.value = next.value;
+          frozen.segment = next.segment;
         }
       }
       const injected = injectedModelIdRef.current;
@@ -397,9 +441,15 @@ export function useProviderSetupFlow(
     // following the occurrence edit by edit and clearing the freeze at the
     // first edit that occurrence does not survive. Provenance, not string
     // shape: a removed id that merely prefixes a surviving one is a rename
-    // or a deleted prefix twin, and both are genuine removals.
+    // or a deleted prefix twin, and both are genuine removals. Surviving
+    // is also not enough on its own — the latch follows shrinks too, so a
+    // backspace below the id's boundary and a retyped divergent
+    // continuation keeps the freeze alive while the on-screen token is no
+    // longer the frozen id. The exemption covers only a freeze whose value
+    // still extends that id.
     const frozen = frozenTokenRef.current;
-    const exemptFrozenId = frozen !== null ? frozen.id : null;
+    const exemptFrozenId =
+      frozen !== null && frozen.value.startsWith(frozen.id) ? frozen.id : null;
     const removed = new Set(
       before.filter((id) => !after.includes(id) && id !== exemptFrozenId),
     );
@@ -528,7 +578,12 @@ export function useProviderSetupFlow(
           activeTokenEditTouchedRef.current &&
           id === activeCustomModelIdRef.current
         ) {
-          frozenTokenRef.current = { id, value: id };
+          const occurrenceAt = customModelIdsRef.current.indexOf(id);
+          frozenTokenRef.current = {
+            id,
+            value: id,
+            segment: occurrenceAt >= 0 ? occurrenceAt : undefined,
+          };
           kept.push(id);
         }
       }
@@ -558,15 +613,29 @@ export function useProviderSetupFlow(
       // unserved built-in leaves the text and a served id moves to its
       // checkbox, so only the frozen id and ids outside both lists stay.
       // The shielded occurrence itself survives the re-derive because the
-      // selection installed above still carries it.
-      customModelIdsRef.current =
-        listChanged || selectionChanged
-          ? customsBeforeSwap.filter(
-              (custom) =>
-                custom === frozenId ||
-                (!builtIn.has(custom) && !served.has(custom)),
-            )
-          : customsBeforeSwap;
+      // selection installed above still carries it. It also collapses a
+      // repeated id to one segment, so the reseed dedupes the same way:
+      // keeping every copy would leave a phantom twin in the stream that
+      // the on-screen text no longer has, and the latch would diff the
+      // next edit against it and clear a freeze that legitimately grew.
+      if (listChanged || selectionChanged) {
+        const reseeded: string[] = [];
+        for (const custom of customsBeforeSwap) {
+          const survives =
+            custom === frozenId ||
+            (!builtIn.has(custom) && !served.has(custom));
+          if (survives && !reseeded.includes(custom)) {
+            reseeded.push(custom);
+          }
+        }
+        customModelIdsRef.current = reseeded;
+        const frozen = frozenTokenRef.current;
+        if (frozen !== null) {
+          frozen.segment = reseeded.indexOf(frozen.id);
+        }
+      } else {
+        customModelIdsRef.current = customsBeforeSwap;
+      }
     },
     [recordAuthoredModelIds, replaceRecommendations, setDisplayedModelIds],
   );
