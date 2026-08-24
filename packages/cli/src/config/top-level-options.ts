@@ -5,6 +5,11 @@
  */
 
 import type { Options } from 'yargs';
+import {
+  APPROVAL_MODE_INFO,
+  APPROVAL_MODES,
+  AuthType,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Top-level (global) option definitions shared between the bootstrap
@@ -160,9 +165,10 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'approval-mode': {
     type: 'string' as const,
-    choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'] as const,
-    description:
-      'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
+    choices: APPROVAL_MODES,
+    description: `Set the approval mode: ${APPROVAL_MODES.map(
+      (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
+    ).join(', ')}`,
   },
   acp: {
     type: 'boolean' as const,
@@ -353,11 +359,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
   'auth-type': {
     type: 'string' as const,
     choices: [
-      'openai',
-      'anthropic',
-      'qwen-oauth',
-      'gemini',
-      'vertex-ai',
+      AuthType.USE_OPENAI,
+      AuthType.USE_ANTHROPIC,
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_GEMINI,
+      AuthType.USE_VERTEX_AI,
     ] as const,
     description: 'Authentication type',
   },

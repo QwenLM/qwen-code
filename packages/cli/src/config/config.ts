@@ -6,6 +6,7 @@
 
 import {
   ApprovalMode,
+  APPROVAL_MODES,
   type AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -106,14 +107,6 @@ function resolveLocaleForExtensions(settings: Settings): string {
   return detectSystemLanguage();
 }
 
-const VALID_APPROVAL_MODE_VALUES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-
 const SKILL_LEVELS: readonly SkillLevel[] = [
   'project',
   'user',
@@ -127,7 +120,7 @@ function isSkillLevel(value: unknown): value is SkillLevel {
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${VALID_APPROVAL_MODE_VALUES.join(
+    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
       ', ',
     )}`,
   );
@@ -135,22 +128,15 @@ function formatApprovalModeError(value: string): Error {
 
 function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
-  switch (normalized) {
-    case 'plan':
-      return ApprovalMode.PLAN;
-    case 'default':
-      return ApprovalMode.DEFAULT;
-    case 'yolo':
-      return ApprovalMode.YOLO;
-    case 'auto_edit':
-    case 'autoedit':
-    case 'auto-edit':
-      return ApprovalMode.AUTO_EDIT;
-    case 'auto':
-      return ApprovalMode.AUTO;
-    default:
-      throw formatApprovalModeError(value);
+  const canonical =
+    normalized === 'auto_edit' || normalized === 'autoedit'
+      ? ApprovalMode.AUTO_EDIT
+      : normalized;
+  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
+  if (approvalMode === undefined) {
+    throw formatApprovalModeError(value);
   }
+  return approvalMode;
 }
 
 export interface CliArgs {
@@ -2079,25 +2065,6 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through the CDP tunnel (far lighter than the OS-level computer-use
-    // driver), so disable computer-use to keep the agent off that heavy path.
-    computerUseEnabled: (() => {
-      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
-      // Surface the override when it contradicts an explicit opt-in, so the
-      // effective config isn't a silent surprise during debugging.
-      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
-        writeStderrLine(
-          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
-            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through the CDP tunnel, so computer-use stays disabled.',
-        );
-      }
-      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
-    })(),
-    computerUseMaxImageDimension:
-      settings.tools?.computerUse?.maxImageDimension,
-    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -2132,6 +2099,7 @@ export async function loadCliConfig(
     trustedFolder,
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
+    workflowsEnabled: settings.tools?.workflowsEnabled,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
