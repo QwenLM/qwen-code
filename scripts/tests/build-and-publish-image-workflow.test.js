@@ -106,6 +106,17 @@ describe('build-and-publish-image workflow', () => {
     expect(failureIssueJob).not.toContain('github.event.inputs.publish');
   });
 
+  it('skips the failure-issue job for publishing dispatches without a version', () => {
+    // The dispatch arm of the gate admits an empty version input (required:
+    // false), which the build job services with its branch/sha fallback
+    // tags. The reporting job files one issue per VERSION and hard-fails on
+    // a versionless run, so the gate skips that combination by design. Tag
+    // pushes always carry a version through the tag name.
+    expect(failureIssueJob).toContain(
+      "(github.event_name == 'push' || github.event.inputs.version != '')",
+    );
+  });
+
   it('exports the publish decision before any step that can fail', () => {
     expect(buildJob).toContain(
       "push_image: '${{ steps.publish-decision.outputs.push_image }}'",

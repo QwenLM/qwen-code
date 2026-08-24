@@ -160,11 +160,14 @@ jobs:
   # One issue per version when both build attempts fail — a released npm
   # version without a sandbox image silently breaks every sandbox-based CI
   # lane. Covers publishing dispatches too: that is the recovery path the
-  # issue body recommends. Logic lives in the script named below.
+  # issue body recommends. Logic lives in the script named below. A
+  # publishing dispatch without a version input is skipped by design: the
+  # build job tags such runs with its branch/sha fallback, but this job
+  # files one issue per VERSION and cannot dedup a versionless failure.
   file-failure-issue:
     needs: ['build-and-push-to-ghcr']
     if: |-
-      ${{ failure() && github.repository == 'QwenLM/qwen-code' && needs.build-and-push-to-ghcr.outputs.push_image == 'true' }}
+      ${{ failure() && github.repository == 'QwenLM/qwen-code' && needs.build-and-push-to-ghcr.outputs.push_image == 'true' && (github.event_name == 'push' || github.event.inputs.version != '') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
