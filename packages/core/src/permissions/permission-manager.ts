@@ -193,6 +193,13 @@ export class PermissionManager {
    */
   private startupAllowRules: PermissionRule[] = [];
 
+  /**
+   * Set once the restart caveat for session allow-rule grants under an
+   * active registry allowlist has been logged, so repeated skill
+   * `allowedTools` grants do not pile identical warnings into the log.
+   */
+  private sessionGrantAllowlistCaveatLogged = false;
+
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
@@ -801,6 +808,14 @@ export class PermissionManager {
    * mid-session — skill `allowedTools`, "Always allow", `/permissions`
    * writes — extend membership live even though they can never ACTIVATE
    * the allowlist (#9827).
+   *
+   * Caveat: extending membership flips this runtime predicate only. A
+   * mid-session grant can never RESTORE a tool that the startup allowlist
+   * skipped at REGISTRATION — the registry is built once in
+   * `Config.initialize` and `ensureTool` returns undefined for factories
+   * that were never stored, so such a call still fails TOOL_NOT_REGISTERED
+   * until the rule is added to settings `permissions.allow` and the
+   * session restarts (#9827).
    */
   private isCoveredByAllowRule(canonicalName: string): boolean {
     const covered = (rule: PermissionRule): boolean =>
@@ -1122,6 +1137,12 @@ export class PermissionManager {
    * Add a session-level allow rule (in-memory, cleared when the session ends).
    * Used when the user clicks "Always allow for this session".
    *
+   * Under an active `permissions.allow` registry allowlist the grant
+   * auto-approves matching calls and extends allowlist MEMBERSHIP, but it
+   * cannot REGISTER a tool the startup allowlist skipped — registry
+   * composition is restart-scoped. The first such grant logs a caveat
+   * pointing at the restart path (#9827).
+   *
    * @param raw - The raw rule string, e.g. "Bash(git status)".
    */
   addSessionAllowRule(raw: string): void {
@@ -1132,6 +1153,18 @@ export class PermissionManager {
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
         return;
+      }
+      if (
+        this.permissionsAllowListActive &&
+        !this.sessionGrantAllowlistCaveatLogged
+      ) {
+        this.sessionGrantAllowlistCaveatLogged = true;
+        debugLogger.warn(
+          'Session allow rule granted while the permissions.allow registry allowlist is active: ' +
+            'the grant auto-approves matching calls, but it cannot register a tool the startup ' +
+            'allowlist skipped at registration — an unavailable tool stays unavailable until the ' +
+            'rule is added to settings permissions.allow and the session restarts (#9827).',
+        );
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
       // any newly added allow rule that is itself dangerous must be

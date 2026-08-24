@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,6 +28,18 @@ import {
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+
+const debugLoggerMock = vi.hoisted(() => ({
+  isEnabled: vi.fn().mockReturnValue(false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLoggerMock,
+}));
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -2828,10 +2840,17 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('edit')).toBe(true);
     });
 
-    it('session-granted allow rules keep their tools available under an active allowlist', async () => {
+    it('session-granted allow rules flip the runtime gate under an active allowlist', async () => {
       // Skill allowedTools grants (applySkillAllowedTools) and "Always
-      // allow" choices must not strand their tools when the session started
-      // with configured allow rules.
+      // allow" choices extend allowlist membership, so the runtime
+      // permission gate stops rejecting their tools when the session
+      // started with configured allow rules.
+      //
+      // Narrowed contract (#9827): this only asserts the
+      // PermissionManager-level half. A grant still cannot REGISTER a tool
+      // the startup allowlist skipped — registry composition is
+      // restart-scoped (see the caveat-warning tests below and
+      // `isCoveredByAllowRule`).
       pm = new PermissionManager(
         makeConfig({ permissionsAllow: ['read_file'] }),
       );
@@ -2841,6 +2860,30 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('cron_create')).toBe(true);
       // Unrelated tools stay gated
       expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('warns once that a session grant cannot register a startup-skipped tool (#9827)', async () => {
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      pm.addSessionAllowRule('run_shell_command');
+      pm.addSessionAllowRule('cron_create');
+      // Once per session, not once per grant.
+      expect(debugLoggerMock.warn).toHaveBeenCalledTimes(1);
+      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('cannot register a tool'),
+      );
+    });
+
+    it('does not log the restart caveat when the allowlist is inactive (#9827)', async () => {
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      pm.addSessionAllowRule('run_shell_command');
+      expect(debugLoggerMock.warn).not.toHaveBeenCalled();
     });
 
     it('removing a startup allow rule mid-session keeps its tools registered (restart-scoped, #9827)', async () => {
