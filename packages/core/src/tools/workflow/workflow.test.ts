@@ -149,6 +149,9 @@ describe('WorkflowTool', () => {
     // Each enumerated form is a real qwen trigger. Without the list the gate
     // is unfalsifiable from the model's side — it cannot tell whether the
     // request in front of it qualifies.
+    expect(description).toContain(
+      'It counts as requested when any of these holds:',
+    );
     expect(description).toMatch(/contains the word `workflow`/);
     expect(description).toMatch(/in their own words/);
     expect(description).toMatch(/skill or slash command/);
@@ -164,6 +167,12 @@ describe('WorkflowTool', () => {
     // model reads "do not call it" as "refuse", and a user who would have
     // said yes never gets asked. Over-blocking is this change's one real
     // failure mode, so the escape hatch is anchored.
+    expect(description).toContain(
+      'Do not call this tool unless the user has asked for multi-agent orchestration.',
+    );
+    expect(description).toContain(
+      'Otherwise do not call it, however well the task would parallelize.',
+    );
     expect(description).toMatch(/let the user decide/);
     expect(description).toMatch(/skips the ask/);
 
