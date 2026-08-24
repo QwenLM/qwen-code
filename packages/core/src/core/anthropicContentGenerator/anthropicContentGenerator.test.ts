@@ -6,10 +6,7 @@
 
 import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  CountTokensParameters,
-  GenerateContentParameters,
-} from '@google/genai';
+import type { GenerateContentParameters } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import {
@@ -17,19 +14,11 @@ import {
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../openaiContentGenerator/constants.js';
 
-// Mock the request tokenizer module BEFORE importing the class that uses it.
-const mockTokenizer = {
-  calculateTokens: vi.fn(),
-  dispose: vi.fn(),
-};
 const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
 const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
 const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
 const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
-vi.mock('../../utils/request-tokenizer/index.js', () => ({
-  RequestTokenEstimator: vi.fn(() => mockTokenizer),
-}));
 vi.mock('../../telemetry/gen-ai-request.js', () => ({
   reportAnthropicRequest: mockReportAnthropicRequest,
   reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
@@ -107,16 +96,6 @@ describe('AnthropicContentGenerator', () => {
     savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
     delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
-    mockTokenizer.calculateTokens.mockResolvedValue({
-      totalTokens: 50,
-      breakdown: {
-        textTokens: 50,
-        imageTokens: 0,
-        audioTokens: 0,
-        otherTokens: 0,
-      },
-      processingTime: 1,
-    });
     anthropicState = anthropicMockState;
 
     anthropicState.createImpl.mockReset();
@@ -3302,58 +3281,6 @@ describe('AnthropicContentGenerator', () => {
         expect.not.objectContaining({ output_config: expect.anything() }),
       );
       expect(messages[1]).toEqual(toolOnlyAssistant);
-    });
-  });
-
-  describe('countTokens', () => {
-    it('counts tokens using the request tokenizer', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: {},
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
-
-      const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello world' }] }],
-        model: 'claude-test',
-      };
-
-      const result = await generator.countTokens(request);
-      expect(mockTokenizer.calculateTokens).toHaveBeenCalledWith(request);
-      expect(result.totalTokens).toBe(50);
-    });
-
-    it('falls back to character approximation when tokenizer throws', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
-      mockTokenizer.calculateTokens.mockRejectedValueOnce(new Error('boom'));
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: {},
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
-
-      const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
-        model: 'claude-test',
-      };
-
-      const content = JSON.stringify(request.contents);
-      const expected = Math.ceil(content.length / 4);
-      const result = await generator.countTokens(request);
-      expect(result.totalTokens).toBe(expected);
     });
   });
 
