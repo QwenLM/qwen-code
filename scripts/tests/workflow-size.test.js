@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // GitHub does not start runs for a workflow file over 500 KB (512,000 bytes)
@@ -59,30 +60,20 @@ describe('workflow file size', () => {
       'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
     );
     expect(step?.[0]).not.toContain('ci_profile');
-    // The ratchet's PR-scope fix (#9904) hangs off this env: without it the
-    // gate has no base to compare against and silently degrades to the
-    // pre-fix red-wall, so pin both event arms the script relies on.
-    expect(step?.[0]).toContain('WORKFLOW_SIZE_BASE_SHA');
-    expect(step?.[0]).toContain('github.event.pull_request.base.sha');
-    expect(step?.[0]).toContain('github.event.merge_group.base_sha');
   });
 
-  it('wires the base SHA into every lane that runs the vitest mirror', () => {
-    // The ratchet mirror below is the only enforcer on the merge-queue lanes
-    // that never run the bash gate; each `npm run test:ci` step must hand it
-    // the same base SHA the gate gets, or the #9904 stale-baseline leniency
-    // silently degrades to the pre-fix red wall on exactly those lanes.
-    const testSteps = [
-      ...ciWorkflow.matchAll(
-        /- name: 'Run tests and generate reports'[\s\S]*?npm run test:ci/g,
-      ),
-    ];
-    expect(testSteps).toHaveLength(3);
-    for (const step of testSteps) {
-      expect(step[0]).toContain('WORKFLOW_SIZE_BASE_SHA');
-      expect(step[0]).toContain('github.event.pull_request.base.sha');
-      expect(step[0]).toContain('github.event.merge_group.base_sha');
-    }
+  it('wires the base SHA once at workflow level so every lane inherits it', () => {
+    // The ratchet's PR-scope fix (#9904) hangs off this env: without it the
+    // gate and its vitest mirror have no base to compare against and
+    // silently degrade to the pre-fix red wall. Declared once at workflow
+    // level, it reaches the gate step AND every `npm run test:ci` lane —
+    // including the merge-queue lanes where the mirror is the only ratchet
+    // enforcer — without each step hand-wiring a copy a future lane could
+    // forget.
+    const workflowEnv = ciWorkflow.match(/^env:[\s\S]*?\njobs:/m)?.[0];
+    expect(workflowEnv).toContain('WORKFLOW_SIZE_BASE_SHA');
+    expect(workflowEnv).toContain('github.event.pull_request.base.sha');
+    expect(workflowEnv).toContain('github.event.merge_group.base_sha');
   });
 });
 
@@ -90,11 +81,19 @@ describe('workflow file size', () => {
 // landed on main without the same-PR baseline bump — warns instead of
 // red-walling unrelated PRs (#9904). This mirror is the ONLY enforcer on the
 // merge-queue lanes that never run the bash script, so it applies the same
-// leniency: an over-allowance file that is byte-identical to the base passes.
-// As in the gate, an unset or unresolvable base fails closed.
+// leniency to both the over-allowance and the missing-entry arms: a file
+// byte-identical to the base passes. An unset base fails closed, and an
+// unresolvable base throws instead of returning false: like the gate's
+// exit-2 arm, a transient fetch failure and genuine PR growth need opposite
+// remedies, so the failure says which one it is instead of blaming the PR's
+// growth.
 const fileMatchesBase = (file) => {
   const baseSha = (process.env.WORKFLOW_SIZE_BASE_SHA ?? '').trim();
   if (!baseSha) return false;
+  // node:path join emits backslashes on the merge-queue Windows lane; git
+  // pathspecs want forward slashes, and normalizing once covers the
+  // readFileSync below on every platform.
+  const repoPath = file.split(/[\\/]/).join('/');
   let resolved =
     spawnSync(
       'git',
@@ -104,17 +103,19 @@ const fileMatchesBase = (file) => {
   if (!resolved) {
     resolved =
       spawnSync('git', ['fetch', '--depth=1', '--quiet', 'origin', baseSha], {
-        stdio: 'ignore',
+        // stderr inherits so a fetch failure leaves its trace in the log.
+        stdio: ['ignore', 'ignore', 'inherit'],
       }).status === 0;
   }
-  if (!resolved) return false;
-  const baseCopy = spawnSync('git', [
-    'show',
-    `${baseSha}:${file.split(/[\\/]/).join('/')}`,
-  ]);
+  if (!resolved) {
+    throw new Error(
+      `base ${baseSha} could not be resolved (transient git fetch failure? re-run the job)`,
+    );
+  }
+  const baseCopy = spawnSync('git', ['show', `${baseSha}:${repoPath}`]);
   return (
     baseCopy.status === 0 &&
-    Buffer.compare(baseCopy.stdout, readFileSync(file)) === 0
+    Buffer.compare(baseCopy.stdout, readFileSync(repoPath)) === 0
   );
 };
 
@@ -154,7 +155,16 @@ describe('workflow size growth ratchet', () => {
   });
 
   it.each(workflowFiles)('%s has a baseline entry', (file) => {
-    expect(baseline.has(workflowName(file))).toBe(true);
+    if (baseline.has(workflowName(file))) return;
+    // Stale-baseline leniency (#9904), mirroring the shell gate's
+    // missing-entry arm: a workflow that reached main without an entry
+    // (bypass merge, misclassification, gate outage) is main-side drift, and
+    // hard-failing every unrelated PR here relocates the exact red wall this
+    // PR removes into `npm run test:ci`.
+    expect(
+      fileMatchesBase(file),
+      `${file} has no entry in .size-baseline and differs from the PR's base`,
+    ).toBe(true);
   });
 
   it.each(workflowFiles)('%s is within its baseline allowance', (file) => {
@@ -207,37 +217,38 @@ const bashSupportsAssocArrays =
 const gitAvailable =
   spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
 
+const gatePath = join(
+  process.cwd(),
+  '.github',
+  'scripts',
+  'check-workflow-size.sh',
+);
+// The gate reads three WORKFLOW_SIZE_* knobs, and the git fixtures commit
+// through the developer's git config — scrub both, because a leak from the
+// surrounding shell must not change what the fixtures assert: a leaked
+// WORKFLOW_SIZE_BASE_SHA flips the fail-closed fixtures to the warning path,
+// a leaked WORKFLOW_SIZE_GROWTH_ALLOWANCE flips a one-byte-over failure
+// green, and a global commit.gpgsign or hooksPath breaks `git commit`
+// silently the same way.
+const hermeticGateEnv = (dir) => {
+  const env = { ...process.env };
+  delete env.WORKFLOW_SIZE_BASE_SHA;
+  delete env.WORKFLOW_SIZE_GATE_BYTES;
+  delete env.WORKFLOW_SIZE_GROWTH_ALLOWANCE;
+  const gitconfigPath = join(dir, 'fixture-gitconfig');
+  writeFileSync(gitconfigPath, '');
+  return Object.assign(env, {
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: gitconfigPath,
+  });
+};
+
 describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
   'check-workflow-size.sh execution',
   () => {
     // The block above re-implements the gate's arithmetic in JS; only running
     // the real script pins its decision branches (growth, missing entry,
     // missing baseline, slack warning, malformed line).
-    const gatePath = join(
-      process.cwd(),
-      '.github',
-      'scripts',
-      'check-workflow-size.sh',
-    );
-    // The gate reads three WORKFLOW_SIZE_* knobs, and the git fixtures commit
-    // through the developer's git config — scrub both, because a leak from
-    // the surrounding shell must not change what the fixtures assert: a
-    // leaked WORKFLOW_SIZE_BASE_SHA flips the fail-closed fixtures to the
-    // warning path, a leaked WORKFLOW_SIZE_GROWTH_ALLOWANCE flips a
-    // one-byte-over failure green, and a global commit.gpgsign or hooksPath
-    // breaks `git commit` silently the same way.
-    const hermeticGateEnv = (dir) => {
-      const env = { ...process.env };
-      delete env.WORKFLOW_SIZE_BASE_SHA;
-      delete env.WORKFLOW_SIZE_GATE_BYTES;
-      delete env.WORKFLOW_SIZE_GROWTH_ALLOWANCE;
-      const gitconfigPath = join(dir, 'fixture-gitconfig');
-      writeFileSync(gitconfigPath, '');
-      return Object.assign(env, {
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: gitconfigPath,
-      });
-    };
     const runGate = ({ files, baseline, commitBase, dirtyFiles, baseSha }) => {
       const dir = mkdtempSync(join(tmpdir(), 'workflow-size-gate-'));
       try {
@@ -586,77 +597,254 @@ describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
           rmSync(dir, { recursive: true, force: true });
         }
       });
+    });
+  },
+);
 
-      describe('the vitest mirror of the leniency (fileMatchesBase)', () => {
-        // The mirror is the only enforcer on the merge-queue lanes; these
-        // fixtures pin its four outcomes on a real git repo, mirroring the
-        // gate's semantics.
-        let dir;
-        let env;
-        let baseSha;
-        let restoreCwd;
-        beforeAll(() => {
-          dir = mkdtempSync(join(tmpdir(), 'workflow-size-mirror-'));
-          env = hermeticGateEnv(dir);
-          mkdirSync(join(dir, WORKFLOW_DIR), { recursive: true });
-          writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'base content\n');
-          const git = (args) => {
-            const r = spawnSync('git', args, {
-              cwd: dir,
-              encoding: 'utf8',
-              env,
-            });
-            expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
-            return r;
-          };
-          git(['init', '--quiet']);
-          git(['config', 'user.email', 'gate-test@example.com']);
-          git(['config', 'user.name', 'gate-test']);
-          git(['add', '.']);
-          git(['commit', '--quiet', '-m', 'base']);
-          baseSha = git(['rev-parse', 'HEAD']).stdout.trim();
-          restoreCwd = process.cwd();
-          process.chdir(dir);
+// The mirror spawns only git, so its fixtures gate on git alone — not on the
+// bash assoc-array capability the SCRIPT needs. They must run on the
+// merge-group Windows and macOS lanes, where the bash gate never runs and
+// this mirror is the only ratchet enforcer.
+describe.skipIf(!gitAvailable)(
+  'fileMatchesBase — the vitest mirror of the leniency',
+  () => {
+    let dir;
+    let baseSha;
+    let restoreCwd;
+    beforeAll(() => {
+      dir = mkdtempSync(join(tmpdir(), 'workflow-size-mirror-'));
+      const env = hermeticGateEnv(dir);
+      mkdirSync(join(dir, WORKFLOW_DIR), { recursive: true });
+      writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'base content\n');
+      const git = (args) => {
+        const r = spawnSync('git', args, {
+          cwd: dir,
+          encoding: 'utf8',
+          env,
         });
-        afterAll(() => {
-          process.chdir(restoreCwd);
-          delete process.env.WORKFLOW_SIZE_BASE_SHA;
-          rmSync(dir, { recursive: true, force: true });
-        });
+        expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
+        return r;
+      };
+      git(['init', '--quiet']);
+      git(['config', 'user.email', 'gate-test@example.com']);
+      git(['config', 'user.name', 'gate-test']);
+      git(['add', '.']);
+      git(['commit', '--quiet', '-m', 'base']);
+      baseSha = git(['rev-parse', 'HEAD']).stdout.trim();
+      restoreCwd = process.cwd();
+      process.chdir(dir);
+    });
+    afterAll(() => {
+      process.chdir(restoreCwd);
+      delete process.env.WORKFLOW_SIZE_BASE_SHA;
+      rmSync(dir, { recursive: true, force: true });
+    });
 
-        it('returns false when no base SHA is set', () => {
-          delete process.env.WORKFLOW_SIZE_BASE_SHA;
-          expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(false);
-        });
+    it('returns false when no base SHA is set', () => {
+      delete process.env.WORKFLOW_SIZE_BASE_SHA;
+      expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(false);
+    });
 
-        it('returns true for a file byte-identical to the base', () => {
-          process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
-          expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(true);
-        });
+    it('returns true for a file byte-identical to the base', () => {
+      process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+      expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(true);
+    });
 
-        it('returns false for a file the PR changed', () => {
-          process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
-          const path = join(WORKFLOW_DIR, 'small.yml');
-          writeFileSync(path, 'changed by the PR\n');
-          try {
-            expect(fileMatchesBase(path)).toBe(false);
-          } finally {
-            writeFileSync(path, 'base content\n');
-          }
-        });
+    it('returns false for a file the PR changed', () => {
+      process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+      const path = join(WORKFLOW_DIR, 'small.yml');
+      writeFileSync(path, 'changed by the PR\n');
+      try {
+        expect(fileMatchesBase(path)).toBe(false);
+      } finally {
+        writeFileSync(path, 'base content\n');
+      }
+    });
 
-        it('returns false for a file absent from the base commit', () => {
-          process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
-          const path = join(WORKFLOW_DIR, 'brand-new.yml');
-          writeFileSync(path, 'added by the PR\n');
-          expect(fileMatchesBase(path)).toBe(false);
-        });
+    it('returns false for a file absent from the base commit', () => {
+      process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+      const path = join(WORKFLOW_DIR, 'brand-new.yml');
+      writeFileSync(path, 'added by the PR\n');
+      expect(fileMatchesBase(path)).toBe(false);
+    });
 
-        it('fails closed on an unresolvable base', () => {
-          process.env.WORKFLOW_SIZE_BASE_SHA = '0'.repeat(40);
-          expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(false);
-        });
-      });
+    it('normalizes win32-style paths before asking git or the filesystem', () => {
+      // On the merge-queue Windows lane join() emits backslashes, which git
+      // pathspecs reject. Pin the normalization with a backslash path on
+      // EVERY lane — on POSIX join() never emits one, so without this case
+      // a mutation deleting the normalization survives every test that runs
+      // and first fails during a real stale-baseline drift.
+      process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+      expect(fileMatchesBase(win32.join(WORKFLOW_DIR, 'small.yml'))).toBe(true);
+    });
+
+    it('fails closed on an unresolvable base', () => {
+      // Throws rather than returning false so the failure says "re-run the
+      // job" instead of blaming the PR's growth — the gate's exit-2 arm
+      // separates the same two cases for the same reason.
+      process.env.WORKFLOW_SIZE_BASE_SHA = '0'.repeat(40);
+      expect(() => fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toThrow(
+        /could not be resolved/,
+      );
+    });
+
+    it('fetches the base commit when it is not local (CI shallow-clone path)', () => {
+      // Mirror of the gate's shallow-clone fixture: every production lane
+      // checks out at depth 1, so the base commit is never present locally
+      // and this fetch arm IS the production path for the mirror. Removing
+      // the arm must turn this test red.
+      const fetchDir = mkdtempSync(
+        join(tmpdir(), 'workflow-size-mirror-fetch-'),
+      );
+      const fetchCwd = process.cwd();
+      try {
+        const env = hermeticGateEnv(fetchDir);
+        const bare = join(fetchDir, 'origin.git');
+        const seed = join(fetchDir, 'seed');
+        const checkout = join(fetchDir, 'checkout');
+        const git = (args, cwd) => {
+          const r = spawnSync('git', args, { cwd, encoding: 'utf8', env });
+          expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
+          return r;
+        };
+        mkdirSync(seed, { recursive: true });
+        git(['init', '--quiet', '--bare', bare], fetchDir);
+        // The bare repo's HEAD defaults to refs/heads/master; point it at
+        // the branch the seed pushes so the clone checks files out at all.
+        git(['symbolic-ref', 'HEAD', 'refs/heads/main'], bare);
+        git(['config', 'uploadpack.allowAnySHA1InWant', 'true'], bare);
+        // Seed: a base commit, then a second commit that changes only an
+        // unrelated file, so the base sits behind the tip and a depth-1
+        // clone does not contain it.
+        git(['init', '--quiet'], seed);
+        git(['config', 'user.email', 'gate-test@example.com'], seed);
+        git(['config', 'user.name', 'gate-test'], seed);
+        const seedWorkflows = join(seed, WORKFLOW_DIR);
+        mkdirSync(seedWorkflows, { recursive: true });
+        writeFileSync(join(seedWorkflows, 'small.yml'), 'base content\n');
+        git(['add', '.'], seed);
+        git(['commit', '--quiet', '-m', 'base'], seed);
+        const fetchBaseSha = git(['rev-parse', 'HEAD'], seed).stdout.trim();
+        writeFileSync(join(seed, 'README.md'), 'unrelated tip change\n');
+        git(['add', '.'], seed);
+        git(['commit', '--quiet', '-m', 'unrelated tip'], seed);
+        git(['remote', 'add', 'origin', bare], seed);
+        git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], seed);
+        // Depth-1 clone holds only the tip; the base commit needs a fetch.
+        // The file:// URL matters: a plain local path ignores --depth and
+        // copies full history, which would hide the fetch under test.
+        git(
+          [
+            'clone',
+            '--quiet',
+            '--depth',
+            '1',
+            pathToFileURL(bare).href,
+            checkout,
+          ],
+          fetchDir,
+        );
+        process.chdir(checkout);
+        process.env.WORKFLOW_SIZE_BASE_SHA = fetchBaseSha;
+        // Pin the precondition: the base is absent locally, so any success
+        // below must come from the fetch arm, not from local history.
+        expect(
+          spawnSync(
+            'git',
+            ['rev-parse', '--verify', '--quiet', `${fetchBaseSha}^{commit}`],
+            { stdio: 'ignore' },
+          ).status,
+        ).not.toBe(0);
+        expect(fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'))).toBe(true);
+      } finally {
+        process.chdir(fetchCwd);
+        delete process.env.WORKFLOW_SIZE_BASE_SHA;
+        rmSync(fetchDir, { recursive: true, force: true });
+      }
+    });
+  },
+);
+
+// One predicate ships as two implementations: the bash gate on the PR lanes
+// and this JS mirror on the merge-queue lanes. Nothing else runs both
+// against the same repo state, so an edit to the leniency logic that lands
+// in only one copy makes one lane warn while the other hard-fails — the
+// #9904 red wall recreated on lanes that never show the bash diagnostic —
+// and stays green here. One committed fixture, both runtimes, every verdict.
+describe.skipIf(!gitAvailable || !bashSupportsAssocArrays)(
+  'the gate and the mirror agree on the same repo state',
+  () => {
+    it('is lenient on main-side drift and strict on PR growth, in both runtimes', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'workflow-size-parity-'));
+      const restoreCwd = process.cwd();
+      try {
+        const env = hermeticGateEnv(dir);
+        mkdirSync(join(dir, WORKFLOW_DIR), { recursive: true });
+        writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'a'.repeat(5000));
+        writeFileSync(
+          join(dir, WORKFLOW_DIR, '.size-baseline'),
+          '100 small.yml\n',
+        );
+        const git = (args) => {
+          const r = spawnSync('git', args, {
+            cwd: dir,
+            encoding: 'utf8',
+            env,
+          });
+          expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
+          return r;
+        };
+        git(['init', '--quiet']);
+        git(['config', 'user.email', 'gate-test@example.com']);
+        git(['config', 'user.name', 'gate-test']);
+        git(['add', '.']);
+        git(['commit', '--quiet', '-m', 'base']);
+        const baseSha = git(['rev-parse', 'HEAD']).stdout.trim();
+        env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+        process.env.WORKFLOW_SIZE_BASE_SHA = baseSha;
+        process.chdir(dir);
+        const gate = () =>
+          spawnSync('bash', [gatePath], { cwd: dir, encoding: 'utf8', env });
+        const mirror = () => fileMatchesBase(join(WORKFLOW_DIR, 'small.yml'));
+
+        // Over-allowance drift: 5000 bytes against a recorded 100, file
+        // unchanged from the base — both runtimes lenient.
+        const driftGate = gate();
+        expect(driftGate.status).toBe(0);
+        expect(driftGate.stdout).toContain('the baseline went stale on main');
+        expect(mirror()).toBe(true);
+
+        // The same drift with the PR changing the file — both strict.
+        writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'a'.repeat(5001));
+        const growthGate = gate();
+        expect(growthGate.status).toBe(1);
+        expect(growthGate.stdout).toContain('grew to 5001 bytes');
+        expect(mirror()).toBe(false);
+
+        // Missing-entry drift: the gate's other lenient arm, with the file
+        // back at its base content — both runtimes lenient.
+        writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'a'.repeat(5000));
+        writeFileSync(
+          join(dir, WORKFLOW_DIR, '.size-baseline'),
+          '# header only\n',
+        );
+        const missingGate = gate();
+        expect(missingGate.status).toBe(0);
+        expect(missingGate.stdout).toContain('has no entry');
+        expect(missingGate.stdout).toContain('unrelated PRs are not blocked');
+        expect(mirror()).toBe(true);
+
+        // Missing entry with the PR changing the file — both strict.
+        writeFileSync(join(dir, WORKFLOW_DIR, 'small.yml'), 'a'.repeat(5001));
+        const changedGate = gate();
+        expect(changedGate.status).toBe(1);
+        expect(changedGate.stdout).toContain('has no entry');
+        expect(mirror()).toBe(false);
+      } finally {
+        process.chdir(restoreCwd);
+        delete process.env.WORKFLOW_SIZE_BASE_SHA;
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   },
 );

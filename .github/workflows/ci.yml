@@ -51,6 +51,12 @@ env:
   # new helper test can't be added to one path and silently dropped from the
   # other.
   HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  # The growth ratchet and its vitest mirror compare each workflow against
+  # the PR's base commit to tell "this PR grew the file" apart from "the
+  # baseline went stale on main" (#9904). Wired once here so every lane
+  # inherits it — the gate step and every `npm run test:ci` step, whatever
+  # it is named — instead of each step hand-wiring a copy.
+  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
 
 jobs:
   classify_pr:
@@ -317,11 +323,6 @@ jobs:
       # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
       - name: 'Check workflow file size'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        env:
-          # Lets the growth ratchet tell "this PR grew the workflow" apart
-          # from "the baseline went stale on main" so one author's missing
-          # baseline bump cannot red-wall every unrelated open PR (#9904).
-          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
         run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
@@ -532,11 +533,6 @@ jobs:
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
-          # Same base SHA the size gate above receives: the vitest mirror of
-          # the ratchet applies the identical stale-baseline leniency (#9904),
-          # so main-side drift warns here too instead of red-walling the
-          # full-CI lanes the gate just passed.
-          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -882,7 +878,6 @@ jobs:
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
-          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -1013,7 +1008,6 @@ jobs:
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
-          WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
