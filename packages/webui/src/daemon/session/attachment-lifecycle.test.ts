@@ -164,4 +164,50 @@ describe('SessionAttachmentLifecycle', () => {
     await expect(pending).rejects.toThrow('load failed');
     expect(lifecycle.isCleanupDetachPreserved(otherSession)).toBe(true);
   });
+
+  it("keeps the successor's exemption when a stale load is rejected", async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const session = {
+      sessionId: 'session-a',
+    } as DaemonSessionClient;
+    const stale = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    const staleLoad = lifecycle.pendingLoad!;
+    // A same-session reload supersedes the failed load; the second switch
+    // re-preserves the cleanup-detach exemption for the successor.
+    const successor = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    await expect(stale).rejects.toMatchObject({ name: 'AbortError' });
+    lifecycle.preserveCleanupDetach(session);
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(true);
+
+    // The late reject of the superseded load must return false and must NOT
+    // release the exemption: releasePendingLoad fails on the stale load
+    // before any release runs, so the successor keeps its exemption.
+    expect(lifecycle.rejectPendingLoad(staleLoad, new Error('late'))).toBe(
+      false,
+    );
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(true);
+
+    let successorSettled = false;
+    void successor.then(
+      () => {
+        successorSettled = true;
+      },
+      () => {
+        successorSettled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(successorSettled).toBe(false);
+
+    lifecycle.resolvePendingLoad(lifecycle.pendingLoad!);
+    await expect(successor).resolves.toBeUndefined();
+  });
 });
