@@ -194,6 +194,13 @@ describe('backfillWorkspaceSessionPrs', () => {
     workspaceCwd = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-work-'),
     );
+    // A healthy workspace has refs/remotes/origin/HEAD — model it so head-
+    // branch mapping runs; the fail-closed test deletes the symref.
+    execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
+    execSync(
+      'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main',
+      { cwd: workspaceCwd, stdio: 'pipe' },
+    );
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     runtime = {
       workspaceId: 'primary',
@@ -773,6 +780,52 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
     );
     expect(prsB?.map((entry) => entry.number)).toEqual([31]);
+  });
+
+  it('fails closed on head-branch mapping when the default branch is unknown', async () => {
+    // A workspace whose refs/remotes/origin/HEAD is absent (git init +
+    // remote add without a clone, or `git remote set-head origin -d`)
+    // leaves getDefaultBranch null and the default-branch exclusion
+    // cannot run — a fork PR carrying the bare default-branch name as
+    // headRefName would map, re-enabling the exact misattribution the
+    // exclusion exists to prevent. Head-branch mapping must be skipped
+    // for the whole run; convention bindings do not depend on it.
+    execSync('git symbolic-ref --delete refs/remotes/origin/HEAD', {
+      cwd: workspaceCwd,
+      stdio: 'pipe',
+    });
+    await seedSession(SESSION_A);
+    await seedTranscriptBranchNames(SESSION_A, ['main']);
+    await seedSession(SESSION_B);
+    await seedTranscriptBranchNames(SESSION_B, ['feat-x']);
+    await seedSession(SESSION_C);
+    await seedWorktreeSidecar(SESSION_C, 'pr-7', 'worktree-pr-7');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(9199, 'main'),
+        pr(31, 'feat-x'),
+        pr(7, 'worktree-pr-7'),
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 3, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+    const prsC = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_C, 'active'),
+    );
+    expect(prsC?.map((entry) => entry.number)).toEqual([7]);
   });
 
   it('keeps the convention number bound when candidates exceed the cap', async () => {
@@ -1413,6 +1466,11 @@ describe('registerSessionPrBackfillRoutes', () => {
     const cwd = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-route-work-'),
     );
+    execSync('git init', { cwd, stdio: 'pipe' });
+    execSync(
+      'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main',
+      { cwd, stdio: 'pipe' },
+    );
     const runtimeDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-route-runtime-'),
     );
@@ -1529,6 +1587,136 @@ describe('registerSessionPrBackfillRoutes', () => {
       expect(response.body).toMatchObject({ bound: 0 });
       expect(invalidateSpy).not.toHaveBeenCalled();
       expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
+    } finally {
+      invalidateSpy.mockRestore();
+      await seeded.cleanup();
+    }
+  });
+
+  // Seeds a trusted workspace whose single session recorded ten transcript
+  // branches while its sidecar already holds the first nine — the shape a
+  // concurrent dialog binding turns into an eviction-only write.
+  async function seedTrustedEvictionWorkspace(): Promise<{
+    runtime: WorkspaceRuntime;
+    markSessionCatalogChanged: ReturnType<typeof vi.fn>;
+    prPath: string;
+    cleanup: () => Promise<void>;
+  }> {
+    const cwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-work-'),
+    );
+    execSync('git init', { cwd, stdio: 'pipe' });
+    execSync(
+      'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main',
+      { cwd, stdio: 'pipe' },
+    );
+    const runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-backfill-route-runtime-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    const markSessionCatalogChanged = vi.fn();
+    const rt = {
+      workspaceId: 'primary',
+      workspaceCwd: cwd,
+      sessionRuntimeBaseDir: runtimeDir,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged },
+    } as unknown as WorkspaceRuntime;
+    const service = createWorkspaceRuntimeSessionService(rt);
+    const chatsDir = path.join(new Storage(cwd).getProjectDir(), 'chats');
+    await fsp.mkdir(chatsDir, { recursive: true });
+    let transcript = '';
+    for (let i = 1; i <= 10; i++) {
+      transcript += `${JSON.stringify({
+        uuid: `${SESSION_A}-user-${i}`,
+        parentUuid: i === 1 ? null : `${SESSION_A}-user-${i - 1}`,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'more' }] },
+        cwd,
+        gitBranch: `b-${i}`,
+      })}\n`;
+    }
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      transcript,
+      'utf8',
+    );
+    const prPath = service.getPrSessionPathForArchiveState(SESSION_A, 'active');
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: Array.from({ length: 9 }, (_, i) => ({
+          number: i + 1,
+          url: `https://github.com/o/r/pull/${i + 1}`,
+          createdAt: '2026-08-01T00:00:00.000Z',
+        })),
+      }),
+      'utf8',
+    );
+    return {
+      runtime: rt,
+      markSessionCatalogChanged,
+      prPath,
+      cleanup: async () => {
+        delete process.env['QWEN_RUNTIME_DIR'];
+        await fsp.rm(cwd, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('invalidates the cache when a persisted plan evicts without adding', async () => {
+    const seeded = await seedTrustedEvictionWorkspace();
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: Array.from({ length: 10 }, (_, i) =>
+        pr(i + 1, `b-${i + 1}`),
+      ),
+    });
+    // The dialog binds #10 between the snapshot read and the queued write:
+    // every surviving plan number is then already present, so the cap trim
+    // persists an eviction (of #1) with zero additions — still a catalog
+    // mutation the sidebar must refetch.
+    sidecarReadHook.current = {
+      path: seeded.prPath,
+      run: () =>
+        upsertSessionPr(seeded.prPath, {
+          number: 10,
+          url: 'https://github.com/o/r/pull/10',
+        }).then(() => undefined),
+    };
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([seeded.runtime]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    try {
+      const response = await request(app).post('/sessions/backfill-prs');
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces[0]).toMatchObject({
+        scanned: 1,
+        bound: 0,
+        alreadyBound: 9,
+        overLimit: 1,
+      });
+      const after = await readSessionPrs(seeded.prPath);
+      expect(after?.map((entry) => entry.number)).toEqual([
+        2, 3, 4, 5, 6, 7, 8, 9, 10,
+      ]);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      expect(seeded.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     } finally {
       invalidateSpy.mockRestore();
       await seeded.cleanup();

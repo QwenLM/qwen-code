@@ -114,6 +114,8 @@ export interface SessionPrBackfillWorkspaceResult {
   scanned: number;
   /** New PR bindings written by this run (a session may bind several). */
   bound: number;
+  /** Sidecar writes persisted, including eviction-only rewrites. */
+  written: number;
   /** Resolved bindings that already existed in the sidecar. */
   alreadyBound: number;
   /** Resolved numbers skipped because they exceed the sidecar cap. */
@@ -175,6 +177,7 @@ export async function backfillWorkspaceSessionPrs(
     workspaceCwd: runtime.workspaceCwd,
     scanned: 0,
     bound: 0,
+    written: 0,
     alreadyBound: 0,
     overLimit: 0,
     unresolved: 0,
@@ -244,6 +247,14 @@ export async function backfillWorkspaceSessionPrs(
     // by owner), so mapping it would bind every such session to an unrelated
     // contributor's PR — the highest-numbered one.
     let defaultBranch: string | undefined;
+    // Fail closed: when the default branch is undeterminable (no
+    // refs/remotes/origin/HEAD — git init + remote add without a clone, or
+    // `git remote set-head origin -d`), the exclusion below degenerates to
+    // `headRefName !== undefined` and fork PRs carrying the bare default-
+    // branch name would map again — the misattribution this guard exists
+    // to prevent. Skip head-branch mapping for the whole run instead;
+    // convention/slug bindings do not read branchToNumber and survive.
+    let headBranchMapping = false;
     if (candidates.some((candidate) => candidate.branches.length > 0)) {
       // Local ref read only — no credentials needed; getDefaultBranch
       // sanitizes the ambient env through gitEnv internally, the same
@@ -251,12 +262,14 @@ export async function backfillWorkspaceSessionPrs(
       const defaultRef = await getDefaultBranch(runtime.workspaceCwd);
       if (defaultRef) {
         defaultBranch = defaultRef.slice(defaultRef.indexOf('/') + 1);
+        headBranchMapping = true;
       }
     }
     for (const pr of prs.pullRequests) {
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
+      if (!headBranchMapping) continue;
       // Highest-number-wins a reused head branch: PR numbers are assigned
       // monotonically, so this picks the newest PR regardless of arrival
       // order — the slim field set omits updatedAt, so no sort order is
@@ -406,7 +419,10 @@ export async function backfillWorkspaceSessionPrs(
           ? null
           : next;
       });
-      if (persisted !== null) result.bound += added;
+      if (persisted !== null) {
+        result.bound += added;
+        result.written += 1;
+      }
     } catch {
       // One unwritable sidecar must not abort the whole workspace.
       result.writeErrors = (result.writeErrors ?? 0) + 1;
@@ -433,6 +449,7 @@ export function registerSessionPrBackfillRoutes(
             workspaceCwd: runtime.workspaceCwd,
             scanned: 0,
             bound: 0,
+            written: 0,
             alreadyBound: 0,
             overLimit: 0,
             unresolved: 0,
@@ -444,10 +461,12 @@ export function registerSessionPrBackfillRoutes(
           const result = await backfillWorkspaceSessionPrs(runtime);
           workspaces.push(result);
           // Same pairing as every other catalog mutation in this feature:
-          // the sidebar refetch is catalog-version-gated, so new bindings
-          // stay invisible until the cache scope is dropped and the
-          // revision advances.
-          if (result.bound > 0) {
+          // the sidebar refetch is catalog-version-gated, so a persisted
+          // rewrite — new bindings or an eviction-only plan — stays
+          // invisible until the cache scope is dropped and the revision
+          // advances. Gate on writes, not additions: a capped plan can
+          // evict an entry while adding none.
+          if (result.written > 0) {
             invalidateWorkspaceSessionListCache({
               runtimeBaseDir: runtime.sessionRuntimeBaseDir,
               workspaceCwd: runtime.workspaceCwd,
@@ -460,6 +479,7 @@ export function registerSessionPrBackfillRoutes(
             workspaceCwd: runtime.workspaceCwd,
             scanned: 0,
             bound: 0,
+            written: 0,
             alreadyBound: 0,
             overLimit: 0,
             unresolved: 0,
