@@ -85,6 +85,28 @@ describe('useMessageHandling', () => {
     }
   });
 
+  it('toggles the waiting flag without exposing write-only loading text', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    expect(rendered.api.isWaitingForResponse).toBe(false);
+    // The waiting-message renderer was removed with the WebShell transcript
+    // migration; only the boolean flag (submit gating / cancel) may survive.
+    expect(rendered.api).not.toHaveProperty('loadingMessage');
+
+    act(() => {
+      rendered.api.setWaitingForResponse();
+    });
+    expect(rendered.api.isWaitingForResponse).toBe(true);
+    expect(rendered.api).not.toHaveProperty('loadingMessage');
+
+    act(() => {
+      rendered.api.clearWaitingForResponse();
+    });
+    expect(rendered.api.isWaitingForResponse).toBe(false);
+  });
+
   it('assigns the second assistant segment a newer timestamp so a tool call can sort between the two segments', () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -14,6 +15,7 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  deriveConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -23,7 +25,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
+import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -65,8 +67,8 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
-import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
+import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../memory/memoryDiscovery.js';
 import {
   readAutoMemoryIndexWithStats,
   readUserAutoMemoryIndexWithStats,
@@ -185,7 +187,7 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
@@ -286,7 +288,7 @@ vi.mock('../tools/web-fetch', () => ({
 vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
-vi.mock('../memory/const.js', () => ({
+vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -1644,17 +1646,246 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
-  describe('FileReadCache isolation', () => {
-    it('returns a distinct cache for child Configs created via Object.create', () => {
-      // Subagent / scoped-agent / fork construction all use
-      // `Object.create(parent)`, which does NOT run field initializers.
-      // Without explicit handling the child would resolve fileReadCache
-      // through the prototype chain back to the parent's instance, so a
-      // subagent's ReadFile would see the parent's recorded reads and
-      // return file_unchanged placeholders for files the subagent has
-      // never received in its own transcript.
+  describe('derived Config ownership', () => {
+    it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent, {
+        getCwd: () => '/tmp/derived',
+      });
+
+      expect(child.getCwd()).toBe('/tmp/derived');
+      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      expect(Object.getPrototypeOf(child)).toBe(parent);
+    });
+
+    it('ignores undefined getter overrides', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent, { getCwd: undefined });
+
+      expect(child.getCwd()).toBe(parent.getCwd());
+      expect(Object.hasOwn(child, 'getCwd')).toBe(false);
+    });
+
+    it('prohibits inherited session-writer lifecycle access', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+      (
+        parent as unknown as {
+          chatRecordingService: {
+            hasWriteOwnership: () => boolean;
+            beginClose: () => void;
+            close: () => Promise<void>;
+            assertCanStartTurn: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        hasWriteOwnership: () => true,
+        beginClose,
+        close,
+        assertCanStartTurn,
+      };
+      const child = deriveConfig(parent);
+
+      expect(child.hasSessionWriteOwnership()).toBe(false);
+      expect(() => child.setSessionWriterReclaimPolicy('never')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.setSessionWriterTakeoverPolicy('certified')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      await expect(child.assertCanStartTurn()).resolves.toBeUndefined();
+      expect(assertCanStartTurn).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(parent.hasSessionWriteOwnership()).toBe(true);
+    });
+
+    it('prohibits initializing a derived Config', async () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
+
+      await expect(child.initialize()).rejects.toThrow(
+        'Derived Configs cannot be initialized',
+      );
+    });
+
+    it('prohibits canonical lifecycle operations on derived Configs', async () => {
+      const parent = new Config(baseParams);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const child = deriveConfig(parent);
+
+      expect(() => child.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        child.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(child.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(child.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('preserves ownership guards through nested prototype wrappers', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          beginClose: () => void;
+          close: () => Promise<void>;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        beginClose,
+        close,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const wrapped = Object.create(deriveConfig(parent)) as Config;
+
+      expect(wrapped.hasSessionWriteOwnership()).toBe(false);
+      expect(() => wrapped.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => wrapped.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        wrapped.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(wrapped.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(wrapped.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+      await expect(
+        wrapped.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('prohibits derived approval changes from mutating parent permissions', () => {
+      const parent = new Config(baseParams);
+      const restoreDangerousRules = vi.fn();
+      const internal = parent as unknown as {
+        approvalMode: ApprovalMode;
+        permissionManager: {
+          stripDangerousRulesForAutoMode: () => void;
+          restoreDangerousRules: () => void;
+        };
+      };
+      internal.approvalMode = ApprovalMode.AUTO;
+      internal.permissionManager = {
+        stripDangerousRulesForAutoMode: vi.fn(),
+        restoreDangerousRules,
+      };
+      const child = deriveConfig(parent);
+
+      expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change approval mode',
+      );
+      expect(restoreDangerousRules).not.toHaveBeenCalled();
+      expect(parent.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('does not shut down resources inherited from the parent', async () => {
+      const parent = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          beginClose: () => void;
+          close: () => Promise<void>;
+        };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        finalize,
+        flush,
+        beginClose,
+        close,
+      };
+      const child = deriveConfig(parent);
+
+      await expect(
+        child.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('returns a distinct file-read cache for derived Configs', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
 
       const parentCache = parent.getFileReadCache();
       const childCache = child.getFileReadCache();
@@ -1670,7 +1901,7 @@ describe('Server Config (config.ts)', () => {
           ino: 100,
           mtimeMs: 1_000_000,
           size: 42,
-        } as unknown as import('node:fs').Stats,
+        } as unknown as Stats,
         { full: true, cacheable: true },
       );
 
@@ -1679,9 +1910,6 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('returns the same cache instance on repeated getter calls within one Config', () => {
-      // Sanity: the lazy own-property initialization in
-      // getFileReadCache() must not allocate a fresh cache on every
-      // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
     });
@@ -2078,10 +2306,10 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('MemoryPressureMonitor isolation', () => {
-    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+    it('returns a distinct monitor for child Configs created via deriveConfig', async () => {
       const parent = new Config(baseParams);
       await parent.initialize({ skipGeminiInitialization: true });
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
 
       const parentMonitor = parent.getMemoryPressureMonitor();
       const childMonitor = child.getMemoryPressureMonitor();
@@ -2258,7 +2486,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
       mockMemoryRatio(0.35);
 
       expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
@@ -2726,7 +2954,7 @@ describe('Server Config (config.ts)', () => {
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
-      const child = Object.create(config) as Config;
+      const child = deriveConfig(config);
 
       expect(() => child.getGoalRuntime()).toThrow(
         GoalPersistenceUnavailableError,
@@ -5181,7 +5409,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5232,7 +5459,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5266,7 +5492,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5823,7 +6048,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -7899,6 +8123,62 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.ZOOM_IMAGE);
     });
 
+    it('does not register create_sub_session without a wired spawner', async () => {
+      // The tool only works under `qwen serve`, where the ACP session wires a
+      // spawner. Declaring it in every session used to pollute the action space
+      // of interactive/headless runs with a tool that can never succeed there.
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const { registerFactory, registerTool } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: { registerFactory: Mock; registerTool: Mock };
+          };
+        }
+      ).ToolRegistry.prototype;
+      // Both entry points: a regression that re-adds the tool eagerly via
+      // `registry.registerTool(new CreateSubSessionTool(this))` never touches
+      // `registerFactory`.
+      expect(registerFactory.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+      expect(
+        registerTool.mock.calls.map((call) => call[0]?.name),
+      ).not.toContain(ToolNames.CREATE_SUB_SESSION);
+    });
+
+    it('registers create_sub_session on a subagent registry rebuilt after the spawner is wired', async () => {
+      // The daemon ACP session wires the spawner only after its own registry
+      // exists, so a subagent registry rebuilt later must pick the tool up here
+      // — `copyDiscoveredToolsFrom` never carries built-ins. The rebuild runs on
+      // an `Object.create(base)` override, which reaches the spawner through
+      // prototype delegation.
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerFactory = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(registerFactory.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+
+      config.setSubSessionSpawner(async () => ({ sessionId: 'sub' }));
+      registerFactory.mockClear();
+      const override = Object.create(config) as Config;
+      await override.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      expect(registerFactory.mock.calls.map((call) => call[0])).toContain(
+        ToolNames.CREATE_SUB_SESSION,
+      );
+    });
+
     it('does not register list_directory by default (opt-in tool)', async () => {
       const config = new Config(baseParams);
       await config.initialize();
@@ -8061,6 +8341,42 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    // The leader-only property of request_shutdown is "enforced by absence":
+    // a teammate's registry never contains it, so the call cannot be formed.
+    // That only holds if the skip actually fires, which nothing asserted.
+    it('registers request_shutdown for a leader but not for a subagent', async () => {
+      const config = new Config({
+        ...baseParams,
+        agentTeamEnabled: true,
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const leaderNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(leaderNames).toContain(ToolNames.REQUEST_SHUTDOWN);
+
+      (registerToolMock as Mock).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const subagentNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(subagentNames).not.toContain(ToolNames.REQUEST_SHUTDOWN);
+      // The rest of the team surface still registers — only the leader-only
+      // control tool is withheld.
+      expect(subagentNames).toContain(ToolNames.SEND_MESSAGE);
     });
 
     it('registers web_search when enabled with a usable env-declared backend', async () => {
@@ -9806,29 +10122,6 @@ describe('visibleTools', () => {
   });
 });
 
-describe('computer use settings', () => {
-  const baseParams: ConfigParameters = {
-    targetDir: '.',
-    debugMode: false,
-    model: 'test-model',
-    cwd: '.',
-    chatRecording: false,
-  };
-
-  it('exposes the configured idle timeout', () => {
-    const config = new Config({
-      ...baseParams,
-      computerUseIdleTimeoutMs: 12_345,
-    });
-    expect(config.getComputerUseIdleTimeoutMs()).toBe(12_345);
-  });
-
-  it('leaves the idle timeout undefined when not configured', () => {
-    const config = new Config(baseParams);
-    expect(config.getComputerUseIdleTimeoutMs()).toBeUndefined();
-  });
-});
-
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -10759,7 +11052,7 @@ describe('Model Switching and Config Updates', () => {
 
   it('isolates active Todo reminders inherited through child Configs', () => {
     const parent = Object.create(Config.prototype) as Config;
-    const child = Object.create(parent) as Config;
+    const child = deriveConfig(parent);
     parent.setActiveTodoReminder('parent-prompt', 'parent work');
 
     child.setActiveTodoReminder('child-prompt', 'child work');

@@ -41,6 +41,8 @@ export type RoleId =
   | '1a'
   | '1b'
   | '1c'
+  | '1d'
+  | '1e'
   | '2'
   | '3a'
   | '3b'
@@ -251,8 +253,6 @@ Walk **every hunk, line by line**. For each hunk, read the **enclosing function 
 - Inverted or wrong conditions; off-by-one and fence-post errors; null/undefined dereference; a missing \`await\`; falsy-zero checks (\`if (x)\` where \`0\` or \`''\` is a valid value); wrong-variable copy-paste; an error swallowed by a \`catch\` that should propagate; unescaped regex metacharacters
 - Edge cases: empty collections; single- versus multi-element; very large inputs; special characters and unicode; integer overflow
 - Race conditions and concurrency; type-safety holes; error-handling gaps and exception propagation
-- **The language-pitfall checklist for this diff's language.** JS/TS: \`==\` coercion, closure-captured loop variables, floating (un-awaited) promises. Python: mutable default arguments, late-binding closures. Go: nil-map writes, range-variable capture. Any language: SQL built by string concatenation, timezone/DST arithmetic, float equality.
-- **Wrapper/proxy routing.** When the diff adds or modifies a type that wraps another (a cache, proxy, decorator, adapter): check that every method routes through the *wrapped instance* and not back through a registry, session, or global — which re-enters the wrapper and recurses — and that the wrapper forwards every method its callers actually use.
 
 Scope guard: reading the enclosing function is for **context**. A defect entirely in unchanged code is out of scope — unless a change in this diff is what makes it newly reachable or newly wrong, in which case report it as an effect of this diff.`,
   },
@@ -312,6 +312,42 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 **Rule on REACHABILITY, not just correctness, for new code that claims to fix something.** Enumerate the in-tree callers of the new path: if no shipped caller can reach it (only tests do, or the producing condition cannot occur on any live path), the change is scaffolding, not a fix — say so, and grade the linked claim accordingly. Classify the input shape a guard defends against as actively-produced / latent / unreachable, and let the classification set the severity: a latent landmine is worth a note, an unreachable one is worth silence.
 
 **Reachability has a TIME axis too — a value that arrives after every decision it should influence is a record, not a mechanism.** For every value the diff produces in order to steer something — a captured fact, a resolved address, a computed flag — name two moments: when the value EXISTS, and when each decision it is supposed to steer is TAKEN. A value computed only after the last such decision has been taken steered nothing, whatever the surrounding prose claims for it; the finding is the gap between claim and timeline, and it is **Critical** when documentation or workflow guidance instructs a consumer to treat the record as though it had steered the run. (Measured, PR #9655: a drive's \`--capture\` extracted the service's bound address only after the driven script's requests had all been sent, while the accompanying brief told the witness to quote the captured address — attributing one process's readings to another. Four rounds walked every hunk and missed it, because no hunk is wrong; the defect is the ordering of two moments no single line contains.) State both moments in the finding — "produced at X, needed at Y, Y precedes X" is the whole trace.`,
+  },
+
+  '1d': {
+    reviewsCode: true,
+    label: 'Agent 1d: Language-pitfall scan',
+    publicLabel: 'the language-pitfall pass',
+    publicLabelZh: '语言陷阱检查',
+    readsDiff: true,
+    brief: `You are **Agent 1d: the language-pitfall scan**. Your dimension is a CHECKLIST carried against the whole diff, not a line-by-line walk: every language has a short list of classic footguns, and the skill is *pattern-matching* the hunks against the list. That is a different attention mode from judging each line in its context — this check used to ride inside Agent 1a's walk as one bullet, and the walk's rhythm diluted it. You own the instances of these shapes this diff INTRODUCES; general correctness is 1a's, security is 2's, quality is 3a-3c's.
+
+Name the diff's language and framework first. Then walk every hunk against that language's list:
+
+- **JS/TS:** \`==\` where \`===\` is owed; falsy-value bugs (\`if (x)\` or \`x || def\` where \`0\`, \`''\` or \`false\` is a legitimate value); a closure capturing a \`var\` loop variable (\`let\`/\`const\` for-heads bind per iteration, so those captures are safe); floating (un-awaited) promises and unhandled rejections; mutation of an array/object shared across a boundary; \`parseInt\` without a radix.
+- **Python:** mutable default arguments; late-binding closures in loops; in-place mutation of a shared/default collection; a bare \`except:\` swallowing \`KeyboardInterrupt\`/\`SystemExit\`; integer division where float is intended.
+- **Go:** writes to a nil map; range-variable capture in a closure or goroutine (a footgun only under the pre-1.22 per-loop semantics — check the module's \`go\` directive in go.mod, not the installed toolchain: a module targeting Go 1.22+ allocates the loop variable per iteration, so the capture is safe); an error assigned to \`_\`; \`defer\` inside a loop pinning a resource until function exit.
+- **Java:** \`==\` where \`.equals\` is owed (boxed types, \`String\`); \`Optional.get\` without \`isPresent\`; mutating a collection during iteration over it; an \`AutoCloseable\` never closed.
+- **Kotlin:** \`===\` where \`==\` is owed — Kotlin \`==\` is already structural equality (it calls \`equals\`), \`===\` is identity; mutating a collection during iteration over it; an \`AutoCloseable\` never closed.
+- **Any language:** SQL built by string concatenation from values a caller controls; date/time arithmetic that crosses a DST boundary; float equality; integer division truncating silently; a regex built from unescaped input.
+
+For each hit, name the footgun and the input or state that fires it — "matches the checklist" without the firing shape is not a finding. Instances entirely in unchanged code are out of scope unless a change in this diff makes them newly reachable. **A checklist that matches nothing is a completed walk, not a whiff** — return that, with the list you carried and the language you carried it for.`,
+  },
+
+  '1e': {
+    reviewsCode: true,
+    label: 'Agent 1e: Wrapper/proxy routing',
+    publicLabel: 'the wrapper and proxy routing pass',
+    publicLabelZh: '包装与代理路由检查',
+    readsDiff: true,
+    brief: `You are **Agent 1e: wrapper/proxy routing correctness**. Your dimension is a STRUCTURAL expectation, not a line-by-line walk: every type this diff adds or modifies that wraps another — a cache, proxy, decorator, adapter, facade, delegate — must route through the *wrapped instance*, and must forward everything its callers actually use. This check used to ride inside Agent 1a's walk as one bullet, and the walk's rhythm diluted it; you hold the whole structure.
+
+1. **Enumerate.** Find every wrapping type the diff adds or modifies. For each, name the wrapped instance — the field, parameter, or receiver it forwards to.
+2. **Routing.** For every method the wrapper exposes, check the operation resolves on the WRAPPED instance — not back through a registry, session, factory, or global lookup that resolves to the wrapper itself. That shape re-enters the wrapper: infinite recursion, or the wrapper silently consulting its own stale state. (The live case: a caching provider whose \`delegate\` field resolves through \`session.get(…)\` instead of \`delegate.get(…)\` — every call re-enters its own cache.)
+3. **Forwarding completeness.** \`grep_search\` the wrapper's call sites. Every method its callers actually use must exist on the wrapper and be forwarded — a method callers reach for that the wrapper does not forward is a breakage, not a feature gap. A wrapper typed as an interface it does not fully implement is the same defect wearing a type.
+4. **Forwarding fidelity.** A forwarded call must pass ALL the arguments through, preserve the wrapped method's error propagation and async-ness, and return what the wrapped instance returns — a forward that swallows the return, catches the error, or drops an argument routes correctly and still lies.
+
+A wrapping type the diff does not add or modify is out of scope, even when its routing is wrong — unless a change in this diff is what makes the misrouting newly reachable. **A diff that adds and modifies no wrapping type is a completed walk, not a whiff** — return that, with what you checked for the wrapping shapes.`,
   },
 
   '2': {
@@ -749,10 +785,11 @@ Return, for each finding, one verdict:
 
 **For anything non-Critical, when uncertain, downgrade to low confidence rather than rejecting.** Reserve outright rejection for a finding that clearly does not match the code (it describes behaviour the code does not have) or matches an Exclusion Criterion. Low confidence is for "likely real, needs human judgement", not for "I have no idea" — a vague suspicion with no concrete evidence in the code can still be rejected.
 
-**Your job is to falsify, not to fail-to-verify — and the two feel identical from inside a trace that went nowhere.** Rejection is a claim that you hold **direct counter-evidence**: the quoted contradicting code, the observed probe output, the matched Exclusion Criterion (the one exception stays as stated above: a finding that names nothing checkable at all is rejectable for that reason). Two states reliably masquerade as grounds to reject, and neither is (the split is measured practice from a reflection filter that ran over production reviews at millions-of-comments scale, whose single operating rule was this asymmetry):
+**Your job is to falsify, not to fail-to-verify — and the two feel identical from inside a trace that went nowhere.** Rejection is a claim that you hold **direct counter-evidence constructible from the code** — one of four shapes, each of them something you can SHOW: the finding is **factually wrong** — quote the actual line it misreads (an observed probe output demonstrating the correct behaviour is exactly this); the claimed state is **provably impossible** — a type, a constant, an invariant excludes it, and you show the exclusion; the case is **already handled in this diff** — cite the guard and show it covers the claimed trigger (a plausible-looking guard you did not trace is not this); or it is **pure style with no observable effect** — or otherwise matches an Exclusion Criterion. (The one exception stays as stated above: a finding that names nothing checkable at all is rejectable for that reason.) **A rejection that constructs none of these — "too speculative", "depends on runtime state", "I don't think it can happen" — is not a verdict this pipeline keeps: it downgrades to \`confirmed (low confidence)\` and goes to a human instead.** Three states reliably masquerade as grounds to reject, and none of them is (the split is measured practice from a reflection filter that ran over production reviews at millions-of-comments scale, whose single operating rule was this asymmetry):
 
 - **"I could not verify it."** A trace that fails to confirm a claim is information about your trace, not about the claim — the trigger may need state you did not construct, a platform you are not on, a timing window your read-through cannot open. If the trace neither confirms nor contradicts, the verdict is \`confirmed (low confidence)\` with what-would-settle-it named. "Could not reproduce the reasoning" is already listed above as insufficient to reject a Critical; it is equally insufficient for a Suggestion whose evidence is merely out of your reach.
 - **"Its evidence is somewhere I did not look."** A finding may rest on evidence the finder gathered and you have not — a caller grepped in a file the diff never touches, issue evidence fetched from GitHub, a behaviour observed in a run. The evidence being absent from *your* view is not evidence of absence: you have the same tools the finder had, so **go read the claimed source first** — the named file, the quoted issue text in the launch message, the cited output. Reject only if what you find there contradicts the claim. If the source is genuinely unreachable from this environment (a lightweight diff-only review, an external service), the floor is the low-confidence downgrade, never rejection.
+- **"It is too speculative — it depends on runtime state."** A finding whose failure scenario names a state the code does not exclude is **PLAUSIBLE by default**, and these are exactly the shapes that read as speculation from inside a trace that went nowhere: a concurrency race or timing window; nil/undefined arriving on a rare-but-reachable path — an error handler, a cold cache, a missing optional field; a falsy zero, an empty string, or an empty collection treated as missing; an off-by-one on a boundary the code does not exclude; a retry storm or partial failure — the half-finished state a multi-step operation leaves behind; a regex or allowlist that lost an anchor and matches more than it should. "I cannot construct that state from a read-through" is a report about your trace, not about the code — these are precisely the triggers the probe, the A/B, and the sweep above exist to settle. Rule on the four constructible grounds, or downgrade.
 
 The asymmetry cuts both ways: confirming also requires the trace, and a finding that merely *sounds* right confirms nothing. What it forbids is only the shortcut in the rejecting direction, because that direction is the irreversible one.
 
