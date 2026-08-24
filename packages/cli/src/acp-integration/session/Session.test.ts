@@ -12328,25 +12328,34 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
-      it('evicts the oldest retained route token count after eight routes (#9529)', async () => {
+      it('evicts the oldest route count once the retained-route budget is exhausted (#9529)', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         let routeIdentity = 'route-0';
         mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
-        mockChat.sendMessageStream = vi.fn().mockImplementation(() =>
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                usageMetadata: {
-                  totalTokenCount: 101,
-                  promptTokenCount: 101,
+
+        // Record an over-limit count under nine distinct route keys on the
+        // same chat instance — one more than the retained-route budget, so
+        // the oldest entry must be evicted instead of growing unbounded.
+        const sendStreamMock = vi.fn();
+        for (let i = 1; i <= 9; i += 1) {
+          sendStreamMock.mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
                 },
               },
-            },
-          ]),
-        );
+            ]),
+          );
+        }
+        sendStreamMock.mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendStreamMock;
 
-        for (let i = 0; i < 9; i++) {
+        for (let i = 1; i <= 9; i += 1) {
           routeIdentity = `route-${i}`;
           mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
             originalTokenCount: 50,
@@ -12356,23 +12365,39 @@ describe('Session', () => {
           await expect(
             session.prompt({
               sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: `route ${i}` }],
+              prompt: [{ type: 'text', text: `prompt ${i}` }],
             }),
           ).resolves.toEqual({ stopReason: 'end_turn' });
         }
 
-        routeIdentity = 'route-0';
+        // The evicted oldest route (route-1) reads back no cached count, so
+        // a send on it must go out instead of tripping the gate.
+        routeIdentity = 'route-1';
         mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
           new Error('compression rate limited'),
         );
         await expect(
           session.prompt({
             sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'return to evicted route' }],
+            prompt: [{ type: 'text', text: 'evicted route' }],
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(10);
+        // A retained route (route-2) still trips the gate from the cache.
+        routeIdentity = 'route-2';
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retained route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        // Nine recording sends plus the evicted-route send; the
+        // retained-route send was dropped by the gate.
+        expect(sendStreamMock).toHaveBeenCalledTimes(10);
       });
 
       it('returns cancelled when automatic compression is aborted', async () => {
