@@ -16,6 +16,8 @@ import globals from 'globals';
 import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
+import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
+import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
@@ -109,24 +111,20 @@ export default tseslint.config(
     },
   },
   {
-    // `utils/` is the layer every other directory imports, so it must not
-    // import back into one. The daemon direction is clean and enforced here;
-    // the remaining `ui/`, `config/`, `i18n/` and `nonInteractive/` edges are
-    // tracked in #9146 and will be added to this group as they are resolved.
+    // `utils/` is the leaf layer that every other directory imports, so it
+    // must not import back up into a domain directory. Type-only imports are
+    // exempt: they are erased at compile time and cannot create a runtime
+    // cycle. See #9146.
     files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
-    rules: {
-      'no-restricted-imports': [
-        'error',
-        {
-          patterns: [
-            {
-              group: ['**/serve/*', '**/serve/**'],
-              message:
-                'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
-            },
-          ],
+    plugins: {
+      architecture: {
+        rules: {
+          'no-utils-upward-import': noUtilsUpwardImport,
         },
-      ],
+      },
+    },
+    rules: {
+      'architecture/no-utils-upward-import': 'error',
     },
   },
   {
@@ -224,15 +222,21 @@ export default tseslint.config(
   },
   {
     // The rule itself exempts tests, __tests__, and fixtures; repeating that
-    // here would give the exemption two sources of truth.
+    // here would give the exemption two sources of truth. The utils-upward
+    // rule self-scopes to packages/core/src/utils production files, so it can
+    // share this block without redefining the architecture plugin.
     files: ['packages/core/src/**/*.{ts,tsx}'],
     plugins: {
       architecture: {
-        rules: { 'no-core-root-barrel-import': noCoreRootBarrelImport },
+        rules: {
+          'no-core-root-barrel-import': noCoreRootBarrelImport,
+          'no-core-utils-upward-import': noCoreUtilsUpwardImport,
+        },
       },
     },
     rules: {
       'architecture/no-core-root-barrel-import': 'error',
+      'architecture/no-core-utils-upward-import': 'error',
     },
   },
   {
@@ -385,6 +389,8 @@ export default tseslint.config(
       './scripts/**/*.mjs',
       'esbuild.config.js',
       'packages/*/scripts/**/*.js',
+      'packages/*/scripts/**/*.mjs',
+      'packages/*/build.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.

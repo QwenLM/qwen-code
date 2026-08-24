@@ -971,6 +971,7 @@ export default {
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
+  'from nested agent': 'ネストされた agent から',
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',
