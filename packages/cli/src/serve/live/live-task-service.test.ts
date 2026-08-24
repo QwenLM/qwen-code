@@ -776,6 +776,10 @@ describe('LiveTaskService', () => {
     listWorkspaceSessionsForResponse.mockResolvedValue({
       sessions: [{ ...liveSummary, sessionId: persistedSessionId }],
     });
+    const resolveLiveSessionOwner = vi.spyOn(
+      harness.registry,
+      'resolveLiveSessionOwner',
+    );
     const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
 
     const result = await harness.service.handle({
@@ -791,6 +795,10 @@ describe('LiveTaskService', () => {
       timedOut: true,
       polls: [{ thread: { id: persistedSessionId } }],
     });
+    expect(resolveLiveSessionOwner).toHaveBeenCalledWith(sessionId);
+    expect(resolveLiveSessionOwner).not.toHaveBeenCalledWith(
+      persistedSessionId,
+    );
     expect(harness.bridge.getSessionEventEpoch).toHaveBeenCalledWith(sessionId);
     expect(harness.bridge.getSessionLastEventId).toHaveBeenCalledWith(
       sessionId,
