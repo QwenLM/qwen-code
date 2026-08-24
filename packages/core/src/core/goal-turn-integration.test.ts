@@ -82,6 +82,7 @@ describe('Goal turn evidence propagation', () => {
       processStreamResponse: (
         model: string,
         stream: AsyncGenerator<GenerateContentResponse>,
+        routeKey: string,
         goalContext?: GoalTurnPermit,
       ) => AsyncGenerator<GenerateContentResponse>;
       pendingPartialAssistantRecord:
@@ -102,6 +103,7 @@ describe('Goal turn evidence propagation', () => {
     for await (const _ of internal.processStreamResponse(
       'test-model',
       normalStream,
+      'test-route',
       permit,
     )) {
       // Consume the persisted normal assistant attempt.
@@ -136,6 +138,7 @@ describe('Goal turn evidence propagation', () => {
         for await (const _ of internal.processStreamResponse(
           'test-model',
           partialStream,
+          'test-route',
           permit,
         )) {
           // Consume until the deferred partial attempt is staged.

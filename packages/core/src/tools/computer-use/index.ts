@@ -12,7 +12,7 @@ export { COMPUTER_USE_TOOL_NAMES, COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { ComputerUseTool } from './tool.js';
 import { COMPUTER_USE_SCHEMAS, COMPUTER_USE_TOOL_NAMES } from './schemas.js';
 import type { ToolFactory } from '../tool-registry.js';
-import type { ToolName } from '../../utils/tool-utils.js';
+import type { ToolName } from '../tool-utils.js';
 import type { Config } from '../../config/config.js';
 
 /**
