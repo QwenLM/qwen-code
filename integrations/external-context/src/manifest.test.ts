@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { loadConfig } from './config.js';
 
 describe('extension manifest', () => {
   it('exposes only the retrieval tool', async () => {
@@ -230,6 +233,46 @@ describe('extension manifest', () => {
         type: 'mem0-platform-v3',
         apiKeyEnv: 'MEM0_API_KEY',
         appId: 'repository-memory',
+      },
+    });
+  });
+  it('keeps the open-source Mem0 example loadable after placeholder substitution', async () => {
+    const config = await readJson('../examples/mem0-oss.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        baseUrl: 'http://<your-mem0-endpoint>:8080',
+        apiKeyEnv: 'MEM0_API_KEY',
+        userId: '<your-user-id>',
+        appId: 'qwen-code',
+        allowInsecureHttp: true,
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    const configPath = join(directory, 'config.json');
+    await writeFile(configPath, JSON.stringify(substituted));
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      }),
+    ).resolves.toMatchObject({
+      provider: {
+        type: 'mem0',
+        userId: 'example-user',
+        appId: 'qwen-code',
       },
     });
   });
