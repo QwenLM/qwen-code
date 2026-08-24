@@ -136,6 +136,12 @@ const mockExtractCommandRules = vi.hoisted(() => vi.fn());
 vi.mock('../utils/shellAstParser.js', () => ({
   isShellCommandReadOnlyASTInDirectory: mockIsShellCommandReadOnlyAST,
   extractCommandRules: mockExtractCommandRules,
+  // Not mocked away: the confirmation scope depends on the real predicate,
+  // and a stub returning false would hide the very defect it guards.
+  plantsStateForLaterCommands: (command: string) =>
+    /^\s*(?:cd|pushd|popd|export|declare|readonly|typeset|local|set|alias|eval|source|\.)(?:\s|$)/.test(
+      command,
+    ),
 }));
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';

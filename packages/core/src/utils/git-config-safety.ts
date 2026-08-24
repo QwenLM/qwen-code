@@ -10,15 +10,30 @@ import { statSync } from 'node:fs';
 interface LocalGitConfigRisk {
   diffExternal: boolean;
   fsmonitor: boolean;
+  /**
+   * Any other repository-local key that makes an ordinary read verb execute a
+   * program the command line never names: a `textconv` diff driver reached
+   * through `.gitattributes`, a clean/smudge filter, the gpg program used to
+   * display signatures, or a `!`-prefixed shell alias.
+   *
+   * Consumed only where a *vouched wrapper* is treated as a possible git
+   * frontend. Literal `git` keeps the two checks above unchanged on purpose:
+   * `git lfs install --local` writes `filter.lfs.clean`, so keying literal
+   * `git diff` to this flag would downgrade it in a large share of real
+   * checkouts. Closing that gap for literal git is a separate change.
+   */
+  helperProgram: boolean;
 }
 
 const NO_RISK: LocalGitConfigRisk = {
   diffExternal: false,
   fsmonitor: false,
+  helperProgram: false,
 };
 const PROBE_FAILED: LocalGitConfigRisk = {
   diffExternal: true,
   fsmonitor: true,
+  helperProgram: true,
 };
 
 export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
@@ -38,7 +53,7 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       '--show-scope',
       '--null',
       '--get-regexp',
-      '^diff\\.external$|^core\\.fsmonitor$',
+      '^diff\\.external$|^core\\.fsmonitor$|^diff\\..*\\.textconv$|^filter\\..*\\.(clean|smudge)$|^gpg\\.program$|^alias\\.',
     ],
     {
       encoding: 'utf8',
@@ -74,11 +89,31 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
   const diffExternal = localValue('diff.external');
   const fsmonitor = localValue('core.fsmonitor');
 
+  let helperProgram = false;
+  for (const [key, entry] of effective) {
+    if (entry.scope !== 'local' && entry.scope !== 'worktree') continue;
+    const value = entry.value.trim();
+    if (value === '') continue;
+    // Git runs an alias through the shell only when it starts with `!`.
+    if (key.startsWith('alias.')) {
+      helperProgram ||= value.startsWith('!');
+      continue;
+    }
+    if (
+      /^diff\..*\.textconv$/.test(key) ||
+      /^filter\..*\.(?:clean|smudge)$/.test(key) ||
+      key === 'gpg.program'
+    ) {
+      helperProgram = true;
+    }
+  }
+
   return {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
     fsmonitor:
       fsmonitor !== undefined &&
       fsmonitor !== '' &&
       !/^(?:true|false|yes|no|on|off|0|1)$/i.test(fsmonitor),
+    helperProgram,
   };
 }

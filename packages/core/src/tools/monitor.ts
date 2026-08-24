@@ -52,6 +52,7 @@ import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
   isShellCommandReadOnlyASTInDirectory,
+  plantsStateForLaterCommands,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
@@ -212,6 +213,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
       this.params.directory || this.config.getTargetDir?.() || process.cwd();
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
+    // See `plantsStateForLaterCommands`: after a `cd` or an `export`, a later
+    // sub-command classified alone is classified against the wrong directory
+    // or environment, so it must stay in the confirmation scope.
+    let statePlanted = false;
 
     for (const sub of subCommands) {
       // Only filter out read-only commands via AST analysis.
@@ -223,9 +228,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
-          extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
-        });
+        isReadOnly =
+          !statePlanted &&
+          (await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
+            extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
+          }));
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
@@ -234,6 +241,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
           e,
         );
       }
+
+      statePlanted ||= plantsStateForLaterCommands(sub);
 
       if (isReadOnly) {
         continue;

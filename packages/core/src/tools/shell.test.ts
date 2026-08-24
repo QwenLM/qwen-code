@@ -7374,6 +7374,39 @@ describe('ShellTool', () => {
       );
     });
 
+    it('keeps sub-commands after a state planter in the confirmation scope', async () => {
+      // A read-only classification is only meaningful for the directory and
+      // environment the sub-command actually runs in. After a `cd` or an
+      // `export`, classifying a later sub-command alone measures the wrong
+      // one — so it must stay in the scope the user approves, or approval
+      // silently covers a command the dialog never showed.
+      for (const command of [
+        'cd /hostile && git status && npm run build',
+        'export GIT_DIR=/hostile/.git && git status && npm run build',
+      ]) {
+        const invocation = shellTool.build({ command, is_background: false });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { rootCommand: string };
+
+        expect(details.rootCommand).toContain('git');
+        expect(details.rootCommand).toContain('npm');
+      }
+    });
+
+    it('still drops a read-only sub-command that no planter precedes', async () => {
+      const invocation = shellTool.build({
+        command: 'git status && npm run build',
+        is_background: false,
+      });
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      expect(details.rootCommand).not.toContain('git');
+      expect(details.rootCommand).toContain('npm');
+    });
+
     it('should not surface file descriptor redirects as standalone commands in confirmation details', async () => {
       const params = {
         command: 'npm run build 2>&1 | head -100',

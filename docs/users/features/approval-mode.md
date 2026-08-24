@@ -195,12 +195,21 @@ so the vouch is honoured only for an invocation it can read literally:
   a prompt for a CLI that spells its own config flag `-c` or `-C`; ordinary
   flags such as `--json` or `--format=…` are unaffected.
 
+- when the first non-flag argument is a `git` sub-command, the whole
+  invocation is screened by `git`'s own evaluator — the write-verb list, the
+  `branch -D` flags, `--output`, and the `%G…` signature formats. A wrapper for
+  `git` is a case this setting explicitly supports, so it gets exactly what
+  literal `git` gets. The cost is a prompt for a vouched CLI whose own verb
+  collides with one of `git`'s, such as `ib add` or `ib tag`.
+
 A vouched command is also treated as a possible `git` frontend. `git diff` and
 `git status` are downgraded to a prompt when the repository's own
 `.git/config` sets `diff.external` or `core.fsmonitor`, because git then runs a
 script the command line never names; a wrapper you vouched for gets the same
-treatment, since Qwen Code cannot know which of its verbs reach git. In a
-repository that plants neither setting — the ordinary case — nothing changes.
+treatment, since Qwen Code cannot know which of its verbs reach git. The same applies to any other repository-local
+setting that makes a read verb run a program — a `textconv` diff driver, a
+clean/smudge filter, the gpg program, or a `!`-prefixed shell alias. In a
+repository that plants none of them — the ordinary case — nothing changes.
 
 The cost is an occasional extra prompt — when a CLI's own sub-command shares a
 name with a real command, or when an argument needs quoting. Prompting costs a

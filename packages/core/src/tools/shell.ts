@@ -74,6 +74,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
+  plantsStateForLaterCommands,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
 import {
@@ -2123,21 +2124,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
+    // Once a sub-command has planted state, the ones after it cannot be
+    // classified alone — they are probed against a directory or environment
+    // the sequence has already changed — so they stay in the scope the user
+    // approves. Mirrors `PermissionManager.evaluateCompoundCommand`.
+    let statePlanted = false;
     for (const sub of subCommands) {
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
-          extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
-        });
+        isReadOnly =
+          !statePlanted &&
+          (await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
+            extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
+          }));
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }
+      statePlanted ||= plantsStateForLaterCommands(sub);
 
       if (isReadOnly) {
         continue;
       }
 
-      if (pm) {
+      if (pm && !statePlanted) {
         try {
           if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;

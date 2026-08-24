@@ -130,6 +130,44 @@ describe('isShellCommandReadOnlyAST', () => {
       );
     });
 
+    it('refuses a vouched frontend against any program-executing key', async () => {
+      // The gate modelled only `diff.external`/`core.fsmonitor`, but a wrapper
+      // has no sub-command filter, so every key that makes a read verb run a
+      // program reaches it — including a `!` alias, which git runs through the
+      // shell for a verb it does not recognise.
+      const vouched = { extraReadOnlyRoots: new Set(['gitw']) };
+      for (const [key, value] of [
+        ['alias.pwn', '!./evil.sh'],
+        ['gpg.program', './evil.sh'],
+        ['diff.evil.textconv', './evil.sh'],
+        ['filter.evil.clean', './evil.sh'],
+      ]) {
+        const cwd = createRepo();
+        gitConfig(cwd, key!, value!);
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('gitw show', cwd, vouched),
+        ).toBe(false);
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('gitw pwn', cwd, vouched),
+        ).toBe(false);
+      }
+    });
+
+    it('leaves literal git alone when only a helper key is planted', async () => {
+      // `git lfs install --local` writes `filter.lfs.clean` in a large share
+      // of real checkouts. Keying literal `git diff` to the new flag would
+      // downgrade all of them, so the flag is consumed on the vouched path
+      // only and literal git keeps its two original checks.
+      const cwd = createRepo();
+      gitConfig(cwd, 'filter.lfs.clean', 'git-lfs clean -- %f');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
     it('gives a vouched git frontend the same planted-config gate', async () => {
       // The vouch exists for wrapper CLIs, so keying this defence to the
       // literal name `git` would let `gitw status` run a planted
@@ -765,12 +803,38 @@ describe('substitution hidden in a heredoc body', () => {
     // The shape predates the vouch for built-in roots, so it is pinned there
     // too — the vouch only turned the prompt into an unattended auto-run.
     'cat <<EOF | rm -rf build\nhello\nEOF',
+    // Not just pipelines: whatever follows `&&`, `||` or `;` on the opener
+    // line is a direct named child of the redirect too, across every
+    // statement shape tree-sitter has.
+    'vtool <<EOF && ! rm x\nhello\nEOF',
+    'vtool <<EOF && if true; then rm x; fi\nhello\nEOF',
+    'vtool <<EOF && for i in 1; do rm x; done\nhello\nEOF',
+    'vtool <<EOF && while true; do rm x; done\nhello\nEOF',
+    'vtool <<EOF && until false; do rm x; done\nhello\nEOF',
+    'vtool <<EOF || rm -rf build\nhello\nEOF',
+    // These two need no vouch at all — `cat` is a built-in read-only root.
+    'cat <<EOF && for ((i=0;i<1;i++)); do rm -rf build; done\nhello\nEOF',
+    'cat <<EOF && select x in a; do rm -rf build; done\nhello\nEOF',
   ])('evaluates the write segment of %s', async (command) => {
     expect(
       await classifyShellCommandSafety(command, {
         extraReadOnlyRoots: new Set(['vtool']),
       }),
     ).toBe('write');
+  });
+
+  it('refuses a semicolon-separated segment after a heredoc opener', async () => {
+    // `;` puts the segment in the redirect too, but tree-sitter gives it a
+    // shape the classifier reads as `unknown` rather than `write`. Both are
+    // refusals; pinned at its real category so a change of category fails.
+    expect(
+      await classifyShellCommandSafety(
+        'vtool <<EOF; rm -rf build\nhello\nEOF',
+        {
+          extraReadOnlyRoots: new Set(['vtool']),
+        },
+      ),
+    ).toBe('unknown');
   });
 
   it('still reads a heredoc with no pipeline as read-only', async () => {
@@ -1477,6 +1541,7 @@ describe('extraReadOnlyRoots', () => {
   // the count is asserted both ways: removing a name fails the containment
   // loop, adding one without a deliberate edit here fails the size check.
   const REFUSAL_FLOOR = [
+    'ash',
     'bash',
     'busybox',
     'cmd',
@@ -1485,30 +1550,55 @@ describe('extraReadOnlyRoots', () => {
     'dash',
     'fish',
     'ksh',
+    'mksh',
+    'osh',
+    'posh',
     'powershell',
     'pwsh',
     'sh',
     'tcsh',
     'toybox',
+    'yash',
     'zsh',
     'bun',
     'bunx',
+    'clojure',
+    'crystal',
+    'dart',
     'deno',
+    'dmd',
+    'elixir',
+    'escript',
     'expect',
+    'ghc',
+    'groovy',
     'lua',
     'luajit',
     'java',
+    'jshell',
+    'julia',
+    'kotlin',
+    'nim',
     'node',
     'nodejs',
+    'ocaml',
     'osascript',
     'perl',
     'pnpx',
     'php',
     'python',
     'python3',
+    'racket',
+    'rscript',
     'ruby',
+    'runghc',
+    'scala',
+    'swift',
     'tclsh',
+    'ts-node',
+    'tsx',
     'wish',
+    'zig',
     'ant',
     'bazel',
     'buck',
@@ -1519,6 +1609,8 @@ describe('extraReadOnlyRoots', () => {
     'cc',
     'c++',
     'clang',
+    'guile',
+    'tcc',
     'clang++',
     'cmake',
     'conda',
@@ -1723,12 +1815,52 @@ describe('extraReadOnlyRoots', () => {
     'gitw cat-file --filters',
     'gitw log --show-signature',
     'gitw diff --ext-diff',
+    // Write verbs. The wrapper had no sub-command filter at all, so every
+    // one of these ran unattended while its literal twin classified `write`.
+    'gitw push origin main',
+    'gitw reset --hard',
+    'gitw checkout main',
+    'gitw rebase main',
+    'gitw merge feature',
+    'gitw stash',
+    'gitw tag v1.0',
+    'gitw apply --index p.diff',
+    'gitw branch -D feature',
+    'gitw worktree add ../evil',
+    'gitw format-patch -o dir master',
+    'gitw archive -o out.tar master',
+    // Output redirection on a read verb.
+    'gitw diff --output=f',
+    'gitw log --output=f',
+    'gitw show --output=f',
+    // The gpg-helper format specifier, which runs the configured gpg program.
+    'gitw log --format=%GG',
+    'gitw show --format=%G?',
+    'gitw log --format=%GK',
   ])('refuses the vouched git frontend invocation %s', async (command) => {
     expect(
       await classifyShellCommandSafety(command, {
         extraReadOnlyRoots: new Set(['gitw']),
       }),
     ).toBe('unknown');
+  });
+
+  it('still accepts a git read verb through a vouched wrapper', async () => {
+    // The screen fires on git-shaped invocations, not on every vouched one:
+    // the read verbs literal git allows are still allowed here.
+    for (const command of [
+      'gitw status',
+      'gitw diff',
+      'gitw log --oneline -10',
+      'gitw branch -a',
+      'gitw --json status',
+    ]) {
+      expect(
+        await classifyShellCommandSafety(command, {
+          extraReadOnlyRoots: new Set(['gitw']),
+        }),
+      ).toBe('read-only');
+    }
   });
 
   it('leaves an ordinary flag on a vouched root alone', async () => {
