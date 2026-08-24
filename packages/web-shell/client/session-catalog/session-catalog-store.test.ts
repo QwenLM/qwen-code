@@ -608,15 +608,26 @@ describe('SessionCatalogStore', () => {
       workspaceCwd: '/w',
       options: { archiveState: 'archived', view: 'organized', group: 'all' },
     };
+    const pinnedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'pinned' },
+    };
     legacy.mockImplementation(
       async (
         _cwd: string,
-        options: { archiveState?: string } | undefined,
+        options: { archiveState?: string; group?: string } | undefined,
       ): Promise<DaemonSessionListPage> => ({
         sessions: [
           {
-            sessionId: options?.archiveState === 'archived' ? 'old' : 'live',
+            sessionId:
+              options?.group === 'pinned'
+                ? 'already-pinned'
+                : options?.archiveState === 'archived'
+                  ? 'old'
+                  : 'live',
             workspaceCwd: '/w',
+            ...(options?.group === 'pinned' ? { isPinned: true } : {}),
           },
         ],
         nextCursor: undefined,
@@ -624,6 +635,7 @@ describe('SessionCatalogStore', () => {
     );
     await store.loadOnce(listQuery, { fresh: true });
     await store.loadOnce(archivedQuery, { fresh: true });
+    await store.loadOnce(pinnedQuery, { fresh: true });
 
     store.addSession(
       '/w',
@@ -641,6 +653,12 @@ describe('SessionCatalogStore', () => {
         .getSnapshot(archivedQuery)
         .page?.sessions.map((session) => session.sessionId),
     ).toEqual(['old']);
+    // A non-pinned row never belongs to the pinned section.
+    expect(
+      store
+        .getSnapshot(pinnedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['already-pinned']);
 
     // A second seed must not duplicate the row.
     store.addSession(
@@ -653,6 +671,74 @@ describe('SessionCatalogStore', () => {
         .getSnapshot(listQuery)
         .page?.sessions.filter((session) => session.sessionId === 'restored'),
     ).toHaveLength(1);
+  });
+
+  it('reseeds a restored pinned session into pinned pages', async () => {
+    const listQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'all' },
+    };
+    const pinnedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'pinned' },
+    };
+    const archivedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'archived', view: 'organized', group: 'all' },
+    };
+    legacy.mockImplementation(
+      async (
+        _cwd: string,
+        options: { archiveState?: string; group?: string } | undefined,
+      ): Promise<DaemonSessionListPage> => ({
+        sessions: [
+          {
+            sessionId: options?.group === 'pinned' ? 'other-pin' : 'live',
+            workspaceCwd: '/w',
+            ...(options?.group === 'pinned' ? { isPinned: true } : {}),
+          },
+        ],
+        nextCursor: undefined,
+      }),
+    );
+    await store.loadOnce(listQuery, { fresh: true });
+    await store.loadOnce(pinnedQuery, { fresh: true });
+    await store.loadOnce(archivedQuery, { fresh: true });
+
+    // Pin survives the archive move on the daemon side, so the restored
+    // row carries isPinned and must reappear in the pinned section too —
+    // otherwise it is absent from every section until the refetch lands.
+    store.removeSession('/w', 'pinned-back', { archiveStates: ['archived'] });
+    store.addSession(
+      '/w',
+      {
+        sessionId: 'pinned-back',
+        workspaceCwd: '/w',
+        isArchived: false,
+        isPinned: true,
+        pinnedAt: '2026-01-02T03:04:05.000Z',
+      },
+      { archiveStates: ['active'] },
+    );
+
+    expect(
+      store
+        .getSnapshot(listQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['live', 'pinned-back']);
+    expect(
+      store
+        .getSnapshot(pinnedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['other-pin', 'pinned-back']);
+    expect(
+      store
+        .getSnapshot(archivedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['live']);
   });
 
   it('invalidates only catalog entries matching the requested archive states', async () => {

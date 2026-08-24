@@ -651,7 +651,12 @@ export class SessionCatalogStore {
    * Insert a daemon-confirmed session into cached pages of the opposite
    * archive state — the write-through companion to an archive/unarchive
    * RPC, so the row appears in its destination list without waiting for
-   * the refetch. Pinned-group pages stay server-owned (membership there
+   * the refetch. Pinned-group pages only accept pinned rows: the daemon
+   * keeps pin organization across an archive move, so restoring a pinned
+   * session must reseed its pinned-section membership too, or the row is
+   * absent from every section (the regular list filters pinned rows out)
+   * until the refetch lands — up to a 30s retry window when that refetch
+   * fails. Non-pinned rows stay out of pinned pages (membership there
    * depends on the daemon's pin filter, not the archive state).
    */
   addSession(
@@ -666,7 +671,9 @@ export class SessionCatalogStore {
       if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
         continue;
       }
-      if (entry.query.options.group === 'pinned') continue;
+      if (entry.query.options.group === 'pinned' && session.isPinned !== true) {
+        continue;
+      }
       if (
         options.archiveStates &&
         !options.archiveStates.includes(
