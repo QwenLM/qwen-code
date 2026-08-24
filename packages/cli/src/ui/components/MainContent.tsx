@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type React from 'react';
 import { Box, Static, type DOMElement } from 'ink';
 import {
   memo,
@@ -21,7 +22,7 @@ import {
   ToolCallStatus,
 } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
-import { ShowMoreLines } from './ShowMoreLines.js';
+import { ShowMoreLines, useShowMoreLinesVisible } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -123,6 +124,78 @@ const virtualKeyExtractor = (item: VpItem) =>
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
 
+interface VpScrollRegionProps {
+  data: VpItem[];
+  renderItem: (info: { item: VpItem; index: number }) => React.ReactElement;
+  hasFocus: boolean;
+  containerHeight: number;
+  measureAtFullHeight: boolean;
+  showScrollbar: boolean;
+  constrainHeight: boolean;
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+/**
+ * The VP-mode scrollable region: the virtualized list plus the sibling
+ * `<ShowMoreLines>` hint. `<ShowMoreLines>` renders below the list, OUTSIDE
+ * its height-clamped box, so a row it adds is a row the list's own
+ * `containerHeight` budget never accounted for — and VP mode's alternate
+ * screen has no scrollback to reveal a row that does not fit. Reading
+ * `useShowMoreLinesVisible` here — the same predicate `<ShowMoreLines>`
+ * itself uses — and reserving that one row up front keeps the list's real
+ * on-screen footprint (list + hint) within the budget the caller computed
+ * (issue #8239: VP-mode content cut off at bottom).
+ */
+export function VpScrollRegion({
+  data,
+  renderItem,
+  hasFocus,
+  containerHeight,
+  measureAtFullHeight,
+  showScrollbar,
+  constrainHeight,
+  footerRef,
+}: VpScrollRegionProps) {
+  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const reserveForHint = useShowMoreLinesVisible(constrainHeight) ? 1 : 0;
+
+  return (
+    <>
+      <ScrollableList
+        ref={scrollRef}
+        hasFocus={hasFocus}
+        data={data}
+        renderItem={renderItem}
+        estimatedItemHeight={virtualEstimatedItemHeight}
+        keyExtractor={virtualKeyExtractor}
+        initialScrollIndex={data.length <= 1 ? 0 : SCROLL_TO_ITEM_END}
+        isStaticItem={virtualIsStaticItem}
+        containerHeight={Math.max(0, containerHeight - reserveForHint)}
+        measureAtFullHeight={measureAtFullHeight}
+        showScrollbar={showScrollbar}
+      />
+      <TextSelectionController
+        isActive={hasFocus}
+        getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+        getAdditionalSelectableRects={() =>
+          footerRef?.current ? [measureElementPosition(footerRef.current)] : []
+        }
+        getScrollState={() =>
+          scrollRef.current?.getScrollState() ?? {
+            scrollTop: 0,
+            scrollHeight: 0,
+            innerHeight: 0,
+          }
+        }
+        hitTestScrollbar={(location) =>
+          scrollRef.current?.hitTestScrollbar(location) ?? false
+        }
+      />
+      <ShowMoreLines constrainHeight={constrainHeight} />
+    </>
+  );
+}
+
 interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
 }
@@ -155,7 +228,6 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   // state still computes because it lives at the top of the component, but
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
-  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -496,41 +568,16 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
 
     return (
       <OverflowProvider>
-        <ScrollableList
-          ref={scrollRef}
-          hasFocus={!uiState.dialogsVisible}
+        <VpScrollRegion
           data={allVirtualItems}
           renderItem={renderVirtualItem}
-          estimatedItemHeight={virtualEstimatedItemHeight}
-          keyExtractor={virtualKeyExtractor}
-          initialScrollIndex={
-            allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
-          }
-          isStaticItem={virtualIsStaticItem}
+          hasFocus={!uiState.dialogsVisible}
           containerHeight={scrollContainerHeight}
           measureAtFullHeight={hasPendingPlainTextConfirmation}
           showScrollbar={showScrollbar}
+          constrainHeight={uiState.constrainHeight}
+          footerRef={footerRef}
         />
-        <TextSelectionController
-          isActive={!uiState.dialogsVisible}
-          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
-          getAdditionalSelectableRects={() =>
-            footerRef?.current
-              ? [measureElementPosition(footerRef.current)]
-              : []
-          }
-          getScrollState={() =>
-            scrollRef.current?.getScrollState() ?? {
-              scrollTop: 0,
-              scrollHeight: 0,
-              innerHeight: 0,
-            }
-          }
-          hitTestScrollbar={(location) =>
-            scrollRef.current?.hitTestScrollbar(location) ?? false
-          }
-        />
-        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
     );
   }

@@ -14,19 +14,29 @@ interface ShowMoreLinesProps {
   constrainHeight: boolean;
 }
 
-export const ShowMoreLines = ({ constrainHeight }: ShowMoreLinesProps) => {
+/**
+ * Whether <ShowMoreLines> will render its one-row hint right now. Exported
+ * so a fixed-height container that lays it out as a sibling (VP mode's
+ * viewport, which cannot scroll to reveal a row it did not budget for) can
+ * reserve that row instead of discovering it only after paint.
+ */
+export const useShowMoreLinesVisible = (constrainHeight: boolean): boolean => {
   const overflowState = useOverflowState();
   const streamingState = useStreamingContext();
 
-  if (
-    overflowState === undefined ||
-    overflowState.overflowingIds.size === 0 ||
-    !constrainHeight ||
-    !(
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    )
-  ) {
+  return (
+    overflowState !== undefined &&
+    overflowState.overflowingIds.size > 0 &&
+    constrainHeight &&
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation)
+  );
+};
+
+export const ShowMoreLines = ({ constrainHeight }: ShowMoreLinesProps) => {
+  const visible = useShowMoreLinesVisible(constrainHeight);
+
+  if (!visible) {
     return null;
   }
 

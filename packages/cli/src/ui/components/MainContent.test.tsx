@@ -16,6 +16,7 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
+import { StreamingContext } from '../contexts/StreamingContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
 
@@ -73,10 +74,17 @@ vi.mock('./HistoryItemDisplay.js', () => ({
 // test can distinguish between "mounted but disconnected from overflow
 // state" and "mounted with a live overflow context".
 vi.mock('./ShowMoreLines.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./ShowMoreLines.js')>(
+      './ShowMoreLines.js',
+    );
   const { useOverflowState } = await vi.importActual<
     typeof import('../contexts/OverflowContext.js')
   >('../contexts/OverflowContext.js');
   return {
+    // The real hook — VpScrollRegion uses it to reserve ShowMoreLines' row,
+    // and it has no rendering of its own to fake out.
+    useShowMoreLinesVisible: actual.useShowMoreLinesVisible,
     ShowMoreLines: () => {
       const overflow = useOverflowState();
       // Non-overlapping markers so a `toContain('SHOW_MORE')` substring
@@ -258,9 +266,15 @@ const renderMainContent = (uiState: UIState) =>
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
       <UIActionsContext.Provider value={createUIActions()}>
         <UIStateContext.Provider value={uiState}>
-          <OverflowProvider>
-            <MainContent />
-          </OverflowProvider>
+          {/* Mirrors App.tsx: VpScrollRegion reads useShowMoreLinesVisible
+              (which reads useStreamingContext) to reserve ShowMoreLines'
+              row, so the real provider must be present even though
+              ShowMoreLines itself is mocked below. */}
+          <StreamingContext.Provider value={uiState.streamingState}>
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </StreamingContext.Provider>
         </UIStateContext.Provider>
       </UIActionsContext.Provider>
     </AppContext.Provider>,
@@ -300,9 +314,11 @@ describe('<MainContent />', () => {
               historyRemountKey: 7,
             })}
           >
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
+            <StreamingContext.Provider value={createUIState().streamingState}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </StreamingContext.Provider>
           </UIStateContext.Provider>
         </UIActionsContext.Provider>
       </AppContext.Provider>,
@@ -497,9 +513,11 @@ describe('<MainContent />', () => {
               historyRemountKey: 1,
             })}
           >
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
+            <StreamingContext.Provider value={createUIState().streamingState}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </StreamingContext.Provider>
           </UIStateContext.Provider>
         </UIActionsContext.Provider>
       </AppContext.Provider>,
@@ -547,9 +565,11 @@ describe('<MainContent />', () => {
           <UIStateContext.Provider
             value={createUIState({ history, historyRemountKey: 2 })}
           >
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
+            <StreamingContext.Provider value={createUIState().streamingState}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </StreamingContext.Provider>
           </UIStateContext.Provider>
         </UIActionsContext.Provider>
       </AppContext.Provider>,
@@ -651,9 +671,11 @@ describe('<MainContent />', () => {
               currentModel: 'model-b',
             })}
           >
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
+            <StreamingContext.Provider value={createUIState().streamingState}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </StreamingContext.Provider>
           </UIStateContext.Provider>
         </UIActionsContext.Provider>
       </AppContext.Provider>,
@@ -1275,9 +1297,11 @@ describe('<MainContent />', () => {
                 slashCommands: stableSlashCommands,
               })}
             >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
+              <StreamingContext.Provider value={createUIState().streamingState}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </StreamingContext.Provider>
             </UIStateContext.Provider>
           </UIActionsContext.Provider>
         </AppContext.Provider>,
@@ -1327,9 +1351,11 @@ describe('<MainContent />', () => {
                 slashCommands: stableSlashCommands,
               })}
             >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
+              <StreamingContext.Provider value={createUIState().streamingState}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </StreamingContext.Provider>
             </UIStateContext.Provider>
           </UIActionsContext.Provider>
         </AppContext.Provider>,
@@ -1380,9 +1406,11 @@ describe('<MainContent />', () => {
                 slashCommands: stableSlashCommands,
               })}
             >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
+              <StreamingContext.Provider value={createUIState().streamingState}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </StreamingContext.Provider>
             </UIStateContext.Provider>
           </UIActionsContext.Provider>
         </AppContext.Provider>,
@@ -1438,9 +1466,11 @@ describe('<MainContent />', () => {
                 slashCommands: stableSlashCommands,
               })}
             >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
+              <StreamingContext.Provider value={createUIState().streamingState}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </StreamingContext.Provider>
             </UIStateContext.Provider>
           </UIActionsContext.Provider>
         </AppContext.Provider>,
