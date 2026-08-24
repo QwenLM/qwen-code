@@ -161,6 +161,21 @@ describe('extractUrlHits', () => {
       'https://b.dev/y',
     ]);
   });
+
+  it('stops the body at CJK/fullwidth punctuation glued to the URL', () => {
+    // The shared linkification break set (osc8 BARE_URL_BREAK_CHARACTERS):
+    // the ASCII-only trailing trimmer cannot remove fullwidth punctuation,
+    // so the grammar itself must stop there.
+    expect(extractUrlHits('文档 https://example.com/docs。其余文字')).toEqual([
+      expect.objectContaining({ url: 'https://example.com/docs' }),
+    ]);
+    expect(extractUrlHits('见https://example.com/a，然后')).toEqual([
+      expect.objectContaining({ url: 'https://example.com/a' }),
+    ]);
+    expect(extractUrlHits('（见https://example.com/x）')).toEqual([
+      expect.objectContaining({ url: 'https://example.com/x' }),
+    ]);
+  });
 });
 
 describe('findUrlAtRow', () => {

@@ -22,6 +22,7 @@
  * Pure logic + the append-only writer; the renderer wiring consumes these.
  */
 
+import stringWidth from 'string-width';
 import type { CliRendererConfig } from '@opentui/core';
 import {
   isInteractiveTerminal,
@@ -75,7 +76,9 @@ export function resolveScreenReaderPolicy(
     options.isTTY,
     options.env ?? process.env,
   );
-  const stdoutIsTTY = Boolean(options.isTTY);
+  // Ink gates both installs on process.stdout.isTTY — an omitted isTTY probes
+  // the real stdout, never "false".
+  const stdoutIsTTY = options.isTTY ?? process.stdout.isTTY;
   return {
     enabled,
     plainText: enabled,
@@ -86,8 +89,8 @@ export function resolveScreenReaderPolicy(
       interactive,
     ),
     mouse: !enabled,
-    synchronizedOutput: stdoutIsTTY && !enabled,
-    redrawOptimizer: stdoutIsTTY && !enabled,
+    synchronizedOutput: Boolean(stdoutIsTTY) && !enabled,
+    redrawOptimizer: Boolean(stdoutIsTTY) && !enabled,
   };
 }
 
@@ -132,28 +135,45 @@ export function applyScreenReaderPolicy(
 
 const ERASE_LINE = '\x1b[2K';
 const CURSOR_UP = '\x1b[1A';
+const CURSOR_LEFT = '\x1b[G';
 
-/** Escape sequence that erases `count` lines ending at the cursor. */
+/**
+ * Escape sequence that erases `count` lines ending at the cursor. Byte-exact
+ * ink parity (ansi-escapes `eraseLines`): the trailing cursorLeft is required
+ * because EL and CUU preserve the cursor column, so without it the next write
+ * would land mid-line on the line above.
+ */
 export function eraseLines(count: number): string {
   if (count <= 0) return '';
-  return ERASE_LINE + (CURSOR_UP + ERASE_LINE).repeat(count - 1);
+  return ERASE_LINE + (CURSOR_UP + ERASE_LINE).repeat(count - 1) + CURSOR_LEFT;
 }
 
 /**
- * Hard-wraps text at `width` columns (ink parity: `wrapAnsi(output, width,
- * { hard: true })` breaks lines at the terminal width). Widths <= 0 disable
- * wrapping.
+ * Hard-wraps text at `width` display columns (ink parity: `wrapAnsi(output,
+ * width, { hard: true })` measures columns, not UTF-16 code units, so CJK
+ * glyphs count as 2). Widths <= 0 disable wrapping.
  */
 export function hardWrap(text: string, width: number): string {
   if (width <= 0) return text;
   return text
     .split('\n')
     .map((line) => {
-      if (line.length <= width) return line;
       const parts: string[] = [];
-      for (let i = 0; i < line.length; i += width) {
-        parts.push(line.slice(i, i + width));
+      let current = '';
+      let currentWidth = 0;
+      for (const char of line) {
+        const charWidth = stringWidth(char);
+        // A glyph wider than the whole width is kept on its own line rather
+        // than wrapped into an unreachable column.
+        if (currentWidth > 0 && currentWidth + charWidth > width) {
+          parts.push(current);
+          current = '';
+          currentWidth = 0;
+        }
+        current += char;
+        currentWidth += charWidth;
       }
+      parts.push(current);
       return parts.join('\n');
     })
     .join('\n');

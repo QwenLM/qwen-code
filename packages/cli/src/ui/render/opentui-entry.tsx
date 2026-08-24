@@ -96,12 +96,23 @@ export async function startOpenTuiUI(
   const kittySupported = await probeKittyKeyboardSupport();
   // Mouse capture honors the ui.mouseTracking setting (opencode config.mouse
   // parity, default on): off means the terminal keeps its native selection,
-  // context menu, and wheel scrolling instead of the app.
+  // context menu, and wheel scrolling instead of the app. The screen-reader
+  // policy is a defensive second layer: startInteractiveUI routes screen-reader
+  // sessions to ink, but this entry is exported and can be mounted directly
+  // (tests, embedders) — there the policy at least keeps the renderer on the
+  // main screen with mouse capture off.
   const mouseTracking = settings?.merged.ui?.mouseTracking ?? true;
+  const { resolveScreenReaderPolicy, screenReaderRendererOptions } =
+    await import('../opentui/a11y-screen-reader.js');
+  const screenReaderPolicy = resolveScreenReaderPolicy({
+    screenReader: config?.getScreenReader?.(),
+  });
+  const rendererPolicy = screenReaderRendererOptions(screenReaderPolicy);
   const renderer = await createCliRenderer({
     targetFps: 60,
     useKittyKeyboard: kittySupported ? {} : null,
-    useMouse: mouseTracking,
+    useMouse: mouseTracking && rendererPolicy.useMouse,
+    screenMode: rendererPolicy.screenMode,
     exitOnCtrlC: false,
     externalOutputMode: 'passthrough',
     autoFocus: true,

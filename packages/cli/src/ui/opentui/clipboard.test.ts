@@ -13,17 +13,18 @@ describe('osc52Sequence', () => {
     expect(osc52Sequence('hello', {})).toBe(`\x1b]52;c;${b64}\x07`);
   });
 
-  it('wraps the sequence in a tmux DCS passthrough under TMUX', () => {
+  it('emits both the bare sequence and the tmux DCS passthrough under TMUX', () => {
     const b64 = Buffer.from('hello', 'utf8').toString('base64');
+    const bare = `\x1b]52;c;${b64}\x07`;
     expect(osc52Sequence('hello', { TMUX: '/tmp/tmux-0/default' })).toBe(
-      `\x1bPtmux;\x1b\x1b]52;c;${b64}\x07\x1b\\`,
+      bare + `\x1bPtmux;\x1b${bare}\x1b\\`,
     );
   });
 
-  it('wraps the sequence under GNU screen (STY) too', () => {
+  it('wraps the sequence raw in a plain DCS passthrough under GNU screen (STY)', () => {
     const b64 = Buffer.from('hi', 'utf8').toString('base64');
     expect(osc52Sequence('hi', { STY: '12345.pts-0.host' })).toBe(
-      `\x1bPtmux;\x1b\x1b]52;c;${b64}\x07\x1b\\`,
+      `\x1bP\x1b]52;c;${b64}\x07\x1b\\`,
     );
   });
 });

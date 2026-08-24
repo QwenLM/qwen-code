@@ -168,14 +168,22 @@ export function applyThemeMode(
 export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
   const light = definition.type === 'light';
   const surface = light ? LIGHT : DARK;
-  Object.assign(C, surface, definition.palette);
+  // Empty-string palette values mean "no color" in ink themes (the NoColor
+  // theme is all empty strings). @opentui/core does not treat '' as unset:
+  // parseColor('') fails its hex regex and falls back to magenta, so the
+  // empties must be skipped to leave the built-in surface color in place.
+  const palette = Object.fromEntries(
+    Object.entries(definition.palette).filter(([, value]) => value !== ''),
+  ) as typeof definition.palette;
+  Object.assign(C, surface, palette);
   // The dark surface intentionally has no `bg` (keeps terminal transparency);
   // Object.assign never clears keys, so reset it explicitly.
   C.bg = surface.bg;
   SYNTAX = SyntaxStyle.fromStyles({
     // `default` colors unstyled markdown chunks (table cells, plain inline
-    // text); anchor it on the theme's own foreground.
-    default: { fg: definition.palette.text },
+    // text); anchor it on the theme's own foreground — '' (NoColor) stays
+    // unset, registerStyle guards the empty value.
+    default: { fg: palette.text },
     ...definition.syntaxStyles,
     // Markdown structure tokens are not part of the ink hljs maps; keep
     // headings/inline styling alive on the theme's dark/light family.

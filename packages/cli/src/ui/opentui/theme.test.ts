@@ -120,4 +120,32 @@ describe('applyOpenTuiTheme (settings ui.theme face)', () => {
     // Restore the dark default for other suites.
     applyThemeMode('dark');
   });
+
+  it('skips empty-string palette values (NoColor) instead of overwriting the surface', () => {
+    // The NoColor theme maps every ink color to ''. Downstream parseColor('')
+    // is not "unset" — it falls back to magenta — so the empties must be
+    // dropped and the built-in dark surface left in place.
+    const empty = {
+      text: '',
+      dim: '',
+      accent: '',
+      green: '',
+      red: '',
+      yellow: '',
+      purple: '',
+      hover: '',
+    };
+    applyOpenTuiTheme({
+      name: 'NoColor',
+      type: 'dark',
+      palette: empty,
+      syntaxStyles: {},
+    } satisfies OpenTuiThemeDefinition);
+    expect(C.text).toBe('#CDD6F4');
+    expect(C.hover).toBe('#313244');
+    expect(C.bg).toBeUndefined();
+    expect((syntaxTokens()['default'] as { fg?: string }).fg).toBeUndefined();
+    // Restore the dark default for other suites.
+    applyThemeMode('dark');
+  });
 });

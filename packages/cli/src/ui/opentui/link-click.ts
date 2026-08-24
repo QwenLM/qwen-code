@@ -21,7 +21,11 @@
  * together — the same class of limitation terminal auto-detection has.
  */
 
-import { isSafeOscScheme, trimTrailingUrlPunctuation } from '../utils/osc8.js';
+import {
+  BARE_URL_BREAK_CHARACTERS,
+  isSafeOscScheme,
+  trimTrailingUrlPunctuation,
+} from '../utils/osc8.js';
 
 export interface UrlHit {
   /** Openable URL; `www.` matches are normalized to `https://`. */
@@ -52,13 +56,16 @@ export interface BufferRow {
   cellColumns: number[];
 }
 
-// `scheme://…` or `www.…`, stopped by whitespace, quotes, backticks and
-// control bytes. Trailing punctuation (and unsafe schemes) are filtered by
-// the osc8 helpers afterwards, mirroring the ink renderer.
-// The control range is the point of the exclusion, not an accident.
-const URL_PATTERN =
-  // eslint-disable-next-line no-control-regex
-  /(?:[a-zA-Z][a-zA-Z0-9+.-]*:\/\/|www\.)[^\s<>"'`\u0000-\u001f\u007f]+/g;
+// `scheme://…` or `www.…`, stopped by whitespace, quotes, backticks, control
+// bytes, and the shared linkification break set (CJK/fullwidth punctuation
+// glued to the URL — the same body grammar as osc8's BARE_URL_PATTERN, whose
+// ASCII-only trailing trimmer cannot remove fullwidth punctuation). Trailing
+// ASCII punctuation (and unsafe schemes) are filtered by the osc8 helpers
+// afterwards, mirroring the ink renderer.
+const URL_PATTERN = new RegExp(
+  `(?:[a-zA-Z][a-zA-Z0-9+.-]*://|www\\.)[^\\s<>"'\`\\u0000-\\u001f\\u007f${BARE_URL_BREAK_CHARACTERS}]+`,
+  'g',
+);
 
 /**
  * High bits of native cell values are flags, not code points: 0xC0000000

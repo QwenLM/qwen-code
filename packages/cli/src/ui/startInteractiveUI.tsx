@@ -79,9 +79,17 @@ export async function startInteractiveUI(
 ) {
   // Dual-renderer dispatch: `QWEN_TUI_RENDERER=opentui` boots the experimental
   // OpenTUI backend; the default ink path never imports @opentui (dynamic import).
+  // Screen-reader mode always stays on ink: ink ships the plain-text,
+  // append-only screen-reader output pipeline, which OpenTUI has no equivalent
+  // for — an alternate-screen renderer would be unusable with a screen reader.
+  // This also overrides an explicit QWEN_TUI_RENDERER=opentui: accessibility
+  // outranks a renderer preference.
   const { pickRenderer, isExperimentalRenderer, rendererExplicitlyRequested } =
     await import('./render/dispatch.js');
-  if (isExperimentalRenderer(pickRenderer())) {
+  const screenReaderMode = (
+    await import('./opentui/a11y-screen-reader.js')
+  ).isScreenReaderEnabled(config.getScreenReader());
+  if (!screenReaderMode && isExperimentalRenderer(pickRenderer())) {
     const { probeOpenTuiRuntime, ensureOpenTuiRuntimeSupported } = await import(
       './render/runtime-gate.js'
     );
