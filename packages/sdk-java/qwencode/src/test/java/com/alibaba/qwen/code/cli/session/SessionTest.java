@@ -261,7 +261,7 @@ class SessionTest {
     void sendPromptDrainsTurnWhenControlResponseSubtypeIsNestedError() throws SessionControlException, SessionSendPromptException {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error\","
-                        + "\"response\":{\"message\":\"set model failed\"}}}",
+                        + "\"error\":\"set model failed\"}}",
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"still consumed\"}]}}",
                 "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
 
@@ -290,7 +290,7 @@ class SessionTest {
     void sendPromptUsesTopLevelSubtypeWhenNestedSubtypeIsMissing() throws SessionControlException, SessionSendPromptException {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"subtype\":\"error\",\"response\":{\"request_id\":\"set-model\","
-                        + "\"response\":{\"message\":\"set model failed\"}}}",
+                        + "\"error\":\"set model failed\"}}",
                 "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
 
         Session session = new Session(transport);
