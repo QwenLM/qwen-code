@@ -134,7 +134,6 @@ export const legacyFilenames = [
   'functionHookRunner',
   'geminiChat',
   'geminiContentGenerator',
-  'geminiRequest',
   'generateContentResponseUtilities',
   'generatedFiles',
   'getFolderStructure',

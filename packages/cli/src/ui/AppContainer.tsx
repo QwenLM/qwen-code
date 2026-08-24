@@ -684,8 +684,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
 
-  const [geminiMdFileCount, setMemoryFileCount] = useState<number>(
-    initializationResult.geminiMdFileCount,
+  const [memoryFileCount, setMemoryFileCount] = useState<number>(
+    initializationResult.memoryFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
@@ -4510,7 +4510,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
-      geminiMdFileCount,
+      memoryFileCount,
       streamingState,
       initError,
       pendingGeminiHistoryItems,
@@ -4656,7 +4656,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
-      geminiMdFileCount,
+      memoryFileCount,
       streamingState,
       initError,
       pendingGeminiHistoryItems,

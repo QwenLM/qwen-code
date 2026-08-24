@@ -36,7 +36,7 @@ describe('initCommand', () => {
   let mockContext: CommandContext;
   const targetDir = '/test/dir';
   const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
-  const geminiMdPath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
+  const memoryFilePath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
 
   beforeEach(() => {
     // Create a fresh mock context for each test
@@ -99,7 +99,7 @@ describe('initCommand', () => {
     const result = await initCommand.action!(mockContext, '');
 
     // Assert: Check that writeFileSync was called correctly
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
 
     // Assert: Check that an informational message was added to the UI
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
@@ -127,7 +127,7 @@ describe('initCommand', () => {
 
     const result = await initCommand.action!(mockContext, '');
 
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
     expect(result).toEqual(
       expect.objectContaining({
         type: 'submit_prompt',
@@ -145,7 +145,7 @@ describe('initCommand', () => {
     const result = await initCommand.action!(mockContext, '');
 
     // Assert: Check that writeFileSync was called correctly
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
 
     // Assert: Check that an informational message was added to the UI
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(

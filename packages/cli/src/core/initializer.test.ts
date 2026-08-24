@@ -96,7 +96,7 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBeNull();
     expect(result.themeError).toBeNull();
-    expect(result.geminiMdFileCount).toBe(0);
+    expect(result.memoryFileCount).toBe(0);
   });
 
   it('should return authError when auth fails', async () => {

@@ -100,24 +100,24 @@ async function getMemoryFilePathsInternalForEachDir(
   implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
   const allPaths = new Set<string>();
-  const geminiMdFilenames = getAllMemoryFilenames();
+  const memoryFilenames = getAllMemoryFilenames();
 
-  for (const geminiMdFilename of geminiMdFilenames) {
+  for (const memoryFilename of memoryFilenames) {
     const resolvedHome = path.resolve(userHomePath);
     const globalQwenDir = Storage.getGlobalQwenDir();
-    const globalMemoryPath = path.join(globalQwenDir, geminiMdFilename);
+    const globalMemoryPath = path.join(globalQwenDir, memoryFilename);
 
     // Handle the case where we're in the home directory (dir is empty string or home path)
     const resolvedDir = dir ? path.resolve(dir) : resolvedHome;
     const isHomeDirectory = resolvedDir === resolvedHome;
 
     if (!implicitDiscoveryEnabled) {
-      const explicitContextPath = path.join(resolvedDir, geminiMdFilename);
+      const explicitContextPath = path.join(resolvedDir, memoryFilename);
       try {
         await fs.access(explicitContextPath, fsSync.constants.R_OK);
         allPaths.add(explicitContextPath);
         logger.debug(
-          `Found readable explicit ${geminiMdFilename}: ${explicitContextPath}`,
+          `Found readable explicit ${memoryFilename}: ${explicitContextPath}`,
         );
       } catch {
         // Not found, which is okay for explicit-only discovery.
@@ -128,7 +128,7 @@ async function getMemoryFilePathsInternalForEachDir(
         await fs.access(globalMemoryPath, fsSync.constants.R_OK);
         allPaths.add(globalMemoryPath);
         logger.debug(
-          `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
+          `Found readable global ${memoryFilename}: ${globalMemoryPath}`,
         );
       } catch {
         // It's okay if it's not found.
@@ -141,13 +141,13 @@ async function getMemoryFilePathsInternalForEachDir(
 
     if (isHomeDirectory) {
       // For home directory, only check for QWEN.md directly in the home directory
-      const homeContextPath = path.join(resolvedHome, geminiMdFilename);
+      const homeContextPath = path.join(resolvedHome, memoryFilename);
       try {
         await fs.access(homeContextPath, fsSync.constants.R_OK);
         if (homeContextPath !== globalMemoryPath) {
           allPaths.add(homeContextPath);
           logger.debug(
-            `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
+            `Found readable home ${memoryFilename}: ${homeContextPath}`,
           );
         }
       } catch {
@@ -158,7 +158,7 @@ async function getMemoryFilePathsInternalForEachDir(
       // if a valid currentWorkingDirectory is provided and it's not the home directory.
       const resolvedCwd = path.resolve(dir);
       logger.debug(
-        `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
+        `Searching for ${memoryFilename} starting from CWD: ${resolvedCwd}`,
       );
 
       const projectRoot = await findProjectRoot(resolvedCwd);
@@ -178,7 +178,7 @@ async function getMemoryFilePathsInternalForEachDir(
           break;
         }
 
-        const potentialPath = path.join(currentDir, geminiMdFilename);
+        const potentialPath = path.join(currentDir, memoryFilename);
         try {
           await fs.access(potentialPath, fsSync.constants.R_OK);
           if (potentialPath !== globalMemoryPath) {

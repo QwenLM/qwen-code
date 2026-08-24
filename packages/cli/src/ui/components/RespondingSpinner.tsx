@@ -7,7 +7,7 @@
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import { Text, useIsScreenReaderEnabled } from 'ink';
-import Spinner from 'ink-spinner';
+import InkSpinner from 'ink-spinner';
 import type { SpinnerName } from 'cli-spinners';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { StreamingState } from '../types.js';
@@ -29,17 +29,15 @@ interface RespondingSpinnerProps {
   spinnerType?: SpinnerName;
 }
 
-export const RespondingSpinner: React.FC<
-  RespondingSpinnerProps
-> = ({ nonRespondingDisplay, spinnerType = 'dots' }) => {
+export const RespondingSpinner: React.FC<RespondingSpinnerProps> = ({
+  nonRespondingDisplay,
+  spinnerType = 'dots',
+}) => {
   const streamingState = useStreamingContext();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   if (streamingState === StreamingState.Responding) {
     return (
-      <Spinner
-        spinnerType={spinnerType}
-        altText={SCREEN_READER_RESPONDING}
-      />
+      <Spinner spinnerType={spinnerType} altText={SCREEN_READER_RESPONDING} />
     );
   } else if (nonRespondingDisplay) {
     return isScreenReaderEnabled ? (
@@ -94,7 +92,7 @@ export const Spinner: React.FC<SpinnerProps> = ({
 
   return (
     <Text color={theme.text.primary}>
-      <Spinner type={spinnerType} />
+      <InkSpinner type={spinnerType} />
     </Text>
   );
 };
