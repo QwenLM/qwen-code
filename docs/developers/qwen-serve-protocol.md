@@ -3074,19 +3074,23 @@ The active policy is configured in `settings.json` under `policy.permissionStrat
 
 > **F3 (#4175): multi-client permission coordination.** F3 added the four policies above. Pre-F3 daemons hardcoded first-responder; the wire shape stays bit-for-bit unchanged when the configured policy is `first-responder`. New events (`permission_partial_vote`, `permission_forbidden`) are additive — old SDKs see them as `unrecognized_known_event` and gracefully ignore.
 
-> **Permission timeout (default 5 minutes).** A `permission_request`
+> **Permission timeout (disabled by default).** A `permission_request`
 > stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
 > fires, (c) the HTTP client driving the prompt disconnects
 > (mid-prompt cancel resolves outstanding permissions as `cancelled`),
 > (d) the session is killed, (e) the daemon shuts down, **or
-> (f) the per-session permission timeout fires** (`DEFAULT_PERMISSION_TIMEOUT_MS`,
-> 5 minutes). On timeout fire the agent's `requestPermission` resolves
+> (f) its configured timeout fires**. On timeout fire the agent's
+> `requestPermission` resolves
 > as `{outcome: 'cancelled'}`, the audit ring records a
 > `permission.timeout` entry, daemon stderr emits a one-line
 > breadcrumb, and the SSE bus fans out the standard
 > `permission_resolved` cancelled frame so subscribers clean up. The
-> timeout is configurable via `BridgeOptions.permissionResponseTimeoutMs`;
-> headless callers running long-form prompts may want to extend it.
+> shared timeout is configurable via
+> `BridgeOptions.permissionResponseTimeoutMs` or
+> `qwen serve --permission-response-timeout-ms`. Its default is `0`, so both
+> ordinary permissions and `ask_user_question` wait indefinitely for a human
+> decision. Voter cancellation, session cancellation, disconnect cleanup, and
+> daemon shutdown still resolve pending interactions as cancelled.
 
 Request:
 

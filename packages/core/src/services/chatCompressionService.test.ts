@@ -219,7 +219,7 @@ describe('ChatCompressionService', () => {
           parts: [
             {
               functionCall: {
-                name: 'computer_use__get_app_state',
+                name: 'mcp__node-repl__node_repl',
                 args: { app: 'Safari' },
               },
             },
@@ -230,7 +230,7 @@ describe('ChatCompressionService', () => {
           parts: [
             {
               functionResponse: {
-                name: 'computer_use__get_app_state',
+                name: 'mcp__node-repl__node_repl',
                 response: { output: '' },
                 parts: imageParts,
               } as unknown as NonNullable<
@@ -3688,7 +3688,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
   });
 });
 
-describe('ChatCompressionService.compress — single-turn computer-use regression', () => {
+describe('ChatCompressionService.compress — single-turn Node REPL image regression', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -3738,7 +3738,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
       parts: [
         {
           functionResponse: {
-            name: 'computer_use__get_app_state',
+            name: 'mcp__node-repl__node_repl',
             response: { output: 'ok' },
             parts: [{ inlineData: { mimeType: 'image/png', data } }],
           } as unknown as NonNullable<
@@ -3752,7 +3752,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
       parts: [
         {
           functionCall: {
-            name: 'computer_use__get_app_state',
+            name: 'mcp__node-repl__node_repl',
             args: { app },
           },
         },
@@ -3821,7 +3821,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     ).toEqual(['s3', 's4', 's5']);
 
     // Assertion 3: Image metadata header mentions the source tool and args.
-    expect(flatText).toContain('computer_use__get_app_state');
+    expect(flatText).toContain('mcp__node-repl__node_repl');
     expect(flatText).toContain('"app":"Safari"');
   });
 });
