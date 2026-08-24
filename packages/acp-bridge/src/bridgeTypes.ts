@@ -281,11 +281,12 @@ export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
 export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
   return Math.max(1, Math.floor(outerWaitMs * 0.8));
 }
-/** Bounds on a single snapshot. Generous next to any real deployment — they
- *  exist so a version-skewed or buggy child cannot make the daemon walk an
- *  unbounded structure per report, not to constrain legitimate use. A packet
- *  over either bound is discarded whole, like any other malformed one. */
+/** Bounds on a single snapshot. Generous next to any real deployment — it
+ *  exists so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded Session list per report. An oversized packet is discarded whole. */
 export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+/** Shared per-Session hold bound. Oversized snapshots are discarded whole;
+ *  oversized close refusals retain the Session without replacing its cache. */
 export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
@@ -823,6 +824,12 @@ export interface BridgeClientRequestContext {
    */
   continue?: boolean;
   /**
+   * Internal: set ONLY after load/resume when the child hinted that a trailing
+   * ask_user_question should be re-hung. HTTP routes never populate this from
+   * request input.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
    * Absolute wallclock budget (ms) for this prompt, measured from admission
    * (the 202 semantic point) and covering queue wait. When exceeded, the
    * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
@@ -833,6 +840,27 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.restoreAskUserQuestion';
+/**
+ * Response `_meta` key on `session/request_permission` cancellations telling
+ * the child WHY the bridge resolved a cancel (`timeout` / `agent_cancelled`
+ * / `session_closed`). The ACP wire frame itself only carries
+ * `{outcome:'cancelled'}`; the child uses this to avoid persisting a
+ * fabricated "canceled by the user" tool result when an unattended restore
+ * prompt's permission wait timed out or the session closed.
+ */
+export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
+  'qwen.daemon.permissionCancelReason';
+/**
+ * Request `_meta` key on the child-bound `session/load` / `session/resume`
+ * telling the child NOT to emit the restore hint and NOT to skip finalizing
+ * the trailing ask_user_question during replay. The daemon sets it when it
+ * already knows it will decline the re-hang (no attached client, fork
+ * restore) — keeping the replay skip and the re-hang decision in lockstep.
+ */
+export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;

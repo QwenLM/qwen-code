@@ -3,8 +3,8 @@
 ## Goal
 
 Expose Thinking and effort controls for the exact `qwen3.8-max` model in the
-WebShell model popover. Acknowledged changes apply to subsequent live-session
-requests.
+WebShell model popover, including the welcome state before a lazy session is
+created. Acknowledged changes apply only to subsequent live-session requests.
 
 ## Design
 
@@ -18,6 +18,29 @@ configuration option. For this model only, the option contains `none` plus the
 three manifest values. WebShell renders `none` as Thinking off and renders the
 remaining values as effort choices. No second effort configuration id is
 introduced.
+
+Both workspace-provider producers expose that same manifest-built option as
+an optional, per-model `configOptions` preview. The field is an additive v1
+projection: older clients can ignore it and older daemons simply omit it. The
+WebUI maps a valid option onto that model's own `reasoningPreview`, rather than
+onto connection-wide reasoning state, so changing models cannot leak the
+capability.
+
+WebShell applies the following priority:
+
+1. When both `sessionId` and session context are absent, it may render the
+   selected model's workspace preview. The suffix and controls are read-only.
+2. Once a session id is allocated but its context has not arrived, WebShell
+   hides the preview.
+3. Once context for that session arrives, its `currentValue`, options, and
+   Thinking state are authoritative. An absent or incompatible live option
+   hides the controls and never falls back to the preview.
+
+The welcome preview deliberately does not create an empty session. Hosts such
+as DataWorks use lazy creation so the first prompt can create or adopt the
+real daemon session; pre-creating one would change that contract and leave
+empty sessions behind. The preview is display-only: it does not persist,
+queue, or apply a selection before session creation.
 
 WebShell retains PR #8675's interaction design: the current reasoning state is
 shown as a suffix on the model chip, reasoning options occupy the first model
@@ -45,20 +68,30 @@ added.
 Included:
 
 - exact stable `qwen3.8-max` only;
+- a read-only welcome preview with `xhigh` as the manifest default;
+- authoritative replacement by same-session context;
 - the current WebShell conversation;
 - Thinking on/off and `low`, `medium`, `xhigh` effort;
-- one browser smoke covering the rendered controls and real request payload.
+- browser coverage for welcome, live override, model switching, old daemons,
+  and the existing live mutation behavior.
 
 Excluded:
 
 - persistence across sessions or restarts;
-- TUI, channel, provider, auth-refresh, and runtime-snapshot behavior;
 - persisted/default-model semantics;
+- saving or queueing welcome-state effort changes;
 - preview, aliases, and future reasoning-control shapes;
-- capability flags and cross-client model/config sync.
+- route and runtime models;
+- TUI, channel, provider, auth-refresh, and runtime-snapshot behavior;
+- capability flags and cross-client model/config broadcasts.
 
 ## Compatibility
 
-Older daemons do not advertise an option containing `none`, so WebShell hides
-the controls. Non-target models keep the existing generic ACP effort option,
-and clients that do not consume this option remain compatible.
+Only a raw, non-runtime, non-route model whose exact manifest id is
+`qwen3.8-max` receives the preview. Preview, dated, aliased, opaque route,
+runtime, and unrelated models do not. Older daemons omit the optional model
+field, so WebShell does not infer or invent welcome-state capability. Existing
+sessions continue to obey the daemon's live `configOptions`, including
+Thinking off, non-default effort, missing capability, and incompatible option
+shapes. Non-target sessions keep the existing generic ACP effort behavior,
+and clients that do not consume the additive field remain compatible.
