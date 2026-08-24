@@ -28,9 +28,12 @@ import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
-import { cpSlice, cpLen } from '../utils/textUtils.js';
+import { cpSlice, cpLen, truncateToWidth } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+
+const TOP_BORDER_LABEL_DECORATION_WIDTH = 4;
+const TOP_BORDER_MIN_LEADING_DASHES = 1;
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -340,11 +343,18 @@ export const BaseTextInput = ({
 
   const columns = process.stdout.columns || 80;
   // Build the top border line: ─────── label ──
-  // Label takes: 1 space + text + 1 space + 2 trailing dashes = label.length + 4
-  const labelWidth = topRightLabel ? stringWidth(topRightLabel) + 4 : 0;
-  const dashCount = Math.max(1, columns - labelWidth);
-  const topBorderLine = topRightLabel
-    ? `${'─'.repeat(dashCount)} ${topRightLabel} ${'─'.repeat(2)}`
+  // Reserve the label decoration and at least one leading dash.
+  const labelBudget =
+    columns - TOP_BORDER_LABEL_DECORATION_WIDTH - TOP_BORDER_MIN_LEADING_DASHES;
+  const renderedLabel = topRightLabel
+    ? truncateToWidth(topRightLabel, labelBudget)
+    : '';
+  const labelWidth = renderedLabel
+    ? stringWidth(renderedLabel) + TOP_BORDER_LABEL_DECORATION_WIDTH
+    : 0;
+  const dashCount = columns - labelWidth;
+  const topBorderLine = renderedLabel
+    ? `${'─'.repeat(dashCount)} ${renderedLabel} ${'─'.repeat(2)}`
     : '─'.repeat(columns);
 
   return (
