@@ -13,7 +13,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashWorktreeFiles, revisionIdentities } from './local-anchor.js';
+import {
+  changedSince,
+  hashWorktreeFiles,
+  revisionIdentities,
+  UNHASHABLE,
+} from './local-anchor.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
@@ -144,42 +149,40 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     expect(off['data.bin']).not.toBe(on['data.bin']);
   });
 
-  it('folds a driver literally named `set` — an attribute-state spelling that is also a legal driver name', () => {
-    // `data.bin diff=set` is a legal gitattributes line naming a DRIVER `set`,
-    // and `check-attr` answers it byte-identically to the `set` attribute
-    // state. The driver collection used to exclude the attribute-state
-    // spellings, so `git diff` honoured `diff.set.binary` — flipping the
-    // section between readable hunks and "Binary files differ" — while the
-    // identity stood still across the flip it exists to track: the next
-    // round's gate compared equal and sliced the file out of scope, carrying
-    // the previous verdict forward against a different rendering.
+  it('a driver literally named `set` is uncertifiable — the answer is ambiguous', () => {
+    // `data.bin diff=set` is a legal gitattributes line naming a DRIVER
+    // `set`, and `check-attr` answers it byte-identically to the `set`
+    // attribute STATE. Folding the spelling into the identity — even with
+    // the `diff.set.binary` config folded beside it — collapsed two
+    // DIFFERENT rendering states into one identity: plain `diff` renders
+    // readable hunks under `diff.set.binary=true` while `diff=set` renders
+    // "Binary files differ" (probed, git 2.39.5), yet both answer `set` and
+    // both fold the same config, so the pair can never be told apart on
+    // this stream. The fold existed to track the config-side flip; the
+    // state-vs-name conflation is one entrance it cannot close, and the
+    // module's standard for a rendering it cannot capture is UNHASHABLE —
+    // re-reviewed every round rather than certified across the flip.
     // `.gitattributes` is worktree content of the reviewed PR, so the driver
-    // name is plantable; `unset` and `unspecified` are plantable the same way.
+    // name is plantable; `unset` is plantable the same way (and needs no
+    // config at all to diverge — see the sibling suite below).
     writeFileSync(join(repo, 'data.bin'), 'x\n');
     writeFileSync(join(repo, '.gitattributes'), 'data.bin diff=set\n');
     git('config', 'diff.set.binary', 'true');
 
-    const on = hashWorktreeFiles(repo, ['data.bin']);
-    expect(on['data.bin']).toContain('diff=set');
-    expect(on['data.bin']).toContain('set.binary=true');
-
-    git('config', 'diff.set.binary', 'false');
-    const off = hashWorktreeFiles(repo, ['data.bin']);
-    expect(off['data.bin']).toContain('set.binary=false');
-    expect(off['data.bin']).not.toBe(on['data.bin']);
+    const out = hashWorktreeFiles(repo, ['data.bin']);
+    expect(out['data.bin']).toBe(UNHASHABLE);
   });
 
-  it('a plain `diff` attribute with no such driver configured folds nothing', () => {
-    // The sibling control for the `set`-named-driver case: a path whose
-    // `diff` attribute is merely SET (no driver) is answered `set` too, and
-    // with no `diff.set.binary` in the config the identity carries no fold —
-    // the over-approximation costs one config probe, not a phantom flag.
+  it('a plain `diff` attribute is uncertifiable too — the sibling ambiguity', () => {
+    // The state half of the pair above: a path whose `diff` attribute is
+    // merely SET (no driver) is answered `set`, byte-identically to a
+    // driver literally named `set`. Neither half can be certified without
+    // the other, so both take UNHASHABLE.
     writeFileSync(join(repo, 'data.bin'), 'x\n');
     writeFileSync(join(repo, '.gitattributes'), 'data.bin diff\n');
 
     const out = hashWorktreeFiles(repo, ['data.bin']);
-    expect(out['data.bin']).toContain('diff=set');
-    expect(out['data.bin']).not.toContain('set.binary=');
+    expect(out['data.bin']).toBe(UNHASHABLE);
   });
 });
 describe('hashWorktreeFiles — a decoded path is not a name', () => {
@@ -313,5 +316,58 @@ describe('revisionIdentities — ledger paths are read literally', () => {
     // the tree — undatable, not fatal.
     expect(ids['sib.md']).toMatch(/^100644:[0-9a-f]{40}:/);
     expect(ids[':(glob)notes.md']).toBeUndefined();
+  });
+});
+
+describe('hashWorktreeFiles — a state name spelled as a value is uncertifiable', () => {
+  // `check-attr` answers an attribute STATE and a VALUE assignment that
+  // spells a state name byte-identically, while `git diff` renders them
+  // differently: `*.dat -diff` renders "Binary files … differ" and
+  // `*.dat diff=unset` renders readable hunks, both answered `diff: unset`
+  // (probed, git 2.39.5 — no config involved). The identity cannot carry a
+  // distinction the probe stream cannot name, so such a path takes
+  // UNHASHABLE — re-reviewed every round rather than certified across a
+  // rendering flip.
+  it('folds the whole identity to UNHASHABLE when `diff` answers `unset` or `set`', () => {
+    writeFileSync(join(repo, 'data.dat'), 'line one\nline two\n');
+
+    writeFileSync(join(repo, '.gitattributes'), '*.dat -diff\n');
+    const stateUnset = hashWorktreeFiles(repo, ['data.dat']);
+    expect(stateUnset['data.dat']).toBe(UNHASHABLE);
+
+    writeFileSync(join(repo, '.gitattributes'), '*.dat diff=unset\n');
+    const namedUnset = hashWorktreeFiles(repo, ['data.dat']);
+    expect(namedUnset['data.dat']).toBe(UNHASHABLE);
+
+    writeFileSync(join(repo, '.gitattributes'), '*.dat diff\n');
+    const stateSet = hashWorktreeFiles(repo, ['data.dat']);
+    expect(stateSet['data.dat']).toBe(UNHASHABLE);
+  });
+
+  it('a flip between the two ambiguous spellings re-enters scope', () => {
+    // The pre-fix identity was byte-identical across the flip, so
+    // `changedSince` read the file as unchanged and the newly-readable
+    // section was sliced out of scope carrying the previous verdict.
+    writeFileSync(join(repo, 'data.dat'), 'line one\nline two\n');
+    writeFileSync(join(repo, '.gitattributes'), '*.dat -diff\n');
+    const round1 = hashWorktreeFiles(repo, ['data.dat']);
+    writeFileSync(join(repo, '.gitattributes'), '*.dat diff=unset\n');
+    const round2 = hashWorktreeFiles(repo, ['data.dat']);
+    expect(changedSince(round1, round2)).toEqual(['data.dat']);
+  });
+
+  it('keeps unambiguous answers folding — the closure narrows, not widens', () => {
+    writeFileSync(join(repo, 'data.dat'), 'line one\nline two\n');
+    writeFileSync(join(repo, 'plain.ts'), 'export const a = 1;\n');
+    writeFileSync(join(repo, '.gitattributes'), '*.dat diff=mydrv\n');
+
+    const ids = hashWorktreeFiles(repo, ['data.dat', 'plain.ts']);
+    // A real driver name still folds into the identity…
+    expect(ids['data.dat']).toContain('diff=mydrv');
+    expect(ids['data.dat']).not.toBe(UNHASHABLE);
+    // …and `unspecified` — the answer every unattributed path gets — stays
+    // foldable, or the anchor would re-review the entire tree every round.
+    expect(ids['plain.ts']).toContain('diff=unspecified');
+    expect(ids['plain.ts']).not.toBe(UNHASHABLE);
   });
 });

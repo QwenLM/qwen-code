@@ -13,7 +13,7 @@ Save the review results to a Markdown file for future reference:
 
 - Local changes review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-local.md`
 - PR review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
-- File review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-<target>.md` (`<target>` is the capture's published token — the plan's `target` field, never the raw filename: `qwen review run` pins the saved report against that same token, and a bare filename agrees with it only at the repo root, which is why the drift went unnoticed)
+- File review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-<target>.md` (`<target>` is the capture's published token — the plan's `target` field, never the raw filename: `qwen review run` pins the saved report against that same token, and a bare filename agrees with it only at the repo root, which is why the drift went unnoticed). When `<target>` itself ends in `.md`, the name ENDS at `<target>` — do not double the extension: `qwen review run`'s report pin for such targets matches `…-<target>` with no second `.md`, so a doubled `…<target>.md` name silently loses the run's `Report:` line
 
 Include hours/minutes/seconds in the filename to avoid overwriting on same-day re-reviews.
 

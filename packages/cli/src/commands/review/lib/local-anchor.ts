@@ -314,6 +314,8 @@ function renderingAttributes(
   const diffDriverByPath = Object.create(null) as Record<string, string>;
   /** Paths whose driver name did not survive the decode — see below. */
   const undecodableDriver = new Set<string>();
+  /** Paths whose `diff` answer cannot name a rendering state — see below. */
+  const ambiguousDiff = new Set<string>();
   const f = raw.split('\0');
   for (let i = 0; i + 2 < f.length; i += 3) {
     const [path, attr, value] = [f[i], f[i + 1], f[i + 2]];
@@ -353,6 +355,31 @@ function renderingAttributes(
         // onto the UNHASHABLE this earns it.
         continue;
       }
+      if (value === 'set' || value === 'unset') {
+        // `check-attr` answers an attribute STATE and a VALUE assignment that
+        // spells a state name byte-identically, and `git diff` renders them
+        // differently: `*.dat -diff` and `*.dat diff=unset` both answer
+        // `diff: unset`, but the state renders "Binary files … differ" while
+        // the driver named `unset` renders readable hunks (probed, git
+        // 2.39.5 — no config involved at all). The `set` pair is the same
+        // conflation one config away: plain `diff` and `diff=set` both answer
+        // `set`, and a `diff.set.binary=true` flips ONLY the driver's
+        // rendering — the config fold below appends the setting to BOTH
+        // identities (each answers `set`, each probes the same config key),
+        // so it cannot split the pair. What this stream cannot name
+        // faithfully cannot be certified — the whole identity takes
+        // UNHASHABLE, the module's standard for a rendering it cannot
+        // capture, and the path re-reviews every round instead.
+        // `unspecified` stays foldable on purpose: it is the answer for every
+        // path no attributes rule mentions, and an UNHASHABLE there would
+        // re-review every unattributed file in the tree every round — the
+        // anchor's whole payoff, spent on a driver that could only be named
+        // `unspecified` on purpose.
+        // Not recorded as a driver either, the undecodable case's reason:
+        // the fold must not append onto the UNHASHABLE this earns it.
+        ambiguousDiff.add(path);
+        continue;
+      }
       drivers.add(value);
       diffDriverByPath[path] = value;
     }
@@ -364,6 +391,7 @@ function renderingAttributes(
   // Applied after the stream, so no later record for the same path can
   // append onto it.
   for (const path of undecodableDriver) out[path] = UNHASHABLE;
+  for (const path of ambiguousDiff) out[path] = UNHASHABLE;
   // `diff=<driver>` names a driver whose behaviour lives in git CONFIG, not
   // in any attributes file — and `diff.<driver>.binary` flips a section
   // between readable hunks and "Binary files … differ" with the attribute
@@ -474,6 +502,37 @@ export function revisionIdentities(
     const a = attrs[p];
     out[p] =
       a === undefined || a === UNHASHABLE ? UNHASHABLE : `${out[p]}:${a}`;
+  }
+  return out;
+}
+
+/**
+ * The tracked paths `git diff` is BLIND to — the ones carrying an
+ * `--assume-unchanged` bit (lowercase tags) or `--skip-worktree` (`S`) in
+ * `git ls-files -v` — or null when the enumeration itself failed.
+ *
+ * A decided stop is a claim that nothing in the tree needs review, and
+ * `git diff HEAD` honours those bits: an edit on a marked path shows no
+ * section, no hash moves, and every comparison a stop keys on stands still
+ * while the bytes were read by no round. The defence therefore asks for the
+ * BITS themselves rather than any edit — whether the hidden bytes diverge
+ * is exactly what the capture cannot tell, and over-review is the
+ * affordable direction. The same oracle, fail-closed the same way, guards
+ * the PR flow's clean-tree claim (`worktree.ts`).
+ */
+export function invisibleTrackedPaths(repoRoot: string): string[] | null {
+  let raw: Buffer;
+  try {
+    raw = gitRaw('-C', repoRoot, 'ls-files', '-v', '-z');
+  } catch {
+    // Unmeasured is uncertifiable, exactly like a listed bit.
+    return null;
+  }
+  const out: string[] = [];
+  for (const rec of raw.toString('utf8').split('\0')) {
+    // `<tag> <path>` records: lowercase tags are the assume-unchanged
+    // family, `S` is skip-worktree; every other tag leaves the path visible.
+    if (/^[a-zS]/.test(rec)) out.push(rec.slice(2));
   }
   return out;
 }
