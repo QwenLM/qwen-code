@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(
@@ -168,3 +177,141 @@ describe('build-and-publish-image workflow', () => {
     expect(failureIssueScript).toContain('contains($marker_html)');
   });
 });
+
+// Replay the script under a recording gh stub instead of pinning only the
+// mechanism's text: text pins stayed green when `.body` was mutated to
+// `.title` (lookup matches nothing, the script dies, nothing is filed) and
+// when the marker lost its `:${version}` suffix (every later version
+// rewrites the first issue). jq is preinstalled on ubuntu-latest runners.
+describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+  'image-build-failure-issue script behavior',
+  () => {
+    const runScript = ({
+      eventName,
+      tagName = '',
+      inputVersion = '',
+      issues,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'image-failure-issue-'));
+      const callsLog = join(dir, 'calls.log');
+      const bodyCapture = join(dir, 'captured-body.md');
+      // Not open-issues.json: the script redirects `gh issue list` into
+      // ${RUNNER_TEMP}/open-issues.json, which would truncate this fixture.
+      const fixture = join(dir, 'fixture-issues.json');
+      writeFileSync(fixture, JSON.stringify(issues));
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/bin/bash',
+          'echo "gh $*" >> "' + callsLog + '"',
+          'prev=""',
+          'for arg in "$@"; do',
+          '  if [[ "$prev" == "--body-file" ]]; then cp "$arg" "' +
+            bodyCapture +
+            '"; fi',
+          '  prev="$arg"',
+          'done',
+          'case "$1 $2" in',
+          '  "issue list") cat "' + fixture + '" ;;',
+          'esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'gh'), 0o755);
+      const result = spawnSync(
+        'bash',
+        ['.github/scripts/image-build-failure-issue.sh'],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: dir + ':' + (process.env.PATH ?? ''),
+            REPO: 'QwenLM/qwen-code',
+            EVENT_NAME: eventName,
+            TAG_NAME: tagName,
+            INPUT_VERSION: inputVersion,
+            DEDUP_LABEL: 'scope/ci-cd',
+            RUN_URL:
+              'https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+            RUNNER_TEMP: dir,
+          },
+        },
+      );
+      return {
+        status: result.status,
+        out: result.stdout,
+        calls: existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '',
+        body: existsSync(bodyCapture) ? readFileSync(bodyCapture, 'utf8') : '',
+      };
+    };
+
+    it('records the recurrence on the existing issue instead of creating', () => {
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            title: 'Sandbox image for 1.2.3 not published: image build failed',
+            body: '<!-- image-build-failure:1.2.3 -->\n\nHand-written note.',
+          },
+          { number: 43, title: 'unrelated', body: 'no marker here' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.calls).not.toContain('issue create');
+      expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
+      expect(result.body).toContain(
+        'https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('creates a new issue when no open issue carries the version marker', () => {
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '4.5.6',
+        issues: [
+          {
+            number: 42,
+            title: 'Sandbox image for 1.2.3 not published: image build failed',
+            body: '<!-- image-build-failure:1.2.3 -->',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue create');
+      expect(result.calls).not.toContain('issue edit');
+      expect(result.calls).toContain(
+        'Sandbox image for 4.5.6 not published: image build failed',
+      );
+      expect(result.body).toContain('<!-- image-build-failure:4.5.6 -->');
+    });
+
+    it('matches a v-prefixed tag push against the versioned marker', () => {
+      // Tag pushes name the version through the tag; dispatches through the
+      // input. Both must normalize to the same marker or the second event
+      // files a duplicate issue that can never be deduped.
+      const result = runScript({
+        eventName: 'push',
+        tagName: 'v1.2.3',
+        issues: [{ number: 42, body: '<!-- image-build-failure:1.2.3 -->' }],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.calls).not.toContain('issue create');
+    });
+
+    it('hard-fails instead of filing when no version resolves', () => {
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '',
+        issues: [],
+      });
+      expect(result.status).toBe(1);
+      expect(result.out).toContain('::error::');
+      expect(result.calls).not.toContain('issue create');
+      expect(result.calls).not.toContain('issue edit');
+    });
+  },
+);
