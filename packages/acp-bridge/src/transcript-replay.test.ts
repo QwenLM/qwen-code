@@ -24,6 +24,7 @@ const GOAL: GoalRecord = {
   evidenceCursor: { recordId: 'record-0' },
   turnCount: 4,
   activeTimeMs: 2000,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 200,
   lastReason: 'continuing',
@@ -204,6 +205,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -226,6 +228,7 @@ describe('createTranscriptReplayMachine', () => {
         ],
       },
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 400,
     };
     expect(
@@ -249,6 +252,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2900,
+      tokensUsed: 0,
       updatedAt: 500,
     };
     expect(
@@ -272,6 +276,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
@@ -279,6 +284,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -298,6 +304,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -324,6 +331,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -337,6 +345,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turnedOnce,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -350,6 +359,7 @@ describe('createTranscriptReplayMachine', () => {
       ...rejectedOnce,
       turnCount: GOAL.turnCount + 2,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -364,6 +374,7 @@ describe('createTranscriptReplayMachine', () => {
     const rejectedTwice: GoalRecord = {
       ...turnedTwice,
       activeTimeMs: 2400,
+      tokensUsed: 0,
       updatedAt: 330,
     };
     expect(
@@ -376,6 +387,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejectedTwice,
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 340,
     };
     expect(
@@ -1136,6 +1148,93 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect([...machine.finalize()]).toEqual([]);
+  });
+
+  it('skips finalize for selected ask_user_question call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-bash',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const finalized = [...machine.finalize()].map((item) => item.update);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-bash',
+      status: 'failed',
+    });
+    expect(machine.snapshot().pendingToolCalls).toEqual([
+      expect.objectContaining({ callId: 'call-auq' }),
+    ]);
+  });
+
+  it('matches the skip set against raw transcript ids after dedup renames', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    // Two dangling calls with the SAME transcript id: the second is renamed
+    // to `call-auq:2`, but the skip set (derived from chat history) holds
+    // the raw id, so both must stay pending.
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+    updates(
+      machine,
+      record('assistant-2', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect([...machine.finalize()]).toEqual([]);
+    expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
   it('correlates an id-less result only to one same-name pending call', () => {

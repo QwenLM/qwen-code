@@ -10,6 +10,7 @@ import {
   collectNewSideLines,
   resolveAnchor,
   resolveAnchors,
+  validateNewSideAnchors,
 } from './anchors.js';
 
 /**
@@ -921,5 +922,224 @@ describe('resolveAnchors (batch)', () => {
       );
       expect(inSomeHunk).toBe(true);
     }
+  });
+});
+
+/**
+ * Two hunks in one file (new-side [1-4] and [22-23]) plus a pure-deletion
+ * file — the shapes the Aone anchor gate must tell apart: in-hunk anchors,
+ * the gap between hunks, and a file whose every hunk occupies no new-side
+ * line. The second header is byte-exact git output: after the +1 delta of
+ * the first hunk, a count-0 insertion after old line 20 occupies new-side
+ * lines 22-23 (`git diff -U0` probed in a scratch repo replicating these
+ * shapes) — the fixture must teach the count-0 geometry git actually emits.
+ */
+const MULTI_DIFF = [
+  'diff --git a/multi.ts b/multi.ts',
+  'index 1111111..2222222 100644',
+  '--- a/multi.ts',
+  '+++ b/multi.ts',
+  '@@ -1,3 +1,4 @@',
+  ' a',
+  '+x',
+  ' b',
+  ' c',
+  '@@ -20,0 +22,2 @@',
+  '+y',
+  '+z',
+  'diff --git a/gone.ts b/gone.ts',
+  'index 3333333..4444444 100644',
+  '--- a/gone.ts',
+  '+++ b/gone.ts',
+  '@@ -3,2 +2,0 @@',
+  '-p',
+  '-q',
+  '',
+].join('\n');
+
+describe('validateNewSideAnchors — the Aone write-path gate', () => {
+  it('accepts a line inside a new-side hunk', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11 },
+    ]);
+    expect(v).toEqual({ valid: true });
+  });
+
+  it.each([10, 12, 13])(
+    'accepts context and end lines of the hunk (%i)',
+    (line) => {
+      const [v] = validateNewSideAnchors(PAY_DIFF, [
+        { path: 'src/pay.ts', line },
+      ]);
+      expect(v.valid).toBe(true);
+    },
+  );
+
+  it.each([9, 14, 9999])(
+    'refuses a line outside every hunk (%i) — the silent-misanchor class',
+    (line) => {
+      // The platform posts these without error (probed on a scratch MR);
+      // the gate is the only check that catches them.
+      const [v] = validateNewSideAnchors(PAY_DIFF, [
+        { path: 'src/pay.ts', line },
+      ]);
+      expect(v.valid).toBe(false);
+      expect(v.reason).toContain('sits in no new-side hunk');
+    },
+  );
+
+  it('refuses a file the diff does not touch', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/other.ts', line: 11 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('file is not in the diff');
+  });
+
+  it.each(['LEFT', 'left', 'RIGHT '])(
+    'refuses a declared non-RIGHT side (%s) — the old side cannot be anchored',
+    (side) => {
+      const [v] = validateNewSideAnchors(PAY_DIFF, [
+        { path: 'src/pay.ts', line: 11, side },
+      ]);
+      expect(v.valid).toBe(false);
+      expect(v.reason).toContain('non-RIGHT side');
+    },
+  );
+
+  it('refuses a non-RIGHT start_side too', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 12, startLine: 11, startSide: 'LEFT' },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('non-RIGHT side');
+  });
+
+  it('treats an absent or explicit RIGHT side as the default', () => {
+    const verdicts = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11 },
+      { path: 'src/pay.ts', line: 11, side: 'RIGHT' },
+    ]);
+    expect(verdicts.every((v) => v.valid)).toBe(true);
+  });
+
+  it('treats an explicit null side as ABSENT (defaults to RIGHT), not old-side', () => {
+    // A JSON `null` side is the model's idiom for an absent optional
+    // field — a documented recurring shape in this pipeline — not a
+    // declaration. Reading it as "declared non-RIGHT" relocates a
+    // perfectly anchorable in-hunk comment; it must default to RIGHT.
+    const verdicts = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11, side: null },
+      { path: 'src/pay.ts', line: 12, startLine: 11, startSide: null },
+    ]);
+    expect(verdicts.every((v) => v.valid)).toBe(true);
+  });
+
+  it('accepts a multi-line range inside ONE hunk', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 12, startLine: 11 },
+    ]);
+    expect(v.valid).toBe(true);
+  });
+
+  it('accepts an equal-boundary range — start_line === line is a shape GitHub itself produces', () => {
+    // Guards the `>` in the reversed-range check: mutated to `>=`, a
+    // shape-clean equal-boundary comment would be refused as ending
+    // before it begins, demoting a Critical from an inline post to a
+    // body relocation with no failing test to surface it.
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      {
+        path: 'src/pay.ts',
+        line: 12,
+        startLine: 12,
+        side: 'RIGHT',
+        startSide: 'RIGHT',
+      },
+    ]);
+    expect(v).toEqual({ valid: true });
+  });
+
+  it('refuses a multi-line range that spills past the hunk', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 15, startLine: 12 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('sits in no single new-side hunk');
+  });
+
+  it('accepts a line in either hunk, but no range ACROSS them', () => {
+    const [inFirst, inSecond, across] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'multi.ts', line: 3 },
+      { path: 'multi.ts', line: 22 },
+      { path: 'multi.ts', line: 21, startLine: 3 },
+    ]);
+    expect(inFirst.valid).toBe(true);
+    expect(inSecond.valid).toBe(true);
+    expect(across.valid).toBe(false);
+  });
+
+  it('refuses every line of a pure-deletion file — it has no new side', () => {
+    // The probe's P2b shape: a deleted line's OLD number still maps to
+    // SOMETHING on the new side of the file, so only the hunk check can
+    // tell them apart.
+    const [v] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'gone.ts', line: 3 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('sits in no new-side hunk');
+  });
+
+  it('refuses the clamped position INSIDE a pure-deletion hunk — the newCount guard', () => {
+    // gone.ts's `@@ -3,2 +2,0 @@` parses to newStart=2, newCount=0,
+    // newEnd=2 (clamped). Line 3 sits outside the clamped range with or
+    // without the guard, so it cannot witness it; line 2 sits INSIDE
+    // [newStart, newEnd] and is rejected ONLY by the `newCount > 0` guard.
+    // Deleting that guard flips this to valid — an off-diff anchor passing.
+    const [v] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'gone.ts', line: 2 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('sits in no new-side hunk');
+  });
+
+  it('refuses a non-integer line — a fraction is not a postable anchor', () => {
+    // 11.5 sits inside the hunk's span, but it is not a whole line; the
+    // platform would post it nowhere meaningful. The gate must reject the
+    // input domain, not certify it against the hunk range.
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11.5 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('positive whole number');
+  });
+
+  it('refuses a non-integer startLine too', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 12, startLine: 10.5 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('positive whole number');
+  });
+
+  it('refuses a reversed range even when both numbers sit in hunks', () => {
+    // With hunks [1-4] and [21-22], {line:10, startLine:21} sets lo=21,
+    // hi=10; lo > hi degenerates the containment test and line 10 — the
+    // GAP between the hunks — would certify. The range ends before it
+    // begins; reject the domain before the hunk scan.
+    const [v] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'multi.ts', line: 10, startLine: 21 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('ends before it begins');
+  });
+
+  it('validates a batch positionally, one verdict per check', () => {
+    const verdicts = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11 },
+      { path: 'src/pay.ts', line: 9999 },
+      { path: 'nope.ts', line: 1 },
+    ]);
+    expect(verdicts).toHaveLength(3);
+    expect(verdicts.map((v) => v.valid)).toEqual([true, false, false]);
   });
 });

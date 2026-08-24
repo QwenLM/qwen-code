@@ -404,6 +404,12 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/Active skill directory names/i);
+    // The inspection guidance must only reference tools in this run's filter
+    // (read_file/write_file/edit) — not `ls`/list_directory, which is opt-in.
+    expect(prompt).toContain(
+      'Use `read_file` to inspect the existing skill files listed above',
+    );
+    expect(prompt).not.toContain('Use `ls`');
   });
 
   it('lists archived directory names as reserved', async () => {
@@ -583,5 +589,22 @@ describe('runSkillReviewByAgent limit wiring', () => {
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
       }),
     );
+  });
+
+  it('passes only always-registered tools to the forked agent', async () => {
+    // list_directory is disabled by default, so it must not be requested for
+    // this turn-budgeted background agent — the prompt steers to read_file.
+    await runSkillReviewByAgent({
+      config: makeConfig(),
+      projectRoot,
+      history: [],
+    });
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.tools).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.WRITE_FILE,
+      ToolNames.EDIT,
+    ]);
   });
 });

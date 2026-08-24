@@ -18,6 +18,53 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 >
 > **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
+### Image generation routes
+
+Set `supportsImageGeneration: true` when a route can be used by the built-in
+`image_gen` tool. This capability is independent from image input support such
+as `capabilities.vision` or `generationConfig.modalities.image`.
+
+Use `imageOnly: true` when the route is dedicated to image generation and must
+not appear in ordinary model selectors. For backward compatibility,
+`imageOnly: true` also implies image-generation capability, so existing settings
+do not need to be migrated.
+
+A dual-role route can be selected both as the main model and through
+`/model --image`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "omni-model",
+        "envKey": "MODEL_API_KEY",
+        "baseUrl": "https://gateway.example.com/model-api",
+        "supportsImageGeneration": true
+      }
+    ]
+  }
+}
+```
+
+A dedicated image route sets both fields. The legacy form with only
+`imageOnly: true` remains valid:
+
+```json
+{
+  "id": "image-model",
+  "envKey": "MODEL_API_KEY",
+  "baseUrl": "https://images.example.com/api/v1",
+  "supportsImageGeneration": true,
+  "imageOnly": true
+}
+```
+
+The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
+`envKey`. Image generation uses the same endpoint and credential as the route;
+if chat and image generation require different endpoints or credentials,
+configure two routes instead.
+
 ## Configuration Examples by Auth Type
 
 Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations.
@@ -33,6 +80,9 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 | `gemini`     | Google Gemini API                                                                                                                               |
 | `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
 | `vertex-ai`  | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
+
+> [!note]
+> Vertex AI entries can authenticate with **Application Default Credentials**. Set `GOOGLE_CLOUD_PROJECT` (and optionally `GOOGLE_CLOUD_LOCATION`, which defaults to `global`) and leave `envKey` unset, along with every other key source the resolver reads: `GOOGLE_API_KEY`, `settings.security.auth.apiKey`, and the CLI key flags. Any API key value that reaches a Vertex entry switches the Google SDK to Vertex Express mode, which ignores the project, the location and your ADC credentials. An entry that declares an `envKey` is never routed to ADC, so a key that fails to be injected keeps failing on that variable instead of silently authenticating as a different principal.
 
 > [!warning]
 > A provider id that is neither a built-in protocol nor mapped via `providerProtocol` (e.g. a typo like `"openai-custom"`) cannot be routed, so its whole entry is **skipped** with a warning — its models simply won't appear in the `/model` picker. Use one of the supported auth type values above for built-in providers, or add a [`providerProtocol`](#custom-provider-ids-providerprotocol) mapping for a custom id.
