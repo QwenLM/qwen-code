@@ -22,6 +22,7 @@ import type {
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import {
+  capDetails,
   getFirstString,
   getOutputText,
   getString,
@@ -59,11 +60,10 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
-const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
-const MEDIA_UNAVAILABLE_TEXT = '[Attached media is no longer available]';
+const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -407,7 +407,10 @@ function normalizeUnrecognizedEvent(
       ...base,
       type: 'debug',
       debugReason: 'unrecognized_event',
-      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+      text: debugBlockText(
+        `${event.type} (unrecognized daemon event)`,
+        event.data,
+      ),
     },
   ];
 }
@@ -589,9 +592,9 @@ function normalizeMidTurnMessageInjected(
       : [];
   const items = data['items'];
   // An injected message is renderable when its text is non-empty OR its
-  // content carries an image or a non-empty text block. The drain's
+  // content carries an image, resource, or non-empty text block. The drain's
   // degraded-media path publishes `messages: ['']` whose items hold only the
-  // '[Attached media is no longer available]' text block — dropping that
+  // '[Attachment is no longer available]' text block — dropping that
   // frame as malformed would erase the echo of the user's message.
   const hasRenderableItemContent =
     Array.isArray(items) &&
@@ -603,6 +606,7 @@ function normalizeMidTurnMessageInjected(
           (block) =>
             isRecord(block) &&
             (block['type'] === 'image' ||
+              block['type'] === 'resource' ||
               (block['type'] === 'text' &&
                 typeof block['text'] === 'string' &&
                 (block['text'] as string).length > 0)),
@@ -738,17 +742,17 @@ function parseTimestamp(value: unknown): number | undefined {
 }
 
 /**
- * True for the session-media reference shape (`mediaId` instead of inline
+ * True for the session-attachment reference shape (`attachmentId` instead of inline
  * data/url/source) that replay producers persist for uploaded attachments.
  * `extractContentPart` cannot render it; see the `user_message_chunk` case
  * below for how it degrades instead of vanishing.
  */
-function isMediaReferenceContent(value: unknown): boolean {
+function isAttachmentReferenceContent(value: unknown): boolean {
   return (
     isRecord(value) &&
-    value['type'] === 'image' &&
-    typeof value['mediaId'] === 'string' &&
-    (value['mediaId'] as string).length > 0 &&
+    (value['type'] === 'image' || value['type'] === 'resource') &&
+    typeof value['attachmentId'] === 'string' &&
+    (value['attachmentId'] as string).length > 0 &&
     value['data'] === undefined &&
     value['url'] === undefined &&
     value['source'] === undefined
@@ -767,7 +771,7 @@ function normalizeSessionUpdate(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `session_update: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('session_update', event.data),
       },
     ];
   }
@@ -830,12 +834,28 @@ function normalizeSessionUpdate(
       // Live consumers hydrate reference blocks before normalization; a path
       // that reaches this point with one (offline record projection, failed
       // hydrate) keeps the user's message visible via the placeholder.
-      if (isMediaReferenceContent(content)) {
+      if (isAttachmentReferenceContent(content)) {
+        if ((content as Record<string, unknown>)['type'] === 'resource') {
+          const attachmentId = (content as Record<string, unknown>)[
+            'attachmentId'
+          ] as string;
+          const mimeType = (content as Record<string, unknown>)['mimeType'];
+          return [
+            {
+              ...base,
+              type: 'user.file.delta',
+              name: attachmentId,
+              attachmentId,
+              mimeType: typeof mimeType === 'string' ? mimeType : '',
+              ...(meta ? { meta } : {}),
+            },
+          ];
+        }
         return [
           {
             ...base,
             type: 'user.text.delta',
-            text: MEDIA_UNAVAILABLE_TEXT,
+            text: ATTACHMENT_UNAVAILABLE_TEXT,
             ...(meta ? { meta } : {}),
           },
         ];
@@ -964,7 +984,7 @@ function normalizeSessionUpdate(
           debugReason: kind?.trim()
             ? 'unrecognized_session_update'
             : 'malformed_payload',
-          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          text: debugBlockText(kind ?? 'session_update', update),
         },
       ];
   }
@@ -1239,9 +1259,15 @@ function asDaemonErrorKind(
     : undefined;
 }
 
-function capDetails(details: string): string {
-  if (details.length <= MAX_DETAILS_LENGTH) return details;
-  return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
+/**
+ * Builds the `text` of a `debug` block that embeds an unrecognized or
+ * malformed payload, capped at the producer. One such block is appended per
+ * frame, so a high-frequency frame could otherwise accumulate 100KB blocks up
+ * to the transcript block cap; capping here means a future debug branch
+ * cannot drop the cap.
+ */
+function debugBlockText(prefix: string, data: unknown): string {
+  return capDetails(`${prefix}: ${stringifyRedactedJson(data)}`);
 }
 
 function normalizePermissionRequest(
@@ -1254,7 +1280,7 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1266,7 +1292,7 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1300,7 +1326,7 @@ function normalizePermissionResolved(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText(event.type, event.data),
       },
     ];
   }

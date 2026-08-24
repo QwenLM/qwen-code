@@ -55,6 +55,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -119,6 +120,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -145,12 +147,14 @@ describe('resumeHistoryUtils', () => {
       ...goal,
       turnCount: 1,
       activeTimeMs: 10,
+      tokensUsed: 0,
       updatedAt: 2,
     };
     const rejected = {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 20,
+      tokensUsed: 0,
       updatedAt: 3,
     };
     const checkpointed = {
@@ -169,6 +173,7 @@ describe('resumeHistoryUtils', () => {
         ],
       },
       activeTimeMs: 30,
+      tokensUsed: 0,
       updatedAt: 4,
     };
     const limited = {
@@ -176,6 +181,7 @@ describe('resumeHistoryUtils', () => {
       status: 'usage_limited' as const,
       lastReason: 'provider failed',
       activeTimeMs: 40,
+      tokensUsed: 0,
       updatedAt: 5,
     };
     const conversation = {
@@ -327,6 +333,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -636,7 +643,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference mid-turn messages as an attachment placeholder', () => {
     // Image-only mid-turn messages are recorded with an empty displayText and
-    // mediaReferences; resuming must not fall back to the raw internal prefix.
+    // attachmentReferences; resuming must not fall back to the raw internal prefix.
     const conversation = {
       messages: [
         {
@@ -651,10 +658,10 @@ describe('resumeHistoryUtils', () => {
           },
           systemPayload: {
             displayText: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },
@@ -684,7 +691,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference ordinary user messages as an attachment placeholder', () => {
     // Image-only prompts are recorded with an empty displayText and
-    // mediaReferences; resuming must keep the prompt visible instead of
+    // attachmentReferences; resuming must keep the prompt visible instead of
     // dropping it from the restored history.
     const conversation = {
       messages: [
@@ -700,10 +707,10 @@ describe('resumeHistoryUtils', () => {
           systemPayload: {
             displayText: '',
             hookContext: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },

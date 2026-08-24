@@ -39,7 +39,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
-  it('keeps Security Checks reporting-only and audits package locks', () => {
+  it('keeps Security Checks a hard gate and audits package locks', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
@@ -74,7 +74,7 @@ describe('security workflows', () => {
     expect(installStep).toContain(
       "run: 'npm ci --ignore-scripts --no-audit --progress=false'",
     );
-    expect(auditStep).toContain('continue-on-error: true');
+    expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
     expect(auditStep).toContain('npm audit --omit=dev --audit-level=high');
@@ -94,7 +94,7 @@ describe('security workflows', () => {
     expect(auditStep).toContain(
       'npm audit --omit=dev --audit-level=high --workspaces=false',
     );
-    expect(trufflehogStep).toContain('continue-on-error: true');
+    expect(trufflehogStep).not.toContain('continue-on-error');
     const trufflehogPin = trufflehogStep.match(
       /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
     );

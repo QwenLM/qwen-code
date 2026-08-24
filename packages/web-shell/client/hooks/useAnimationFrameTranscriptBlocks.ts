@@ -4,7 +4,10 @@ import {
   useMemo,
   useSyncExternalStore,
 } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
+} from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useTranscriptStore,
@@ -28,7 +31,12 @@ function hasPendingInput(): boolean {
   return scheduling?.isInputPending?.() === true;
 }
 
-export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
+interface AnimationFrameTranscriptSnapshot {
+  blocks: readonly DaemonTranscriptBlock[];
+  blockChangeSummary?: DaemonTranscriptBlockChangeSummary;
+}
+
+export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptSnapshot {
   const store = useTranscriptStore();
   const { sessionId } = useConnection();
   const subscribe = useCallback(
@@ -76,18 +84,22 @@ export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBl
       | {
           blocks: readonly DaemonTranscriptBlock[];
           blockIndexById: Readonly<Record<string, number>>;
+          blockChangeSummary: DaemonTranscriptBlockChangeSummary | undefined;
         }
       | undefined;
     return () => {
       const state = store.getSnapshot();
+      const blockChangeSummary = store.getBlockChangeSummary?.();
       if (
         !cached ||
         cached.blocks !== state.blocks ||
-        cached.blockIndexById !== state.blockIndexById
+        cached.blockIndexById !== state.blockIndexById ||
+        cached.blockChangeSummary !== blockChangeSummary
       ) {
         cached = {
           blocks: state.blocks,
           blockIndexById: state.blockIndexById,
+          blockChangeSummary,
         };
       }
       return cached;
@@ -104,8 +116,13 @@ export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBl
   // same-session store reset without blocking ordinary streamed text updates.
   const snapshot = useMemo(() => ({ sessionId, ...live }), [live, sessionId]);
   const deferred = useDeferredValue(snapshot);
-  return deferred.sessionId === sessionId &&
+  const current =
+    deferred.sessionId === sessionId &&
     deferred.blockIndexById === live.blockIndexById
-    ? deferred.blocks
-    : live.blocks;
+      ? deferred
+      : live;
+  return {
+    blocks: current.blocks,
+    blockChangeSummary: current.blockChangeSummary,
+  };
 }

@@ -12,6 +12,8 @@ Authorization: Bearer <token>
 
 Without a configured token (loopback dev default) the header is optional. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
 
+**`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Bare `--open`, direct embedded callers, non-loopback binds, and other clients do not receive automatic credentials. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
+
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
 **`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
@@ -2678,7 +2680,7 @@ Response:
 { "modelId": "qwen-staging" }
 ```
 
-On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
+On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
 
 ### `POST /session/:id/recap`
 
