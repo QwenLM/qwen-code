@@ -342,6 +342,29 @@ describe('relaxSchemaForFunctionCalling', () => {
     );
   });
 
+  it('strips uniqueItems keywords from function-calling schemas', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        blockedBy: {
+          type: 'array',
+          items: { type: 'string' },
+          uniqueItems: true,
+        },
+        uniqueItems: { type: 'boolean' },
+      },
+      required: ['blockedBy'],
+      additionalProperties: false,
+    };
+
+    const relaxed = relaxSchemaForFunctionCalling(schema) as {
+      properties: Record<string, { uniqueItems?: unknown }>;
+    };
+
+    expect(relaxed.properties['blockedBy']!.uniqueItems).toBeUndefined();
+    expect(Object.keys(relaxed.properties)).toContain('uniqueItems');
+  });
+
   it('relaxes nested object levels independently', () => {
     const nested = {
       type: 'object',

@@ -195,8 +195,8 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  *   declare optional properties (some `properties` key missing from
  *   `required`). Levels where every property is required keep the
  *   constraint — there is nothing for a gateway to promote.
- * - `$schema` / `$id` metadata is dropped at every level (some gateways
- *   reject unknown keywords).
+ * - `$schema` / `$id` metadata and `uniqueItems` are dropped at every level
+ *   (some gateways reject unknown or unsupported keywords).
  * - Everything else passes through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
@@ -229,7 +229,7 @@ export function relaxSchemaForFunctionCalling(
       Object.keys(properties).some((key) => !required.includes(key));
 
     for (const [key, value] of Object.entries(source)) {
-      if (key === '$schema' || key === '$id') {
+      if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
         continue;
       }
       if (
