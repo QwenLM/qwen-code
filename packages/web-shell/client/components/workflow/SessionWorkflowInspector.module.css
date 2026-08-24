@@ -1,0 +1,517 @@
+.inspector {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--foreground);
+}
+
+.inspector button {
+  color: inherit;
+  font: inherit;
+}
+
+.inspector button:focus-visible,
+.inspector summary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.summary,
+.detail,
+.attention,
+.steps,
+.collapsible {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 15px;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 86%, transparent);
+}
+
+.summaryHeading,
+.sectionHeading,
+.compactHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.summaryHeading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.summaryHeading span,
+.sectionHeading > div > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.summaryHeading strong {
+  font-size: 16px;
+}
+
+.summaryHeading b {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
+  font-size: 12px;
+}
+
+.summaryHeading b[data-status='attention'] {
+  color: var(--warning-color);
+  background: var(--warning-bg);
+}
+
+.summaryHeading b[data-status='completed'] {
+  color: var(--success-color);
+  background: var(--success-bg);
+}
+
+.progress {
+  height: 6px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--agent-blue-500);
+}
+
+.summaryMeta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.expandButton {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.expandButton:hover {
+  background: var(--accent);
+}
+
+.expandButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.expandButton svg:last-child {
+  margin-left: auto;
+}
+
+.attention,
+.steps,
+.detail {
+  padding: 13px;
+}
+
+.compactHeading {
+  align-items: center;
+  margin-bottom: 9px;
+}
+
+.compactHeading h2,
+.sectionHeading h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.compactHeading span {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}
+
+.attention > button,
+.stepList > button,
+.linkedAgents button,
+.deliverables button,
+.activityList > button,
+.activityList > div {
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.attention > button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention > button:hover,
+.attention > button[aria-pressed='true'] {
+  background: var(--warning-bg);
+}
+
+.attention i {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--warning-color);
+  background: var(--warning-bg);
+  font-style: normal;
+  font-weight: 800;
+}
+
+.attention svg {
+  width: 14px;
+}
+
+.sectionHeading h2 {
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+.status {
+  flex: none;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.status[data-status='running'],
+.status[data-status='in_progress'] {
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 9%, transparent);
+}
+
+.status[data-status='completed'] {
+  color: var(--success-color);
+  background: var(--success-bg);
+}
+
+.stepId {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.dependencies {
+  display: grid;
+  gap: 8px;
+  margin: 13px 0 0;
+}
+
+.dependencies div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.dependencies dt,
+.dependencies dd {
+  margin: 0;
+  font-size: 11px;
+}
+
+.dependencies dt {
+  color: var(--muted-foreground);
+}
+
+.dependencies dd {
+  overflow-wrap: anywhere;
+}
+
+.linkedAgents {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.linkedAgents h3 {
+  margin: 0 0 7px;
+  font-size: 11px;
+}
+
+.linkedAgents button,
+.deliverables button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.linkedAgents button > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.linkedAgents button strong,
+.linkedAgents button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkedAgents button strong {
+  font-size: 11px;
+}
+
+.linkedAgents button small,
+.linkedAgents button em {
+  color: var(--muted-foreground);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.linkedAgents button:hover,
+.deliverables button:hover {
+  background: var(--accent);
+}
+
+.linkedAgents svg,
+.deliverables svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.linkedAgents p,
+.activityList p,
+.deliverables p {
+  margin: 7px 0 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stepList {
+  display: grid;
+  gap: 3px;
+}
+
+.stepList > button {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.stepList > button:hover,
+.stepList > button[aria-pressed='true'] {
+  background: var(--accent);
+}
+
+.stepList i {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.stepList i[data-status='completed'] {
+  color: var(--success-color);
+  border-color: color-mix(in srgb, var(--success-color) 45%, var(--border));
+}
+
+.stepList > button > span,
+.deliverables button > span,
+.activityList > button > span,
+.activityList > div > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.stepList strong,
+.stepList small,
+.deliverables strong,
+.deliverables small,
+.activityList strong,
+.activityList small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepList strong,
+.deliverables strong,
+.activityList strong {
+  font-size: 11px;
+}
+
+.stepList small,
+.deliverables small,
+.activityList small {
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.stepList em,
+.activityList em {
+  color: var(--muted-foreground);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.collapsible {
+  padding: 0 13px;
+}
+
+.collapsible summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.collapsible summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible summary small {
+  color: var(--muted-foreground);
+}
+
+.activityList,
+.deliverables {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 12px;
+}
+
+.activityList > button,
+.activityList > div {
+  display: grid;
+  grid-template-columns: 38px 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 4px;
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.activityList > button {
+  cursor: pointer;
+}
+
+.activityList > button:hover {
+  background: var(--accent);
+}
+
+.activityList time {
+  color: var(--muted-foreground);
+  font-size: 9px;
+}
+
+.activityList > button > i,
+.activityList > div > i {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 9%, transparent);
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.canvasHint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}
+
+.canvasHint svg {
+  width: 14px;
+}
+
+.empty {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.empty svg {
+  width: 28px;
+  height: 28px;
+}
+
+.empty strong {
+  color: var(--foreground);
+}
+
+.empty p {
+  max-width: 280px;
+  margin: 0;
+  font-size: 12px;
+}

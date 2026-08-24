@@ -5560,7 +5560,19 @@ describe('App plan todos', () => {
             toolName: 'todo_write',
             status: 'completed',
             args: {
-              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+              todos: [
+                {
+                  id: 'prepare',
+                  content: 'Prepare',
+                  status: 'completed',
+                },
+                {
+                  id: 'work',
+                  content: 'Work',
+                  status: 'in_progress',
+                  blockedBy: ['prepare'],
+                },
+              ],
             },
             rawOutput: {
               sessionWorkflow: true,
@@ -5583,8 +5595,9 @@ describe('App plan todos', () => {
       testState.latestTodoPanelOnOpen?.();
       await Promise.resolve();
     });
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
     expect(
-      container.querySelector('[data-testid="cockpit-page"]'),
+      container.querySelector('[data-testid="workflow-inspector"]'),
     ).not.toBeNull();
   });
 });
@@ -5642,9 +5655,10 @@ describe('App session workflow', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(new URLSearchParams(window.location.search).get('view')).toBe(
-      'cockpit',
-    );
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
 
     const replaceState = vi.spyOn(window.history, 'replaceState');
     testState.blocks = [makePendingPermissionBlock()];
@@ -5652,6 +5666,9 @@ describe('App session workflow', () => {
     await flush();
 
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).toBeNull();
     expect(
       container.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
@@ -5695,6 +5712,16 @@ describe('App session workflow', () => {
     editorFocus.mockClear();
 
     act(() => testState.latestTodoPanelOnOpen?.());
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+    });
     expect(
       container.querySelector('[data-testid="cockpit-page"]'),
     ).not.toBeNull();
@@ -5970,10 +5997,12 @@ describe('App session workflow', () => {
     rerender();
     await flush();
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
-    expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="open-workflow"]'),
+    ).not.toBeNull();
   });
 
-  it('opens the unified Workflow view with plan todos and linked agents', async () => {
+  it('opens the inspector first and expands into a synchronized graph', async () => {
     testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
@@ -5985,7 +6014,19 @@ describe('App session workflow', () => {
             toolName: 'todo_write',
             status: 'completed',
             args: {
-              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+              todos: [
+                {
+                  id: 'prepare',
+                  content: 'Prepare',
+                  status: 'completed',
+                },
+                {
+                  id: 'work',
+                  content: 'Work',
+                  status: 'in_progress',
+                  blockedBy: ['prepare'],
+                },
+              ],
             },
             rawOutput: {
               sessionWorkflow: true,
@@ -6008,7 +6049,7 @@ describe('App session workflow', () => {
         ],
       },
     ];
-    const { container, rerender } = renderApp();
+    const { container } = renderApp();
     await flush();
 
     expect(testState.latestTodoPanelOnOpen).not.toBeNull();
@@ -6021,6 +6062,25 @@ describe('App session workflow', () => {
       await Promise.resolve();
     });
 
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]')
+        ?.textContent,
+    ).toContain('Worker agent');
+    expect(container.querySelector('[data-plan-node-id="work"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+      await Promise.resolve();
+    });
     expect(
       container.querySelector('[data-testid="cockpit-page"]'),
     ).not.toBeNull();
@@ -6028,132 +6088,7 @@ describe('App session workflow', () => {
       container.querySelector('[data-plan-node-id="work"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('Worker agent');
-    expect(
-      container.querySelector('[data-testid="chat-context-header"]'),
-    ).not.toBeNull();
-
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
-        ?.click();
-      await Promise.resolve();
-    });
-    testState.messages = [
-      ...testState.messages.map((message) => {
-        if (message.id !== 'agents' || message.role !== 'tool_group') {
-          return message;
-        }
-        return {
-          ...message,
-          tools: message.tools.map((tool) => ({
-            ...tool,
-            status: 'completed' as const,
-          })),
-        };
-      }),
-      {
-        id: 'plan-complete',
-        role: 'tool_group',
-        tools: [
-          {
-            callId: 'todo-complete',
-            toolName: 'todo_write',
-            status: 'completed',
-            args: {
-              todos: [{ id: 'work', content: 'Work', status: 'completed' }],
-            },
-            rawOutput: {
-              sessionWorkflow: true,
-              plan: { id: 'plan-1' },
-            },
-          },
-        ],
-      },
-      { id: 'follow-up', role: 'user', content: 'What happened?' },
-      { id: 'reply', role: 'assistant', content: 'The work completed.' },
-    ];
-    rerender();
-    await flush();
-
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-workflow"]')
-        ?.click();
-      await Promise.resolve();
-    });
-
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('100%');
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('Worker agent');
-    expect(new URLSearchParams(window.location.search).get('view')).toBe(
-      'cockpit',
-    );
-
-    testState.backgroundTasks = [
-      {
-        kind: 'agent',
-        id: 'restored-agent',
-        label: 'Restored worker',
-        description: 'Inspect repository',
-        status: 'completed',
-        startTime: 1,
-        endTime: 65_001,
-        runtimeMs: 65_000,
-        isBackgrounded: true,
-        stats: { totalTokens: 1_200, toolUses: 4, durationMs: 65_000 },
-        recentActivities: [
-          {
-            name: 'read_file',
-            description: 'Restored from daemon history',
-            at: 65_000,
-          },
-        ],
-      },
-    ];
-    rerender();
-    await flush();
-
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]'),
-    ).not.toBeNull();
-    expect(new URLSearchParams(window.location.search).get('view')).toBe(
-      'cockpit',
-    );
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-plan-node-id="work"]')
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('Restored from daemon history');
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('1,200 tokens');
-
-    const completedMessages = testState.messages;
-    testState.messages = [];
-    rerender();
-    await flush();
-    expect(
-      container.querySelector('[data-testid="cockpit-empty"]'),
-    ).not.toBeNull();
-    expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="open-workflow"]'),
-    ).not.toBeNull();
-    testState.messages = completedMessages;
-    rerender();
-    await flush();
-
-    expect(
-      container.querySelector('[data-testid="cockpit-page"]'),
+      container.querySelector('[data-testid="workflow-canvas-detail"]'),
     ).not.toBeNull();
     expect(new URLSearchParams(window.location.search).get('view')).toBe(
       'cockpit',
@@ -6161,7 +6096,20 @@ describe('App session workflow', () => {
 
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="prepare"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-canvas-detail"]')
+        ?.textContent,
+    ).toContain('Prepare');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="workflow-back-to-chat"]',
+        )
         ?.click();
       await Promise.resolve();
     });

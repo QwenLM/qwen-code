@@ -47,22 +47,26 @@ approving exits Plan Mode.
 
 ### Phase 3: current-session Workflow
 
-- Add an experimental Workflow full-page view beside the existing Chat view.
+- Add Workflow to the existing right-panel tab system. Clicking the floating
+  Todo summary or the Session header opens this inspector without replacing
+  Chat.
 - Reuse the active Todo snapshot, daemon task polling, linked Agent tools, and
   the existing artifact panel instead of introducing another workflow model.
 - Keep a matching `exit_plan_mode` approval in Chat. After approval, the user
   can open Workflow for observation at any time.
-- Keep Chat mounted while Workflow is visible so switching views does not
-  interrupt execution or discard composer state.
-- Reuse the existing dependency graph as the main Workflow surface and derive
-  activity, deliverables, and attention from the same Todo and daemon-task
-  snapshots.
+- Put the progress summary, attention items, ordered steps, selected-step
+  context, recent Agent activity, and deliverables in the inspector. Agent and
+  artifact links open sibling tabs in the same right-panel controller.
+- Keep the dependency graph out of the narrow inspector. An explicit **Expand
+  dependency graph** action opens the existing full-page canvas while the
+  inspector becomes the selected-node detail surface.
+- Keep Chat mounted while either Workflow surface is visible so observation
+  does not interrupt execution or discard composer state.
 - Let a selected step show its upstream and downstream relationships plus the
   linked Agent's latest activity and runtime metrics. Opening an Agent continues
   into the existing transcript and artifact panel.
-- Show Skill calls from the Agent transcript, Session artifacts from the
-  existing artifact store, and keep current permission decisions in the
-  existing Chat approval component.
+- Show Session artifacts from the existing artifact store and keep current
+  permission decisions in the existing Chat approval component.
 - Keep the Workflow entry available after completion, later chat turns, and
   session resume by reading marked Todo snapshots from the transcript. Opening
   the Session normally restores the entry when a marked snapshot exists.
@@ -78,7 +82,7 @@ and a durable decision ledger are not claimed because the current transcript
 does not provide them.
 
 The standalone cockpit mock remains a product reference rather than a second
-application embedded through an iframe. The Web Shell Workflow page reuses the
-mock's plan, progress, Agent activity, and detail concepts while leaving
-DataWorks-specific scheduling, retry, and approval queues to their owning
-product.
+application embedded through an iframe. The Web Shell uses a context-preserving
+inspector for routine checks and reserves the full-page surface for the DAG.
+DataWorks-specific scheduling, retry, and approval queues remain with their
+owning product.

@@ -435,6 +435,8 @@ export function PlanExecutionView({
   tasks,
   onOpenSubagent,
   hideTitle = false,
+  selection,
+  showStepDetails = true,
 }: {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
@@ -445,6 +447,13 @@ export function PlanExecutionView({
    * The locate control stays either way — it is an action, not a label.
    */
   hideTitle?: boolean;
+  /** Lets a larger host keep graph selection in sync with an adjacent detail surface. */
+  selection?: {
+    value: string | undefined;
+    onChange: (todoId: string | undefined) => void;
+  };
+  /** The full Workflow canvas renders selected-step detail in the right panel. */
+  showStepDetails?: boolean;
 }) {
   const { t } = useI18n();
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
@@ -555,7 +564,10 @@ export function PlanExecutionView({
   const graphSignatureRef = useRef('');
   const autoLocatedTopologyRef = useRef('');
   const [graph, setGraph] = useState(EMPTY_GRAPH_LAYOUT);
-  const [selectedTodoId, setSelectedTodoId] = useState<string>();
+  const [internalSelectedTodoId, setInternalSelectedTodoId] =
+    useState<string>();
+  const selectedTodoId = selection ? selection.value : internalSelectedTodoId;
+  const updateSelectedTodoId = selection?.onChange ?? setInternalSelectedTodoId;
   const [hoveredTodoId, setHoveredTodoId] = useState<string>();
   // Hovering previews a step's dependency chain, selecting pins it. Both feed
   // one focus value so the highlight never fights itself.
@@ -604,9 +616,9 @@ export function PlanExecutionView({
 
   useEffect(() => {
     if (selectedTodoId && !todos.some((todo) => todo.id === selectedTodoId)) {
-      setSelectedTodoId(undefined);
+      updateSelectedTodoId(undefined);
     }
-  }, [selectedTodoId, todos]);
+  }, [selectedTodoId, todos, updateSelectedTodoId]);
 
   // A removed node never gets a pointerleave, so a stale hover id would keep
   // data-focused set with no edge matching it — dimming the whole graph.
@@ -1120,18 +1132,25 @@ export function PlanExecutionView({
                       className={styles.nodeSummary}
                       data-plan-interactive
                       data-plan-node-id={todo.id}
-                      aria-expanded={selectedTodoId === todo.id}
+                      aria-pressed={selectedTodoId === todo.id}
+                      aria-expanded={
+                        showStepDetails ? selectedTodoId === todo.id : undefined
+                      }
                       aria-controls={
-                        selectedTodoId === todo.id ? detailsId : undefined
+                        showStepDetails && selectedTodoId === todo.id
+                          ? detailsId
+                          : undefined
                       }
                       title={`${t(
-                        selectedTodoId === todo.id
+                        showStepDetails && selectedTodoId === todo.id
                           ? 'todo.detail.hide'
                           : 'todo.detail.show',
                       )}: ${todo.content}`}
                       onClick={() =>
-                        setSelectedTodoId((current) =>
-                          current === todo.id ? undefined : todo.id,
+                        updateSelectedTodoId(
+                          showStepDetails && selectedTodoId === todo.id
+                            ? undefined
+                            : todo.id,
                         )
                       }
                     >
@@ -1171,7 +1190,7 @@ export function PlanExecutionView({
           ))}
         </div>
       </div>
-      {selectedTodo && selectedState && (
+      {showStepDetails && selectedTodo && selectedState && (
         <section
           className={styles.stepDetails}
           data-plan-step-details

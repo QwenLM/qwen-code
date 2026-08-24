@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This branch turns the collaboration-cockpit reference into a real Web Shell page without introducing another workflow engine. One Workflow view combines the existing execution graph with activity, deliverables, and items that need attention, all projected from the persisted session transcript and daemon task snapshot.
+This branch turns the collaboration-cockpit reference into a native Web Shell workflow inspector and dependency canvas without introducing another workflow engine. Both surfaces are projected from the persisted session transcript and daemon task snapshot.
 
 ## Data and control flow
 
@@ -10,8 +10,10 @@ This branch turns the collaboration-cockpit reference into a real Web Shell page
 - Agent calls are linked to a Todo through `todo_id`; daemon task snapshots supply live status, activity, usage, and persisted transcript/output paths.
 - `exit_plan_mode` remains the execution gate. When the experimental Session Workflow setting is enabled, its revision-bound approval stays in the existing Chat approval flow.
 - Approval uses the existing permission API. Workflow does not schedule, pause, or persist tasks itself.
-- The shared Session header switches between Chat and Workflow. Workflow reuses the existing execution graph; Agent cards and activity rows open the existing transcript detail panel, and deliverables open the existing artifact panel.
-- `?view=cockpit` makes the cockpit directly addressable and browser navigation returns to Chat.
+- The floating Todo summary and Session header open Workflow as a tab in the existing right panel. Chat remains visible and usable.
+- The inspector shows the summary, items needing attention, ordered steps, selected-step dependencies, Agent activity, and deliverables. Agent and deliverable actions open sibling tabs in the existing panel.
+- **Expand dependency graph** opens the dedicated canvas. Graph selection stays synchronized with the inspector's selected step.
+- `?view=cockpit` keeps the dependency canvas directly addressable and browser navigation returns to Chat.
 - A completed Session restores its Workflow entry from the marked Todo snapshot when the Session is opened normally.
 
 ## Demo
@@ -45,10 +47,10 @@ http://127.0.0.1:5294/session/<session-id>?token=<copied-token>&view=cockpit
 Expected flow:
 
 1. The pending `exit_plan_mode` request shows the existing in-flow plan approval in Chat.
-2. Approval starts execution; the user can open Workflow without interrupting the conversation.
-3. Selecting a Todo shows its dependencies and linked Agent; selecting the Agent opens its persisted transcript.
-4. The shared Session header switches between **Chat / Workflow** without leaving the Session.
-5. Returning to Chat resumes the conversation. The header or `?view=cockpit` reopens the completed workflow later.
+2. Approval starts execution; clicking the Todo summary opens the Workflow inspector without interrupting the conversation.
+3. Selecting a step shows its dependencies and linked Agent; selecting the Agent opens its persisted transcript in a sibling right-panel tab.
+4. **Expand dependency graph** opens the full canvas, where selecting a graph node updates the inspector detail.
+5. Returning to Chat keeps the inspector available. The header or Todo summary reopens the completed workflow later, and `?view=cockpit` opens the graph directly.
 
 ## Deliberate boundary
 

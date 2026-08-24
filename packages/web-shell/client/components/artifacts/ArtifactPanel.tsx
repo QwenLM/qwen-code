@@ -2,8 +2,9 @@ import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
+  DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   type DaemonSessionActions,
@@ -17,6 +18,7 @@ import {
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
+  GitBranchIcon,
   ImageIcon,
   Maximize2Icon,
   MessageCirclePlusIcon,
@@ -87,6 +89,7 @@ import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
+import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import {
   useArtifactWorkspaceTarget,
   type ArtifactWorkspaceActions,
@@ -116,6 +119,11 @@ const rejectMissingSideTaskCreate = () =>
   Promise.reject(new Error('Side-task session creation is unavailable'));
 
 export type ArtifactPanelTab =
+  | {
+      id: string;
+      kind: 'workflow';
+      title: string;
+    }
   | {
       id: string;
       kind: 'review';
@@ -275,6 +283,18 @@ interface ArtifactPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  workflow?: {
+    todos: readonly TodoItem[];
+    tools: readonly ACPToolCall[];
+    tasks: readonly DaemonSessionTaskStatus[];
+    artifacts: readonly DaemonSessionArtifact[];
+    selectedTodoId?: string;
+    onSelectedTodoIdChange: (todoId: string | undefined) => void;
+    onExpandGraph: () => void;
+    onOpenSubagent: (tool: ACPToolCall) => void;
+    onOpenArtifact?: (artifactId: string) => void;
+    canvasMode?: boolean;
+  };
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   deferSubagentMount?: boolean;
   onClose: () => void;
@@ -311,6 +331,7 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
   onClose,
@@ -419,6 +440,11 @@ export function ArtifactPanel({
                   <span className={styles.tabIcon} aria-hidden="true">
                     {tab.kind === 'review' ? (
                       <TabReviewIcon />
+                    ) : tab.kind === 'workflow' ? (
+                      <GitBranchIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : tab.kind === 'file' ? (
                       <FileTypeIcon
                         name={tab.workspacePath}
@@ -702,6 +728,12 @@ export function ArtifactPanel({
                 </DropdownMenu>
               ))}
           </div>
+        ) : activeTab.kind === 'workflow' ? (
+          workflow ? (
+            <SessionWorkflowInspector {...workflow} />
+          ) : (
+            <div className={styles.empty}>{t('workflow.empty.title')}</div>
+          )
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&

@@ -187,7 +187,6 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
-import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 import {
   isPluginShadowPanel,
   installWebShellShadowStyles,
@@ -7172,6 +7171,28 @@ export function App({
     floatingTodosState.sourceMessageId !== null &&
     floatingTodosState.sourceMessageId ===
       sessionWorkflowTodosState.sourceMessageId;
+  const [selectedWorkflowTodoId, setSelectedWorkflowTodoId] = useState<
+    string | undefined
+  >();
+  useEffect(() => {
+    setSelectedWorkflowTodoId(undefined);
+  }, [logicalSessionKey]);
+  useEffect(() => {
+    if (
+      (sessionWorkflowEnabled && !approvalOverlayActive) ||
+      (!sessionWorkflowSettingsResolved && !approvalOverlayActive) ||
+      !artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    closeArtifactPanelTab('workflow');
+  }, [
+    artifactPanelTabs,
+    approvalOverlayActive,
+    closeArtifactPanelTab,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
   const environmentAgentTasks = useMemo(
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
@@ -7201,12 +7222,16 @@ export function App({
     if (tasksDialogMessage) {
       return getAgentToolsForPlan(messages, floatingTodosState);
     }
-    if (!sessionWorkflowEnabled) return [];
-    if (mainView === 'cockpit') {
-      return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
+    if (
+      !sessionWorkflowEnabled ||
+      (mainView !== 'cockpit' &&
+        !artifactPanelTabs.some((tab) => tab.kind === 'workflow'))
+    ) {
+      return [];
     }
-    return [];
+    return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
   }, [
+    artifactPanelTabs,
     floatingTodosState,
     mainView,
     messages,
@@ -9127,6 +9152,58 @@ export function App({
     requireActiveSessionForLocalCommand,
     sessionWorkflowEnabled,
   ]);
+  const openWorkflowInspector = useCallback(() => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return;
+    if (!requireActiveSessionForLocalCommand()) return;
+    rememberArtifactPanelTrigger();
+    const tab: ArtifactPanelTab = {
+      id: 'workflow',
+      kind: 'workflow',
+      title: t('workflow.title'),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current
+        ? width
+        : Math.min(440, getDefaultReviewPanelWidth()),
+    );
+    setArtifactPanelOpen(true);
+  }, [
+    approvalOverlayActive,
+    getDefaultReviewPanelWidth,
+    rememberArtifactPanelTrigger,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
+    t,
+  ]);
+  const keepWorkflowDrawerClosedForCanvasRef = useRef(false);
+  const workflowCanvasEntryHandledRef = useRef(false);
+  const expandWorkflowGraph = useCallback(() => {
+    openCockpit();
+    if (useFloatingArtifactPanel) {
+      keepWorkflowDrawerClosedForCanvasRef.current = true;
+      setArtifactPanelOpen(false);
+    }
+  }, [openCockpit, useFloatingArtifactPanel]);
+  useEffect(() => {
+    if (mainView !== 'cockpit') {
+      keepWorkflowDrawerClosedForCanvasRef.current = false;
+      workflowCanvasEntryHandledRef.current = false;
+      return;
+    }
+    if (workflowCanvasEntryHandledRef.current) return;
+    workflowCanvasEntryHandledRef.current = true;
+    if (
+      keepWorkflowDrawerClosedForCanvasRef.current ||
+      artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    openWorkflowInspector();
+  }, [artifactPanelTabs, mainView, openWorkflowInspector]);
   const focusComposerAfterCockpitCloseRef = useRef(false);
   const closeCockpit = useCallback(() => {
     focusComposerAfterCockpitCloseRef.current = true;
@@ -11881,6 +11958,20 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onError: reportError,
     sessionWorkflowEnabled,
+    workflow: sessionWorkflowEnabled
+      ? {
+          todos: sessionWorkflowTodos,
+          tools: planAgentTools,
+          tasks: environmentAgentTasks,
+          artifacts,
+          selectedTodoId: selectedWorkflowTodoId,
+          onSelectedTodoIdChange: setSelectedWorkflowTodoId,
+          onExpandGraph: expandWorkflowGraph,
+          onOpenSubagent: openSubagentPanel,
+          onOpenArtifact: openArtifactPanel,
+          canvasMode: mainView === 'cockpit',
+        }
+      : undefined,
     onImageIngestionNotice: pushToast,
     deferSubagentMount,
     onClose: closeArtifactPanel,
@@ -12434,30 +12525,16 @@ export function App({
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
-                      <ToggleGroup
-                        type="single"
-                        value={mainView}
+                      <Button
                         variant="outline"
                         size="sm"
-                        spacing={0}
                         className="mr-3"
-                        aria-label={t('workflow.viewSwitcherLabel')}
-                        onValueChange={(view) => {
-                          if (view === 'chat') closeCockpit();
-                          if (view === 'cockpit') openCockpit();
-                        }}
+                        data-testid="open-workflow"
+                        disabled={approvalOverlayActive}
+                        onClick={openWorkflowInspector}
                       >
-                        <ToggleGroupItem value="chat" data-testid="open-chat">
-                          {t('workflow.chatTitle')}
-                        </ToggleGroupItem>
-                        <ToggleGroupItem
-                          value="cockpit"
-                          data-testid="open-workflow"
-                          disabled={approvalOverlayActive}
-                        >
-                          {t('workflow.title')}
-                        </ToggleGroupItem>
-                      </ToggleGroup>
+                        {t('workflow.title')}
+                      </Button>
                     )}
                 </div>
               )}
@@ -12910,10 +12987,10 @@ export function App({
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
-                    artifacts={artifacts}
+                    selectedTodoId={selectedWorkflowTodoId}
+                    onSelectedTodoIdChange={setSelectedWorkflowTodoId}
                     onBackToChat={closeCockpit}
                     onOpenSubagent={openSubagentPanel}
-                    onOpenArtifact={openArtifactPanel}
                     {...(sessionDisplayName
                       ? { sessionName: sessionDisplayName }
                       : {})}
@@ -13271,7 +13348,7 @@ export function App({
                             onOpen={
                               showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
-                                  ? openCockpit
+                                  ? openWorkflowInspector
                                   : openTasksPanel
                                 : undefined
                             }
