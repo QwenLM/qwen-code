@@ -1,6 +1,53 @@
 .root {
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.root :global([data-web-shell-message-list]) {
+  padding: 8px 10px 6px;
+  scroll-padding-bottom: 6px;
+}
+
+.root :global([data-web-shell-user-row]) {
+  margin: 16px 0 14px;
+}
+
+.root :global([data-web-shell-user-row] > div) {
+  max-width: 92%;
+}
+
+.root :global([data-web-shell-user-bubble]),
+.root :global([data-markdown-source]:not([data-markdown-source='thinking'])) {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.root :global([data-web-shell-user-bubble]) {
+  padding: 7px 10px;
+}
+
+.root :global([data-web-shell-composer]) {
+  margin-bottom: 0;
+}
+
+.root :global([data-web-shell-composer-surface]) {
+  --chat-editor-min-height: 96px;
+  --chat-editor-max-height: min(260px, 42vh);
+  --chat-editor-input-min-height: 36px;
+  --chat-editor-input-max-height: 200px;
+  border-radius: 8px;
+}
+
+.root :global([data-web-shell-composer-content]) {
+  padding: 8px 10px;
+  border-width: 1px;
+}
+
+.root :global([data-web-shell-composer-editor] .cm-content) {
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .header {
@@ -117,7 +164,7 @@
   flex-direction: column;
   gap: 6px;
   margin: 0 auto;
-  padding: 6px 20px;
+  padding: 6px 10px;
 }
 
 .notice {
@@ -159,7 +206,7 @@
   width: min(100%, var(--chat-shell-width, 1040px));
   flex: 0 0 auto;
   margin: 0 auto;
-  padding: 0 20px 10px;
+  padding: 0 8px 8px;
 }
 
 .historyBackdrop {

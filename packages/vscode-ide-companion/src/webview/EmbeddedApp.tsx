@@ -13,6 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import type { CSSProperties } from 'react';
 import type {
   EmbeddedWebShellPermissionRequest,
   EmbeddedWebShellSession,
@@ -63,6 +64,34 @@ type InsightProgress = {
 };
 
 const LIGHT_THEME_RE = /light/i;
+
+const VSCODE_THEME_STYLE = {
+  '--background': 'var(--vscode-sideBar-background)',
+  '--foreground': 'var(--vscode-foreground)',
+  '--card': 'var(--vscode-editorWidget-background)',
+  '--card-foreground': 'var(--vscode-editorWidget-foreground)',
+  '--popover': 'var(--vscode-dropdown-background)',
+  '--popover-foreground': 'var(--vscode-dropdown-foreground)',
+  '--primary': 'var(--vscode-button-background)',
+  '--primary-foreground': 'var(--vscode-button-foreground)',
+  '--secondary': 'var(--vscode-input-background)',
+  '--secondary-foreground': 'var(--vscode-descriptionForeground)',
+  '--muted': 'var(--vscode-sideBarSectionHeader-background)',
+  '--muted-foreground': 'var(--vscode-descriptionForeground)',
+  '--accent': 'var(--vscode-list-hoverBackground)',
+  '--accent-foreground': 'var(--vscode-list-hoverForeground)',
+  '--border': 'var(--vscode-widget-border, var(--vscode-panel-border))',
+  '--ring': 'var(--vscode-focusBorder)',
+  '--chat-editor-bg-primary': 'var(--vscode-input-background)',
+  '--chat-editor-bg-tertiary': 'var(--vscode-sideBar-background)',
+  '--chat-editor-border-color':
+    'var(--vscode-input-border, var(--vscode-widget-border))',
+  '--chat-editor-text-primary': 'var(--vscode-input-foreground)',
+  '--chat-editor-text-secondary': 'var(--vscode-descriptionForeground)',
+  '--chat-editor-text-dimmed': 'var(--vscode-input-placeholderForeground)',
+  '--chat-editor-accent-color': 'var(--vscode-focusBorder)',
+  '--agent-gray-200': 'var(--vscode-input-border, var(--vscode-widget-border))',
+} as CSSProperties;
 
 const EmbeddedWebShell = lazy(() =>
   import('@qwen-code/web-shell').then((module) => ({
@@ -661,6 +690,7 @@ export function EmbeddedApp() {
       <EmbeddedWebShell
         blocks={blocks}
         theme={webShellTheme}
+        style={VSCODE_THEME_STYLE}
         loading={isLoading || sessionManagement.isSwitchingSession}
         loadingLabel={
           sessionManagement.isSwitchingSession

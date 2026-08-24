@@ -2719,7 +2719,7 @@ export const ChatEditor = memo(
               )}
             </div>
           )}
-          <div className={styles.content}>
+          <div className={styles.content} data-web-shell-composer-content>
             {core.pastedImages.length > 0 && (
               <div className={styles.images} data-web-shell-composer-images>
                 {core.pastedImages.map((img, i) => {

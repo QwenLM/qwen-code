@@ -235,7 +235,7 @@ export const UserMessage = memo(function UserMessage({
   }, [measureOverflow]);
 
   return (
-    <div className={styles.chatMessageRow}>
+    <div className={styles.chatMessageRow} data-web-shell-user-row>
       <div
         className={`${styles.chatMessageColumn}${
           isLocateFlashing && content.trim().length === 0
