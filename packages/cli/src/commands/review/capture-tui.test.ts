@@ -850,6 +850,84 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'does not let a kill that fell back to /tmp vouch for the start base',
+    async () => {
+      // `-L` PINS the socket base in the client's environment; it does not
+      // bind tmux to it. An unusable base sends the client to /tmp — which
+      // is why the failure path checks verdictExaminedBase before believing
+      // a wording — and the success path had no equivalent: an exit 0 from a
+      // kill aimed at a destroyed base was credited to that base. The
+      // captured command destroys the base mid-window and binds a
+      // sacrificial server at this run's unique name under /tmp; the
+      // fallback kill exits 0, and the run's own server — alive behind its
+      // removed socket, unreachable by `-L` and invisible to the readdir
+      // sweep — was orphaned at exit 0 with nothing on stderr.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-fellback-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // Binds under the START base so the stamp is taken there, destroys
+      // that base while the capture runs, then answers every kill with
+      // exit 0 the way a fallback kill against /tmp would.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+    : > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then exit 0; fi
+done
+rm -rf '${envBase}'
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+        // And it says WHICH doubt: an operator told "kill-server failed
+        // twice" would go looking for a wedged server.
+        expect(stderr).toContain('could not reach the base this run started');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'reads the stamped identity at VERDICT time, not once before the loop',
     async () => {
       // The identity arm used to read a snapshot taken before the candidate
@@ -1744,6 +1822,85 @@ exit 0
           readFileSync(join(dir, 'cap.json'), 'utf8'),
         );
         expect(manifest.evidence).toBe('png');
+        expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
+          [],
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a render input rewritten IN PLACE — the inode never changed',
+    async () => {
+      // The sibling below swaps the file; this one rewrites it. The staging
+      // check pinned its input by inode alone, and an in-place rewrite keeps
+      // the inode by definition — no allocator reuse needed, nothing to
+      // race. So an actor that truncates and rewrites <out>.ans inside the
+      // stamp→link window (which spans the whole freeze availability probe)
+      // had its bytes staged, rendered and credited at the publishable png
+      // rung, with a manifest naming both artifacts: a complete evidence
+      // forgery reported as success. Identity here is now the comparison
+      // `changed()` and isSameSocket already make — ino, size and mtime —
+      // and size and mtime are exactly what an in-place rewrite moves.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-inplace-'));
+      writeFakeTmux(dir, '    :');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      const rendered = join(dir, 'freeze-ran');
+      writeFileSync(
+        freezeBin,
+        `#!/bin/sh\ncat "$3" > "$5"\n: > '${rendered}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      let inodeHeld = false;
+      probes.freeze = () => {
+        const ans = join(dir, 'cap.ans');
+        const before = lstatSync(ans).ino;
+        // Same file, new bytes — the shape an inode comparison cannot see.
+        writeFileSync(ans, 'FORGED-EVIDENCE-BYTES-FORGED-EVIDENCE-BYTES');
+        inodeHeld = lstatSync(ans).ino === before;
+        return { status: 'ok', out: '' } as const;
+      };
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        // The premise: the inode really did survive the rewrite, so an
+        // inode-only check would have passed these bytes through.
+        expect(inodeHeld).toBe(true);
+        // freeze never saw the staged input, so nothing was rendered...
+        expect(existsSync(rendered)).toBe(false);
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        // ...and the forged bytes are never credited as this run's image.
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.pngPath).toBeNull();
+        expect(manifest.degradedBecause).toContain(
+          'was replaced while the render was being prepared',
+        );
         expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
           [],
         );

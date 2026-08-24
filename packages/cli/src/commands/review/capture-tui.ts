@@ -250,6 +250,28 @@ export const probes = {
   sleepBin: (): string | undefined => resolveOnPath('sleep'),
 };
 
+/** Whether tmux would actually USE this socket base.
+ *
+ * The two tests the start gate applies, shared so the reap cannot drift from
+ * it. `-L` PINS a base in the client's environment but does not bind tmux to
+ * it: an unusable base sends the client to /tmp, which is exactly why the
+ * reap's failure path checks `verdictExaminedBase` before believing a
+ * wording. The success path needs the same question asked a different way —
+ * an exit-0 kill proves something died where the client LOOKED, not where it
+ * was aimed.
+ */
+function baseIsUsable(base: string): boolean {
+  try {
+    // Directoryness FIRST, like the --cwd gate: a regular file (or a symlink
+    // to one) passes W_OK|X_OK on some hosts.
+    if (!statSync(base).isDirectory()) return false;
+    accessSync(base, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** What a capture's own socket looked like at start, by identity. */
 export interface SocketStamp {
   ino: number;
@@ -1072,21 +1094,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   {
     const envBase = process.env['TMUX_TMPDIR'];
     if (envBase) {
-      try {
-        // Directoryness FIRST, like the --cwd gate: a regular file (or a
-        // symlink to one) passes W_OK|X_OK on some hosts, and measuring the
-        // socket path against a base tmux will never use produced a
-        // machine-read refusal naming the wrong problem.
-        if (!statSync(envBase).isDirectory()) throw new Error('not a dir');
-        accessSync(envBase, fsConstants.W_OK | fsConstants.X_OK);
-        // RESOLVED: a relative TMUX_TMPDIR measured verbatim under-counts
-        // the real socket path by the whole cwd — the same split-resolution
-        // hazard this file already met one gate earlier with TMPDIR, where
-        // the probe and the holder disagreed about what the path meant.
-        startBase = resolve(envBase);
-      } catch {
-        // Unusable — tmux falls back to /tmp, and so does this measurement.
-      }
+      // Unusable means tmux falls back to /tmp, and so does this
+      // measurement. RESOLVED: a relative TMUX_TMPDIR measured verbatim
+      // under-counts the real socket path by the whole cwd — the same
+      // split-resolution hazard this file already met one gate earlier with
+      // TMPDIR, where the probe and the holder disagreed about what the
+      // path meant.
+      if (baseIsUsable(envBase)) startBase = resolve(envBase);
     }
   }
 
@@ -1374,6 +1388,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let killSpawnFailed = false;
     let killDirUnusable = false;
     let plantedEntry = false;
+    let killBaseUnusable = false;
     const uid = process.getuid?.();
     /** Whether the socket start bound is still the one at its path — read
      * WHERE THE VERDICT IS, never once up front. A goal-state verdict about
@@ -1509,6 +1524,29 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         }
         try {
           tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
+          // WHERE THE CLIENT LOOKED, not where it was aimed. `-L` pins the
+          // base in the environment; it does not bind tmux to it, and an
+          // unusable base sends the client to /tmp — the same divergence
+          // the catch branch below defends against with
+          // verdictExaminedBase, which this success path had no equivalent
+          // of. A base destroyed mid-window therefore sends this kill to
+          // /tmp, where a sacrificial server bound at this run's unique
+          // name answers exit 0; crediting that silenced the WARNING over
+          // this run's own still-live server. An exit 0 from a base the
+          // client could not have examined establishes nothing HERE, so it
+          // does not end this base's attempts either — it leaves the doubt
+          // that the WARNING is for. Only with a stamp: without one the
+          // bind site is unknown, a fallback kill that succeeded killed
+          // whatever was actually there, and there is nothing better to
+          // weigh it against.
+          if (
+            socketStamp !== undefined &&
+            resolve(base) === startBase &&
+            !baseIsUsable(base)
+          ) {
+            killBaseUnusable = true;
+            break;
+          }
           baseDead = true;
           // Death established GLOBALLY only where this kill CAN have reached
           // this run's server. The name is unique to this run, but uniqueness
@@ -1641,22 +1679,28 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // not a kill that failed, and an operator told "failed twice" would
         // go looking for a wedged server instead of a planted entry.
         `capture-tui: WARNING — ${
-          plantedEntry
-            ? 'the reap refused to connect'
-            : 'kill-server failed twice'
+          killBaseUnusable
+            ? 'the reap could not reach the base this run started under'
+            : plantedEntry
+              ? 'the reap refused to connect'
+              : 'kill-server failed twice'
         }${
-          plantedEntry
-            ? " (the socket entry was not this capture's own plain socket " +
-              '— a symlink, a hard link or a non-socket stood at its path, ' +
-              'so the kill was NOT attempted: connecting would have reached ' +
-              'whatever that entry resolves to)'
-            : killSpawnFailed
-              ? ' (this process could not spawn tmux at all — fd ' +
-                'exhaustion, not a wedged server)'
-              : killDirUnusable
-                ? ' (tmux refused before reaching the socket directory — ' +
-                  'its permissions or type, not the server)'
-                : ''
+          killBaseUnusable
+            ? ' (the socket base this run started under is no longer usable, ' +
+              'so the pinned kill fell back to /tmp and can say nothing ' +
+              'about the base this run bound under)'
+            : plantedEntry
+              ? " (the socket entry was not this capture's own plain socket " +
+                '— a symlink, a hard link or a non-socket stood at its path, ' +
+                'so the kill was NOT attempted: connecting would have reached ' +
+                'whatever that entry resolves to)'
+              : killSpawnFailed
+                ? ' (this process could not spawn tmux at all — fd ' +
+                  'exhaustion, not a wedged server)'
+                : killDirUnusable
+                  ? ' (tmux refused before reaching the socket directory — ' +
+                    'its permissions or type, not the server)'
+                  : ''
         }; the private tmux server ${server} may still be running ` +
           `(tmux -L ${server} kill-server to reap it by hand).`,
       );
@@ -2068,8 +2112,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // victim's bytes as this capture's png. Identity is the portable
       // question: the stage must be another name for the very inode this
       // run's own .ans write produced.
+      // ino+size+mtime, the comparison `changed()` and isSameSocket both
+      // make and for the same reason: an inode is not a durable name for a
+      // FILE, and the stamp→link window here spans the whole freeze
+      // availability probe — a 10s-belted spawn plus a PATH walk. An actor
+      // that rm's and recreates <out>.ans inside it gets the freed inode
+      // back from an ext-family allocator, and an inode-only check then fed
+      // foreign bytes to the render and credited them at the png rung.
       const staged = lstatSync(ansStage);
-      if (!staged.isFile() || staged.ino !== ansWritten.ino) {
+      if (
+        !staged.isFile() ||
+        staged.ino !== ansWritten.ino ||
+        staged.size !== ansWritten.size ||
+        staged.mtimeMs !== ansWritten.mtimeMs
+      ) {
         throw new Error('staged render input is not the .ans this run wrote');
       }
       renderInputStaged = true;
