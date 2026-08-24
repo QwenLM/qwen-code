@@ -20,6 +20,7 @@ import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
+const INTEGRATION_TYPECHECK_SCRIPT = 'typecheck:integration';
 const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
 const CONFIGURE_ACTION_PATH =
   '.github/actions/configure-windows-runner/action.yml';
@@ -130,6 +131,12 @@ describe('no-AK integration CI wiring', () => {
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
     );
 
+    expect(packageJson.scripts[INTEGRATION_TYPECHECK_SCRIPT]).toBe(
+      'tsc -p integration-tests/tsconfig.json --pretty false',
+    );
+    expect(packageJson.scripts.typecheck).toContain(
+      `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
+    );
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
@@ -180,8 +187,7 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
-    const integrationTypecheckCommand =
-      'npx tsc -p integration-tests/tsconfig.json --pretty false';
+    const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
     expect(gateStep).toContain(integrationTypecheckCommand);
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
@@ -213,6 +219,7 @@ describe('no-AK integration CI wiring', () => {
       'IDEALAB_API_KEY',
       'MINIMAX_API_KEY',
       'MODELSCOPE_API_KEY',
+      'MOONSHOT_API_KEY',
       'OPENAI_API_KEY',
       'OPENAI_BASE_URL',
       'OPENAI_MODEL',
