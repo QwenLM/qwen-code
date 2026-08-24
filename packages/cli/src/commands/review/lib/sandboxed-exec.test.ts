@@ -277,44 +277,60 @@ describe('containerCommand', () => {
     rootless: false,
   };
 
-  it('drops --user on a rootless runtime and keeps it on a rootful one', () => {
-    // Rootless engines map the container's uid onto a host SUBUID, so naming
-    // the host uid here hands the container process an identity that owns
-    // nothing in the tree it is mounted on: `npm ci` cannot create
-    // `node_modules`, and whatever it does create comes out unsweepable. The
-    // container's root already IS the invoking user there, so the flag's job
-    // is done without it. On a rootful engine it is still the only thing
-    // between the reviewed code and real uid 0 on the mount.
-    if (process.getuid === undefined || process.getgid === undefined) return;
-    // The documented opt-out is a real thing an operator exports, and it
-    // removes the very flag this asserts — without pinning it off, this test
-    // reports a failure of the code in a shell where the code is correct.
-    vi.stubEnv('SANDBOX_SET_UID_GID', '');
-    const cwd = join(tmpDir, 'review-pr-9');
-    const rootful = containerCommand('npm ci', {
-      ...base,
-      cwd,
-      kind: 'install',
-    });
-    expect(rootful.args).toContain('--user');
-    expect(rootful.args[rootful.args.indexOf('--user') + 1]).toBe(
-      `${process.getuid()}:${process.getgid()}`,
-    );
+  // Skipped rather than returned early, for the same reason as the sibling
+  // above: an early return reports PASSED with nothing asserted.
+  it.skipIf(process.getuid === undefined || process.getgid === undefined)(
+    'drops --user on a rootless runtime and keeps it on a rootful one',
+    () => {
+      // Rootless engines map the container's uid onto a host SUBUID, so naming
+      // the host uid here hands the container process an identity that owns
+      // nothing in the tree it is mounted on: `npm ci` cannot create
+      // `node_modules`, and whatever it does create comes out unsweepable. The
+      // container's root already IS the invoking user there, so the flag's job
+      // is done without it. On a rootful engine it is still the only thing
+      // between the reviewed code and real uid 0 on the mount.
+      //
+      // The documented opt-out is a real thing an operator exports, and it
+      // removes the very flag this asserts — without pinning it off, this test
+      // reports a failure of the code in a shell where the code is correct.
+      // Restored in a `finally`, so a failing assertion below fails THIS test
+      // instead of leaking the stub into whichever test runs next.
+      vi.stubEnv('SANDBOX_SET_UID_GID', '');
+      try {
+        // The documented opt-out is a real thing an operator exports, and it
+        // removes the very flag this asserts — without pinning it off, this test
+        // reports a failure of the code in a shell where the code is correct.
 
-    const rootless = containerCommand('npm ci', {
-      ...base,
-      cwd,
-      kind: 'install',
-      rootless: true,
-    });
-    expect(rootless.args).not.toContain('--user');
-    // Everything else is the SAME run — dropping --user must not quietly take
-    // the mount, the tmpfs HOME or the image with it.
-    expect(rootless.args).toContain('--volume');
-    expect(rootless.args).toContain('--tmpfs');
-    expect(rootless.args.at(-4)).toBe(base.image);
-    vi.unstubAllEnvs();
-  });
+        const cwd = join(tmpDir, 'review-pr-9');
+        const rootful = containerCommand('npm ci', {
+          ...base,
+          cwd,
+          kind: 'install',
+        });
+        expect(rootful.args).toContain('--user');
+        // Optional-called because the skipIf guard above cannot narrow these
+        // for the compiler; the test does not run where they are undefined.
+        expect(rootful.args[rootful.args.indexOf('--user') + 1]).toBe(
+          `${process.getuid?.()}:${process.getgid?.()}`,
+        );
+
+        const rootless = containerCommand('npm ci', {
+          ...base,
+          cwd,
+          kind: 'install',
+          rootless: true,
+        });
+        expect(rootless.args).not.toContain('--user');
+        // Everything else is the SAME run — dropping --user must not quietly take
+        // the mount, the tmpfs HOME or the image with it.
+        expect(rootless.args).toContain('--volume');
+        expect(rootless.args).toContain('--tmpfs');
+        expect(rootless.args.at(-4)).toBe(base.image);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('answers rootful when the runtime will not say', () => {
     // The unknown case must land on the LOUD side: keeping `--user` breaks a
