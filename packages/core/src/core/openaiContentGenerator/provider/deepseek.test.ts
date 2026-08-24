@@ -224,6 +224,41 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       });
     });
 
+    it('preserves image parts when the resolved model declares image support', () => {
+      const visionProvider = new DeepSeekOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          baseUrl: 'https://llm.example.com/v1',
+          model: 'deepseekv4flash-vision-exp',
+          modalities: { image: true },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const content = [
+        { type: 'text' as const, text: 'Describe this image.' },
+        {
+          type: 'image_url' as const,
+          image_url: { url: 'data:image/png;base64,AAAA' },
+        },
+      ];
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'deepseekv4flash-vision-exp',
+        messages: [
+          {
+            role: 'user',
+            content,
+          },
+        ],
+      };
+
+      const result = visionProvider.buildRequest(originalRequest, userPromptId);
+
+      expect(result.messages?.[0]).toEqual({
+        role: 'user',
+        content,
+      });
+    });
+
     // https://github.com/QwenLM/qwen-code/issues/3695 — DeepSeek's thinking
     // mode rejects subsequent requests when any prior assistant turn omits
     // reasoning_content, even if the model itself returned no reasoning text.

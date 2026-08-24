@@ -124,9 +124,13 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       return reshaped;
     }
 
+    const preservesContentParts =
+      this.contentGeneratorConfig.modalities?.image === true;
     const messages = reshaped.messages.map((message) => {
-      const flattened = flattenContentParts(message);
-      return ensureReasoningContentOnAssistantMessage(flattened);
+      const contentMessage = preservesContentParts
+        ? message
+        : flattenContentParts(message);
+      return ensureReasoningContentOnAssistantMessage(contentMessage);
     });
 
     return {
