@@ -110,14 +110,10 @@ The PR completes and verifies these user flows:
 - copy actions, file links, report links, and VS Code diff actions;
 - error, cancellation, authentication, and reconnect states.
 
-User-message edit/rewind is deliberately not restored in this cutover. The
-legacy interaction was removed in #9719, and Web Shell's current rewind picker
-depends on daemon snapshot APIs while VS Code continues to own an ACP runtime.
-Restoring the feature safely requires a separate controlled-host contract for
-enumerating rewind targets, mapping transcript turns to canonical ACP turn
-indexes, and reconciling persisted history after success or rollback. #9911
-tracks that follow-up. This is an explicit temporary parity break rather than
-an implicit consequence of deleting the legacy UI.
+The latest user message remains editable in the embedded shell. The controlled
+host maps the selected transcript turn to the ACP turn index, rewinds both ACP
+and persisted conversation history, and restores the original snapshot if the
+replacement prompt fails.
 
 ## Out of scope
 

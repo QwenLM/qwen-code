@@ -38,6 +38,7 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  onEditUserMessage?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
@@ -58,6 +59,7 @@ export const MessageItem = memo(function MessageItem({
   onRetryClick,
   sendFailed = false,
   onRetrySend,
+  onEditUserMessage,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
@@ -91,6 +93,7 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onEdit={onEditUserMessage}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
           />

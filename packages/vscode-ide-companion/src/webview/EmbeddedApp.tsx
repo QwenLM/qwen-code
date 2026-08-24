@@ -306,6 +306,10 @@ export function EmbeddedApp() {
   const [webShellTheme, setWebShellTheme] = useState<WebShellTheme>(readTheme);
   const [composerInput, setComposerInput] = useState<WebShellComposerInput>();
   const [composerInputVersion, setComposerInputVersion] = useState(0);
+  const [editingMessage, setEditingMessage] = useState<{
+    targetTurnIndex: number;
+    content: string;
+  } | null>(null);
   const [includeActiveFile, setIncludeActiveFile] = useState(true);
   const composerTextRef = useRef('');
   const transcriptBlocksRef = useRef(blocks);
@@ -378,6 +382,48 @@ export function EmbeddedApp() {
     setComposerInput({ text: next });
     setComposerInputVersion((version) => version + 1);
   }, []);
+
+  const beginEditingMessage = useCallback(
+    (targetTurnIndex: number, content: string) => {
+      if (
+        messageHandling.isStreaming ||
+        messageHandling.isWaitingForResponse
+      ) {
+        return;
+      }
+      fileContext.clearFileReferences();
+      composerTextRef.current = content;
+      setEditingMessage({ targetTurnIndex, content });
+      setComposerInput({ text: content, tags: [], clearAttachments: true });
+      setComposerInputVersion((version) => version + 1);
+    },
+    [fileContext, messageHandling],
+  );
+
+  const cancelEditingMessage = useCallback(() => {
+    composerTextRef.current = '';
+    setEditingMessage(null);
+    setComposerInput({ text: '', tags: [], clearAttachments: true });
+    setComposerInputVersion((version) => version + 1);
+    fileContext.clearFileReferences();
+  }, [fileContext]);
+
+  useEffect(() => {
+    const clearEditingOnBoundary = (event: MessageEvent) => {
+      const type = event.data?.type;
+      if (
+        type === 'conversationLoaded' ||
+        type === 'qwenSessionSwitched' ||
+        type === 'conversationCleared' ||
+        type === 'sessionExpired'
+      ) {
+        setEditingMessage(null);
+      }
+    };
+    window.addEventListener('message', clearEditingOnBoundary);
+    return () => window.removeEventListener('message', clearEditingOnBoundary);
+  }, []);
+
 
   useWebViewMessages({
     sessionManagement,
@@ -533,7 +579,7 @@ export function EmbeddedApp() {
       try {
         messageHandling.setWaitingForResponse();
         vscode.postMessage({
-          type: 'sendMessage',
+          type: editingMessage ? 'editMessage' : 'sendMessage',
           data: {
             text: submission.text,
             context: context.length > 0 ? context : undefined,
@@ -553,8 +599,12 @@ export function EmbeddedApp() {
                   : [],
             ),
             inputAnnotations: submission.inputAnnotations,
+            ...(editingMessage
+              ? { targetTurnIndex: editingMessage.targetTurnIndex }
+              : {}),
           },
         });
+        setEditingMessage(null);
         fileContext.clearFileReferences();
         return true;
       } catch (error) {
@@ -563,7 +613,7 @@ export function EmbeddedApp() {
         return false;
       }
     },
-    [fileContext, includeActiveFile, messageHandling, vscode],
+    [editingMessage, fileContext, includeActiveFile, messageHandling, vscode],
   );
 
   const onCancel = useCallback(() => {
@@ -752,6 +802,7 @@ export function EmbeddedApp() {
         contextWindow={contextWindow}
         composerInput={composerInput}
         composerInputVersion={composerInputVersion}
+        editingMessage={editingMessage}
         onComposerTextChange={(text: string) => {
           composerTextRef.current = text;
         }}
@@ -799,6 +850,8 @@ export function EmbeddedApp() {
         }
         onFocusActiveFile={fileContext.focusActiveEditor}
         onActiveFileIncludedChange={setIncludeActiveFile}
+        onEditUserMessage={beginEditingMessage}
+        onCancelEdit={cancelEditingMessage}
         onPermissionResponse={onPermissionResponse}
         onQuestionResponse={onQuestionResponse}
         onNoticeAction={(noticeId: string) => {

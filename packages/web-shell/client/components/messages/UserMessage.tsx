@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { RefreshCwIcon } from 'lucide-react';
+import { PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
 import {
   getComposerTagIconUrl,
@@ -61,6 +61,7 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  onEdit?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -125,6 +126,7 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
+  onEdit,
   onImagePreview,
   onAttachmentPreview,
 }: UserMessageProps) {
@@ -378,6 +380,17 @@ export const UserMessage = memo(function UserMessage({
               <span>{t('common.retry')}</span>
             </button>
           </div>
+        )}
+        {onEdit && (
+          <button
+            type="button"
+            className={styles.editButton}
+            onClick={onEdit}
+            aria-label="Edit message"
+            title="Edit message"
+          >
+            <PencilIcon aria-hidden="true" />
+          </button>
         )}
       </div>
     </div>

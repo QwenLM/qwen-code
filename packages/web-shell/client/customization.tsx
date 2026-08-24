@@ -300,6 +300,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 

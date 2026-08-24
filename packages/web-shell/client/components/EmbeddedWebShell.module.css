@@ -361,6 +361,47 @@
   padding: 0 12px 12px;
 }
 
+.editingBar {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--vscode-focusBorder, var(--border));
+  border-bottom: 0;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--vscode-input-background, var(--background));
+  color: var(--vscode-descriptionForeground, var(--muted-foreground));
+  font-size: 12px;
+}
+
+.editingCancel {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.editingCancel:hover,
+.editingCancel:focus-visible {
+  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+  color: var(--foreground);
+  outline: none;
+}
+
+.editingCancel svg {
+  width: 14px;
+  height: 14px;
+}
+
 .historyBackdrop {
   position: absolute;
   inset: 0;
