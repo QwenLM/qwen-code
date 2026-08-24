@@ -119,7 +119,13 @@ export function sandboxPolicy(
     raw && POLICIES.includes(raw) && !fileSourced('QWEN_REVIEW_SANDBOX')
       ? (raw as SandboxPolicy)
       : undefined;
-  const setting = settings.sandbox;
+  // Normalised the SAME way as the env value above. It was not, and the
+  // asymmetry fell on the wrong side: `"Required"` — or a trailing space — in
+  // settings.json matched no policy, resolved to `off`, and silently disabled
+  // the containment the operator had just asked for. Settings is the
+  // documented way to turn this on (the environment can only tighten), so the
+  // unnormalised half was the half operators actually use.
+  const setting = settings.sandbox?.trim().toLowerCase();
   const fromSettings =
     setting && POLICIES.includes(setting)
       ? (setting as SandboxPolicy)

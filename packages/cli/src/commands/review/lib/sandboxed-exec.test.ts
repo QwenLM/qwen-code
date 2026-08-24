@@ -15,12 +15,14 @@ import { join, sep } from 'node:path';
 import {
   existsSync,
   mkdirSync,
+  writeFileSync,
   mkdtempSync,
   realpathSync,
   rmSync,
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
@@ -310,6 +312,42 @@ describe('the decisions this module exists to make', () => {
     ).toBe('off');
   });
 
+  it('reads either side the way an operator would write it', () => {
+    // The env half was normalised and the settings half was not, and the
+    // asymmetry fell the wrong way: settings.json is the documented place to
+    // turn this ON, so `"Required"` — or a stray trailing space — matched no
+    // policy, resolved to `off`, and disabled the control without a word.
+    // Fail-open on the one setting whose entire purpose is to fail closed.
+    expect(sandboxPolicy({}, { sandbox: 'Required' })).toBe('required');
+    expect(sandboxPolicy({}, { sandbox: 'required ' })).toBe('required');
+    expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'Required' }, {})).toBe(
+      'required',
+    );
+    expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: ' required ' }, {})).toBe(
+      'required',
+    );
+    // A value that is not a policy at all still resolves to `off` — the
+    // normalisation widens spelling, not the set of accepted values.
+    expect(sandboxPolicy({}, { sandbox: 'requiredish' })).toBe('off');
+  });
+
+  it('reads the operator settings file when no settings are passed', () => {
+    // The production shape: every real caller takes the default. With the
+    // default replaced by `{}` the whole settings half stops being consulted
+    // and every other assertion here — which passes settings explicitly —
+    // stays green.
+    const isolation = isolateOperatorReviewSettings();
+    try {
+      writeFileSync(
+        join(isolation.home, 'settings.json'),
+        JSON.stringify({ review: { sandbox: 'required' } }),
+      );
+      expect(sandboxPolicy({})).toBe('required');
+    } finally {
+      isolation.dispose();
+    }
+  });
+
   it('falls back to running directly under `auto` when nothing answers', () => {
     // The cell that makes `auto` usable on a machine without a runtime — and
     // the one a mutant turning it into a refusal would sail through, because
@@ -426,6 +464,14 @@ describe('containerCommand', () => {
         expect(rootless.args).toContain('--volume');
         expect(rootless.args).toContain('--tmpfs');
         expect(rootless.args.at(-4)).toBe(base.image);
+
+        // The opt-out is read case- and space-insensitively, so an operator
+        // who exports `False` gets the documented behaviour rather than a
+        // flag they thought they had turned off.
+        vi.stubEnv('SANDBOX_SET_UID_GID', ' False ');
+        expect(
+          containerCommand('npm ci', { ...base, cwd, kind: 'install' }).args,
+        ).not.toContain('--user');
       } finally {
         vi.unstubAllEnvs();
       }
