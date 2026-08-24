@@ -83,8 +83,5 @@ export function isGoalEvidenceLimited(goal: GoalResumeGateRecord): boolean {
  */
 export function canResumeGoal(goal: GoalResumeGateRecord): boolean {
   if (goal.status === 'complete' || goal.status === 'active') return false;
-  if (goal.status === 'usage_limited' && isGoalEvidenceLimited(goal)) {
-    return false;
-  }
   return true;
 }

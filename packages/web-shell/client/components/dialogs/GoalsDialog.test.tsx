@@ -228,24 +228,22 @@ describe('GoalsDialog', () => {
     expect(resumeButton()).not.toBeNull();
   });
 
-  it('hides resume for an evidence-limited Goal', async () => {
-    // The reducer refuses `resume` on a Goal stopped at an evidence bound, so
-    // offering the control only earns the user an invalid-transition 409.
+  it('offers resume for an evidence-limited Goal', async () => {
     await mount([stopped({ limitKind: 'evidence_catalog' })]);
-    expect(resumeButton()).toBeNull();
+    expect(resumeButton()).not.toBeNull();
   });
 
   // One `it` per sentinel: `mount` installs a fresh container each call and
   // only the last is torn down, so two mounts in one test strand a stale DOM
   // that every later test then queries.
   it.each([...GOAL_EVIDENCE_LIMIT_REASONS])(
-    'hides resume for a Goal evidence-limited before `limitKind` existed (%#)',
+    'offers resume for a Goal evidence-limited before `limitKind` existed (%#)',
     async (lastReason) => {
       // The sentinel prose shipped before the `limitKind` field did: a Goal
       // persisted in that window restores as `usage_limited` with no
-      // `limitKind`, and this gate used to read it as resumable.
+      // `limitKind`. The reducer still recognizes it and restarts the window.
       await mount([stopped({ lastReason })]);
-      expect(resumeButton()).toBeNull();
+      expect(resumeButton()).not.toBeNull();
     },
   );
 

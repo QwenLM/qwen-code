@@ -100,28 +100,25 @@ describe('canResumeGoal', () => {
     expect(canResumeGoal(goal({ status: 'usage_limited' }))).toBe(true);
   });
 
-  it('withholds resume from an evidence-limited Goal, by field or by sentinel', () => {
+  it('offers resume for an evidence-limited Goal, by field or by sentinel', () => {
     expect(
       canResumeGoal(
         goal({ status: 'usage_limited', limitKind: 'evidence_catalog' }),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       canResumeGoal(
         goal({ status: 'usage_limited', lastReason: CATALOG_EXHAUSTED }),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       canResumeGoal(
         goal({ status: 'usage_limited', lastReason: CHECKPOINT_TOO_LARGE }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it('scopes the evidence check to `usage_limited`, as the reducer does', () => {
-    // The reducer only consults `isEvidenceLimited` under `usage_limited`; a
-    // paused Goal carrying stale sentinel prose is still resumable there, and
-    // hiding its Resume button would strand it with no way forward.
+  it('ignores evidence metadata on other stopped statuses', () => {
     expect(
       canResumeGoal(goal({ status: 'paused', lastReason: CATALOG_EXHAUSTED })),
     ).toBe(true);
