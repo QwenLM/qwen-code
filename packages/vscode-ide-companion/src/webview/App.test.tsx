@@ -17,8 +17,12 @@ const {
   mockOpenCompletion,
   mockCloseCompletion,
   mockMessageState,
+  mockMessages,
+  mockInsightState,
   mockAddMessage,
   mockEndStreaming,
+  mockWebShellTranscriptProps,
+  mockWebShellLoadFailure,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -27,8 +31,26 @@ const {
     isStreaming: false,
     isWaitingForResponse: false,
   },
+  mockMessages: [] as Array<{
+    role: string;
+    content: string;
+    timestamp: number;
+    localOnly?: boolean;
+  }>,
+  mockInsightState: {
+    progress: null as null | {
+      stage: string;
+      progress: number;
+      detail?: string;
+    },
+    reportPath: null as null | string,
+  },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
+  mockWebShellTranscriptProps: {
+    current: null as null | Record<string, unknown>,
+  },
+  mockWebShellLoadFailure: { current: false },
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -97,10 +119,9 @@ vi.mock('./hooks/file/useFileContext.js', () => ({
 
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
   useMessageHandling: () => ({
-    messages: [],
+    messages: mockMessages,
     isStreaming: mockMessageState.isStreaming,
     isWaitingForResponse: mockMessageState.isWaitingForResponse,
-    loadingMessage: null,
     addMessage: mockAddMessage,
     endStreaming: mockEndStreaming,
     setWaitingForResponse: vi.fn(),
@@ -123,6 +144,8 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
       setIsAuthenticated,
       setAvailableCommands,
       setAvailableSkills,
+      setInsightProgress,
+      setInsightReportPath,
     }: {
       setIsAuthenticated: (value: boolean) => void;
       setAvailableCommands: (
@@ -133,6 +156,10 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         }>,
       ) => void;
       setAvailableSkills: (value: string[]) => void;
+      setInsightProgress?: (
+        value: { stage: string; progress: number; detail?: string } | null,
+      ) => void;
+      setInsightReportPath?: (value: string | null) => void;
     }) => {
       const initializedRef = React.useRef(false);
 
@@ -142,6 +169,12 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         }
         initializedRef.current = true;
         setIsAuthenticated(true);
+        if (mockInsightState.progress) {
+          setInsightProgress?.(mockInsightState.progress);
+        }
+        if (mockInsightState.reportPath) {
+          setInsightReportPath?.(mockInsightState.reportPath);
+        }
         setAvailableCommands([
           {
             name: 'skills',
@@ -160,7 +193,13 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
           },
         ]);
         setAvailableSkills(['code-review']);
-      }, [setAvailableCommands, setAvailableSkills, setIsAuthenticated]);
+      }, [
+        setAvailableCommands,
+        setAvailableSkills,
+        setIsAuthenticated,
+        setInsightProgress,
+        setInsightReportPath,
+      ]);
     },
   };
 });
@@ -232,6 +271,14 @@ vi.mock('@qwen-code/webui', () => ({
   EmptyState: () => null,
   ChatHeader: () => null,
   SessionSelector: () => null,
+  InsightProgressCard: ({
+    stage,
+    progress,
+  }: {
+    stage: string;
+    progress: number;
+    detail?: string;
+  }) => `${stage} ${Math.round(progress)}%`,
   ZERO_WIDTH_SPACE: '\u200B',
   CloseSmallIcon: () => null,
   stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
@@ -284,7 +331,23 @@ vi.mock('./components/layout/InputForm.js', () => ({
   ),
 }));
 
-import { App, getLastUserTurnIndex, type MessageListItem } from './App.js';
+vi.mock('@qwen-code/web-shell', () => ({
+  WebShellTranscript: (props: Record<string, unknown>) => {
+    // Simulate the lazy chunk failing to load (e.g. a retained webview
+    // fetching a content-hashed chunk that an extension auto-update
+    // removed). Like a rejected dynamic import, the failure surfaces as a
+    // render error escaping Suspense, which only an ErrorBoundary catches.
+    if (mockWebShellLoadFailure.current) {
+      throw new Error(
+        'Failed to fetch dynamically imported module: chunks/web-shell.js',
+      );
+    }
+    mockWebShellTranscriptProps.current = props;
+    return null;
+  },
+}));
+
+import { App } from './App.js';
 
 function createDomRect(): DOMRect {
   return {
@@ -364,58 +427,10 @@ function renderApp() {
   return { container, root };
 }
 
-describe('getLastUserTurnIndex', () => {
-  it('returns the latest user turn and ignores assistant messages', () => {
-    const messages: MessageListItem[] = [
-      {
-        type: 'message',
-        timestamp: 1,
-        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: { role: 'assistant', content: 'reply', timestamp: 2 },
-      },
-      {
-        type: 'message',
-        timestamp: 3,
-        data: { role: 'user', content: 'second', timestamp: 3, turnIndex: 1 },
-      },
-    ];
-
-    expect(getLastUserTurnIndex(messages)).toBe(1);
-  });
-
-  it('keeps image and text parts in the same explicit user turn', () => {
-    const messages: MessageListItem[] = [
-      {
-        type: 'message',
-        timestamp: 1,
-        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: {
-          role: 'user',
-          content: '',
-          timestamp: 2,
-          turnIndex: 1,
-          kind: 'image',
-          imagePath: '/tmp/image.png',
-        },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: { role: 'user', content: 'caption', timestamp: 2, turnIndex: 1 },
-      },
-    ];
-
-    expect(getLastUserTurnIndex(messages)).toBe(1);
-  });
-});
+/** Reset via a call so tsc does not narrow the prop capture to `null`. */
+function resetWebShellTranscriptProps(): void {
+  mockWebShellTranscriptProps.current = null;
+}
 
 describe('App /skills secondary picker', () => {
   let root: Root | null = null;
@@ -423,8 +438,12 @@ describe('App /skills secondary picker', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMessages.length = 0;
+    mockInsightState.progress = null;
+    mockInsightState.reportPath = null;
     mockMessageState.isStreaming = false;
     mockMessageState.isWaitingForResponse = false;
+    mockWebShellLoadFailure.current = false;
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -614,11 +633,546 @@ describe('App /skills secondary picker', () => {
       expect.objectContaining({
         role: 'assistant',
         content: 'Interrupted',
+        // The transcript only renders ACP frames; the local cancel mark
+        // must carry the localOnly flag or it is never shown.
+        localOnly: true,
       }),
     );
     expect(mockPostMessage).toHaveBeenCalledWith({
       type: 'cancelStreaming',
       data: {},
     });
+  });
+
+  it('renders locally generated messages in a notice slot beside the transcript', async () => {
+    mockMessages.push(
+      { role: 'user', content: 'ordinary history', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'Failed to connect to Qwen agent: spawn failed',
+        timestamp: 2,
+        localOnly: true,
+      },
+      {
+        role: 'assistant',
+        content: 'Interrupted',
+        timestamp: 3,
+        localOnly: true,
+      },
+    );
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const notices = rendered.container.querySelectorAll(
+      '[data-testid="local-message-notice"]',
+    );
+    expect(notices).toHaveLength(2);
+    expect(notices[0]?.textContent).toContain(
+      'Failed to connect to Qwen agent: spawn failed',
+    );
+    expect(notices[1]?.textContent).toBe('Interrupted');
+    // Extension-provided history must not leak into the notice slot.
+    expect(
+      rendered.container.querySelector('[data-testid="local-message-notices"]')
+        ?.textContent,
+    ).not.toContain('ordinary history');
+  });
+
+  it('posts openFile when a file link inside the transcript area is clicked', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'see the report',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    expect(area).not.toBeNull();
+
+    const link = document.createElement('a');
+    link.setAttribute('href', '/tmp/insight-report.md');
+    link.textContent = '/tmp/insight-report.md';
+    area.appendChild(link);
+
+    act(() => {
+      link.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'openFile',
+      data: { path: '/tmp/insight-report.md' },
+    });
+  });
+
+  it('leaves external links alone when clicked in the transcript area', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'docs',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    const link = document.createElement('a');
+    link.setAttribute('href', 'https://example.com/docs');
+    link.textContent = 'docs';
+    area.appendChild(link);
+
+    // VS Code webviews never navigate on external links; cancel the jsdom
+    // navigation without interfering with the handler under test.
+    const preventNavigation = (event: Event) => event.preventDefault();
+    document.addEventListener('click', preventNavigation);
+    try {
+      act(() => {
+        link.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, cancelable: true }),
+        );
+      });
+    } finally {
+      document.removeEventListener('click', preventNavigation);
+    }
+
+    expect(mockPostMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'openFile' }),
+    );
+  });
+
+  it('exposes the chat-messages webviewSection context key when content exists', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // The contributed copy commands filter on
+    // `when: "webviewSection == 'chat-messages'"`; without the attribute
+    // the context-menu items never appear.
+    expect(area.getAttribute('data-vscode-context')).toBe(
+      '{"webviewSection": "chat-messages"}',
+    );
+  });
+
+  it('reports contextMenuTriggered so copy commands route to this webview', async () => {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    mockPostMessage.mockClear();
+
+    act(() => {
+      document.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'contextMenuTriggered',
+      data: {},
+    });
+  });
+
+  async function renderAppWithTranscriptText(text: string) {
+    mockMessages.push({
+      role: 'assistant',
+      content: 'notice',
+      timestamp: 1,
+      localOnly: true,
+    });
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // Feed one assistant block through the real transcript reducer.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    return rendered;
+  }
+
+  it('copies the last assistant reply on copyLastReply', async () => {
+    await renderAppWithTranscriptText('reply text');
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyLastReply' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'reply text' },
+    });
+  });
+
+  it('copies labeled conversation text on copyAllMessages', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+    void rendered;
+
+    // Also feed a user block so the labeled format is exercised.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'the question' },
+              },
+            },
+          },
+        }),
+      );
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyAllMessages' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: {
+        text: '**Qwen Code:** reply text\n\n---\n\n**User:** the question',
+      },
+    });
+  });
+
+  it('copies the block under the cursor on copyMessage', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // Simulate a MessageList row for the first assistant block
+    // (reducer block ids are `assistant-<ordinal>`, ordinal starts at 1).
+    const row = document.createElement('div');
+    row.setAttribute('data-message-row-key', 'msg:assistant-1');
+    row.textContent = 'reply text';
+    area.appendChild(row);
+
+    act(() => {
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyMessage' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'reply text' },
+    });
+  });
+
+  it('copies the tool block under a tool-group row key on copyMessage', async () => {
+    const rendered = await renderAppWithTranscriptText('reply text');
+
+    // Feed a tool block through the real transcript reducer. Block ids use
+    // one shared ordinal across kinds, so the assistant block is
+    // `assistant-1` and this tool block becomes `tool-2`.
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-copy',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-1',
+                title: 'Read file',
+                status: 'completed',
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    const area = rendered.container.querySelector(
+      '.flex-1.min-h-0.relative',
+    ) as HTMLDivElement;
+    // MessageList keys tool-group rows as `msg:tg-<first block id>`.
+    const row = document.createElement('div');
+    row.setAttribute('data-message-row-key', 'msg:tg-tool-2');
+    row.textContent = 'Read file';
+    area.appendChild(row);
+
+    act(() => {
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    });
+    mockPostMessage.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'copyCommand', data: { action: 'copyMessage' } },
+        }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboard',
+      data: { text: 'Read file' },
+    });
+  });
+
+  it('renders /insight progress updates from the insightProgress setter', async () => {
+    mockInsightState.progress = { stage: 'Analyzing', progress: 40 };
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const card = rendered.container.querySelector(
+      '[data-testid="insight-progress"]',
+    );
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('Analyzing');
+    expect(card?.textContent).toContain('40%');
+  });
+
+  it('surfaces the generated insight report path and opens it on click', async () => {
+    mockInsightState.reportPath = '/tmp/insight-report.md';
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const link = rendered.container.querySelector(
+      '[data-testid="insight-report-link"]',
+    ) as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.textContent).toBe('/tmp/insight-report.md');
+
+    mockPostMessage.mockClear();
+    act(() => {
+      link.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'openInsightReport',
+      data: { path: '/tmp/insight-report.md' },
+    });
+  });
+
+  it('disables WebShell transcript turn auto-collapse while a response is in flight', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // WebShellTranscript hardcodes isResponding={false}; without an
+    // explicit opt-out, MessageList would auto-collapse the in-progress
+    // turn mid-response.
+    const transcriptProps = mockWebShellTranscriptProps.current;
+    expect(transcriptProps).not.toBeNull();
+    expect(transcriptProps!.collapseCompletedTurns).toBe(false);
+  });
+
+  it('reserves composer clearance on the WebShell transcript scroll area', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // MessageList pads its scroll area by
+    // calc(8px + var(--web-shell-bottom-panel-inset, 0px)); the absolutely
+    // positioned composer would otherwise occlude the transcript tail.
+    const transcriptProps = mockWebShellTranscriptProps.current;
+    expect(transcriptProps).not.toBeNull();
+    expect(transcriptProps!.style).toMatchObject({
+      '--web-shell-bottom-panel-inset': '140px',
+    });
+  });
+
+  it('tracks live VS Code color-theme changes on the transcript theme prop', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+    document.body.setAttribute('data-vscode-theme-kind', 'vscode-dark');
+
+    try {
+      const rendered = renderApp();
+      root = rendered.root;
+      container = rendered.container;
+
+      await act(async () => {});
+
+      expect(mockWebShellTranscriptProps.current).not.toBeNull();
+      expect(mockWebShellTranscriptProps.current!.theme).toBe('dark');
+
+      // VS Code applies a color-theme change to an open webview in place by
+      // updating the body attribute (no reload); the transcript theme must
+      // follow instead of staying on the mount-time snapshot.
+      await act(async () => {
+        document.body.setAttribute('data-vscode-theme-kind', 'vscode-light');
+        await Promise.resolve();
+      });
+
+      expect(mockWebShellTranscriptProps.current!.theme).toBe('light');
+    } finally {
+      document.body.removeAttribute('data-vscode-theme-kind');
+    }
+  });
+
+  it('shows a recoverable error state instead of blanking the panel when the transcript chunk fails to load', async () => {
+    mockMessageState.isStreaming = true;
+    mockWebShellLoadFailure.current = true;
+    // React logs errors that an error boundary catches; keep output clean.
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    try {
+      const rendered = renderApp();
+      root = rendered.root;
+      container = rendered.container;
+
+      await act(async () => {});
+
+      const fallback = rendered.container.querySelector(
+        '[data-testid="transcript-load-error"]',
+      );
+      expect(fallback).not.toBeNull();
+      expect(fallback?.textContent).toContain('failed to load');
+      expect(fallback?.textContent).toContain('Reload panel');
+
+      // The boundary must be scoped to the transcript subtree: the rest of
+      // the panel (here the composer) has to survive the chunk failure
+      // instead of being unmounted with the whole root.
+      expect(
+        rendered.container.querySelector('[data-testid="input-field"]'),
+      ).not.toBeNull();
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('feeds reduced transcript blocks from transcriptUpdate messages into the WebShell transcript', async () => {
+    mockMessageState.isStreaming = true;
+    resetWebShellTranscriptProps();
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    expect(mockWebShellTranscriptProps.current).not.toBeNull();
+    const blocksBefore = JSON.stringify(
+      mockWebShellTranscriptProps.current!.blocks,
+    );
+
+    // The extension forwards every ACP session/update notification as a
+    // `transcriptUpdate` webview message; useAcpTranscript reduces it and
+    // App passes the resulting blocks to the renderer.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'timeline-block-content' },
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    expect(mockWebShellTranscriptProps.current).not.toBeNull();
+    const blocks = mockWebShellTranscriptProps.current!.blocks;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect((blocks as unknown[]).length).toBeGreaterThan(0);
+    expect(JSON.stringify(blocks)).toContain('timeline-block-content');
+    // The prop must change because of the message, proving the reduced
+    // blocks are actually wired through rather than a static prop.
+    expect(JSON.stringify(blocks)).not.toBe(blocksBefore);
   });
 });
