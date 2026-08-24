@@ -2816,6 +2816,22 @@ describe('runNonInteractive', () => {
           .filter((metadata) => metadata.callId !== 'enter-plan')
           .map((metadata) => metadata.executionStatus),
       ).toEqual(['not_started', 'not_started', 'not_started']);
+      // The skipped siblings are marked executed (they get a fabricated
+      // response in the next turn), but they never ran: the loop guards'
+      // request-side reservations must unwind so the constant fabricated
+      // error fingerprint is never recorded as result evidence (issue
+      // #9450 — the daemon excludes this class via its not_started
+      // filter; the CLI has to unwind it explicitly).
+      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledTimes(3);
+      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
+        'write-before-entry',
+      );
+      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
+        'read-after-entry-1',
+      );
+      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
+        'read-after-entry-2',
+      );
     });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
