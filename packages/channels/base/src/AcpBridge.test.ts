@@ -515,6 +515,33 @@ describe('AcpBridge', () => {
     });
   });
 
+  it('sends multiple images before the text prompt', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe both', {
+      images: [
+        { data: 'first', mimeType: 'image/png' },
+        { data: 'second', mimeType: 'image/jpeg' },
+      ],
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'first', mimeType: 'image/png' },
+        { type: 'image', data: 'second', mimeType: 'image/jpeg' },
+        { type: 'text', text: 'describe both' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
   it('excludes nested subagent text from the final response', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

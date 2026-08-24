@@ -283,11 +283,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
+    const images =
+      options?.images && options.images.length > 0
+        ? options.images
+        : options?.imageBase64 && options.imageMimeType
+          ? [
+              {
+                data: options.imageBase64,
+                mimeType: options.imageMimeType,
+              },
+            ]
+          : [];
+    for (const image of images) {
       prompt.push({
         type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
+        data: image.data,
+        mimeType: image.mimeType,
       });
     }
     prompt.push({ type: 'text', text });
