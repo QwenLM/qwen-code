@@ -2663,17 +2663,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } catch {
             // Listing is best-effort; the bare message is still actionable.
           }
-          return {
-            llmContent: notFoundMessage,
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: effectiveSubagentType,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: notFoundMessage,
-            },
-          };
+          return this.buildSpawnBlockedResult(notFoundMessage, notFoundMessage);
         }
         subagentConfig = loadedConfig;
       }
@@ -2835,6 +2825,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         return {
           llmContent: reason,
+          // `error` marks the call failed in the scheduler (see
+          // buildSpawnBlockedResult): a launch that never ran must not
+          // count as a successful agent call. The failure path forwards
+          // only `error.message` to the model, so it carries the full
+          // provisioning reason.
+          error: { message: reason },
           returnDisplay: this.currentDisplay,
         };
       };
@@ -3302,6 +3298,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           restoreParentPM();
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
+            error: { message: `${errorMessage}${wtSuffix}` },
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4320,6 +4317,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       return {
         llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        error: {
+          message: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        },
         returnDisplay: errorDisplay,
       };
     }

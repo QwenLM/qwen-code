@@ -1581,6 +1581,9 @@ describe('AgentTool', () => {
       expect(result.llmContent).toBe(
         'Subagent "non-existent" not found. Available subagents: file-search, code-review',
       );
+      expect(result.error?.message).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
     });
 
     it('still reports not-found when listing available subagents fails', async () => {
@@ -2471,6 +2474,36 @@ describe('AgentTool', () => {
       );
     });
 
+    it('marks a worktree provisioning failure as a failed tool call (#9509)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      // The nested-isolation guard fires before any git probe, so no real
+      // repository is needed — a cwd inside `.qwen/worktrees/` is enough to
+      // make failWorktreeProvisioning() return.
+      vi.mocked(config.getTargetDir).mockReturnValue(
+        '/test/project/.qwen/worktrees/agent-outer',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Nested isolation',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        isolation: 'worktree',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(/Nested isolation/);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      // The scheduler records a failure only when `error` is set. A launch
+      // that never ran must not count as a successful agent call (#9509).
+      expect(result.error?.message).toMatch(
+        /Nested isolation worktrees are not supported/,
+      );
+    });
+
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));
@@ -3231,10 +3264,68 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to run subagent: Creation failed');
+      expect(result.error?.message).toContain(
+        'Failed to run subagent: Creation failed',
+      );
       const display = result.returnDisplay as AgentResultDisplay;
 
       expect(display.status).toBe('failed');
     });
+
+    it('includes preserved worktree details in execution errors', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-error-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+          async (_cfg, agentConfig) => {
+            fs.writeFileSync(
+              path.join(agentConfig.getProjectRoot(), 'dirty.txt'),
+              'dirty\n',
+            );
+            throw new Error('subagent boom');
+          },
+        );
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+          isolation: 'worktree',
+          run_in_background: false,
+        });
+        const result = await invocation.execute();
+
+        const llmText = partToString(result.llmContent);
+        expect(llmText).toContain('Failed to run subagent: subagent boom');
+        expect(llmText).toContain('[worktree preserved:');
+        expect(result.error?.message).toContain('[worktree preserved:');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
 
     it('should execute subagent without live output callback', async () => {
       const params: AgentParams = {
@@ -6568,6 +6659,7 @@ describe('AgentTool', () => {
         const result = await invocation.execute();
 
         expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect(result.error?.message).toBe(errorMessage);
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
