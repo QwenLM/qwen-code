@@ -14,7 +14,7 @@ import {
   isPrivateHost,
 } from '../utils/fetch.js';
 import type { Storage } from '../config/storage.js';
-import { MAX_SESSION_BYTES } from '../utils/truncation.js';
+import { MAX_SESSION_BYTES } from './truncation.js';
 import {
   formatByteSize,
   isBinaryContentType,
