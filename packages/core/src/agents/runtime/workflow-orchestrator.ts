@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import {
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   type Config,
@@ -937,6 +938,9 @@ async function runOverridePath(
   // resolve workspace-bound state through the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  // Approval-profile cleanup for the derived dispatch contexts below; a
+  // no-op unless the dispatch transitions its child-local mode into AUTO.
+  let approvalCleanup: (() => void) | undefined;
   // Same contradiction the sandbox gate names, re-checked here: the sandbox
   // gate reads the raw opts BEFORE the JSON revival, so an enumerable getter
   // can withhold `isolation` during validation and surface it at stringify
@@ -984,6 +988,20 @@ async function runOverridePath(
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {
       customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
     });
+  }
+
+  if (effectiveContext !== config) {
+    // Layer an approval profile over the derived dispatch context (as
+    // agent.ts does) so approval-mode transitions on it stay child-local
+    // instead of hitting the bare-derived-Config guard. Initial mode equals
+    // the base mode, so no AUTO strip is acquired and cleanup stays a
+    // no-op unless the dispatch itself transitions into AUTO.
+    const approvalHandle = deriveApprovalModeConfig(
+      effectiveContext,
+      config.getApprovalMode(),
+    );
+    approvalCleanup = approvalHandle.cleanup;
+    effectiveContext = approvalHandle.config;
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -1196,6 +1214,9 @@ async function runOverridePath(
     if (onParentAbort && signal) {
       signal.removeEventListener('abort', onParentAbort);
     }
+    // Release the dispatch context's approval profile (no-op unless it
+    // acquired an AUTO override during the run).
+    approvalCleanup?.();
     // Outer fallback cleanup: fires only when worktree was provisioned
     // but the success-path cleanup didn't run (createAgentHeadless threw,
     // or execute threw, or the terminateMode check threw, or — after the

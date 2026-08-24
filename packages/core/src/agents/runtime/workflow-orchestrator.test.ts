@@ -22,7 +22,7 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { Config } from '../../config/config.js';
+import type { ApprovalMode, Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
@@ -2965,6 +2965,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
@@ -4442,9 +4447,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].runtimeContext.getProjectRoot()).toBe(
       '/fake/repo/.qwen/worktrees/agent-deadbe1',
     );
-    expect(Object.hasOwn(calls[0].runtimeContext, 'workspaceContext')).toBe(
-      true,
-    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
     expect(
       calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
     ).toBe('.qwenignore, .cursorignore');

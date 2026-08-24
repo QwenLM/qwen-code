@@ -502,12 +502,18 @@ async function createPerAgentConfig(
   runtimeView?: RuntimeContentGeneratorView;
   cleanup: () => void;
 }> {
-  const approvalHandle =
-    approvalMode === undefined
-      ? { config: base, cleanup: () => {} }
-      : deriveApprovalModeConfig(base, approvalMode, {
-          hooks: approvalModeHooks,
-        });
+  // Every per-agent config needs child-local approval state, not just the
+  // ones spawned with an explicit mode: tools bind to this config, and
+  // teammate mode switches (Shift+Tab) plus "Proceed always" confirmations
+  // call `setApprovalMode` on it — which the derived-Config guard rejects
+  // unless an approval profile owns the transition. When no mode was
+  // requested, snapshot the base's current mode: the initial mode equals
+  // the base mode, so no AUTO strip is acquired and cleanup stays a no-op.
+  const approvalHandle = deriveApprovalModeConfig(
+    base,
+    approvalMode ?? base.getApprovalMode(),
+    { hooks: approvalModeHooks },
+  );
   const handle = deriveAgentConfig(approvalHandle.config, cwd, {
     customIgnoreFiles: base.getFileFilteringOptions().customIgnoreFiles,
     getPlanFilePath: () => {
