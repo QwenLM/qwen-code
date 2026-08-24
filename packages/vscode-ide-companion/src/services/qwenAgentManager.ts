@@ -291,14 +291,9 @@ export class QwenAgentManager {
         const obj = (init || {}) as Record<string, unknown>;
         const modes = obj['modes'] as
           | {
-              currentModeId?:
-                | 'plan'
-                | 'default'
-                | 'auto-edit'
-                | 'auto'
-                | 'yolo';
+              currentModeId?: ApprovalModeValue;
               availableModes?: Array<{
-                id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+                id: ApprovalModeValue;
                 name: string;
                 description: string;
               }>;
@@ -1409,9 +1404,9 @@ export class QwenAgentManager {
    */
   onModeInfo(
     callback: (info: {
-      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+      currentModeId?: ApprovalModeValue;
       availableModes?: Array<{
-        id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+        id: ApprovalModeValue;
         name: string;
         description: string;
       }>;
@@ -1424,11 +1419,7 @@ export class QwenAgentManager {
   /**
    * Register mode changed callback
    */
-  onModeChanged(
-    callback: (
-      modeId: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo',
-    ) => void,
-  ): void {
+  onModeChanged(callback: (modeId: ApprovalModeValue) => void): void {
     this.callbacks.onModeChanged = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
