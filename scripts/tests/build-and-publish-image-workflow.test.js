@@ -25,9 +25,13 @@ const buildStep =
   )?.[0] ?? '';
 const retryStep =
   workflow.match(
-    /- name: 'Build and push Docker image \(retry\)'[\s\S]*?(?=\n[ ]{2}# A released npm version)/,
+    /- name: 'Build and push Docker image \(retry\)'[\s\S]*?(?=\n[ ]{2}# One issue per version)/,
   )?.[0] ?? '';
 const failureIssueJob = workflow.match(/file-failure-issue:[\s\S]*$/)?.[0] ?? '';
+const failureIssueScript = readFileSync(
+  '.github/scripts/image-build-failure-issue.sh',
+  'utf8',
+);
 
 describe('build-and-publish-image workflow', () => {
   it('marks only stable three-part semver versions as stable', () => {
@@ -81,10 +85,13 @@ describe('build-and-publish-image workflow', () => {
   it('dedups the failure issue by an exact client-side marker match', () => {
     // GitHub search tokenizes the colon out of the marker, so a --search
     // lookup never finds the issues this job files.
-    expect(failureIssueJob).not.toContain('--search');
     expect(failureIssueJob).toContain(
+      'bash .github/scripts/image-build-failure-issue.sh',
+    );
+    expect(failureIssueScript).not.toContain('--search');
+    expect(failureIssueScript).toContain(
       'jq -r --arg marker_html "${marker_html}"',
     );
-    expect(failureIssueJob).toContain('contains($marker_html)');
+    expect(failureIssueScript).toContain('contains($marker_html)');
   });
 });
