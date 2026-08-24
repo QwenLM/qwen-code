@@ -912,6 +912,47 @@ export function coverageFromTranscripts(
   // credited. `returned`, not merely live: an unreturned relaunch earns
   // told-range coverage on its way to dying, and that presumption must
   // not refute an honest declaration.
+  /**
+   * Does this launch's own told-range still describe the chunk it declares?
+   *
+   * The `of M` count seals a declaration to a plan with M chunks — but two
+   * plans that share a count while chunking different lines are the same
+   * number to it, and that collision is reachable. `since` fences transcripts
+   * by their FILE's mtime (`recordsIn`), and the harness appends every event
+   * through one long-lived fd, so a record written before a same-session
+   * re-plan lands in a file whose mtime is newer than the plan's and survives
+   * the fence. A stale `chunk 2 of 2` then passes count, membership, and both
+   * refutation guards, `uncoverable.add(2)` erases the chunk's live spanning
+   * coverage, and `classify()` reports `declared-uncoverable` — "no read can
+   * span it", nothing a relaunch repairs — for a chunk a relaunch could cover.
+   *
+   * Territory tells the two plans apart where the count cannot. Every chunk
+   * launch this CLI builds spells its read as the chunk's WHOLE window
+   * (`diffWindow` is `offset = startLine - 1, limit = endLine - startLine + 1`;
+   * an oversized chunk is told to page in prose, not given a smaller limit), so
+   * an honest declarer's told-range spans its chunk exactly — including the
+   * oversized chunks that are the likeliest to be declared at all. A stale
+   * one's spans the window it was written against, which after a re-chunk is
+   * not this one.
+   *
+   * `told`, not `ranges`: the question is which plan the LAUNCH was written
+   * against, and a stale agent's actual reads are stale in the same way its
+   * prompt is. A launch that spells no read at all resolves through the
+   * current plan inside `pointedAt` and so still passes here — that hole is
+   * older than this guard and unchanged by it; such a record is already
+   * disclosed as a rewritten launch.
+   */
+  const declarationStillOnTerritory = (
+    told: ReadonlyArray<[number, number]>,
+    chunkId: number,
+  ): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    if (c === undefined) return false;
+    return merge([...told]).some(
+      ([s, e]) => s <= c.startLine && e >= c.endLine,
+    );
+  };
+
   const refutedByReturnedSpanningRead = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
     if (c === undefined) return false;
@@ -1206,6 +1247,7 @@ export function coverageFromTranscripts(
       if (
         plan.chunks.some((c) => c.id === chunk) &&
         assignedChunkTotal(rec) === plan.chunks.length &&
+        declarationStillOnTerritory(told, chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
         !refutedByReturnedSpanningRead(chunk)
       ) {

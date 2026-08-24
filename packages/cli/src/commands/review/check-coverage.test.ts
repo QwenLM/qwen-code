@@ -3166,6 +3166,63 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     expect(entry?.outcome).toBe('missing');
     expect(entry?.classification).toBe('rewritten-prompt');
   });
+
+  it('drops a stale declaration whose count matches but whose window moved', () => {
+    // The collision the `of M` count cannot see. A re-plan kept TWO chunks and
+    // shifted their windows, so a launch left over from the old chunking says
+    // `chunk 2 of 2` — membership passes, and so does the count seal, because
+    // both plans have two chunks.
+    //
+    // It reaches the walk because `since` fences transcripts by their FILE's
+    // mtime and the harness appends every event through one long-lived fd: a
+    // record written before a same-session re-plan lands in a file the re-plan
+    // leaves NEWER than the plan, so the fence never sees it. Chunk 2's live
+    // agent was launched verbatim and died before returning, so neither
+    // `chunkSatisfied` (needs a RETURNED superseder) nor the spanning-read
+    // refutation can stand the declaration down.
+    //
+    // Territory is what tells the two plans apart: this launch was told to read
+    // lines 801-900, and the chunk 2 it names now spans 101-200.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 1, text: '' });
+    transcript(
+      'stale',
+      `You are reviewing chunk 2 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      {
+        calls: 1,
+        range: [800, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('covered');
+    expect(entry?.classification).toBeUndefined();
+  });
+
+  it("still admits a declaration whose told-range is its chunk's own window", () => {
+    // The control for the guard above, and the reason it is a territory test
+    // rather than a blanket refusal: the same fixture with the declarer reading
+    // the window it declares is an HONEST declaration, and it must still stand.
+    // Without this pair, a mutant that dropped every declaration would ship
+    // green on the test above.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 1,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+  });
 });
 
 // The per-chunk ledger: the same walk's conclusions, keyed by CHUNK instead of
@@ -3399,13 +3456,20 @@ describe('the chunk ledger', () => {
     // read can span. A mutant reordering the pair hands the operator
     // "rebuild the prompt" for a chunk proven unreviewable, and only this
     // fixture goes red.
+    //
+    // The rewrite is in the PROSE, not the offsets. Mis-paging the read was
+    // the older way to make this record rewritten, and it no longer produces
+    // the pair: a declarer whose told-range does not span the chunk it names
+    // is now dropped as off-territory, so the fixture would have tested the
+    // territory guard instead of the precedence it exists for. Keeping the
+    // read on the chunk's own window isolates the one question this test asks.
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
-      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      good(2).replace('You are reviewing', 'Please take a look at'),
       {
         calls: 1,
-        range: [0, 50],
+        range: [100, 100],
         opens: [],
         text: 'Uncoverable: chunk 2 — line exceeds the read limit',
       },
