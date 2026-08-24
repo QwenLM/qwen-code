@@ -440,6 +440,93 @@ describe('tool group summary logic', () => {
     expect(summary?.textContent).not.toContain('timeout: 30000ms');
   });
 
+  it('opens a completed MCP App result in the session transcript', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    ]);
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
+  it('keeps an MCP App open when multiple tools share a summary', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'read', toolName: 'read_file' }),
+      makeTool({
+        callId: 'app',
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    ]);
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
+  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '',
+          toolResult: {},
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+  });
+
+  it('keeps an MCP App open in a summary-only row', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+      { summaryOnly: true },
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
       makeTool({
