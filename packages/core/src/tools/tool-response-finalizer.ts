@@ -279,28 +279,27 @@ function fitText(
   if (header.length >= maxChars) {
     // Degenerate allocation: the header does not fit whole. As long as the
     // allocation holds prefix + digest line, slicing the header keeps the
-    // full digest (content-dependent). Below that, slicing the header would
-    // return only constant text — the prefix plus a fragment of the digest
-    // LABEL, whose digest starts at offset
-    // BATCH_BUDGET_FIT_PREFIX.length + 1 + FULL_OUTPUT_DIGEST_LABEL.length —
-    // so every oversized result would fingerprint identically regardless of
-    // content and a CHANGING board would false-halt on
-    // consecutive_identical_tool_calls under a small configured
-    // toolOutputBatchBudget (issue #9450). Slice the digest line itself
-    // instead so any allocation reaching past the label carries
-    // content-dependent digest characters. The band at or below the label
-    // length is degenerate one notch further: slicing the digest line there
-    // yields only (a prefix of) the constant label itself — budget 240 over
-    // 12 oversized slots gives exactly FULL_OUTPUT_DIGEST_LABEL.length chars
-    // per slot — so carry the digest's own characters instead and every
-    // non-zero allocation stays content-dependent (issue #9450).
+    // full digest (content-dependent). Below that, return the FULL digest
+    // line even though it overshoots the allocation (bounded by the line's
+    // own FULL_OUTPUT_DIGEST_LABEL.length + 64 chars — the same deliberate
+    // overshoot spirit allocateTextBudget applies with its >= 1-char
+    // allocations). A slice of the digest line instead would be a digest
+    // FRAGMENT, and the loop guards' stripPersistenceEnvelope reduces only
+    // the exact full digest line (or the save-failure note) to its digest:
+    // a fragment fingerprints as ordinary content, so byte-identical
+    // content would fingerprint differently for every sub-line allocation
+    // (75 vs 76 chars, or crossing the line length as batch composition
+    // changes) and never collide with the raw / full-fit / spilled
+    // representations of the same board — consecutiveIdentical evidence
+    // could never accumulate for a frozen oversized board under a small
+    // configured toolOutputBatchBudget, disarming the cap's result-aware
+    // stuck signal exactly in the small-budget regime (issue #9450). The
+    // full line makes every degenerate fit reduce to the same digest as
+    // every other representation of the same content.
     if (maxChars >= minimalHeader.length) {
       return sliceStartWithoutBrokenSurrogate(header, maxChars);
     }
-    if (maxChars > FULL_OUTPUT_DIGEST_LABEL.length) {
-      return sliceStartWithoutBrokenSurrogate(digestLine, maxChars);
-    }
-    return sliceStartWithoutBrokenSurrogate(digest, maxChars);
+    return digestLine;
   }
 
   const separator = '\n\n';

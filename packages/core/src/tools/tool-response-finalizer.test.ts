@@ -23,6 +23,7 @@ import {
   persistAndTruncateToolResult,
   TRUNCATION_SAVE_FAILURE_NOTE,
 } from './truncation.js';
+import { fingerprintToolResult } from '../services/loopDetectionService.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -987,9 +988,10 @@ describe('tool response finalization', () => {
         const fitB = fittedOutput(
           enforceFunctionResponseBudget([oversizedEntry('b', boardB)], budget),
         ) as string;
-        expect(fitA.length).toBeLessThanOrEqual(budget);
-        expect(fitB.length).toBeLessThanOrEqual(budget);
-        // Content-dependent from the first char past the digest label.
+        // Degenerate fits return the FULL digest line even when it
+        // overshoots the allocation: only the exact full line reduces to
+        // the digest in the loop guards (bounded overshoot).
+        expect(fitA.length).toBe(FULL_OUTPUT_DIGEST_LABEL.length + 64);
         expect(fitA.startsWith(FULL_OUTPUT_DIGEST_LABEL)).toBe(true);
         expect(fitA).not.toBe(fitB);
       }
@@ -1065,7 +1067,9 @@ describe('tool response finalization', () => {
       // only constant label text pre-fix (the digest starts AFTER the
       // label), so every oversized result fingerprinted identically no
       // matter its content — the degenerate band one notch below the band
-      // the digest-line slice covers (21..107).
+      // the digest-line slice covers (21..107). The band now returns the
+      // full digest line too, so every non-zero allocation stays
+      // content-dependent AND reduces to the digest in the loop guards.
       const boardA = '#1 [in_progress] @peer-a — ship it';
       const boardB = '#2 [completed] @peer-b — totally different board';
 
@@ -1076,8 +1080,8 @@ describe('tool response finalization', () => {
         const fitB = fittedOutput(
           enforceFunctionResponseBudget([oversizedEntry('b', boardB)], budget),
         ) as string;
-        expect(fitA.length).toBeLessThanOrEqual(budget);
-        expect(fitA).not.toBe('');
+        expect(fitA.length).toBe(FULL_OUTPUT_DIGEST_LABEL.length + 64);
+        expect(fitA.startsWith(FULL_OUTPUT_DIGEST_LABEL)).toBe(true);
         expect(fitA).not.toBe(fitB);
       }
     });
@@ -1133,17 +1137,59 @@ describe('tool response finalization', () => {
           ] as string,
       );
       expect(fitted.every((text) => text.length >= 1)).toBe(true);
-      // Content-dependent from the first char: each fit is the first char
-      // of its own board's full-output digest (1-char allocations cannot
-      // carry more), never the shared '' constant.
+      // Content-dependent and guard-reducible from the smallest allocation:
+      // every degenerate fit is the FULL digest line of its own board's
+      // full-output digest (bounded overshoot), never the shared ''
+      // constant and never a digest fragment the loop guards cannot reduce.
       fitted.forEach((text, index) => {
         expect(text).toBe(
-          createHash('sha256')
-            .update(`${boards[index]}\n${'board line\n'.repeat(300)}`)
-            .digest('hex')
-            .slice(0, 1),
+          FULL_OUTPUT_DIGEST_LABEL +
+            createHash('sha256')
+              .update(`${boards[index]}\n${'board line\n'.repeat(300)}`)
+              .digest('hex'),
         );
       });
+    });
+
+    it('collides with every other representation of identical content across allocations', () => {
+      // The digest carry-through exists so the same board fingerprints
+      // identically no matter which representation carries it. Pre-fix the
+      // sub-84-char allocations emitted a digest FRAGMENT the guards'
+      // stripPersistenceEnvelope cannot reduce, so a frozen board whose
+      // per-slot allocation varied with its siblings' lengths (75 vs 76
+      // chars, or crossing the full-line boundary as batch composition
+      // changes) fingerprinted differently every poll despite byte-identical
+      // content. Every degenerate allocation must now reduce to the same
+      // guard fingerprint as the raw (under-budget) board text.
+      const board = '#4 [in_progress] @peer-d — frozen oversized board';
+      const text = `${board}\n${'board line\n'.repeat(300)}`;
+      const guardFingerprint = (output: string) =>
+        fingerprintToolResult([
+          {
+            functionResponse: {
+              id: 'a',
+              name: 'task_list',
+              response: { output },
+            },
+          },
+        ]);
+      const rawFingerprint = guardFingerprint(text);
+      expect(rawFingerprint).not.toBeNull();
+      for (const budget of [1, 5, 12, 20, 21, 40, 75, 76, 83, 84, 90, 106]) {
+        const fit = fittedOutput(
+          enforceFunctionResponseBudget([oversizedEntry('a', board)], budget),
+        ) as string;
+        expect(guardFingerprint(fit)).toBe(rawFingerprint);
+      }
+      // Same content, two different allocations in the degenerate band:
+      // the fingerprints must collide (the pre-fix 75-vs-76 divergence).
+      const fit75 = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('a', board)], 75),
+      ) as string;
+      const fit76 = fittedOutput(
+        enforceFunctionResponseBudget([oversizedEntry('b', board)], 76),
+      ) as string;
+      expect(guardFingerprint(fit75)).toBe(guardFingerprint(fit76));
     });
   });
 });
