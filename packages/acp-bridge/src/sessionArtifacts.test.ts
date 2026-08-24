@@ -181,6 +181,57 @@ describe('SessionArtifactStore', () => {
     expect(missing).not.toHaveProperty('sizeBytes');
   });
 
+  it('forgets a write_file artifact after its workspace file is deleted', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanished',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.get(artifactId)).resolves.toBeUndefined();
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('keeps an explicit record_artifact entry missing after its file is deleted', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-record-artifact-missing',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'alibaba.pdf'), 'pdf');
+    const created = await store.upsertMany([
+      {
+        title: '阿里巴巴牛逼',
+        workspacePath: 'alibaba.pdf',
+        toolName: 'record_artifact',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'alibaba.pdf'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      id: artifactId,
+      status: 'missing',
+    });
+  });
+
   it('exposes the live size after a workspace file grows without re-registering', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-get-grown',

@@ -288,6 +288,7 @@ export class SessionArtifactStore {
   async list(): Promise<SessionArtifactsEnvelope> {
     return this.enqueue(async () => {
       await this.refreshWorkspaceStatuses();
+      await this.forgetVanishedAutoRecordedArtifacts();
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -312,9 +313,14 @@ export class SessionArtifactStore {
       if (!artifact) return undefined;
       if (
         artifact.workspacePath &&
-        shouldRefreshWorkspaceStatus(artifact, Date.now())
+        (artifact.toolName === 'write_file' ||
+          shouldRefreshWorkspaceStatus(artifact, Date.now()))
       ) {
         await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
+      }
+      if (isVanishedAutoRecordedWorkspaceArtifact(artifact)) {
+        await this.forgetVanishedAutoRecordedArtifacts();
+        return undefined;
       }
       return toPublicArtifact(artifact);
     });
@@ -1641,7 +1647,11 @@ export class SessionArtifactStore {
     const now = Date.now();
     const staleWorkspaceArtifacts = Array.from(this.artifacts.values())
       .filter((artifact) => artifact.workspacePath)
-      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
+      .filter(
+        (artifact) =>
+          artifact.toolName === 'write_file' ||
+          shouldRefreshWorkspaceStatus(artifact, now),
+      );
 
     await runInBatches(
       staleWorkspaceArtifacts,
@@ -1751,6 +1761,39 @@ export class SessionArtifactStore {
         }
       }
       return;
+    }
+  }
+
+  private async forgetVanishedAutoRecordedArtifacts(): Promise<void> {
+    const vanished = Array.from(this.artifacts.values()).filter(
+      isVanishedAutoRecordedWorkspaceArtifact,
+    );
+    if (vanished.length === 0) {
+      return;
+    }
+    const removedAt = new Date().toISOString();
+    const changes: InternalSessionArtifactChange[] = vanished.map(
+      (existing) => ({
+        action: 'removed',
+        artifactId: existing.id,
+        artifact: toRemovedPublicArtifact(existing, removedAt),
+        reason: 'explicit',
+        durableTombstoneRequired:
+          existing.durableTombstoneRequired ||
+          existing.retention !== 'ephemeral'
+            ? true
+            : undefined,
+        removedClientId: existing.clientId,
+      }),
+    );
+    const before = this.cloneState();
+    for (const artifact of vanished) {
+      this.artifacts.delete(artifact.id);
+    }
+    try {
+      await this.persistChanges(changes, false);
+    } catch {
+      this.restoreState(before);
     }
   }
 
@@ -2222,6 +2265,16 @@ function countByRetentionSource(
     counts[artifact.retentionSource]++;
   }
   return counts;
+}
+
+function isVanishedAutoRecordedWorkspaceArtifact(
+  artifact: StoredArtifact,
+): boolean {
+  return (
+    artifact.toolName === 'write_file' &&
+    artifact.workspacePath !== undefined &&
+    artifact.status === 'missing'
+  );
 }
 
 function shouldRefreshWorkspaceStatus(
