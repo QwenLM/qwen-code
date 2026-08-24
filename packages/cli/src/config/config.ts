@@ -2160,6 +2160,8 @@ export async function loadCliConfig(
         : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
+    crossSessionMessagingEnabled:
+      !bareMode && !safeMode && settings.agents?.crossSessionMessaging === true,
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,

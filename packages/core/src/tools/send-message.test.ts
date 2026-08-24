@@ -33,6 +33,7 @@ function makeTeamConfig(opts?: {
     };
   } | null;
   approvalMode?: ApprovalMode;
+  crossSessionMessagingEnabled?: boolean;
 }) {
   const teamManager = opts?.teamManager
     ? {
@@ -52,6 +53,8 @@ function makeTeamConfig(opts?: {
     getTeamManager: () => teamManager,
     getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
+    isCrossSessionMessagingEnabled: () =>
+      opts?.crossSessionMessagingEnabled === true,
   } as unknown as Config;
 }
 
@@ -70,6 +73,7 @@ describe('SendMessageTool — team mode', () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
+        crossSessionMessagingEnabled: true,
         teamManager: {
           sendMessage,
           broadcast: vi.fn(),
@@ -92,10 +96,11 @@ describe('SendMessageTool — team mode', () => {
     );
   });
 
-  it('rejects broadcast', async () => {
+  it('preserves Agent Team broadcast', async () => {
     const broadcast = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
+        crossSessionMessagingEnabled: true,
         teamManager: {
           sendMessage: vi.fn(),
           broadcast,
@@ -108,13 +113,31 @@ describe('SendMessageTool — team mode', () => {
       message: 'hey all',
     });
     const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('broadcast to all teammates');
+    expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
+    expect(sendToPeerMock).not.toHaveBeenCalled();
+  });
+
+  it('does not treat broadcast as cross-session messaging', async () => {
+    const tool = new SendMessageTool(
+      makeTeamConfig({ crossSessionMessagingEnabled: true }),
+    );
+
+    const result = await tool.validateBuildAndExecute(
+      { to: '*', message: 'hey all' },
+      new AbortController().signal,
+    );
+
     expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('not supported');
-    expect(broadcast).not.toHaveBeenCalled();
+    expect(result.llmContent).toContain('Cross-session broadcast');
+    expect(sendToPeerMock).not.toHaveBeenCalled();
   });
 
   it('returns error when no team is active and no task_id given', async () => {
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = new SendMessageTool(
+      makeTeamConfig({ crossSessionMessagingEnabled: true }),
+    );
     const invocation = tool.build({
       to: 'alice',
       message: 'hello',
@@ -227,9 +250,12 @@ describe('SendMessageTool — peer-session mode', () => {
     sendToPeerMock.mockResolvedValue({
       kind: 'sent',
       address: 'worker-ab',
+      msgId: 'message-12345678',
       peer: { cwd: '/work/worker' },
     });
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = new SendMessageTool(
+      makeTeamConfig({ crossSessionMessagingEnabled: true }),
+    );
 
     const result = await tool.validateBuildAndExecute(
       { to: 'worker-ab', message: 'inspect the failing test' },
@@ -238,6 +264,7 @@ describe('SendMessageTool — peer-session mode', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('another Qwen Code session');
+    expect(result.llmContent).toContain('message-12345678');
     expect(sendToPeerMock).toHaveBeenCalledWith({
       target: 'worker-ab',
       message: 'inspect the failing test',
@@ -249,6 +276,7 @@ describe('SendMessageTool — peer-session mode', () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
+        crossSessionMessagingEnabled: true,
         teamManager: { sendMessage, broadcast: vi.fn() },
       }),
     );
@@ -267,10 +295,12 @@ describe('SendMessageTool — peer-session mode', () => {
     sendToPeerMock.mockResolvedValue({
       kind: 'sent',
       address: PEER_ADDRESS,
+      msgId: 'message-12345678',
       peer: { cwd: '/work/peer' },
     });
     const tool = new SendMessageTool(
       makeTeamConfig({
+        crossSessionMessagingEnabled: true,
         teamManager: { sendMessage, broadcast: vi.fn() },
       }),
     );
@@ -290,7 +320,9 @@ describe('SendMessageTool — peer-session mode', () => {
   });
 
   it('does not send structured team controls to a peer', async () => {
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = new SendMessageTool(
+      makeTeamConfig({ crossSessionMessagingEnabled: true }),
+    );
 
     const result = await tool.validateBuildAndExecute(
       {
@@ -381,7 +413,9 @@ describe('SendMessageTool — peer-session mode', () => {
         `qwen-session:${'b'.repeat(64)} (worker in /b)`,
       ],
     });
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = new SendMessageTool(
+      makeTeamConfig({ crossSessionMessagingEnabled: true }),
+    );
 
     const result = await tool.validateBuildAndExecute(
       { to: 'worker', message: 'inspect this' },

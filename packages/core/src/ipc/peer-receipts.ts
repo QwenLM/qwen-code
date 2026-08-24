@@ -18,7 +18,12 @@ const tracked = new Map<string, TrackedMessage>();
 
 function sweep(now: number): void {
   for (const [msgId, entry] of tracked) {
-    if (now - entry.sentAt > PEER_RECEIPT_TTL_MS) tracked.delete(msgId);
+    if (
+      entry.lastStatus !== 'held' &&
+      now - entry.sentAt > PEER_RECEIPT_TTL_MS
+    ) {
+      tracked.delete(msgId);
+    }
   }
 }
 

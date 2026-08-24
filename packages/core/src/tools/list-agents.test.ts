@@ -29,6 +29,7 @@ const peerAddress = (
   sessionId: string,
   ipcPath: string,
   pid: number,
+  procStart: string,
   startedAt: number,
 ) =>
   `qwen-session:${createHash('sha256')
@@ -38,19 +39,24 @@ const peerAddress = (
     .update('\0')
     .update(String(pid))
     .update('\0')
+    .update(procStart)
+    .update('\0')
     .update(String(startedAt))
     .digest('hex')}`;
 
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
   let tool: ListAgentsTool;
+  let crossSessionMessagingEnabled: boolean;
 
   beforeEach(() => {
     peerMocks.getOwnPeerIdentity.mockReset().mockResolvedValue(null);
     peerMocks.listMessageablePeers.mockReset().mockResolvedValue([]);
     registry = new BackgroundTaskRegistry();
+    crossSessionMessagingEnabled = false;
     tool = new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
+      isCrossSessionMessagingEnabled: () => crossSessionMessagingEnabled,
     } as unknown as Config);
   });
 
@@ -139,6 +145,7 @@ describe('ListAgentsTool', () => {
   });
 
   it('lists reachable peer sessions with unambiguous addresses', async () => {
+    crossSessionMessagingEnabled = true;
     registry.register({
       agentId: 'agent-running',
       description: 'Inspect runtime',
@@ -152,7 +159,7 @@ describe('ListAgentsTool', () => {
       sessionId: 'self',
       ipcPath: '/tmp/self.sock',
       name: 'self',
-      address: peerAddress('self', '/tmp/self.sock', 1, 0),
+      address: peerAddress('self', '/tmp/self.sock', 1, 'process-1', 0),
     });
     peerMocks.listMessageablePeers.mockResolvedValue([
       {
@@ -161,6 +168,7 @@ describe('ListAgentsTool', () => {
         ref: '000000',
         cwd: '/work/self',
         pid: 1,
+        procStart: 'process-1',
         ipcPath: '/tmp/self.sock',
         startedAt: 0,
       },
@@ -170,6 +178,7 @@ describe('ListAgentsTool', () => {
         ref: 'aaaaaa',
         cwd: '/work/a',
         pid: 2,
+        procStart: 'process-2',
         ipcPath: '/tmp/a.sock',
         startedAt: 1,
       },
@@ -179,6 +188,7 @@ describe('ListAgentsTool', () => {
         ref: 'bbbbbb',
         cwd: '/work/b',
         pid: 3,
+        procStart: 'process-3',
         ipcPath: '/tmp/b.sock',
         startedAt: 2,
       },
@@ -200,14 +210,14 @@ describe('ListAgentsTool', () => {
       ],
       sessions: [
         {
-          to: peerAddress('peer-a', '/tmp/a.sock', 2, 1),
+          to: peerAddress('peer-a', '/tmp/a.sock', 2, 'process-2', 1),
           name: 'app',
           ref: 'aaaaaa',
           cwd: '/work/a',
           started_at: '1970-01-01T00:00:00.001Z',
         },
         {
-          to: peerAddress('peer-b', '/tmp/b.sock', 3, 2),
+          to: peerAddress('peer-b', '/tmp/b.sock', 3, 'process-3', 2),
           name: 'app',
           ref: 'bbbbbb',
           cwd: '/work/b',
@@ -215,5 +225,12 @@ describe('ListAgentsTool', () => {
         },
       ],
     });
+  });
+
+  it('does not inspect the peer registry when the experiment is off', async () => {
+    await tool.validateBuildAndExecute({}, new AbortController().signal);
+
+    expect(peerMocks.getOwnPeerIdentity).not.toHaveBeenCalled();
+    expect(peerMocks.listMessageablePeers).not.toHaveBeenCalled();
   });
 });

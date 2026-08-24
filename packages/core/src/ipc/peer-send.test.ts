@@ -47,6 +47,7 @@ function peer(
     ref,
     cwd: `/work/${name}`,
     pid: 10,
+    procStart: 'process-10',
     ipcPath: socket(ref),
     startedAt: 1,
   };
@@ -59,6 +60,7 @@ describe('sendToPeer', () => {
       name: 'planner',
       cwd: '/work/planner',
       pid: 1,
+      procStart: 'process-1',
       startedAt: 1,
       ipcPath: socket('self'),
     });
@@ -98,10 +100,11 @@ describe('sendToPeer', () => {
       approvalMode: ApprovalMode.DEFAULT,
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       kind: 'sent',
       peer: worker,
       address: formatPeerAddress(worker),
+      msgId: expect.any(String),
     });
     expect(mocks.sendPeerFrame).toHaveBeenCalledWith(
       worker.ipcPath,
@@ -112,6 +115,7 @@ describe('sendToPeer', () => {
           sessionId: 'self-session',
           ipcPath: socket('self'),
           pid: 1,
+          procStart: 'process-1',
           startedAt: 1,
         }),
         fromName: 'planner',

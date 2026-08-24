@@ -105,6 +105,23 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted[0].displayText).toContain('app-ab');
   });
 
+  it('does not expose an invalid reply target to the model', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'reply to me',
+        from: 'leader',
+        fromAddress: 'leader',
+      }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain('from="unknown session"');
+    expect(submitted[0].modelText).not.toContain('from="leader"');
+  });
+
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await sendPeerFrame(

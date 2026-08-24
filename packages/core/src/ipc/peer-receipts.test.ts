@@ -56,6 +56,19 @@ describe('peer receipt tracking', () => {
     ).toBe(false);
   });
 
+  it('keeps a held message correlated until its terminal receipt', () => {
+    trackSentPeerMessage('long-hold', 1);
+    expect(acceptPeerDeliveryStatus(receipt('long-hold', 'held'), 2)).toBe(
+      true,
+    );
+    expect(
+      acceptPeerDeliveryStatus(
+        receipt('long-hold', 'delivered'),
+        1 + PEER_RECEIPT_TTL_MS + 1,
+      ),
+    ).toBe(true);
+  });
+
   it('bounds tracked messages and allows failed sends to be forgotten', () => {
     for (let i = 0; i <= MAX_TRACKED_PEER_MESSAGES; i++) {
       trackSentPeerMessage(`bounded-${i}`, 1);

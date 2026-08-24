@@ -23,6 +23,16 @@ import { randomUUID } from 'node:crypto';
 
 /** Bumped only for a breaking change to the frame shape. */
 export const PEER_FRAME_VERSION = 1;
+export const PEER_SESSION_ADDRESS_PREFIX = 'qwen-session:';
+const PEER_SESSION_ADDRESS_PATTERN = /^qwen-session:[0-9a-f]{64}$/i;
+
+export function isPeerSessionAddress(value: string): boolean {
+  return PEER_SESSION_ADDRESS_PATTERN.test(value.trim());
+}
+
+export function hasPeerSessionAddressPrefix(value: string): boolean {
+  return value.trim().toLowerCase().startsWith(PEER_SESSION_ADDRESS_PREFIX);
+}
 
 /**
  * Longest single line accepted before the connection is dropped.
@@ -154,7 +164,10 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       msgId,
       type: 'user',
       from: optionalString(parsed['from']),
-      fromAddress: optionalString(parsed['fromAddress']),
+      ...(typeof parsed['fromAddress'] === 'string' &&
+      isPeerSessionAddress(parsed['fromAddress'])
+        ? { fromAddress: parsed['fromAddress'] }
+        : {}),
       fromName: optionalString(parsed['fromName']),
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }

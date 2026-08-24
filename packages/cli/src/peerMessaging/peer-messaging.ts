@@ -26,6 +26,7 @@ import {
   formatPeerDisplay,
   formatPeerEnvelope,
   InboundGate,
+  isLocalIpcPath,
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
@@ -217,7 +218,11 @@ export class PeerMessaging {
   }
 
   private deliver(frame: PeerUserFrame): void {
-    const from = frame.fromAddress ?? frame.from ?? 'unknown session';
+    const from =
+      frame.fromAddress ??
+      (frame.from && isLocalIpcPath(frame.from)
+        ? frame.from
+        : 'unknown session');
     if (
       !this.enqueue({
         modelText: formatPeerEnvelope({

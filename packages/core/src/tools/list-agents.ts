@@ -61,9 +61,9 @@ class ListAgentsInvocation extends BaseToolInvocation<
           : {}),
       }));
 
-    // The inbox address is also the experimental send-side gate: without
-    // one, this session cannot receive replies or delivery receipts.
-    const self = await getOwnPeerIdentity();
+    const self = this.config.isCrossSessionMessagingEnabled()
+      ? await getOwnPeerIdentity()
+      : null;
     const peers = self
       ? (await listMessageablePeers()).filter(
           (peer) => peer.ipcPath !== self.ipcPath,

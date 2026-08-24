@@ -62,6 +62,12 @@ describe('parsePeerFrame — user frames', () => {
     expect(frame && 'fromMode' in frame).toBe(false);
   });
 
+  it('drops a reply address outside the explicit peer namespace', () => {
+    const frame = parsePeerFrame(line({ ...validUser, fromAddress: 'leader' }));
+    expect(frame).not.toBeNull();
+    expect(frame && 'fromAddress' in frame).toBe(false);
+  });
+
   it('defaults an unknown priority to next', () => {
     expect(
       parsePeerFrame(line({ ...validUser, priority: 'urgent' })),

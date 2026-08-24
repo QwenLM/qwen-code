@@ -42,7 +42,7 @@ import {
 } from './tools.js';
 
 export interface SendMessageParams {
-  /** Recipient teammate or peer-session address. */
+  /** Recipient teammate, team broadcast, or peer-session address. */
   to?: string;
   /** Background-task ID, from the launch response (background mode). */
   task_id?: string;
@@ -91,6 +91,18 @@ class SendMessageInvocation extends BaseToolInvocation<
     to: string,
     explicit: boolean = false,
   ): Promise<ToolResult | null> {
+    if (!this.config.isCrossSessionMessagingEnabled()) {
+      if (explicit) {
+        const msg =
+          'Cross-session messaging is unavailable in this session. Enable the experimental agents.crossSessionMessaging setting and restart before using a peer address.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'Cross-session messaging unavailable.',
+          error: { message: msg },
+        };
+      }
+      return null;
+    }
     if (this.params.type) return null;
 
     let approvalMode: ApprovalMode | null;
@@ -168,8 +180,9 @@ class SendMessageInvocation extends BaseToolInvocation<
         return {
           llmContent:
             `Sent to ${outcome.address}, another Qwen Code session working in ${outcome.peer.cwd}. ` +
-            'The message may be held for its user to review before that session acts on it.',
-          returnDisplay: `“${preview}” → ${outcome.address}`,
+            `Message id: ${outcome.msgId}. ` +
+            'A later delivery receipt will use this id; the message may first be held for its user to review.',
+          returnDisplay: `“${preview}” → ${outcome.address} [${outcome.msgId.slice(0, 8)}]`,
         };
       }
       default: {
@@ -326,14 +339,41 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
+    const teamManager = this.config.getTeamManager();
+
     if (to === '*') {
-      const msg =
-        'Broadcast (to: "*") is not supported; send one message per recipient.';
-      return {
-        llmContent: msg,
-        returnDisplay: 'Broadcast not supported.',
-        error: { message: msg },
-      };
+      if (!teamManager) {
+        const msg =
+          'No active team is available for broadcast. Cross-session broadcast is not supported.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'No active team for broadcast.',
+          error: { message: msg },
+        };
+      }
+      if (this.params.type) {
+        const msg = 'Structured control messages cannot be broadcast.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'Controls cannot be broadcast.',
+          error: { message: msg },
+        };
+      }
+      try {
+        await teamManager.broadcast(
+          this.params.message,
+          getAgentName() ?? LEADER_NAME,
+        );
+        const msg = 'Message broadcast to all teammates.';
+        return { llmContent: msg, returnDisplay: msg };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return {
+          llmContent: `Failed to broadcast message: ${errMsg}`,
+          returnDisplay: `Failed to broadcast message: ${errMsg}`,
+          error: { message: errMsg },
+        };
+      }
     }
 
     const explicitPeerTarget = isExplicitPeerTarget(to);
@@ -352,7 +392,6 @@ class SendMessageInvocation extends BaseToolInvocation<
     }
 
     // Route 2: an in-process teammate wins a bare-name collision with a peer.
-    const teamManager = this.config.getTeamManager();
     const teamFile = teamManager?.getTeamFile();
     const teamAddressExists =
       !!teamFile &&
@@ -428,7 +467,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
       'Send a message to a teammate or peer session (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
-        'Set "to" to a bare teammate name (no @), or use a session address returned by list_agents. ' +
+        'Set "to" to a bare teammate name (no @), "*" to broadcast only within an active Agent Team, or use a session address returned by list_agents. ' +
         'Peer messages may be held for the other session user to review. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
@@ -440,7 +479,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           to: {
             type: 'string',
             description:
-              'Recipient teammate name or peer-session address from list_agents.',
+              'Recipient teammate name, "*" for Agent Team broadcast, or peer-session address from list_agents.',
           },
           task_id: {
             type: 'string',

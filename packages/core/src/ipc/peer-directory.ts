@@ -10,8 +10,15 @@ import {
   type SessionRegistryRecord,
 } from '../services/session-registry.js';
 import { flattenPeerLabel } from './peer-envelope.js';
+import {
+  hasPeerSessionAddressPrefix,
+  isPeerSessionAddress,
+  PEER_SESSION_ADDRESS_PREFIX,
+} from './peer-frames.js';
 import { isLocalIpcPath } from './socket-path.js';
 import { probePeerSocket } from './uds-client.js';
+
+const MAX_CONCURRENT_PEER_PROBES = 8;
 
 export interface PeerSessionInfo {
   sessionId: string;
@@ -19,6 +26,7 @@ export interface PeerSessionInfo {
   ref: string;
   cwd: string;
   pid: number;
+  procStart: string | null;
   ipcPath: string;
   startedAt: number;
 }
@@ -37,6 +45,7 @@ function toPeer(record: SessionRegistryRecord): PeerSessionInfo | null {
     ref: peerRef(record.sessionId),
     cwd: flattenPeerLabel(record.cwd),
     pid: record.pid,
+    procStart: record.procStart,
     ipcPath: record.ipcPath,
     startedAt: record.startedAt,
   };
@@ -46,8 +55,19 @@ export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
   const candidates = (await listLiveSessions())
     .map(toPeer)
     .filter((peer): peer is PeerSessionInfo => peer !== null);
-  const reachable = await Promise.all(
-    candidates.map((peer) => probePeerSocket(peer.ipcPath)),
+  const reachable = new Array<boolean>(candidates.length).fill(false);
+  let nextIndex = 0;
+  const probeNext = async () => {
+    while (nextIndex < candidates.length) {
+      const index = nextIndex++;
+      reachable[index] = await probePeerSocket(candidates[index]!.ipcPath);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_PEER_PROBES, candidates.length) },
+      probeNext,
+    ),
   );
   return candidates.filter((_, index) => reachable[index]);
 }
@@ -56,9 +76,6 @@ export type PeerResolution =
   | { kind: 'one'; peer: PeerSessionInfo }
   | { kind: 'none' }
   | { kind: 'ambiguous'; matches: PeerSessionInfo[] };
-
-const PEER_ADDRESS_PREFIX = 'qwen-session:';
-const PEER_ADDRESS_PATTERN = /^qwen-session:[0-9a-f]{64}$/i;
 
 function resolveMatches(matches: PeerSessionInfo[]): PeerResolution {
   if (matches.length === 0) return { kind: 'none' };
@@ -73,7 +90,8 @@ export function resolvePeerTarget(
   const trimmed = target.trim();
   if (!trimmed) return { kind: 'none' };
 
-  if (PEER_ADDRESS_PATTERN.test(trimmed)) {
+  if (hasPeerSessionAddressPrefix(trimmed)) {
+    if (!isPeerSessionAddress(trimmed)) return { kind: 'none' };
     return resolveMatches(
       peers.filter(
         (peer) =>
@@ -90,7 +108,10 @@ export function resolvePeerTarget(
 }
 
 export function formatPeerAddress(
-  peer: Pick<PeerSessionInfo, 'sessionId' | 'ipcPath' | 'pid' | 'startedAt'>,
+  peer: Pick<
+    PeerSessionInfo,
+    'sessionId' | 'ipcPath' | 'pid' | 'procStart' | 'startedAt'
+  >,
 ): string {
   const token = createHash('sha256')
     .update(peer.sessionId)
@@ -99,14 +120,16 @@ export function formatPeerAddress(
     .update('\0')
     .update(String(peer.pid))
     .update('\0')
+    .update(peer.procStart ?? '')
+    .update('\0')
     .update(String(peer.startedAt))
     .digest('hex');
-  return `${PEER_ADDRESS_PREFIX}${token}`;
+  return `${PEER_SESSION_ADDRESS_PREFIX}${token}`;
 }
 
 export function isExplicitPeerTarget(target: string): boolean {
   const trimmed = target.trim();
-  return PEER_ADDRESS_PATTERN.test(trimmed) || isLocalIpcPath(trimmed);
+  return hasPeerSessionAddressPrefix(trimmed) || isLocalIpcPath(trimmed);
 }
 
 export function suggestPeerNames(

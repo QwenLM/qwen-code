@@ -36,6 +36,7 @@ export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
     address: formatPeerAddress({
       sessionId: record.sessionId,
       pid: record.pid,
+      procStart: record.procStart,
       ipcPath: record.ipcPath,
       startedAt: record.startedAt,
     }),
@@ -43,7 +44,7 @@ export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
 }
 
 export type PeerSendOutcome =
-  | { kind: 'sent'; peer: PeerSessionInfo; address: string }
+  | { kind: 'sent'; peer: PeerSessionInfo; address: string; msgId: string }
   | { kind: 'disabled' }
   | { kind: 'not-found'; suggestions: string[] }
   | { kind: 'ambiguous'; matches: string[] }
@@ -96,7 +97,7 @@ export async function sendToPeer(options: {
   trackSentPeerMessage(frame.msgId);
   try {
     await sendPeerFrame(peer.ipcPath, frame);
-    return { kind: 'sent', peer, address };
+    return { kind: 'sent', peer, address, msgId: frame.msgId };
   } catch (error) {
     forgetSentPeerMessage(frame.msgId);
     return {

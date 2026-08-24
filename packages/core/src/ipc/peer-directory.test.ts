@@ -58,6 +58,7 @@ function peer(name: string, ref: string): PeerSessionInfo {
     ref,
     cwd: `/work/${name}`,
     pid: 10,
+    procStart: 'process-10',
     ipcPath: socket(ref),
     startedAt: 1,
   };
@@ -100,6 +101,26 @@ describe('peer directory', () => {
       ipcPath: socket('live'),
     });
     expect(mocks.probePeerSocket).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds concurrent reachability probes', async () => {
+    mocks.listLiveSessions.mockResolvedValue(
+      Array.from({ length: 20 }, (_, index) => record(`peer-${index}`)),
+    );
+    let active = 0;
+    let maxActive = 0;
+    mocks.probePeerSocket.mockImplementation(async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return true;
+    });
+
+    const peers = await listMessageablePeers();
+
+    expect(peers).toHaveLength(20);
+    expect(maxActive).toBe(8);
   });
 
   it('resolves a unique name, explicit address, or reply socket path', () => {
@@ -203,6 +224,11 @@ describe('peer directory', () => {
     expect(resolvePeerTarget([bareName, bareRef], 'cccccc')).toEqual({
       kind: 'one',
       peer: bareName,
+    });
+
+    const malformed = peer('qwen-session:truncated', 'eeeeee');
+    expect(resolvePeerTarget([malformed], 'qwen-session:truncated')).toEqual({
+      kind: 'none',
     });
   });
 });
