@@ -21,6 +21,8 @@ import {
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
+import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
+import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -128,6 +130,198 @@ describe('WorkflowTool', () => {
     // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
     // absolute path it cannot construct.
     expect(description).toContain('.qwen/workflows');
+  });
+
+  // ── Approval dialog ────────────────────────────────────────────────────
+  //
+  // What the user is asked to approve is arbitrary model-authored JavaScript
+  // that can fan out to the per-run agent cap, provision git worktrees and
+  // spend an uncapped token budget. Before this the entire disclosure was
+  // `Run a workflow script (N chars)`, and one click on "always allow"
+  // persisted a rule matching every future invocation.
+  describe('approval dialog', () => {
+    const SCRIPT_WITH_META = `export const meta = {
+  name: 'audit-deps',
+  description: 'Audit dependencies for CVEs',
+  phases: [
+    { title: 'Scan', detail: 'one agent per manifest' },
+    { title: 'Verify' },
+  ],
+}
+phase('Scan')
+await agent('scan package.json')
+`;
+
+    async function detailsFor(
+      params: Record<string, unknown>,
+      config: Config = fakeConfig(),
+    ) {
+      const tool = new WorkflowTool(config);
+      const invocation = tool.build(params as never);
+      return await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+    }
+
+    it('names the workflow, its purpose and its phases', async () => {
+      const details = await detailsFor({ script: SCRIPT_WITH_META });
+      expect(details.type).toBe('info');
+      const info = details as { title: string; prompt: string };
+      expect(info.title).toBe('Run a dynamic workflow?');
+      expect(info.prompt).toContain('audit-deps');
+      expect(info.prompt).toContain('Audit dependencies for CVEs');
+      expect(info.prompt).toContain('1. Scan');
+      expect(info.prompt).toContain('one agent per manifest');
+      expect(info.prompt).toContain('2. Verify');
+    });
+
+    // The load-bearing failure mode. Reading meta happens on the approval
+    // path now, and `extractAndStripMeta` throws on a malformed literal. A
+    // script with a broken meta block must stay approvable-or-rejectable:
+    // if the dialog throws, the user cannot even say no.
+    it('degrades instead of throwing when meta is malformed', async () => {
+      const details = await detailsFor({
+        script:
+          'export const meta = { name: someIdentifier }\nawait agent("x")',
+      });
+      const info = details as { prompt: string };
+      expect(info.prompt).toContain('declares no meta block');
+      expect(info.prompt).toContain('await agent("x")');
+    });
+
+    it('renders a script that has no meta block at all', async () => {
+      const details = await detailsFor({ script: 'await agent("hello")' });
+      expect((details as { prompt: string }).prompt).toContain(
+        'await agent("hello")',
+      );
+    });
+
+    // Before this change nothing was displayed, so nothing could be spoofed.
+    // A preview without the screen is what would open the hole: the text is
+    // model-authored and reaches a terminal.
+    it('strips escape sequences from everything it displays', async () => {
+      const details = await detailsFor({
+        script: [
+          'export const meta = {',
+          "  name: 'a\\u001b[31mred\\u001b[0m',",
+          "  description: 'plain',",
+          '}',
+          "await agent('x\\u001b[2Jclear')",
+        ].join('\n'),
+      });
+      const { prompt } = details as { prompt: string };
+      expect(prompt).not.toContain('');
+      expect(prompt).toContain('ared');
+    });
+
+    // `stripAnsiAndControl` removes C0 controls and `\n` is one of them, so
+    // the naive call would collapse the excerpt into a single unreadable
+    // line. Sanitizing per line is what keeps the script legible.
+    it('keeps the script excerpt on multiple lines, and bounds it', async () => {
+      const long = Array.from(
+        { length: 400 },
+        (_, i) => `await agent('step ${i}')`,
+      ).join('\n');
+      const { prompt } = (await detailsFor({ script: long })) as {
+        prompt: string;
+      };
+      expect(prompt.split('\n').length).toBeGreaterThan(10);
+      expect(prompt).toContain('more characters)');
+      expect(prompt.length).toBeLessThan(long.length);
+    });
+
+    it('shows args, and survives args that cannot be serialized', async () => {
+      const ok = (await detailsFor({
+        script: 'await agent("x")',
+        args: { target: 'packages/core' },
+      })) as { prompt: string };
+      expect(ok.prompt).toContain('packages/core');
+
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      const bad = (await detailsFor({
+        script: 'await agent("x")',
+        args: circular,
+      })) as { prompt: string };
+      expect(bad.prompt).toContain('not JSON-serializable');
+    });
+
+    // An inline script is fresh model-authored source every time. A blanket
+    // grant would transfer the consent the user gave to the script they read
+    // onto every script the model writes afterwards.
+    it('never lets an inline script be pre-approved', async () => {
+      const details = (await detailsFor({ script: SCRIPT_WITH_META })) as {
+        hideAlwaysAllow?: boolean;
+        permissionRules?: string[];
+      };
+      expect(details.hideAlwaysAllow).toBe(true);
+      // Empty, not absent: `injectPermissionRulesIfMissing` only fills in the
+      // bare-tool-name rule when the tool supplies none, and that rule is
+      // documented as matching every invocation of the tool.
+      expect(details.permissionRules).toEqual([]);
+    });
+
+    it('scopes a saved-workflow grant to the path that was approved', async () => {
+      const details = (await detailsFor({
+        scriptPath: '/home/u/.qwen/workflows/audit.js',
+      })) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+      expect(details.hideAlwaysAllow).toBeFalsy();
+      expect(details.permissionRules).toHaveLength(1);
+
+      // Behavioural, not textual: a rule that reads plausibly but never
+      // matches would make "always allow" silently do nothing, which is a
+      // worse affordance than not offering it. Parse the rule the tool
+      // emitted and check it resolves the same path and only that path.
+      const rule = parseRule(details.permissionRules![0]);
+      const wouldAllow = (toolParams: Record<string, unknown>) =>
+        matchesRule(
+          rule,
+          ToolNames.WORKFLOW,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          toolParams,
+        );
+      expect(
+        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/audit.js' }),
+      ).toBe(true);
+      expect(
+        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/other.js' }),
+      ).toBe(false);
+      expect(wouldAllow({ script: 'await agent("x")' })).toBe(false);
+    });
+
+    // The cost warning used to arrive only after a successful run — i.e.
+    // after the spend it warns about, and never at all on the failure path.
+    it('warns about token cost before the spend, exactly once', async () => {
+      const { config } = configWithRegistry();
+      const first = (await detailsFor(
+        { script: 'await agent("x")' },
+        config,
+      )) as { prompt: string };
+      expect(first.prompt).toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
+
+      // The registry latch flips on read, so the second dialog is quiet and
+      // the post-hoc copy on the result path suppresses itself too.
+      const second = (await detailsFor(
+        { script: 'await agent("y")' },
+        config,
+      )) as { prompt: string };
+      expect(second.prompt).not.toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
+    });
+
+    it('titles the transcript row with the workflow name', () => {
+      const tool = new WorkflowTool(fakeConfig());
+      expect(
+        tool.build({ script: SCRIPT_WITH_META } as never).getDescription(),
+      ).toBe('Run workflow: audit-deps');
+      // Falls back to the character count only when there is no meta to read.
+      expect(
+        tool.build({ script: 'await agent("x")' } as never).getDescription(),
+      ).toContain('chars)');
+    });
   });
 
   // The tool description is not the only model-visible copy of the caps —

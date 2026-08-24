@@ -827,7 +827,7 @@ describe('serializedArgsNamePath — the one needle both halves use', () => {
 
   it('does not credit a shell command that merely mentions the path', () => {
     // The divergence the review measured between this and the prose-boundary
-    // `namesPath` in `utils/findings.ts`, which returns true here. Both the
+    // `namesPath` in `findings.ts`, which returns true here. Both the
     // diff-read half and the brief atoms route through THIS one, so the
     // certification bar cannot credit `rm <file>` as opening it.
     expect(
