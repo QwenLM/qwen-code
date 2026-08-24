@@ -211,6 +211,76 @@ describe('SessionArtifactStore', () => {
     expect(grown?.updatedAt).not.toBe(createdAt);
   });
 
+  it('keeps a changed workspace artifact changed when no content hash was recorded', async () => {
+    const sessionId = 's1-unhashed-baseline';
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'workspace:report.txt',
+    );
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        {
+          id: artifactId,
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Report',
+          workspacePath: 'report.txt',
+          sizeBytes: 5,
+          retention: 'restorable',
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect(await store.get(artifactId)).toMatchObject({
+      status: 'available',
+      metadata: { 'qwen.workspace.sizeBytes': 5 },
+    });
+
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello world');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const changed = await store.get(artifactId);
+    expect(changed).toMatchObject({ status: 'changed', sizeBytes: 11 });
+    expect(changed?.updatedAt).not.toBe('2026-07-04T00:00:00.000Z');
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const stillChanged = await store.get(artifactId);
+    expect(stillChanged).toMatchObject({ status: 'changed', sizeBytes: 11 });
+    expect(stillChanged?.updatedAt).toBe(changed?.updatedAt);
+  });
+
+  it('ignores a published content hash supplied by an untrusted caller', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-untrusted-published-hash',
+      workspaceCwd: workspace,
+    });
+    const created = await store.upsertMany([
+      {
+        title: 'Client page',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-page',
+        metadata: { 'qwen.published.sha256': 'a'.repeat(64), keep: true },
+      },
+    ]);
+
+    expect(created.changes[0]?.artifact?.metadata).toEqual({ keep: true });
+  });
+
   it('does not count injected workspace hash metadata against the user metadata limit', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-workspace-metadata-budget',

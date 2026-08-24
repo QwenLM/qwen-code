@@ -17,6 +17,7 @@ import {
   isReservedWorkspaceMetadataKey,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
+  PUBLISHED_CONTENT_SHA256_METADATA_KEY,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
@@ -1552,6 +1553,7 @@ export class SessionArtifactStore {
     const metadata = withWorkspaceContentHashMetadata(
       normalizeMetadata(input.metadata, {
         budget: options.metadataBudget ?? 'user',
+        trustedPublisher,
       }),
       workspaceStatus,
     );
@@ -2954,7 +2956,7 @@ function isSecretLikeMetadataValue(value: string): boolean {
 
 function normalizeMetadata(
   metadata: unknown,
-  options: { budget?: 'user' | 'persisted' } = {},
+  options: { budget?: 'user' | 'persisted'; trustedPublisher?: boolean } = {},
 ): Record<string, string | number | boolean | null> | undefined {
   if (metadata === undefined) {
     return undefined;
@@ -2974,8 +2976,18 @@ function normalizeMetadata(
     if (isPrototypeMetadataKey(key)) {
       continue;
     }
-    if (options.budget !== 'persisted' && isReservedWorkspaceMetadataKey(key)) {
-      continue;
+    if (options.budget !== 'persisted') {
+      // Content fingerprints are stamped by the store or by the artifact tool,
+      // never by whoever supplied the input.
+      if (isReservedWorkspaceMetadataKey(key)) {
+        continue;
+      }
+      if (
+        key === PUBLISHED_CONTENT_SHA256_METADATA_KEY &&
+        options.trustedPublisher !== true
+      ) {
+        continue;
+      }
     }
     if (!key) {
       throw new SessionArtifactValidationError(
@@ -3228,12 +3240,20 @@ function withWorkspaceContentHashMetadata(
       }
     | undefined,
 ): Record<string, string | number | boolean | null> | undefined {
-  if (workspaceStatus?.status !== 'available' || !workspaceStatus.sha256) {
+  if (
+    workspaceStatus?.status !== 'available' ||
+    (workspaceStatus.sha256 === undefined &&
+      workspaceStatus.sizeBytes === undefined)
+  ) {
     return metadata;
   }
+  // The recorded size is the only baseline left when the file was too large to
+  // hash, so it must be stored even without a sha256.
   const next = {
     ...(metadata ?? {}),
-    [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256,
+    ...(workspaceStatus.sha256
+      ? { [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256 }
+      : {}),
     ...(workspaceStatus.mtimeMs !== undefined
       ? { [WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY]: workspaceStatus.mtimeMs }
       : {}),

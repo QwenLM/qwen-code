@@ -33,9 +33,8 @@ describe('artifactUtils', () => {
       getArtifactFreshnessKey({
         status: 'available',
         updatedAt: '2026-08-24T00:00:01.000Z',
-        metadata: { 'qwen.published.sha256': 'def' },
       }),
-    ).toBe('available:2026-08-24T00:00:01.000Z:def');
+    ).toBe('available:2026-08-24T00:00:01.000Z:');
   });
 
   it('labels office documents from path or kind', () => {
