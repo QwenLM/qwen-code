@@ -212,7 +212,7 @@ interface ChannelAgentBridge {
 }
 ```
 
-`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`.
+`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`. Daemon-backed bridges upload images to the daemon attachment store and restrict them to its supported subtypes (`image/bmp`, `image/gif`, `image/jpeg`, `image/png`, `image/webp`) and its 8 MiB per-item size limit; images outside those limits are skipped with a log line instead of failing the turn, while `AcpBridge` delivers any normalized `image/*` inline.
 
 ### AcpBridge
 

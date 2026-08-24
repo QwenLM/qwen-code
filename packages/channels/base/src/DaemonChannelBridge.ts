@@ -146,6 +146,11 @@ function getTextContent(content: unknown): string | undefined {
 // set is repeated here and checked before uploading.
 const CHANNEL_IMAGE_EXTENSIONS = ['bmp', 'gif', 'jpeg', 'png', 'webp'];
 
+// Mirrors the store's SESSION_ATTACHMENT_MAX_ITEM_BYTES (same file): checked
+// before uploading so one oversized image degrades by omission instead of
+// failing the whole turn.
+const CHANNEL_IMAGE_MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
 function channelImageName(mimeType: string, index = 0): string | undefined {
   if (!mimeType.startsWith('image/')) {
     return undefined;
@@ -483,8 +488,15 @@ export class DaemonChannelBridge
                 );
                 return undefined;
               }
+              const bytes = Buffer.from(image.data, 'base64');
+              if (bytes.byteLength > CHANNEL_IMAGE_MAX_UPLOAD_BYTES) {
+                process.stderr.write(
+                  `[DaemonChannelBridge] skipped channel image above the daemon attachment size limit ${sanitizeLogText(image.mimeType, 128)}\n`,
+                );
+                return undefined;
+              }
               const attachment = await session.uploadAttachment(
-                new Blob([Buffer.from(image.data, 'base64')], {
+                new Blob([bytes], {
                   type: image.mimeType,
                 }),
                 name,
@@ -592,17 +604,17 @@ export class DaemonChannelBridge
             session.removeAttachment(attachmentId),
           ),
         );
-        for (const removal of removals) {
+        removals.forEach((removal, index) => {
           if (removal.status === 'rejected') {
             const reason =
               removal.reason instanceof Error
                 ? removal.reason.message
                 : String(removal.reason);
             process.stderr.write(
-              `[DaemonChannelBridge] failed to remove channel image during rollback: ${sanitizeLogText(reason, 256)}\n`,
+              `[DaemonChannelBridge] failed to remove channel image ${sanitizeLogText(uploadedAttachmentIds[index] ?? '', 128)} for session ${sanitizeLogText(sessionId, 128)} during rollback: ${sanitizeLogText(reason, 256)}\n`,
             );
           }
-        }
+        });
       }
     }
   }
