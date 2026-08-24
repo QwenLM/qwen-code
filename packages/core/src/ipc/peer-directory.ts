@@ -58,6 +58,7 @@ export type PeerResolution =
   | { kind: 'ambiguous'; matches: PeerSessionInfo[] };
 
 const PEER_ADDRESS_PREFIX = 'qwen-session:';
+const PEER_ADDRESS_PATTERN = /^qwen-session:[0-9a-f]{64}$/i;
 
 function resolveMatches(matches: PeerSessionInfo[]): PeerResolution {
   if (matches.length === 0) return { kind: 'none' };
@@ -72,13 +73,13 @@ export function resolvePeerTarget(
   const trimmed = target.trim();
   if (!trimmed) return { kind: 'none' };
 
-  const explicit = new RegExp(
-    `^${PEER_ADDRESS_PREFIX}([0-9a-f]{6})$`,
-    'i',
-  ).exec(trimmed);
-  if (explicit) {
-    const ref = explicit[1]!.toLowerCase();
-    return resolveMatches(peers.filter((peer) => peer.ref === ref));
+  if (PEER_ADDRESS_PATTERN.test(trimmed)) {
+    return resolveMatches(
+      peers.filter(
+        (peer) =>
+          formatPeerAddress(peer).toLowerCase() === trimmed.toLowerCase(),
+      ),
+    );
   }
 
   if (isLocalIpcPath(trimmed)) {
@@ -89,15 +90,13 @@ export function resolvePeerTarget(
 }
 
 export function formatPeerAddress(peer: PeerSessionInfo): string {
-  return `${PEER_ADDRESS_PREFIX}${peer.ref}`;
+  const token = createHash('sha256').update(peer.sessionId).digest('hex');
+  return `${PEER_ADDRESS_PREFIX}${token}`;
 }
 
 export function isExplicitPeerTarget(target: string): boolean {
   const trimmed = target.trim();
-  return (
-    new RegExp(`^${PEER_ADDRESS_PREFIX}[0-9a-f]{6}$`, 'i').test(trimmed) ||
-    isLocalIpcPath(trimmed)
-  );
+  return PEER_ADDRESS_PATTERN.test(trimmed) || isLocalIpcPath(trimmed);
 }
 
 export function suggestPeerNames(

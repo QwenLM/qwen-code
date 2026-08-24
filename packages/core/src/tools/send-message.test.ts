@@ -20,6 +20,7 @@ beforeEach(() => {
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
+const PEER_ADDRESS = `qwen-session:${'a'.repeat(64)}`;
 
 function makeTeamConfig(opts?: {
   teamManager?: {
@@ -265,7 +266,7 @@ describe('SendMessageTool — peer-session mode', () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     sendToPeerMock.mockResolvedValue({
       kind: 'sent',
-      address: 'qwen-session:aaaaaa',
+      address: PEER_ADDRESS,
       peer: { cwd: '/work/peer' },
     });
     const tool = new SendMessageTool(
@@ -275,14 +276,14 @@ describe('SendMessageTool — peer-session mode', () => {
     );
 
     const result = await tool.validateBuildAndExecute(
-      { to: 'qwen-session:aaaaaa', message: 'send to the peer' },
+      { to: PEER_ADDRESS, message: 'send to the peer' },
       new AbortController().signal,
     );
 
     expect(result.error).toBeUndefined();
     expect(sendMessage).not.toHaveBeenCalled();
     expect(sendToPeerMock).toHaveBeenCalledWith({
-      target: 'qwen-session:aaaaaa',
+      target: PEER_ADDRESS,
       message: 'send to the peer',
       approvalMode: DEFAULT_MODE,
     });
@@ -304,12 +305,80 @@ describe('SendMessageTool — peer-session mode', () => {
     expect(sendToPeerMock).not.toHaveBeenCalled();
   });
 
+  it('does not reinterpret an explicit peer address when messaging is off', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({
+            leadAgentId: 'leader@team',
+            members: [
+              {
+                name: PEER_ADDRESS.replace(':', '-'),
+                agentId: 'peer-alias@team',
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const result = await tool.validateBuildAndExecute(
+      { to: PEER_ADDRESS, message: 'peer only' },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain(
+      'Cross-session messaging is unavailable',
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not reinterpret a peer control as a teammate control', async () => {
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast: vi.fn(),
+          requestShutdown,
+          getTeamFile: () => ({
+            leadAgentId: 'leader@team',
+            members: [
+              {
+                name: PEER_ADDRESS.replace(':', '-'),
+                agentId: 'peer-alias@team',
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const result = await tool.validateBuildAndExecute(
+      {
+        to: PEER_ADDRESS,
+        message: 'shut down',
+        type: 'shutdown_request',
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('cannot be sent');
+    expect(requestShutdown).not.toHaveBeenCalled();
+    expect(sendToPeerMock).not.toHaveBeenCalled();
+  });
+
   it('asks for a ref instead of guessing an ambiguous session', async () => {
     sendToPeerMock.mockResolvedValue({
       kind: 'ambiguous',
       matches: [
-        'qwen-session:aaaaaa (worker in /a)',
-        'qwen-session:bbbbbb (worker in /b)',
+        `${PEER_ADDRESS} (worker in /a)`,
+        `qwen-session:${'b'.repeat(64)} (worker in /b)`,
       ],
     });
     const tool = new SendMessageTool(makeTeamConfig());
@@ -320,7 +389,7 @@ describe('SendMessageTool — peer-session mode', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('qwen-session:aaaaaa');
+    expect(result.llmContent).toContain(PEER_ADDRESS);
     expect(result.llmContent).toContain('exact "to" address');
   });
 });

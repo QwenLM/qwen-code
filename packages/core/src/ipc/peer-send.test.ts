@@ -6,7 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from '../config/approval-mode.js';
-import type { PeerSessionInfo } from './peer-directory.js';
+import { formatPeerAddress, type PeerSessionInfo } from './peer-directory.js';
 import { describeSendFailure, sendToPeer } from './peer-send.js';
 import { PeerSendError } from './uds-client.js';
 
@@ -95,7 +95,7 @@ describe('sendToPeer', () => {
     expect(outcome).toEqual({
       kind: 'sent',
       peer: worker,
-      address: 'qwen-session:aaaaaa',
+      address: formatPeerAddress(worker),
     });
     expect(mocks.sendPeerFrame).toHaveBeenCalledWith(
       worker.ipcPath,
@@ -140,8 +140,8 @@ describe('sendToPeer', () => {
     expect(outcome).toMatchObject({
       kind: 'ambiguous',
       matches: [
-        'qwen-session:aaaaaa (worker in /work/worker)',
-        'qwen-session:bbbbbb (worker in /work/worker)',
+        `${formatPeerAddress(peer('worker', 'aaaaaa'))} (worker in /work/worker)`,
+        `${formatPeerAddress(peer('worker', 'bbbbbb'))} (worker in /work/worker)`,
       ],
     });
     expect(mocks.sendPeerFrame).not.toHaveBeenCalled();

@@ -106,14 +106,16 @@ describe('peer directory', () => {
     const target = peer('worker', 'a1b2c3');
     const peers = [target];
 
-    expect(formatPeerAddress(target)).toBe('qwen-session:a1b2c3');
+    expect(formatPeerAddress(target)).toMatch(/^qwen-session:[0-9a-f]{64}$/);
     expect(isExplicitPeerTarget(formatPeerAddress(target))).toBe(true);
 
     expect(resolvePeerTarget(peers, 'worker')).toEqual({
       kind: 'one',
       peer: target,
     });
-    expect(resolvePeerTarget(peers, 'QWEN-SESSION:A1B2C3')).toEqual({
+    expect(
+      resolvePeerTarget(peers, formatPeerAddress(target).toUpperCase()),
+    ).toEqual({
       kind: 'one',
       peer: target,
     });
@@ -132,19 +134,20 @@ describe('peer directory', () => {
       kind: 'ambiguous',
       matches: peers,
     });
-    expect(resolvePeerTarget(peers, 'qwen-session:bbbbbb')).toEqual({
+    expect(resolvePeerTarget(peers, formatPeerAddress(b))).toEqual({
       kind: 'one',
       peer: b,
     });
-    expect(formatPeerAddress(a)).toBe('qwen-session:aaaaaa');
+    expect(formatPeerAddress(a)).not.toBe(formatPeerAddress(b));
   });
 
-  it('does not guess when short refs collide', () => {
+  it('does not use the short display ref as the address identity', () => {
     const a = peer('one', 'aaaaaa');
     const b = peer('two', 'aaaaaa');
-    expect(resolvePeerTarget([a, b], 'qwen-session:aaaaaa')).toEqual({
-      kind: 'ambiguous',
-      matches: [a, b],
+    expect(formatPeerAddress(a)).not.toBe(formatPeerAddress(b));
+    expect(resolvePeerTarget([a, b], formatPeerAddress(a))).toEqual({
+      kind: 'one',
+      peer: a,
     });
   });
 

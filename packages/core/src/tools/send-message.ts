@@ -106,8 +106,18 @@ class SendMessageInvocation extends BaseToolInvocation<
     });
 
     switch (outcome.kind) {
-      case 'disabled':
+      case 'disabled': {
+        if (explicit) {
+          const msg =
+            'Cross-session messaging is unavailable in this session. Enable the experimental agents.crossSessionMessaging setting and restart before using a peer address.';
+          return {
+            llmContent: msg,
+            returnDisplay: 'Cross-session messaging unavailable.',
+            error: { message: msg },
+          };
+        }
         return null;
+      }
       case 'not-found': {
         if (outcome.suggestions.length === 0 && !explicit) return null;
         const suggestion =
@@ -327,6 +337,15 @@ class SendMessageInvocation extends BaseToolInvocation<
     }
 
     const explicitPeerTarget = isExplicitPeerTarget(to);
+    if (explicitPeerTarget && this.params.type) {
+      const msg =
+        'Structured control messages cannot be sent to a peer-session address.';
+      return {
+        llmContent: msg,
+        returnDisplay: 'Peer controls not supported.',
+        error: { message: msg },
+      };
+    }
     if (explicitPeerTarget) {
       const peerResult = await this.trySendToPeer(to, true);
       if (peerResult) return peerResult;

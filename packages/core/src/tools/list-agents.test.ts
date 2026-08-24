@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { ListAgentsTool } from './list-agents.js';
@@ -17,11 +18,15 @@ const peerMocks = vi.hoisted(() => ({
 vi.mock('../ipc/peer-send.js', () => ({
   getOwnPeerIdentity: peerMocks.getOwnPeerIdentity,
 }));
-vi.mock('../ipc/peer-directory.js', () => ({
-  listMessageablePeers: peerMocks.listMessageablePeers,
-  formatPeerAddress: (peer: { name: string; ref: string }) =>
-    `qwen-session:${peer.ref}`,
-}));
+vi.mock('../ipc/peer-directory.js', async () => {
+  const real = await vi.importActual<typeof import('../ipc/peer-directory.js')>(
+    '../ipc/peer-directory.js',
+  );
+  return { ...real, listMessageablePeers: peerMocks.listMessageablePeers };
+});
+
+const peerAddress = (sessionId: string) =>
+  `qwen-session:${createHash('sha256').update(sessionId).digest('hex')}`;
 
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
@@ -181,14 +186,14 @@ describe('ListAgentsTool', () => {
       ],
       sessions: [
         {
-          to: 'qwen-session:aaaaaa',
+          to: peerAddress('peer-a'),
           name: 'app',
           ref: 'aaaaaa',
           cwd: '/work/a',
           started_at: '1970-01-01T00:00:00.001Z',
         },
         {
-          to: 'qwen-session:bbbbbb',
+          to: peerAddress('peer-b'),
           name: 'app',
           ref: 'bbbbbb',
           cwd: '/work/b',
