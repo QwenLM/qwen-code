@@ -22,7 +22,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { TestRig } from '../test-helper.js';
 import {
   startFakeOpenAIServer,
@@ -74,6 +74,40 @@ type PermissionRequest = {
   }>;
 };
 
+type RemoveDirectory = typeof rmSync;
+
+async function removeQwenHomeWithRetry(
+  qwenHome: string,
+  {
+    maxAttempts = 50,
+    retryDelayMs = 100,
+    removeDirectory = rmSync,
+  }: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    removeDirectory?: RemoveDirectory;
+  } = {},
+) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      removeDirectory(qwenHome, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
+        throw error;
+      }
+      if (attempt < maxAttempts - 1) {
+        await delay(retryDelayMs);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 /**
  * Sets up an ACP test environment with cron support enabled, backed by
  * a fake-openai-server for deterministic model responses.
@@ -87,10 +121,13 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
   const stderr: string[] = [];
 
   // Keep the global config dir outside the agent's workspace cwd so workspace
-  // scans (memory discovery, file tooling) never see it.
+  // scans (memory discovery, file tooling) never see it. Keep it outside the
+  // per-run integration directory too: late shutdown writes into QWEN_HOME
+  // should be handled by this test's cleanup path, not by Vitest global
+  // teardown deleting the whole run directory.
   const qwenHome = join(
-    dirname(rig.testDir!),
-    `${basename(rig.testDir!)}-home`,
+    dirname(dirname(rig.testDir!)),
+    `${basename(dirname(rig.testDir!))}-${basename(rig.testDir!)}-home`,
   );
   rmSync(qwenHome, { recursive: true, force: true });
   mkdirSync(qwenHome, { recursive: true });
@@ -344,22 +381,7 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     // rmdir fail with ENOTEMPTY. rmSync's built-in retries only repeat the
     // failing rmdir and never re-walk for entries created mid-walk, so each
     // attempt below starts a fresh walk instead.
-    const RM_ATTEMPTS = 5;
-    const RM_RETRY_DELAY_MS = 200;
-    for (let attempt = 0; attempt < RM_ATTEMPTS; attempt++) {
-      try {
-        rmSync(qwenHome, { recursive: true, force: true });
-        return;
-      } catch (e) {
-        if (
-          (e as NodeJS.ErrnoException).code !== 'ENOTEMPTY' ||
-          attempt === RM_ATTEMPTS - 1
-        ) {
-          throw e;
-        }
-        await delay(RM_RETRY_DELAY_MS);
-      }
-    }
+    await removeQwenHomeWithRetry(qwenHome);
   };
 
   return {
@@ -392,6 +414,27 @@ async function initSession(
 
   return newSession.sessionId;
 }
+
+describe('acp cron cleanup helpers', () => {
+  it('retries transient ENOTEMPTY removal failures', async () => {
+    const removeDirectory = vi
+      .fn<RemoveDirectory>()
+      .mockImplementationOnce(() => {
+        const error = new Error('not empty') as NodeJS.ErrnoException;
+        error.code = 'ENOTEMPTY';
+        throw error;
+      })
+      .mockImplementationOnce(() => undefined);
+
+    await removeQwenHomeWithRetry('/tmp/qwen-home', {
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      removeDirectory,
+    });
+
+    expect(removeDirectory).toHaveBeenCalledTimes(2);
+  });
+});
 
 (IS_SANDBOX ? describe.skip : describe)('acp cron integration', () => {
   it(
