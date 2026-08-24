@@ -639,8 +639,8 @@ Web Shell 输入层静默改变格式。
 
 BMP 的下游回归不只停在 mock HTTP 入参：在既有 ACP session prompt 转换测试中加入
 `image/bmp`，验证最终 Core canonical content 保持
-`inlineData.mimeType === 'image/bmp'`；OpenAI/Gemini converter/tokenizer 聚焦测试验证
-各自既有图片路径，Anthropic 聚焦测试明确断言 BMP 转为 unsupported-media 文本。daemon
+`inlineData.mimeType === 'image/bmp'`；OpenAI/Gemini converter 聚焦测试验证
+各自既有图片路径（tokenizer 估计器簇已随 PR #9676 删除，见上文同步注记），Anthropic 聚焦测试明确断言 BMP 转为 unsupported-media 文本。daemon
 已有结构化 `413` 测试，Core 已有 inline-media within/over limit 测试；本功能不复制
 production 限制，只确认 Web Shell 对这些既有失败语义的状态保留。
 
