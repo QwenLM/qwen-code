@@ -39,6 +39,20 @@ export type ReviewEffort = 'low' | 'medium' | 'high';
  */
 export type ReviewSeverityFloor = 'critical' | 'suggestion';
 
+/**
+ * The review topology: which shape the run takes. `auto` is the standing
+ * effort-driven pipeline (the 3A/3B/3C fan-outs). `minimal` is the A/B
+ * comparison arm from issue #9783 — a single careful senior-engineer pass
+ * over the diff in the orchestrator's own context, at most fifteen findings,
+ * each carrying a concrete failure scenario; no subagent fan-out, no
+ * verification, no reverse audit, no posting. It exists so the full pipeline
+ * and the minimal prompt can be run over the same PR set and compared per
+ * model. It is deliberately orthogonal to `effort` — it is a different
+ * _shape_ of review, not a depth of the same one — and selecting it skips the
+ * agent machinery (roster, coverage, budget) entirely rather than shrinking it.
+ */
+export type ReviewTopology = 'auto' | 'minimal';
+
 export type ReviewTarget =
   | { type: 'pr-number'; number: number }
   | {
@@ -111,6 +125,13 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /**
+   * The review topology. `auto` (the default) runs the standing effort-driven
+   * pipeline; `minimal` runs the single-pass A/B arm and, because it neither
+   * posts nor edits, forces `comment.effective` and `fix.effective` to false.
+   */
+  topology: ReviewTopology;
+  topologySource: 'explicit' | 'default';
   /** The `--host` flag's value, when present — recorded verbatim so the
    *  write gate can bind a recorded bare-number target's platform (the
    *  target itself carries no host in that spelling). */
@@ -153,6 +174,14 @@ export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   // default's name, so an operator typing `--severity-floor auto` means
   // "the round-adaptive rule" (overriding a configured floor), not a typo
   // to reject and then promote into a bogus file target.
+  'auto',
+]);
+
+export const TOPOLOGIES: ReadonlySet<string> = new Set([
+  'minimal',
+  // `auto` is a legal EXPLICIT value for the same reason it is for
+  // `--severity-floor`: typing `--topology auto` means "the standing
+  // effort-driven pipeline", not a typo to reject.
   'auto',
 ]);
 
@@ -200,6 +229,11 @@ function asSeverityFloor(value: string): ReviewSeverityFloor | 'auto' | null {
   return SEVERITY_FLOORS.has(lower)
     ? (lower as ReviewSeverityFloor | 'auto')
     : null;
+}
+
+function asTopology(value: string): ReviewTopology | null {
+  const lower = value.toLowerCase();
+  return TOPOLOGIES.has(lower) ? (lower as ReviewTopology) : null;
 }
 
 /**
@@ -336,6 +370,7 @@ export function parseReviewArgs(
   let resumeRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
+  let explicitTopology: ReviewTopology | null = null;
   let recordedHostFlag: string | undefined;
 
   // The configured default gets the same validation as an explicit flag:
@@ -384,6 +419,8 @@ export function parseReviewArgs(
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
   const floorIssues: EffortIssue[] = [];
+  // `--topology` shares the value-token grammar too, for the same reason.
+  const topologyIssues: EffortIssue[] = [];
 
   // First pass: pull out flags (and each value-taking flag's value token,
   // when the spaced form legitimately consumes one). Non-flag tokens are kept
@@ -392,7 +429,7 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor';
+    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
   }
   const kept: Kept[] = [];
 
@@ -506,6 +543,40 @@ export function parseReviewArgs(
         continue;
       }
       kept.push({ token: next, invalidValueOf: '--severity-floor' });
+      i++;
+      continue;
+    }
+
+    if (token === '--topology' || token.startsWith('--topology=')) {
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        const topologyValue = asTopology(value);
+        if (topologyValue !== null) {
+          explicitTopology = topologyValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--topology' });
+        } else {
+          topologyIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const nextTopology = next !== undefined ? asTopology(next) : null;
+      if (nextTopology !== null) {
+        explicitTopology = nextTopology;
+        i++;
+        continue;
+      }
+      if (next === '') {
+        topologyIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (next === undefined || isFlag(next)) {
+        topologyIssues.push({ kind: 'missing' });
+        continue;
+      }
+      kept.push({ token: next, invalidValueOf: '--topology' });
       i++;
       continue;
     }
@@ -652,7 +723,12 @@ export function parseReviewArgs(
       : undefined;
   let rescuedPr = false;
   for (const k of kept) {
-    const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
+    const issues =
+      k.invalidValueOf === '--effort'
+        ? effortIssues
+        : k.invalidValueOf === '--severity-floor'
+          ? floorIssues
+          : topologyIssues;
     if (k.invalidValueOf !== undefined) {
       const survives = isPrShaped(k.token)
         ? !hasValidCandidate && distinctPr.size === 1
@@ -732,11 +808,29 @@ export function parseReviewArgs(
 
   const isPr = target.type === 'pr-number' || target.type === 'pr-url';
 
+  // The topology resolves like the effort — an explicit flag beats the
+  // standing `auto` default. There is no configured (settings) topology: the
+  // minimal arm is an explicit A/B comparison, never a background default.
+  const topology: ReviewTopology = explicitTopology ?? 'auto';
+  const topologySource: ParsedReviewArgs['topologySource'] =
+    explicitTopology !== null ? 'explicit' : 'default';
+  // The minimal arm is terminal-only — it neither posts to a PR nor edits a
+  // working tree — so both write operations are gated off it. This keeps the
+  // guarantee in code rather than in whichever prose the orchestrator reads.
+  const isMinimal = topology === 'minimal';
+
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
-  const commentEffective = commentRequested && isPr;
+  const commentEffective = commentRequested && isPr && !isMinimal;
   if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
+    );
+  } else if (commentRequested && isPr && isMinimal) {
+    // Only when minimal is THE reason a would-be-effective comment is
+    // suppressed: on a non-PR target the comment does not apply anyway, and
+    // that case keeps its usual handling above.
+    warnings.push(
+      'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
     );
   }
 
@@ -750,12 +844,16 @@ export function parseReviewArgs(
   // `--fix` edits a working tree, so it needs one that outlives the review. A
   // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
   // `file` review's tree is the user's own checkout.
-  const fixEffective = fixRequested && !isPr;
+  const fixEffective = fixRequested && !isPr && !isMinimal;
   if (fixRequested && isPr) {
     warnings.push(
       'Warning: `--fix` flag is ignored because a PR review runs in an ephemeral ' +
         'worktree that is deleted when the review ends — there is no durable tree to ' +
         'fix. Use `--comment` to publish the findings instead.',
+    );
+  } else if (fixRequested && isMinimal) {
+    warnings.push(
+      'Warning: `--fix` is ignored because `--topology minimal` is terminal-only — the minimal arm edits nothing.',
     );
   }
 
@@ -900,6 +998,37 @@ export function parseReviewArgs(
     );
   }
 
+  // The topology's deferred warnings, composed now that the resolution is
+  // final — the same shape as the effort's and the floor's.
+  const topologyResolution =
+    topologySource === 'explicit'
+      ? `--topology ${topology} (the last valid occurrence) is in effect`
+      : 'using the default topology (auto)';
+  for (const issue of topologyIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; ${topologyResolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--topology requires a value; ${topologyResolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)} discarded; ${topologyResolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; treating it as the review target — ${topologyResolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
   return {
     target,
     effort,
@@ -908,6 +1037,8 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    topology,
+    topologySource,
     ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     resume: { requested: resumeRequested, effective: resumeEffective },
     extraTokens,
@@ -954,7 +1085,7 @@ function reviewDefaultsFromSettings(): {
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, --topology, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {

@@ -690,6 +690,8 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 ## LLM call budget
 
+**`--topology minimal` — 0 subagent calls.** The minimal arm (issue #9783, Step 3M) is a single careful pass over the diff in the orchestrator's own context — no fan-out, no verification, no reverse audit, no build/test. It costs one model turn, the same shape as the low tier's inline pass, and it is priced here for completeness, not as a recommended default: it exists so the full pipeline and this minimal prompt can be run over the same PR set and compared per model. This section tracks per-topology _cost_; the A/B the minimal arm enables extends it with per-model _quality_, which is what decides whether any cell of a future model-family × effort routing table routes away from the full pipeline. Until that data exists, every review runs the topology below.
+
 **Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 17-28 calls (typically 17-19):**
 
 | Stage                   | Calls               | Why                                                                                                                                                                                                                                                                       |
