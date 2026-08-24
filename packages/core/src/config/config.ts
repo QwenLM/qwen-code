@@ -4683,10 +4683,19 @@ export class Config {
    * Provider adapters clamp the tier to what the active model supports. Pass
    * undefined to clear the override and fall back to the model/provider default.
    *
+   * With `recordDefaultOverride` an undefined effort records the sticky
+   * "default/on" override instead of clearing it — for surfaces whose
+   * explicit Default choice must survive rebuilds — while still only
+   * deleting `effort`, so sibling keys the wire layer honors (e.g.
+   * `budget_tokens`) survive.
+   *
    * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
    * cannot silently re-enable it.
    */
-  setReasoningEffort(effort: ReasoningEffort | undefined): void {
+  setReasoningEffort(
+    effort: ReasoningEffort | undefined,
+    recordDefaultOverride?: boolean,
+  ): void {
     // Under an explicit `reasoning: false` the tier does not land
     // (applyEffort no-ops) and callers report the discard; do not record an
     // override a later rebuild would then force-apply. The live config is
@@ -4694,12 +4703,12 @@ export class Config {
     const reasoningNow =
       this.contentGeneratorConfig?.reasoning ??
       this.modelsConfig?.getGenerationConfig().reasoning;
-    if (reasoningNow !== false) {
+    if (recordDefaultOverride) {
+      this.reasoningOverride = { type: 'default' };
+    } else if (reasoningNow !== false) {
       // Clearing the tier returns the session to the untouched state — no
       // sticky default override — so a later rebuild applies the
-      // model/provider default, including a preset `reasoning: false`. The
-      // explicit "default/on" choice is setReasoningDisabled(false), which
-      // does record the sticky default.
+      // model/provider default, including a preset `reasoning: false`.
       this.reasoningOverride = effort ? { type: 'effort', effort } : undefined;
     }
     const applyEffort = (
@@ -4782,9 +4791,23 @@ export class Config {
       });
       if (cfg.thinkingMandatory === true || reasoning?.canDisable === false) {
         // Thinking-mandatory models ignore a disable on the wire, so the
-        // override cannot apply; drop it (and the `reasoning: false` it
-        // re-pinned) instead of concealing it behind a projected effort.
-        this.setReasoningDisabled(false);
+        // override cannot apply; drop it, undoing only the
+        // `reasoning: false` it re-pinned — the rebuild may have resolved a
+        // positive block for the new model (e.g. a user-authored preset),
+        // which wholesale clearing would clobber.
+        const clearPinnedDisable = (
+          c: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+        ): void => {
+          if (c && c.reasoning === false) {
+            c.reasoning = undefined;
+          }
+        };
+        clearPinnedDisable(this.contentGeneratorConfig);
+        const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+        if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+          clearPinnedDisable(runtimeCfg);
+        }
+        clearPinnedDisable(this.modelsConfig?.getGenerationConfig());
         this.reasoningOverride = undefined;
         return;
       }

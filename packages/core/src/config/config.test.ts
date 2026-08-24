@@ -4907,6 +4907,54 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('records the sticky default without replacing a budget-carrying block', async () => {
+      // The explicit default choice must stay sticky across rebuilds while
+      // only clearing the effort tier: replacing the whole block (as
+      // setReasoningDisabled(false) does) would drop sibling keys the wire
+      // layer honors, e.g. budget_tokens on the Anthropic wire.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'high', budget_tokens: 32000 },
+        },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'claude-sonnet',
+        authType: AuthType.USE_OPENAI,
+        reasoning: { effort: 'high', budget_tokens: 32000 },
+      };
+
+      config.setReasoningEffort(undefined, true);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        budget_tokens: 32000,
+      });
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toEqual({
+        budget_tokens: 32000,
+      });
+
+      // The recorded default override keeps a later rebuild from re-pinning
+      // a preset disable.
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'claude-sonnet',
+          authType,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -5189,6 +5237,57 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
       config.setReasoningEffort('high');
       expect(config.getReasoningEffort()).toBe('high');
+    });
+
+    it('keeps the positive block a rebuild resolved when dropping an inapplicable sticky disable', async () => {
+      // Switching onto a model that cannot be disabled synced that model's
+      // user-authored preset (a positive reasoning block) into the
+      // rebuildable source before the rebuild; the discard must clear only
+      // the re-pinned `false`, not the block the rebuild just resolved.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      config.getModelsConfig().getGenerationConfig().reasoning = {
+        effort: 'low',
+      };
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k3',
+          authType,
+          baseUrl: 'https://api.moonshot.cn/v1',
+          reasoning: { effort: 'low' },
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'low',
+      });
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toEqual({
+        effort: 'low',
+      });
+
+      // The dropped override must not linger: a later rebuild that resolves
+      // a preset disable keeps it, because nothing restores thinking.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k3',
+          authType,
+          baseUrl: 'https://api.moonshot.cn/v1',
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
     });
 
     it('restores the user effort on a standalone auth refresh under a preset disable', async () => {

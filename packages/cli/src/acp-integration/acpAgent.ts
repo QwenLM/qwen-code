@@ -5374,14 +5374,24 @@ class QwenAgent implements Agent {
           // an explicit opt into the model default or a tier.
           const fallbackConfig = session.getConfig();
           if (effort === undefined) {
-            // Record the sticky default override like the registry branch;
-            // setReasoningEffort(undefined) would clear it again, letting the
-            // next rebuild re-pin a preset `reasoning: false`.
-            fallbackConfig.setReasoningDisabled(false);
+            if (
+              fallbackConfig.getContentGeneratorConfig().reasoning === false
+            ) {
+              // Nothing to preserve on a pinned disable; re-enable wholesale.
+              fallbackConfig.setReasoningDisabled(false);
+            } else {
+              // Record the sticky default override like the registry branch
+              // while only clearing the tier: replacing the block (as
+              // setReasoningDisabled(false) does) would destroy sibling keys
+              // the wire layer honors, e.g. budget_tokens.
+              fallbackConfig.setReasoningEffort(undefined, true);
+            }
           } else {
             // Clear a sticky disable first, or the tier would no-op on it and
             // report success while thinking stays off with no re-enable path.
-            if (fallbackConfig.getContentGeneratorConfig().reasoning === false) {
+            if (
+              fallbackConfig.getContentGeneratorConfig().reasoning === false
+            ) {
               fallbackConfig.setReasoningDisabled(false);
             }
             if (!applyReasoningEffort(fallbackConfig, effort)) {
@@ -5405,7 +5415,6 @@ class QwenAgent implements Agent {
       };
     });
   }
-
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);

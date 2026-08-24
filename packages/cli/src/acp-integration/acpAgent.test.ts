@@ -7357,11 +7357,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         configId: 'reasoning_effort',
         value: 'default',
       })) as { configOptions: typeof session.configOptions };
-      // 'default' records the sticky default override; it must not clear the
-      // tier via setReasoningEffort(undefined), which would also drop the
-      // override and let the next config rebuild re-pin a preset disable.
-      expect(innerConfig.setReasoningDisabled).toHaveBeenLastCalledWith(false);
-      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(1);
+      // 'default' records the sticky default override while only clearing
+      // the effort tier: setReasoningDisabled(false) would replace the whole
+      // block and clobber sibling keys, and setReasoningEffort(undefined)
+      // alone would drop the override and let the next config rebuild re-pin
+      // a preset disable.
+      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenLastCalledWith(
+        undefined,
+        true,
+      );
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
       expect(
         reset.configOptions.find((option) => option.id === 'reasoning_effort')
           ?.currentValue,
@@ -7376,7 +7382,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
       );
-      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(1);
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
 
       innerConfig.setReasoningEffort.mockImplementation(() => {});
       await expect(
@@ -7388,7 +7394,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'Reasoning effort cannot be applied while thinking is disabled',
       );
-      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -7688,6 +7694,83 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(generation.reasoning).toBeUndefined();
       expect(reasoningOverride).toEqual({ type: 'default' });
       expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('default');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('keeps a configured budget when the fallback surface selects default', async () => {
+    // Models outside the reasoning registry fall back to the generic
+    // surface; selecting 'Default' there must record the sticky default
+    // override without replacing the reasoning block, or a configured
+    // sibling budget_tokens (honored e.g. on the Anthropic wire) is silently
+    // destroyed while the selection reports success.
+    const sessionId = 'fallback-reasoning-budget-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string; budget_tokens?: number };
+    } = { reasoning: { effort: 'high', budget_tokens: 32000 } };
+    let reasoningOverride:
+      | { type: 'disabled' }
+      | { type: 'default' }
+      | { type: 'effort'; effort: string }
+      | undefined;
+    innerConfig.getModel = vi.fn().mockReturnValue('my-custom-model');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn(
+      (effort: string | undefined, recordDefaultOverride?: boolean) => {
+        const current = generation.reasoning;
+        if (recordDefaultOverride) {
+          reasoningOverride = { type: 'default' };
+        } else {
+          if (current === false) return;
+          reasoningOverride = effort ? { type: 'effort', effort } : undefined;
+        }
+        if (!current) return;
+        if (effort) {
+          generation.reasoning = { ...current, effort };
+          return;
+        }
+        const { effort: _drop, ...rest } = current;
+        generation.reasoning =
+          Object.keys(rest).length > 0
+            ? (rest as { budget_tokens?: number })
+            : undefined;
+      },
+    );
+    innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
+      reasoningOverride = disabled ? { type: 'disabled' } : { type: 'default' };
+      generation.reasoning = disabled ? false : undefined;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as SetSessionConfigOptionResponse;
+
+      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith(
+        undefined,
+        true,
+      );
+      expect(generation.reasoning).toEqual({ budget_tokens: 32000 });
+      expect(reasoningOverride).toEqual({ type: 'default' });
       expect(
         reset.configOptions.find((item) => item.id === 'reasoning_effort')
           ?.currentValue,
