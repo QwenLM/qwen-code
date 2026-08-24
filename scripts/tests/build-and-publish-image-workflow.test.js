@@ -281,6 +281,12 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       expect(result.status).toBe(0);
       expect(result.calls).toContain('gh issue edit 42');
       expect(result.calls).not.toContain('issue create');
+      // The dedup lookup must stay open-only: with `--state all` a closed
+      // marker issue (image recovered) matches the next failure and the
+      // script edits the CLOSED issue instead of opening a fresh alert —
+      // the silent-failure mode this PR exists to prevent. Only the list
+      // call carries this substring.
+      expect(result.calls).toContain('--state open');
       expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
       // The new run is appended to the recorded list, newest first, instead
       // of replacing it — the previous run URL must survive.
@@ -392,6 +398,13 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       expect(result.status).toBe(0);
       expect(result.calls).toContain('gh issue create');
       expect(result.calls).not.toContain('issue edit');
+      // The dedup lookup filters on DEDUP_LABEL, so the create call must
+      // apply it or every later lookup finds nothing and files duplicates.
+      // Scoped to the create line: the list call carries the label too.
+      const createCall = result.calls
+        .split('\n')
+        .find((call) => call.startsWith('gh issue create'));
+      expect(createCall).toContain('--label scope/ci-cd');
       expect(result.calls).toContain(
         'Sandbox image for 4.5.6 not published: release build job failed',
       );
