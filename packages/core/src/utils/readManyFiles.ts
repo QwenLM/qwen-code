@@ -21,6 +21,7 @@ import {
   isCacheableReadResult,
   processSingleFileContent,
 } from './fileUtils.js';
+import { hasVerifiableInode } from './file-identity.js';
 import { getFolderStructure } from './getFolderStructure.js';
 
 /**
@@ -159,6 +160,9 @@ export async function readManyFiles(
       const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
       if (validatedPathIdentities && !validatedIdentity) continue;
+      if (validatedIdentity && !hasVerifiableInode(validatedIdentity.ino)) {
+        continue;
+      }
       if (
         validatedIdentity &&
         !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
@@ -301,6 +305,7 @@ async function readValidatedTextFileContent(
     const stats = await source.stat();
     if (
       !stats.isFile() ||
+      !hasVerifiableInode(stats.ino) ||
       stats.dev !== expected.dev ||
       stats.ino !== expected.ino
     ) {
@@ -334,6 +339,7 @@ async function matchesValidatedPathIdentity(
     const canonicalPath = await fs.promises.realpath(filePath);
     if (canonicalPath !== filePath) return false;
     const stats = await fs.promises.stat(canonicalPath);
+    if (!hasVerifiableInode(stats.ino)) return false;
     return stats.dev === expected.dev && stats.ino === expected.ino;
   } catch {
     return false;
@@ -366,6 +372,7 @@ async function snapshotValidatedFile(
       const stats = await source.stat();
       if (
         !stats.isFile() ||
+        !hasVerifiableInode(stats.ino) ||
         stats.dev !== expected.dev ||
         stats.ino !== expected.ino
       ) {

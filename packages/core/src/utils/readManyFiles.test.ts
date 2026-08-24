@@ -184,6 +184,53 @@ describe('readManyFiles', () => {
       expect(result.files).toHaveLength(0);
     });
 
+    it('drops a validated path when inode identity is unverifiable', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('zero-inode.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const originalStat = fs.stat.bind(fs);
+      const originalOpen = fs.open.bind(fs);
+      const statSpy = vi
+        .spyOn(fs, 'stat')
+        .mockImplementation(async (...args) => {
+          const stats = await originalStat(...args);
+          if (String(args[0]) === absolutePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await originalOpen(...args);
+          const originalHandleStat = handle.stat.bind(handle);
+          vi.spyOn(handle, 'stat').mockImplementation(async () => {
+            const stats = await originalHandleStat();
+            Object.defineProperty(stats, 'ino', { value: 0 });
+            return stats;
+          });
+          return handle;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: 0 }],
+          ]),
+        });
+
+        expect(contentToString(result.contentParts)).not.toContain(
+          'Content of zero-inode.txt',
+        );
+        expect(result.files).toHaveLength(0);
+      } finally {
+        statSpy.mockRestore();
+        openSpy.mockRestore();
+      }
+    });
+
     it('drops a validated read when the identity map has no matching path key', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
