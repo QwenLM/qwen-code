@@ -315,7 +315,31 @@ describe('TodoWriteTool', () => {
       ).toMatchObject({ planId: 'plan-1' });
     });
 
-    it('should retain the plan ID for a repeated terminal snapshot', async () => {
+    it('should not rewrite or render a todo panel when the snapshot is unchanged', async () => {
+      const unchangedTodos: TodoItem[] = [
+        { id: '1', content: 'Task', status: 'in_progress' },
+        { id: '2', content: 'Next', status: 'pending' },
+      ];
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: unchangedTodos,
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool.build({ todos: unchangedTodos }).execute(mockAbortSignal),
+      );
+
+      expect(result.llmContent).toContain('Todo list is unchanged');
+      expect(result.returnDisplay).toBe('Todo list unchanged.');
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(mockConfig.setActiveTodoReminder).not.toHaveBeenCalled();
+    });
+
+    it('should not rewrite a repeated terminal snapshot', async () => {
       mockFs.readFile.mockResolvedValue(
         JSON.stringify({
           planId: 'finished-plan',
@@ -331,10 +355,8 @@ describe('TodoWriteTool', () => {
         })
         .execute(mockAbortSignal);
 
-      expect(result.returnDisplay).toMatchObject({ planId: 'finished-plan' });
-      expect(
-        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
-      ).toMatchObject({ planId: 'finished-plan' });
+      expect(result.returnDisplay).toBe('Todo list unchanged.');
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
     });
 
     it('should start a new plan after the previous plan completed', async () => {

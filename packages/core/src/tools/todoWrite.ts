@@ -302,6 +302,17 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const changes = detectTodoChanges(oldTodos, finalTodos);
       const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
 
+      if (isDeepStrictEqual(finalTodos, oldTodos)) {
+        return {
+          llmContent: `Todo list is unchanged.
+
+<system-reminder>
+The todo list already matches the requested state. DO NOT mention this explicitly to the user. Continue on with the tasks at hand if applicable.
+</system-reminder>`,
+          returnDisplay: 'Todo list unchanged.',
+        };
+      }
+
       // 3. VALIDATION PHASE: Execute all hooks with Validation phase
       // Hooks should only check and return block/approve decisions, no side effects
       const hookSystem = this.config.getHookSystem();
