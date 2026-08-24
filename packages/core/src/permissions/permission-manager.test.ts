@@ -2906,6 +2906,48 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('exit_plan_mode')).toBe(false);
     });
 
+    it('task_stop is exempt from the allowlist (#9827)', async () => {
+      // Under the exact reporter configuration run_shell_command is listed
+      // and its model-facing copy says to use task_stop to stop a
+      // background command (and not to use broad process-name kills); the
+      // background-promotion result instructs `task_stop({ task_id })`
+      // verbatim. task_stop is shouldDefer=true (task-stop.ts), the same
+      // deferred-schema property the computer_use__* exemption cites, so
+      // gating it buys nothing for the schema-shrink goal and only strips
+      // the sanctioned stop flow.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'ReadFile',
+            'WriteFile',
+            'Edit',
+            'Grep',
+            'Glob',
+            'ListFiles',
+            'Shell',
+            'WebFetch',
+          ],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('task_stop')).toBe(true);
+      // Unrelated unlisted built-ins stay gated.
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+    });
+
+    it('a whole-tool deny rule still wins over the task_stop exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['task_stop'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('task_stop')).toBe(false);
+    });
+
     it('session-granted allow rules extend membership but never activate the allowlist', async () => {
       // No configured allow rules → allowlist must stay inactive even after
       // a mid-session "Always allow" / skill allowedTools grant, or one

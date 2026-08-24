@@ -749,6 +749,15 @@ export class PermissionManager {
     //   `ask_user_question`): the plan-mode system reminder tells the model
     //   to call `exit_plan_mode` to present a plan, so their schemas must
     //   reach the model for the sanctioned plan flow to complete (#9827).
+    // - `task_stop`: registered tools advertise it to the model —
+    //   `run_shell_command`'s schema says to use `task_stop` to stop a
+    //   background command (and not to use broad process-name kills), and
+    //   the background-promotion result instructs `task_stop({ task_id })`
+    //   verbatim. It is `shouldDefer=true` (task-stop.ts), the exact
+    //   property the computer_use__* exemption below cites: deferred
+    //   schemas never enter the eager model request, so gating it buys
+    //   nothing for the schema-shrink goal and only strips the sanctioned
+    //   stop flow while the tool that advertises it stays listed (#9827).
     // - Computer Use tools (`computer_use__*`): the generated cua-driver
     //   surface (35 tools, `computerUseEnabled` defaults to true) has no
     //   alias entry, meta-category, or wildcard rule form — the wire names
@@ -763,6 +772,7 @@ export class PermissionManager {
       this.permissionsAllowListActive &&
       canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
       !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
+      canonicalName !== ToolNames.TASK_STOP &&
       !canonicalName.startsWith('mcp__') &&
       !canonicalName.startsWith('computer_use__') &&
       !this.isCoveredByAllowOrAskRule(canonicalName)
