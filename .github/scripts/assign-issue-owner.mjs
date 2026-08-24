@@ -20,6 +20,19 @@ function isStringArray(value) {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
 
+// A changed-file prefix for assign-pr-owner.mjs: relative, no `//`, no
+// backslash, no `.`/`..` segments, and ending in `/` so startsWith cannot
+// leak into a sibling directory (packages/core matching packages/coredump/).
+function isPathPrefix(prefix) {
+  if (typeof prefix !== 'string' || prefix.length === 0) return false;
+  if (prefix.startsWith('/') || prefix.startsWith('./')) return false;
+  if (!prefix.endsWith('/')) return false;
+  if (prefix.includes('\\') || prefix.includes('//')) return false;
+  return !prefix
+    .split('/')
+    .some((segment) => segment === '.' || segment === '..');
+}
+
 export function loadPolicy(raw) {
   const policy = JSON.parse(raw);
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
@@ -73,6 +86,20 @@ export function loadPolicy(raw) {
         throw new Error(`${OWNERS_FILE}: duplicate owner ${owner}`);
       }
       seen.add(normalizedOwner);
+    }
+    // A never-matching paths entry silently unroutes the area from PR
+    // assignment, so reject it here like other malformed config.
+    if (area.paths !== undefined && !Array.isArray(area.paths)) {
+      throw new Error(
+        `${OWNERS_FILE}: area ${area.name} paths must be an array`,
+      );
+    }
+    for (const prefix of area.paths ?? []) {
+      if (!isPathPrefix(prefix)) {
+        throw new Error(
+          `${OWNERS_FILE}: invalid paths entry in ${area.name}: ${JSON.stringify(prefix)}`,
+        );
+      }
     }
   }
   return policy;
