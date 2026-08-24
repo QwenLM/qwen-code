@@ -1091,6 +1091,102 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'never connects the kill on another base when a stamp proves the bind',
+    async () => {
+      // A stamp proves the bind was on the start base — the same fact
+      // `confirmedDead` leans on. So a socket at this run's unique name on
+      // ANY OTHER candidate base cannot be ours, and the pinned kill must
+      // not connect to it. Without this the identity arm was gated on the
+      // start base, and a plain foreign socket renamed onto the name under
+      // /tmp passed the symlink/nlink tests and took the kill — the user's
+      // own server destroyed, exit 0, no WARNING.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const uid = String(process.getuid?.());
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-crossbind-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const killLog = join(dir, 'kills');
+      const srvFile = join(dir, 'srv');
+      // Binds under the START base (stamp), records the server name, and
+      // ALSO drops a foreign entry at this run's name under /tmp — the
+      // renamed-foreign-socket shape. Every kill-server records the base it
+      // was invoked under.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "\${TMUX_TMPDIR}/tmux-${uid}"
+    : > "\${TMUX_TMPDIR}/tmux-${uid}/$SRV"
+    printf '%s' "$SRV" > '${srvFile}'
+    mkdir -p /tmp/tmux-${uid}
+    : > /tmp/tmux-${uid}/"$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "$TMUX_TMPDIR" >> '${killLog}'
+    exit 0
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        const killedBases = existsSync(killLog)
+          ? readFileSync(killLog, 'utf8').trim().split('\n')
+          : [];
+        // The start base is killed; the OTHER base (/tmp), where a socket
+        // stands at this run's name with a stamp proving we did not bind
+        // there, is NEVER connected to.
+        // The start base is killed; the OTHER base (/tmp), where a socket
+        // stands at this run's name with a stamp proving we did not bind
+        // there, is NEVER connected to — pre-fix it was, destroying it.
+        expect(killedBases).toContain(envBase);
+        expect(killedBases).not.toContain('/tmp');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        // Remove the foreign entry this test planted under the real /tmp.
+        try {
+          const srv = readFileSync(srvFile, 'utf8').trim();
+          if (srv) rmSync(join('/tmp', `tmux-${uid}`, srv), { force: true });
+        } catch {
+          // Nothing planted, or already gone.
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'does not let a kill on another base vouch for the start base',
     async () => {
       // A successful kill used to establish death GLOBALLY on the strength
@@ -1873,7 +1969,7 @@ exit 0
         return { status: 'ok', out: '' } as const;
       };
       try {
-        await withStdio(() =>
+        const { stdout } = await withStdio(() =>
           runCaptureTui({
             command: 'printf hi',
             cwd: dir,
@@ -1886,20 +1982,24 @@ exit 0
             timeoutMs: 10_000,
           } as never),
         );
-        expect(process.exitCode).toBeUndefined();
         // The premise: the inode really did survive the rewrite, so an
         // inode-only check would have passed these bytes through.
         expect(inodeHeld).toBe(true);
-        // freeze never saw the staged input, so nothing was rendered...
+        // ino+size+mtime catches it, and a .ans that is no longer this run's
+        // is no honest evidence: the run REFUSES rather than credit the
+        // forged bytes or mint the signature that would delete them.
+        expect(process.exitCode).toBe(3);
+        expect(JSON.parse(stdout.trim())).toEqual({
+          captured: false,
+          evidence: 'none',
+          reason: expect.stringContaining('replaced during the render window'),
+        });
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+        // freeze never saw the staged input, and the forged file is left in
+        // place (not ours to delete), just never credited.
         expect(existsSync(rendered)).toBe(false);
-        const manifest = JSON.parse(
-          readFileSync(join(dir, 'cap.json'), 'utf8'),
-        );
-        // ...and the forged bytes are never credited as this run's image.
-        expect(manifest.evidence).toBe('ans-only');
-        expect(manifest.pngPath).toBeNull();
-        expect(manifest.degradedBecause).toContain(
-          'was replaced while the render was being prepared',
+        expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+          'FORGED-EVIDENCE-BYTES-FORGED-EVIDENCE-BYTES',
         );
         expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
           [],
@@ -1957,7 +2057,7 @@ exit 0
         return { status: 'ok', out: '' } as const;
       };
       try {
-        await withStdio(() =>
+        const { stdout } = await withStdio(() =>
           runCaptureTui({
             command: 'printf hi',
             cwd: dir,
@@ -1970,20 +2070,21 @@ exit 0
             timeoutMs: 10_000,
           } as never),
         );
-        expect(process.exitCode).toBeUndefined();
-        // freeze never saw the staged input...
+        // A .ans no longer this run's is no honest evidence: the run REFUSES
+        // rather than credit or delete the foreign file (a manifest crediting
+        // it would also mint the clear signature that deletes it next run).
+        expect(process.exitCode).toBe(3);
+        expect(JSON.parse(stdout.trim())).toEqual({
+          captured: false,
+          evidence: 'none',
+          reason: expect.stringContaining('replaced during the render window'),
+        });
+        // No manifest is written on a refusal — that is what keeps 'none' out
+        // of any manifest and off the clear-phase signature.
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+        // freeze never saw the staged input, and the victim is untouched.
         expect(existsSync(rendered)).toBe(false);
         expect(readFileSync(victim, 'utf8')).toBe('FOREIGN-VICTIM-BYTES');
-        const manifest = JSON.parse(
-          readFileSync(join(dir, 'cap.json'), 'utf8'),
-        );
-        // ...and the victim's bytes are never credited as this capture's
-        // image.
-        expect(manifest.evidence).toBe('ans-only');
-        expect(manifest.pngPath).toBeNull();
-        expect(manifest.degradedBecause).toContain(
-          'was replaced while the render was being prepared',
-        );
         // The link this run's linkSync staged is this run's to remove.
         expect(readdirSync(dir).filter((f) => f.includes('.render-'))).toEqual(
           [],

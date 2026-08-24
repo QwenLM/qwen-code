@@ -929,9 +929,12 @@ describe('runCleanup', () => {
 
         runCleanup('local');
 
-        // The planted name is still unlinked — but never announced as a
-        // clean reap.
-        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${planted}`, {
+        // The entry is NOT unlinked: a racer renamed something onto the name
+        // in the connect→re-check window, and it may be a live server whose
+        // socket, once unlinked, is unreachable forever — the harm the
+        // function's own "unlink ONLY when known dead" rule forbids. Leaving
+        // it is self-healing; the next sweep re-examines it.
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(`${dir}/${planted}`, {
           force: true,
         });
         expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(

@@ -788,19 +788,27 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       // entry this sweep has not unlinked yet.
       entryChanged = true;
     }
-    try {
-      rmSync(join(dir, name), { force: true });
-    } catch {
-      // Litter is cosmetic; the server itself is already gone.
-    }
     if (entryChanged) {
+      // NEVER unlink here. The entry is no longer the plain socket the guard
+      // inspected — a racer renamed something onto the name in the
+      // connect→re-check window, and that something may be a live server
+      // whose socket, once unlinked, is unreachable forever (no attach, no
+      // `-L` control): the exact harm this function's own unlink rule
+      // ("ONLY when the server is known dead") forbids. Leaving the entry is
+      // self-healing — the next sweep re-examines it — so the WARNING stands
+      // and the socket is left alone.
       failedAny = true;
       writeStderrLine(
         `WARNING: ${name} changed between the type guard and the kill — ` +
-          'the server killed may not be the orphan this sweep matched; ' +
-          'check your tmux servers',
+          'the server killed may not be the orphan this sweep matched, so ' +
+          'its socket was left in place; check your tmux servers',
       );
     } else {
+      try {
+        rmSync(join(dir, name), { force: true });
+      } catch {
+        // Litter is cosmetic; the server itself is already gone.
+      }
       writeStdoutLine(`Reaped orphaned capture server: ${name}`);
     }
     reapedAny = true;

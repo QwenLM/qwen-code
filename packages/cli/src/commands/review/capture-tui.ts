@@ -1488,7 +1488,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // own is not connected to; the WARNING carries the manual
             // command, which is the disclosed cost of that choice.
             (resolve(base) === startBase &&
-              (socketStamp === undefined || !isStampedSocket(entry)));
+              (socketStamp === undefined || !isStampedSocket(entry))) ||
+            // A stamp PROVES the bind happened on the start base — the same
+            // fact `confirmedDead` already leans on. So on any OTHER base a
+            // socket at this run's unique name cannot be ours, and the kill
+            // must not connect to it: without this the identity arm above
+            // was gated on the start base and a plain foreign socket
+            // renamed onto the name under /tmp passed the symlink/nlink
+            // tests and took the pinned kill (measured: the user's own
+            // server destroyed, exit 0, no WARNING). Uses only the run's own
+            // stamp, no forgeable identity signal.
+            (socketStamp !== undefined && resolve(base) !== startBase);
         } catch {
           // Absent or unstattable: there is nothing planted to connect
           // through, and the kill's own goal-state wordings already answer
@@ -1960,6 +1970,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // .ans FIRST, then render: freeze has hung mid-render on this repo's own
   // workflows, and the text evidence must already be on disk when it does.
   let png: string | null = null;
+  // Identity of the png THIS run landed, for the manifest-failure cleanup to
+  // pin against — the same role ansWritten plays for the .ans.
+  let pngWritten: Stamp = untouched;
+  // Set when staging finds <out>.ans is no longer the bytes this run wrote —
+  // swapped or gone during the render window. The on-disk .ans is then not
+  // ours, so it must not be credited as this run's evidence (nor mint the
+  // clear-phase signature that would authorize a later run to delete it).
+  let ansLost = false;
   // Collect every way this capture fell short of "settled png" — the field's
   // contract is that a manifest reader learns WHY the ladder stopped where it
   // did, and a late frame and a failed render can both be true at once.
@@ -2130,10 +2148,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       }
       renderInputStaged = true;
     } catch {
-      // Swapped between this run's write and the render — degrade rather
-      // than attribute bytes this capture cannot show it produced. The
-      // stage exists when the link itself landed, and only this run names
-      // it, so it is this run's to remove.
+      // Swapped (or gone) between this run's write and the render. The
+      // on-disk .ans is no longer the bytes this run produced, so it is
+      // neither rendered NOR credited: `ansLost` drops the ans rung below,
+      // which also stops the manifest from minting the clear-phase
+      // signature over a foreign file (evidence 'none' is not a signature).
+      // The stage is this run's to remove; the foreign .ans is not touched.
+      ansLost = true;
       try {
         rmSync(ansStage, { force: true });
       } catch {
@@ -2141,7 +2162,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       }
       degradations.push(
         `${ansPath} was replaced while the render was being prepared — ` +
-          '.ans text captured, no image rendered',
+          'this run can no longer show the .ans it wrote, so no evidence ' +
+          'rung is claimed',
       );
     }
     if (renderInputStaged && freezeBin === undefined) {
@@ -2200,6 +2222,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
               const landed = lstatSync(pngPath);
               if (landed.isFile() && changed(pngPath, pngStamp)) {
                 png = pngPath;
+                pngWritten = stampOf(pngPath);
               } else {
                 degradations.push(
                   `${pngPath} changed while the rendered image was being ` +
@@ -2307,6 +2330,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
   }
 
+  if (ansLost) {
+    // The .ans this run wrote was replaced or removed during the render
+    // window (staging detected it by identity). There is no honest evidence
+    // rung left — the bytes on disk are not ours — so this refuses like the
+    // write-failure paths rather than write a manifest crediting them, which
+    // would both misattribute the foreign bytes and mint the clear-phase
+    // signature that authorizes a later run to delete them. The foreign file
+    // is left untouched; only this run's own stage was removed above. The
+    // server was already reaped before the .ans write, so nothing leaks.
+    await drainSignalsThenRelease();
+    refuse(
+      `${ansPath} was replaced during the render window; this run can no ` +
+        'longer show the .ans it wrote and will not credit or remove the ' +
+        'file now at that path',
+    );
+    return;
+  }
+
   const degradedBecause = degradations.length
     ? degradations.join('; ')
     : undefined;
@@ -2358,24 +2399,43 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // all three let a throw on the .ans or .png removal skip the manifest
       // one — leaving exactly the partial manifest this block calls worse
       // than none (probe-reproduced with a directory at the .png path).
-      for (const [path, stamp] of [
-        [ansPath, ansStamp],
-        [pngPath, pngStamp],
-        [manifestPath, manifestStamp],
-      ] as const) {
-        // A collision names the ONE path this run refused to replace: the
-        // occupant is someone else's, and removing it here would be the
-        // data loss the refusal exists to prevent.
-        if (e instanceof ArtifactCollision && path === manifestPath) continue;
-        // The png is ours ONLY when the render actually produced one: a
-        // degraded ladder left the occupant untouched, and an owner who
-        // rewrote their own file during the window answers changed() —
-        // deleting it then destroyed a file this run never wrote, on a run
-        // that wrote and rendered nothing (probe-reproduced; no adversarial
-        // race — the window legally runs up to an hour).
-        if (png === null && path === pngPath) continue;
+      // BY IDENTITY, against what this run actually put there — not against
+      // the pre-window stamp. For the .ans and the .png that stamp had
+      // `existed: false`, so `changed()` collapses to `occupied()` ("is
+      // something there"), and a file SWAPPED into <out>.ans during the
+      // render window then answered it and was destroyed on an ordinary
+      // manifest-write failure (collision/ENOSPC/EMFILE). `ansWritten` and
+      // `pngWritten` record the exact bytes this run wrote and landed, so a
+      // path is removed only while it is still that file; a swap that
+      // replaced it is foreign and left alone.
+      const removeIfStillOurs = (path: string, written: Stamp) => {
+        if (written.size === UNSTAMPED && written.ino === UNSTAMPED) return;
         try {
-          if (changed(path, stamp)) rmSync(path, { force: true });
+          const st = lstatSync(path);
+          if (
+            st.ino === written.ino &&
+            st.size === written.size &&
+            st.mtimeMs === written.mtimeMs
+          ) {
+            rmSync(path, { force: true });
+          }
+        } catch {
+          // Gone, or unstattable: nothing of ours to remove.
+        }
+      };
+      // The .ans write succeeded, so ansWritten is set; remove it only while
+      // it is still those bytes.
+      removeIfStillOurs(ansPath, ansWritten);
+      // The png is ours only when the render actually landed one (pngWritten
+      // stays UNSTAMPED otherwise, so removeIfStillOurs is a no-op).
+      removeIfStillOurs(pngPath, pngWritten);
+      // The manifest is the file this write just failed on: a partial one is
+      // worse than none and is ours (O_TRUNC truncated it), so it goes — but
+      // NOT a collision occupant this run refused to replace.
+      if (!(e instanceof ArtifactCollision)) {
+        try {
+          if (changed(manifestPath, manifestStamp))
+            rmSync(manifestPath, { force: true });
         } catch {
           // The refusal reason below is the primary signal either way.
         }
