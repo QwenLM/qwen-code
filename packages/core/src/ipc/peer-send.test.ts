@@ -57,6 +57,9 @@ describe('sendToPeer', () => {
     mocks.readOwnSessionRecord.mockReset().mockResolvedValue({
       sessionId: 'self-session',
       name: 'planner',
+      cwd: '/work/planner',
+      pid: 1,
+      startedAt: 1,
       ipcPath: socket('self'),
     });
     mocks.listMessageablePeers.mockReset().mockResolvedValue([]);
@@ -82,7 +85,10 @@ describe('sendToPeer', () => {
   it('sends a marked frame and excludes this session from discovery', async () => {
     const worker = peer('worker', 'aaaaaa');
     mocks.listMessageablePeers.mockResolvedValue([
-      peer('planner', '000000', 'self-session'),
+      {
+        ...peer('planner', '000000', 'self-session'),
+        ipcPath: socket('self'),
+      },
       worker,
     ]);
 
@@ -102,6 +108,12 @@ describe('sendToPeer', () => {
       expect.objectContaining({
         type: 'user',
         from: socket('self'),
+        fromAddress: formatPeerAddress({
+          sessionId: 'self-session',
+          ipcPath: socket('self'),
+          pid: 1,
+          startedAt: 1,
+        }),
         fromName: 'planner',
         fromMode: 'prompting',
         message: { role: 'user', content: 'run the focused tests' },
@@ -122,6 +134,23 @@ describe('sendToPeer', () => {
     expect(mocks.sendPeerFrame).toHaveBeenCalledWith(
       worker.ipcPath,
       expect.objectContaining({ fromMode: 'bypass' }),
+    );
+  });
+
+  it('keeps another process that resumed the same conversation addressable', async () => {
+    const sibling = peer('sibling', 'aaaaaa', 'self-session');
+    mocks.listMessageablePeers.mockResolvedValue([sibling]);
+
+    const outcome = await sendToPeer({
+      target: formatPeerAddress(sibling),
+      message: 'coordinate this run',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome).toMatchObject({ kind: 'sent', peer: sibling });
+    expect(mocks.sendPeerFrame).toHaveBeenCalledWith(
+      sibling.ipcPath,
+      expect.anything(),
     );
   });
 

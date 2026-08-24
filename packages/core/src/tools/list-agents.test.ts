@@ -25,8 +25,21 @@ vi.mock('../ipc/peer-directory.js', async () => {
   return { ...real, listMessageablePeers: peerMocks.listMessageablePeers };
 });
 
-const peerAddress = (sessionId: string) =>
-  `qwen-session:${createHash('sha256').update(sessionId).digest('hex')}`;
+const peerAddress = (
+  sessionId: string,
+  ipcPath: string,
+  pid: number,
+  startedAt: number,
+) =>
+  `qwen-session:${createHash('sha256')
+    .update(sessionId)
+    .update('\0')
+    .update(ipcPath)
+    .update('\0')
+    .update(String(pid))
+    .update('\0')
+    .update(String(startedAt))
+    .digest('hex')}`;
 
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
@@ -139,6 +152,7 @@ describe('ListAgentsTool', () => {
       sessionId: 'self',
       ipcPath: '/tmp/self.sock',
       name: 'self',
+      address: peerAddress('self', '/tmp/self.sock', 1, 0),
     });
     peerMocks.listMessageablePeers.mockResolvedValue([
       {
@@ -186,14 +200,14 @@ describe('ListAgentsTool', () => {
       ],
       sessions: [
         {
-          to: peerAddress('peer-a'),
+          to: peerAddress('peer-a', '/tmp/a.sock', 2, 1),
           name: 'app',
           ref: 'aaaaaa',
           cwd: '/work/a',
           started_at: '1970-01-01T00:00:00.001Z',
         },
         {
-          to: peerAddress('peer-b'),
+          to: peerAddress('peer-b', '/tmp/b.sock', 3, 2),
           name: 'app',
           ref: 'bbbbbb',
           cwd: '/work/b',

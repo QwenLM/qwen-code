@@ -38,17 +38,19 @@ describe('parsePeerFrame — user frames', () => {
     });
   });
 
-  it('carries from, fromName and fromMode through', () => {
+  it('carries transport, reply, name and mode fields through', () => {
     const frame = parsePeerFrame(
       line({
         ...validUser,
         from: '/run/user/1000/qwen-socks/9.sock',
+        fromAddress: `qwen-session:${'a'.repeat(64)}`,
         fromName: 'app-ab',
         fromMode: 'bypass',
       }),
     );
     expect(frame).toMatchObject({
       from: '/run/user/1000/qwen-socks/9.sock',
+      fromAddress: `qwen-session:${'a'.repeat(64)}`,
       fromName: 'app-ab',
       fromMode: 'bypass',
     });

@@ -9,6 +9,10 @@ import { readOwnSessionRecord } from '../services/session-registry.js';
 import { receiverReviewsActions } from './inbound-gate.js';
 import { buildUserFrame } from './peer-frames.js';
 import {
+  forgetSentPeerMessage,
+  trackSentPeerMessage,
+} from './peer-receipts.js';
+import {
   formatPeerAddress,
   listMessageablePeers,
   resolvePeerTarget,
@@ -18,18 +22,23 @@ import {
 import { PeerSendError, sendPeerFrame } from './uds-client.js';
 
 export interface OwnPeerIdentity {
-  sessionId: string;
   ipcPath: string;
   name: string;
+  address: string;
 }
 
 export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
   const record = await readOwnSessionRecord();
   if (!record?.ipcPath) return null;
   return {
-    sessionId: record.sessionId,
     ipcPath: record.ipcPath,
     name: record.name,
+    address: formatPeerAddress({
+      sessionId: record.sessionId,
+      pid: record.pid,
+      ipcPath: record.ipcPath,
+      startedAt: record.startedAt,
+    }),
   };
 }
 
@@ -50,7 +59,7 @@ export async function sendToPeer(options: {
   if (!self) return { kind: 'disabled' };
 
   const peers = (await listMessageablePeers()).filter(
-    (peer) => peer.sessionId !== self.sessionId,
+    (peer) => peer.ipcPath !== self.ipcPath,
   );
   const resolved = resolvePeerTarget(peers, options.target);
   if (resolved.kind === 'none') {
@@ -71,24 +80,25 @@ export async function sendToPeer(options: {
 
   const peer = resolved.peer;
   const address = formatPeerAddress(peer);
+  const frame = buildUserFrame({
+    content: options.message,
+    from: self.ipcPath,
+    fromAddress: self.address,
+    fromName: self.name,
+    ...(options.approvalMode !== null
+      ? {
+          fromMode: receiverReviewsActions(options.approvalMode)
+            ? 'prompting'
+            : 'bypass',
+        }
+      : {}),
+  });
+  trackSentPeerMessage(frame.msgId);
   try {
-    await sendPeerFrame(
-      peer.ipcPath,
-      buildUserFrame({
-        content: options.message,
-        from: self.ipcPath,
-        fromName: self.name,
-        ...(options.approvalMode !== null
-          ? {
-              fromMode: receiverReviewsActions(options.approvalMode)
-                ? 'prompting'
-                : 'bypass',
-            }
-          : {}),
-      }),
-    );
+    await sendPeerFrame(peer.ipcPath, frame);
     return { kind: 'sent', peer, address };
   } catch (error) {
+    forgetSentPeerMessage(frame.msgId);
     return {
       kind: 'failed',
       peer,

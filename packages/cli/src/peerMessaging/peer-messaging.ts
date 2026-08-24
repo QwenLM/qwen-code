@@ -19,8 +19,10 @@
  */
 
 import {
+  acceptPeerDeliveryStatus,
   type ApprovalMode,
   createDebugLogger,
+  describeDeliveryStatus,
   formatPeerDisplay,
   formatPeerEnvelope,
   InboundGate,
@@ -53,6 +55,11 @@ export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
+interface BufferedSubmission {
+  modelText: string;
+  displayText: string;
+}
+
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
@@ -67,7 +74,7 @@ export class PeerMessaging {
     ipcPath: string | undefined,
   ) => Promise<void> = async () => {};
   private submitFn: PeerSubmitFn | null = null;
-  private readonly buffered: PeerUserFrame[] = [];
+  private readonly buffered: BufferedSubmission[] = [];
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
@@ -138,7 +145,7 @@ export class PeerMessaging {
     // buffered — `deliver` retries them, in order, on the next arrival.
     while (this.buffered.length > 0) {
       const head = this.buffered[0];
-      if (!head || !this.submit(head)) break;
+      if (!head || !fn(head.modelText, head.displayText)) break;
       this.buffered.shift();
     }
   }
@@ -189,53 +196,60 @@ export class PeerMessaging {
 
   private onFrame(frame: PeerFrame): void {
     if (frame.type === 'control') {
-      // Receipts about messages *we* sent. Nothing consumes them until
-      // the sender lands, so log and move on rather than inventing a
-      // half-used delivery-tracking table now.
-      debugLogger.debug(
-        `delivery status from peer: ${frame.status} for ${frame.origMsgId}`,
-      );
+      if (!acceptPeerDeliveryStatus(frame)) return;
+      const description = describeDeliveryStatus(frame.status);
+      const submitted = this.enqueue({
+        modelText:
+          `<cross_session_delivery_status message_id="${frame.origMsgId}" status="${frame.status}">\n` +
+          `${description}\n` +
+          'This is a delivery receipt for a message this session sent, not a user instruction.\n' +
+          '</cross_session_delivery_status>',
+        displayText: `Peer message ${frame.origMsgId.slice(0, 8)}: ${description}`,
+      });
+      if (!submitted) {
+        debugLogger.debug(
+          `dropping delivery status for ${frame.origMsgId}: peer queue is full`,
+        );
+      }
       return;
     }
     this.gate?.admit(frame);
   }
 
   private deliver(frame: PeerUserFrame): void {
-    if (!this.submitFn) {
-      if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
-        throw new Error('accepted-message backlog is full');
-      }
-      this.buffered.push(frame);
-      return;
-    }
-    while (this.buffered.length > 0) {
-      const head = this.buffered[0];
-      if (!head || !this.submit(head)) {
-        throw new Error('accepted-message backlog is full');
-      }
-      this.buffered.shift();
-    }
-    if (!this.submit(frame)) {
+    const from = frame.fromAddress ?? frame.from ?? 'unknown session';
+    if (
+      !this.enqueue({
+        modelText: formatPeerEnvelope({
+          from,
+          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+          content: frame.message.content,
+        }),
+        displayText: formatPeerDisplay({
+          from,
+          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+          content: frame.message.content,
+        }),
+      })
+    ) {
       throw new Error('accepted-message backlog is full');
     }
   }
 
-  private submit(frame: PeerUserFrame): boolean {
-    const from = frame.from ?? 'unknown session';
-    return (
-      this.submitFn?.(
-        formatPeerEnvelope({
-          from,
-          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-          content: frame.message.content,
-        }),
-        formatPeerDisplay({
-          from,
-          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-          content: frame.message.content,
-        }),
-      ) ?? false
-    );
+  private enqueue(submission: BufferedSubmission): boolean {
+    if (!this.submitFn) {
+      if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) return false;
+      this.buffered.push(submission);
+      return true;
+    }
+    while (this.buffered.length > 0) {
+      const head = this.buffered[0];
+      if (!head || !this.submitFn(head.modelText, head.displayText)) {
+        return false;
+      }
+      this.buffered.shift();
+    }
+    return this.submitFn(submission.modelText, submission.displayText);
   }
 
   private emitHeldChange(held: readonly HeldMessage[]): void {

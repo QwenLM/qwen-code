@@ -318,6 +318,7 @@ export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
+export * from './ipc/peer-receipts.js';
 export * from './ipc/socket-path.js';
 export * from './ipc/uds-client.js';
 export * from './ipc/uds-inbox.js';

@@ -15,9 +15,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   ApprovalMode,
+  buildDeliveryStatusFrame,
   buildUserFrame,
   sendPeerFrame,
   startPeerInbox,
+  trackSentPeerMessage,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -88,6 +90,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       buildUserFrame({
         content: 'check the tests over there',
         from: '/tmp/peer.sock',
+        fromAddress: `qwen-session:${'a'.repeat(64)}`,
         fromName: 'app-ab',
       }),
     );
@@ -95,7 +98,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     expect(submitted).toHaveLength(1);
     expect(submitted[0].modelText).toContain(
-      '<cross_session_message from="/tmp/peer.sock" name="app-ab">',
+      `<cross_session_message from="qwen-session:${'a'.repeat(64)}" name="app-ab">`,
     );
     expect(submitted[0].modelText).toContain('check the tests over there');
     expect(submitted[0].modelText).toContain('permission laundering');
@@ -231,6 +234,35 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
     await settle();
     expect(submitted).toHaveLength(0);
+  });
+
+  it('surfaces correlated delivery receipts to the sending session', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+    trackSentPeerMessage('sent-message');
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-message',
+      }),
+    );
+    await settle();
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'delivered',
+        origMsgId: 'sent-message',
+      }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(2);
+    expect(submitted[0].modelText).toContain(
+      '<cross_session_delivery_status message_id="sent-message" status="held">',
+    );
+    expect(submitted[0].displayText).toContain('held for the recipient user');
+    expect(submitted[1].modelText).toContain('status="delivered"');
   });
 
   it('releases held messages when the approval mode changes', async () => {

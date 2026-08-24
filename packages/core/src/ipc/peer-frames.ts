@@ -49,8 +49,10 @@ export interface PeerUserFrame {
   msgV: number;
   msgId: string;
   type: 'user';
-  /** Reply address: the sender's own socket path, or absent if it has none. */
+  /** Transport return path for receipts, or absent if the sender has none. */
   from?: string;
+  /** Stable process address shown to the receiver for later replies. */
+  fromAddress?: string;
   /** Sender's display name, for the envelope shown to the model. */
   fromName?: string;
   /**
@@ -152,6 +154,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       msgId,
       type: 'user',
       from: optionalString(parsed['from']),
+      fromAddress: optionalString(parsed['fromAddress']),
       fromName: optionalString(parsed['fromName']),
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }
@@ -198,6 +201,7 @@ export function encodePeerFrame(frame: PeerFrame): string {
 export interface BuildUserFrameFields {
   content: string;
   from?: string;
+  fromAddress?: string;
   fromName?: string;
   fromMode?: 'bypass' | 'prompting';
   priority?: PeerMessagePriority;
@@ -209,6 +213,9 @@ export function buildUserFrame(fields: BuildUserFrameFields): PeerUserFrame {
     msgId: randomUUID(),
     type: 'user',
     ...(fields.from !== undefined ? { from: fields.from } : {}),
+    ...(fields.fromAddress !== undefined
+      ? { fromAddress: fields.fromAddress }
+      : {}),
     ...(fields.fromName !== undefined ? { fromName: fields.fromName } : {}),
     ...(fields.fromMode !== undefined ? { fromMode: fields.fromMode } : {}),
     priority: fields.priority ?? 'next',

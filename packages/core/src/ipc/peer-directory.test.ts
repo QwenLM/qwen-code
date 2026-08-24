@@ -151,6 +151,24 @@ describe('peer directory', () => {
     });
   });
 
+  it('binds an address to one live process incarnation', () => {
+    const original = peer('worker', 'aaaaaa');
+    const sibling = {
+      ...original,
+      ipcPath: socket('sibling'),
+    };
+    const pidReuse = {
+      ...original,
+      startedAt: original.startedAt + 1,
+    };
+
+    expect(formatPeerAddress(original)).not.toBe(formatPeerAddress(sibling));
+    expect(formatPeerAddress(original)).not.toBe(formatPeerAddress(pidReuse));
+    expect(resolvePeerTarget([pidReuse], formatPeerAddress(original))).toEqual({
+      kind: 'none',
+    });
+  });
+
   it('round-trips advertised addresses containing reserved syntax', () => {
     const peers = [
       peer('target [bbbbbb]', 'aaaaaa'),

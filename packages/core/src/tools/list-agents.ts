@@ -66,7 +66,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
     const self = await getOwnPeerIdentity();
     const peers = self
       ? (await listMessageablePeers()).filter(
-          (peer) => peer.sessionId !== self.sessionId,
+          (peer) => peer.ipcPath !== self.ipcPath,
         )
       : [];
     const sessions = peers.map((peer) => ({

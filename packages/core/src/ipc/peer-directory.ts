@@ -89,8 +89,18 @@ export function resolvePeerTarget(
   return resolveMatches(peers.filter((peer) => peer.name === trimmed));
 }
 
-export function formatPeerAddress(peer: PeerSessionInfo): string {
-  const token = createHash('sha256').update(peer.sessionId).digest('hex');
+export function formatPeerAddress(
+  peer: Pick<PeerSessionInfo, 'sessionId' | 'ipcPath' | 'pid' | 'startedAt'>,
+): string {
+  const token = createHash('sha256')
+    .update(peer.sessionId)
+    .update('\0')
+    .update(peer.ipcPath)
+    .update('\0')
+    .update(String(peer.pid))
+    .update('\0')
+    .update(String(peer.startedAt))
+    .digest('hex');
   return `${PEER_ADDRESS_PREFIX}${token}`;
 }
 
