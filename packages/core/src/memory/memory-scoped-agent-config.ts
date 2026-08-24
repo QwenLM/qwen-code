@@ -335,8 +335,8 @@ function getScopedDenyRule(
   pinnedRoots: readonly PinnedMemoryRoot[],
 ): string | undefined {
   const allowedRoots = [
-    ...(opts.includeProjectMemory ? [getAutoMemoryRoot(projectRoot)] : []),
     ...(opts.includeUserMemory ? [getUserAutoMemoryRoot()] : []),
+    ...(opts.includeProjectMemory ? [getAutoMemoryRoot(projectRoot)] : []),
   ].join(' or ');
   switch (ctx.toolName) {
     case ToolNames.SHELL:

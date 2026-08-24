@@ -7163,7 +7163,7 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });
 
-    it('POSTs /workspace/memory/forget and forwards client id', async () => {
+    it('POSTs /workspace/memory/forget and forwards scope and client id', async () => {
       const reply = {
         taskId: 'forget-1',
         status: 'queued' as const,
@@ -7174,6 +7174,7 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(
         client.forgetWorkspaceMemory('old preference', {
+          scope: 'user',
           clientId: 'client-7',
         }),
       ).resolves.toEqual(reply);
@@ -7183,6 +7184,7 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         query: 'old preference',
+        scope: 'user',
       });
     });
 

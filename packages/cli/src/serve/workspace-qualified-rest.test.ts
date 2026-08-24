@@ -1609,6 +1609,17 @@ describe('workspace-qualified core REST', () => {
       });
       expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
 
+      const invalidForgetScope = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Wrong scope', scope: 'global' });
+      expect(invalidForgetScope.status).toBe(400);
+      expect(invalidForgetScope.body).toMatchObject({ code: 'invalid_scope' });
+      expect(h.secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledTimes(
+        1,
+      );
+
       const dream = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
         .set('Authorization', 'Bearer secret')

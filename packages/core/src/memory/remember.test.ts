@@ -141,13 +141,30 @@ describe('remember memory helper', () => {
       systemPrompt: string;
       taskPrompt: string;
       tools: string[];
-      completeAfterFirstSuccessfulWrite?: boolean;
+      completeAfterFirstSuccessfulWrite?: (filePath: string) => boolean;
     };
     expect(params.extraHistory).toEqual([]);
     expect(params.preserveEmptyExtraHistory).toBe(true);
     expect(params.systemPrompt).toContain('This is an explicit add request.');
     expect(params.systemPrompt).toContain('Do not create or edit MEMORY.md.');
-    expect(params.completeAfterFirstSuccessfulWrite).toBe(true);
+    // An exact-duplicate exception would steer the agent into a zero-write
+    // completion that the remember_no_update check then fails on every retry.
+    expect(params.systemPrompt).not.toContain('exact duplicate');
+    expect(params.systemPrompt).toContain(
+      'If the content duplicates an existing entry, update that entry',
+    );
+    // MEMORY.md writes are not memory updates, so they must not trigger
+    // early completion; entry writes must.
+    expect(
+      params.completeAfterFirstSuccessfulWrite?.(
+        path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md'),
+      ),
+    ).toBe(false);
+    expect(
+      params.completeAfterFirstSuccessfulWrite?.(
+        path.join(getAutoMemoryRoot(projectRoot), 'feedback', 'saved.md'),
+      ),
+    ).toBe(true);
     expect(params.tools).toEqual([
       'read_file',
       'grep_search',

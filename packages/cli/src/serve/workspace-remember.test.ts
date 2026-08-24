@@ -553,6 +553,18 @@ describe('workspace memory remember routes', () => {
       .expect((res) => expect(res.body.code).toBe('invalid_client_id'));
   });
 
+  it('rejects an invalid forget scope before enqueuing the task', async () => {
+    const bridge = buildBridgeStub({});
+    const app = buildApp(bridge);
+
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference', scope: 'global' })
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_scope'));
+    expect(bridge.forgetCalls).toHaveLength(0);
+  });
+
   it('does not expose client-owned task status to other clients', async () => {
     const bridge = buildBridgeStub({ knownIds: ['client-1', 'client-2'] });
     const app = buildApp(bridge);

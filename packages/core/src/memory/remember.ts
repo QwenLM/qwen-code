@@ -112,7 +112,7 @@ function buildRememberSystemPrompt(memoryPrompt: string): string {
     'You are saving one explicit durable memory for Qwen Code.',
     '',
     'Rules:',
-    '- This is an explicit add request. Unless the supplied content is an exact duplicate, you must use a write or edit tool to create or update a managed memory entry.',
+    '- This is an explicit add request. You must use a write or edit tool to create or update a managed memory entry. If the content duplicates an existing entry, update that entry so the latest request wins.',
     '- If the supplied content supersedes a conflicting instruction in the selected memory scope, update that entry so the latest explicit request wins.',
     '- Save only information provided in the task prompt.',
     '- Use the managed auto-memory system only; do not write QWEN.md or AGENTS.md.',
@@ -234,7 +234,8 @@ export async function runManagedRememberByAgent(params: {
     ],
     abortSignal: params.abortSignal,
     suppressChatRecording: true,
-    completeAfterFirstSuccessfulWrite: true,
+    completeAfterFirstSuccessfulWrite: (filePath) =>
+      path.basename(filePath) !== 'MEMORY.md',
   });
 
   const filesWritten = result.filesWritten ?? [];

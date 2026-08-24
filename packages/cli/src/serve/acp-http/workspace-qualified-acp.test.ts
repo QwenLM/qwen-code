@@ -80,6 +80,12 @@ function makeBridge(): HttpAcpBridge {
       filesTouched: [],
       touchedScopes: [],
     })),
+    runWorkspaceMemoryForget: vi.fn(async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    })),
     publishWorkspaceEvent: vi.fn(),
   } as unknown as HttpAcpBridge;
 }
@@ -1914,6 +1920,40 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       },
     });
     expect(secondaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('runs secondary workspace forget tasks on the secondary bridge with scope', async () => {
+    await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'old preference', scope: 'user' },
+    });
+
+    await vi.waitFor(() => {
+      expect(secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith({
+        query: 'old preference',
+        scope: 'user',
+      });
+    });
+    expect(primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace forget scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
   });
 
   it('rejects a WS upgrade to an unknown workspace selector', async () => {

@@ -590,6 +590,26 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     ]);
   });
 
+  it('does not scan the store a scoped forget excludes', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'tabs preference',
+      { config: mockConfig, scope: 'project' },
+    );
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
+    expect(scanAllUserAutoMemoryTopicDocuments).not.toHaveBeenCalled();
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'tabs preference',
+      { config: mockConfig, scope: 'user' },
+    );
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
+    expect(scanAllUserAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
+  });
+
   it('can select user-level memories through heuristic search', async () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([

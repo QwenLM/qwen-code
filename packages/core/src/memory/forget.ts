@@ -29,6 +29,7 @@ import {
 import {
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
+  type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
@@ -131,13 +132,19 @@ async function listIndexedForgetCandidates(
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
   // Uncapped, to match the recall universe (recall.ts scans uncapped): an
-  // entry that recall can inject must be one that forget can remove.
+  // entry that recall can inject must be one that forget can remove. Scans
+  // are deliberately NOT best-effort, unlike recall.ts: a failure must stay
+  // loud, because forget acts on the "no entries matched" answer by deleting.
+  // A scoped forget skips the excluded store entirely — the scope filter
+  // below discards its candidates anyway, and scanning it would let a failure
+  // in a store forget never deletes from fail the whole scoped forget.
   const [projectDocs, userDocs] = await Promise.all([
-    scanAllAutoMemoryTopicDocuments(projectRoot),
-    // Deliberately NOT best-effort, unlike recall.ts: a scan failure here must
-    // stay loud. Swallowing it would report "no entries matched" for a scope
-    // that was never read, and forget acts on that answer by deleting.
-    scanAllUserAutoMemoryTopicDocuments(),
+    scope === 'user'
+      ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
+      : scanAllAutoMemoryTopicDocuments(projectRoot),
+    scope === 'project'
+      ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
+      : scanAllUserAutoMemoryTopicDocuments(),
   ]);
   abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];

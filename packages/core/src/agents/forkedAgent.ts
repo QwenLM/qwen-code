@@ -428,8 +428,13 @@ export interface AgentPathParams {
   abortSignal?: AbortSignal;
   /** Suppress chat-recording UI telemetry for hidden internal agents. */
   suppressChatRecording?: boolean;
-  /** Complete the run as soon as the first file write succeeds. */
-  completeAfterFirstSuccessfulWrite?: boolean;
+  /**
+   * Complete the run as soon as the first successful file write succeeds.
+   * Pass a predicate to restrict early completion to matching paths — the
+   * remember caller excludes MEMORY.md, whose write does not count as a
+   * memory update on its own.
+   */
+  completeAfterFirstSuccessfulWrite?: boolean | ((filePath: string) => boolean);
 }
 
 export interface ForkedAgentResult {
@@ -668,11 +673,13 @@ export async function runForkedAgent(
     for (const filePath of filePaths) {
       filesWritten.add(filePath);
     }
-    if (
-      params.completeAfterFirstSuccessfulWrite &&
-      filePaths.length > 0 &&
-      !executionController.signal.aborted
-    ) {
+    const completesEarly =
+      params.completeAfterFirstSuccessfulWrite === true
+        ? filePaths.length > 0
+        : typeof params.completeAfterFirstSuccessfulWrite === 'function'
+          ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
+          : false;
+    if (completesEarly && !executionController.signal.aborted) {
       completedAfterWrite = true;
       executionController.abort();
     }
