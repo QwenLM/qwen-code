@@ -152,6 +152,16 @@ export const useShellCommandProcessor = (
 
         onDebugMessage(`Executing in ${targetDir}: ${commandToExecute}`);
 
+        const cleanupShellCommand = () => {
+          abortSignal.removeEventListener('abort', abortHandler);
+          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
+            fs.unlinkSync(pwdFilePath);
+          }
+          setActiveShellPtyId(null);
+          setShellInputFocused(false);
+          resolve();
+        };
+
         try {
           const activeTheme = themeManager.getActiveTheme();
           const shellExecutionConfig = {
@@ -341,17 +351,10 @@ export const useShellCommandProcessor = (
               );
             })
             .finally(() => {
-              abortSignal.removeEventListener('abort', abortHandler);
-              if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-                fs.unlinkSync(pwdFilePath);
-              }
-              setActiveShellPtyId(null);
-              setShellInputFocused(false);
-              resolve();
+              cleanupShellCommand();
             });
         } catch (err) {
           // This block handles synchronous errors from `execute`
-          abortSignal.removeEventListener('abort', abortHandler);
           setPendingHistoryItem(null);
           const errorMessage = err instanceof Error ? err.message : String(err);
           addItemToHistory(
@@ -362,13 +365,7 @@ export const useShellCommandProcessor = (
             userMessageTimestamp,
           );
 
-          // Perform cleanup here as well
-          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-            fs.unlinkSync(pwdFilePath);
-          }
-          setActiveShellPtyId(null);
-          setShellInputFocused(false);
-          resolve(); // Resolve the promise to unblock `onExec`
+          cleanupShellCommand();
         }
       };
 

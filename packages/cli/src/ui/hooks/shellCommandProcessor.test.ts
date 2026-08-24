@@ -568,6 +568,10 @@ describe('useShellCommandProcessor', () => {
 
     const { result } = renderProcessorHook();
     const abortController = new AbortController();
+    const addEventListenerSpy = vi.spyOn(
+      abortController.signal,
+      'addEventListener',
+    );
     const removeEventListenerSpy = vi.spyOn(
       abortController.signal,
       'removeEventListener',
@@ -591,7 +595,7 @@ describe('useShellCommandProcessor', () => {
     expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     expect(removeEventListenerSpy).toHaveBeenCalledWith(
       'abort',
-      expect.any(Function),
+      addEventListenerSpy.mock.calls[0][1],
     );
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
