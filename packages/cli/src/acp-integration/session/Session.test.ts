@@ -18571,6 +18571,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          verifierFeedback: 'Need independent evidence',
         });
 
         await vi.waitFor(() => {
@@ -18583,6 +18584,16 @@ describe('Session', () => {
               expect.objectContaining({
                 text: expect.stringContaining(
                   'Continue working on the active Goal.',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Runtime continuation context: check weather',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Verifier feedback: Need independent evidence',
                 ),
               }),
             ]),
