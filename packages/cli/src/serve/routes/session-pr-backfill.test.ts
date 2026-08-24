@@ -210,6 +210,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         url: 'https://github.com/o/r/pull/123',
         createdAt: expect.any(String),
         state: 'open',
+        source: 'worktree',
       },
     ]);
   });
@@ -618,6 +619,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         number: i + 1,
         url: `https://github.com/o/r/pull/${i + 1}`,
         createdAt: `2026-08-01T00:00:0${i}.000Z`,
+        source: 'review' as const,
       })),
     );
     await seedSession(SESSION_A);
@@ -888,6 +890,118 @@ describe('backfillWorkspaceSessionPrs', () => {
     const result = await backfillWorkspaceSessionPrs(runtime);
 
     expect(result).toMatchObject({ bound: 0 });
+  });
+
+  it('does not bind /review lookalike commands (token isolation)', async () => {
+    // `/review-skill` is another command whose name merely STARTS with
+    // `review`; a `\b` separator after `review` would match it and forge a
+    // binding from its pull-URL argument. The pattern must isolate the
+    // command token — from both the rawCommand and the user-text sources.
+    await seedSession(SESSION_A);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-slash`,
+        parentUuid: `${SESSION_A}-user-1`,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/review-skill https://github.com/o/r/pull/55',
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    await seedSession(SESSION_B);
+    await appendUserText(
+      SESSION_B,
+      '/review-skill https://github.com/o/r/pull/56',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(55, 'fix/55'), pr(56, 'fix/56')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 2, bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects over-long /review numbers instead of truncating them', async () => {
+    // PR numbers above nine digits do not exist; a bare `\d{1,9}` group
+    // would silently bind the nine-digit prefix.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 12345678901');
+    await seedSession(SESSION_B);
+    await appendUserText(
+      SESSION_B,
+      '/review https://github.com/o/r/pull/12345678901',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 2, bound: 0, unresolved: 0 });
+  });
+
+  it('binds the parent-repo URL form of /review in the fork layout', async () => {
+    // Origin is the fork; gh resolves the PARENT repo for queries, and PR
+    // URLs in this layout always point at the parent. The URL form must
+    // gate against the page's repo key too — the identical PR named by
+    // bare number binds through the page, so dropping the URL form leaves
+    // it systematically dead in fork layouts.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/parent/repo/pull/42',
+    );
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/review 42');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        { ...pr(42, 'fix/42'), url: 'https://github.com/parent/repo/pull/42' },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 2, bound: 2 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 42,
+      url: 'https://github.com/parent/repo/pull/42',
+    });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 42 });
   });
 
   it('scans sessions whose mtime ties a pagination boundary', async () => {

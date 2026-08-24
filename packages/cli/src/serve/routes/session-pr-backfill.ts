@@ -15,6 +15,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   upsertSessionPrs,
   type SessionArchiveState,
+  type SessionPrSource,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -70,8 +71,10 @@ interface BackfillCandidate {
   archiveState: SessionArchiveState;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** PR numbers the session was asked to review (`/review <N|url>`). */
+  /** `/review <N|#N>` numbers the session was asked to review. */
   reviewed: readonly number[];
+  /** `/review <url>` forms, repo-gated once gh's page key is known. */
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
 }
 
 // `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
@@ -79,12 +82,15 @@ interface BackfillCandidate {
 // User records lead with that prompt; @-imported file content is appended
 // as later text parts, and shipped docs contain line-leading `/review N`
 // examples, so nothing after the first part may seed a binding. `[ \t]+`
-// (not `\s+`) keeps the number on the command's own line. The bare-number
-// alternative comes first: `/review 42 and fix #7` names 42. Bare session
-// git branches are NOT a source: they bind the workspace's current branch
-// PR onto every session — measured pure noise, removed with cleanup.
+// (not `\s+`) keeps the number on the command's own line and isolates the
+// command token — `/review-skill …` is another command and must not forge
+// a binding. `(?!\d)` rejects 10+-digit numbers instead of truncating them
+// to a 9-digit prefix. The bare-number alternative comes first:
+// `/review 42 and fix #7` names 42. Bare session git branches are NOT a
+// source: they bind the workspace's current branch PR onto every session —
+// measured pure noise, removed with cleanup.
 const REVIEW_COMMAND_PATTERN =
-  /^\s*\/review(?:[ \t]+#?(\d{1,9})|\b[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})))/;
+  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?!\d)|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
 const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 
@@ -97,11 +103,14 @@ const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 // `/review <N>` survives only in the `slash_command` system record's
 // `rawCommand` — read that when present, falling back to the user record's
 // first text part (the daemon-provided prompt path carries no payload).
-function collectReviewedPrNumbers(
-  raw: string,
-  workspaceRepoKey: string | undefined,
-): readonly number[] {
+// The URL form names the repo it reviewed; it is repo-gated once gh's page
+// key is known (see backfillWorkspaceSessionPrs) rather than here.
+function collectReviewedPrNumbers(raw: string): {
+  reviewed: readonly number[];
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+} {
   const numbers = new Set<number>();
+  const urlForms: Array<{ number: number; url: string }> = [];
   for (const line of raw.split('\n')) {
     if (!line.includes('/review')) continue;
     let record: {
@@ -144,19 +153,11 @@ function collectReviewedPrNumbers(
     const url = match[2];
     const urlNumber = match[3];
     if (url === undefined || urlNumber === undefined) continue;
-    // The URL form names the repo it reviewed. Resolution would prefer
-    // the workspace's own page and bind its same-numbered PR instead,
-    // so gate here: a foreign repo's PR must never bind into this
-    // workspace, and an unknown workspace key fails closed.
-    if (
-      workspaceRepoKey === undefined ||
-      repoKeyFromWebUrl(url) !== workspaceRepoKey
-    ) {
-      continue;
+    if (Number(urlNumber) > 0) {
+      urlForms.push({ number: Number(urlNumber), url });
     }
-    if (Number(urlNumber) > 0) numbers.add(Number(urlNumber));
   }
-  return [...numbers];
+  return { reviewed: [...numbers], reviewedUrlForms: urlForms };
 }
 
 /**
@@ -229,21 +230,23 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         transcriptRaw = '';
       }
-      const reviewed = collectReviewedPrNumbers(
-        transcriptRaw,
-        workspaceRepoKey,
-      );
+      const reviewed = collectReviewedPrNumbers(transcriptRaw);
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
-      if (conventionNumber === undefined && reviewed.length === 0) {
+      if (
+        conventionNumber === undefined &&
+        reviewed.reviewed.length === 0 &&
+        reviewed.reviewedUrlForms.length === 0
+      ) {
         continue;
       }
       candidates.push({
         sessionId,
         archiveState,
         conventionNumber,
-        reviewed,
+        reviewed: reviewed.reviewed,
+        reviewedUrlForms: reviewed.reviewedUrlForms,
       });
     }
   }
@@ -258,6 +261,11 @@ export async function backfillWorkspaceSessionPrs(
   const numberToUrl = new Map<number, string>();
   const pageUrlByNumber = new Map<number, string>();
   const pageStateByNumber = new Map<number, 'open' | 'merged' | 'closed'>();
+  // gh lists one repo per page — the PARENT's in the fork layout. Record
+  // its key once: PR URLs always point there in that layout, so
+  // `/review <url>` forms naming it are legitimate even though the
+  // workspace origin's key is the fork's.
+  let pageRepoKey: string | undefined;
   const prs = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -269,6 +277,7 @@ export async function backfillWorkspaceSessionPrs(
       const state = pr.state === 'draft' ? 'open' : pr.state;
       pageUrlByNumber.set(pr.number, pr.url);
       pageStateByNumber.set(pr.number, state);
+      pageRepoKey ??= repoKeyFromWebUrl(pr.url);
       // Fork layout: gh resolves the PARENT repo for list queries when the
       // origin is a fork, so the page can hold another repository's PRs. A
       // bare head-branch collision with one of them would bind a stranger's
@@ -286,6 +295,15 @@ export async function backfillWorkspaceSessionPrs(
     }
   }
 
+  // `/review <url>` names the repo it reviewed: accept the workspace's own
+  // key OR the repo gh's page actually resolved to (the fork layout's
+  // parent); a third repo's PR must never bind into this workspace. Fail
+  // closed only when BOTH keys are unknown — with neither an origin nor a
+  // gh page there is nothing to attribute the URL to.
+  const allowedRepoKeys = new Set<string>();
+  if (workspaceRepoKey !== undefined) allowedRepoKeys.add(workspaceRepoKey);
+  if (pageRepoKey !== undefined) allowedRepoKeys.add(pageRepoKey);
+
   for (const candidate of candidates) {
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail-10 cap: reviewed first (the session merely looked at
@@ -294,6 +312,16 @@ export async function backfillWorkspaceSessionPrs(
     const numbers: number[] = [];
     for (const reviewedNumber of candidate.reviewed) {
       if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
+    }
+    for (const form of candidate.reviewedUrlForms) {
+      const repoKey = repoKeyFromWebUrl(form.url);
+      if (
+        repoKey !== undefined &&
+        allowedRepoKeys.has(repoKey) &&
+        !numbers.includes(form.number)
+      ) {
+        numbers.push(form.number);
+      }
     }
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
@@ -360,6 +388,7 @@ async function bindCandidateNumbers(
     number: number;
     url?: string;
     state?: SessionPrState;
+    source?: SessionPrSource;
   }> = [];
   for (const number of numbers) {
     let url = sources.numberToUrl.get(number);
@@ -378,6 +407,7 @@ async function bindCandidateNumbers(
     bindings.push({
       number,
       url,
+      source: number === candidate.conventionNumber ? 'worktree' : 'review',
       ...(state ? { state } : {}),
     });
   }

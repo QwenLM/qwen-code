@@ -440,6 +440,40 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect(result.updated).toBe(0);
   }, 60_000);
 
+  it('never stamps a number re-bound to another repo during the gh window', async () => {
+    // The sweep reads sidecars before its gh round-trip and stamps after
+    // it. A concurrent writer re-binding the same number to another
+    // repository inside that window must not receive the stale repo's
+    // state — a wrong 'merged' stamp is terminal: the sweep never queries
+    // merged entries again, so the badge stays wrong permanently.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      await upsertSessionPr(prPath, {
+        number: 5,
+        url: 'https://github.com/other/repo/pull/5',
+        state: 'open',
+        source: 'create',
+      });
+      return { kind: 'ok', pullRequests: [pr(5, 'merged')] };
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted?.[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(persisted?.[0]?.state).toBe('open');
+  });
+
   it('never stamps a same-number PR of another repository', async () => {
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(

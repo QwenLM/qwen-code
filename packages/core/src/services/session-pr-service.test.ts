@@ -333,10 +333,11 @@ describe('upsertSessionPrs', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
-  it('evicts non-re-offered entries before re-offered ones at the cap', async () => {
-    // Across runs, the tail cap must not drop a binding the run's
-    // candidates still assert (a session's earliest — strongest — binding)
-    // while entries the candidates no longer name are still present.
+  it('evicts the oldest positions first among equally-ranked entries', async () => {
+    // Entries persisted before provenance was recorded all rank equal, so
+    // the cap drops the oldest positions — offered-or-not no longer
+    // protects anything, and an already-bound number keeps its entry
+    // untouched only while it survives the rank.
     const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
       entry(i + 1),
     );
@@ -349,26 +350,90 @@ describe('upsertSessionPrs', () => {
     expect(result.added).toEqual([11, 12]);
     expect(result.alreadyBound).toEqual([1]);
     expect(result.prs.map((p) => p.number)).toEqual([
-      1, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ]);
-    // The re-offered survivor keeps its original entry — no re-stamp.
-    expect(result.prs[0]).toEqual(entry(1));
+    expect(result.prs[0]).toEqual(entry(3));
     expect(await readSessionPrs(filePath)).toEqual(result.prs);
   });
 
-  it('falls back to oldest-position eviction when every entry is re-offered', async () => {
-    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
-      entry(i + 1),
+  it('never evicts a created binding under an accumulation of reviewed numbers', async () => {
+    // The session's created PR sits at the head while backfill runs keep
+    // re-offering reviewed numbers; once the merged list overflows the
+    // cap, eviction ranked by offered-or-not would drop the
+    // never-re-offered created binding. Provenance rank must protect it.
+    const seeded: SessionPr[] = [
+      { ...entry(100), source: 'create' },
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+        ...entry(i + 1),
+        source: 'review' as const,
+      })),
+    ];
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(
+      filePath,
+      Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) => ({
+        number: i + 1,
+        url: entry(i + 1).url,
+        source: 'review' as const,
+      })),
+    );
+    expect(result.added).toEqual([10]);
+    expect(result.alreadyBound).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      100, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+    expect(result.prs[0]?.source).toBe('create');
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('keeps the convention binding when a create lands on a full list', async () => {
+    // The shell hook offers a single created candidate; inserting it at
+    // the cap must evict the weakest entry, not the head — the head is
+    // the worktree convention binding the session exists for.
+    const seeded: SessionPr[] = [
+      { ...entry(7), source: 'worktree' },
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+        ...entry(i + 21),
+        source: 'review' as const,
+      })),
+    ];
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 42, url: entry(42).url, state: 'open', source: 'create' },
+    ]);
+    expect(result.added).toEqual([42]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      7, 22, 23, 24, 25, 26, 27, 28, 29, 42,
+    ]);
+    expect(result.prs[0]).toEqual(seeded[0]);
+  });
+
+  it('drops a weak candidate instead of displacing strong bindings at the cap', async () => {
+    const seeded: SessionPr[] = Array.from(
+      { length: SESSION_PR_LIST_LIMIT },
+      (_, i) => ({ ...entry(i + 1), source: 'create' as const }),
     );
     await writeSessionPrs(filePath, seeded);
     const result = await upsertSessionPrs(filePath, [
-      ...seeded.map((e) => ({ number: e.number, url: e.url })),
-      { number: 11, url: entry(11).url },
-      { number: 12, url: entry(12).url },
+      { number: 99, url: entry(99).url, source: 'review' },
     ]);
+    expect(result.added).toEqual([]);
     expect(result.prs.map((p) => p.number)).toEqual([
-      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
+  });
+
+  it('persists candidate source and preserves the source of already-bound numbers', async () => {
+    const result = await upsertSessionPrs(filePath, [
+      { number: 7, url: entry(7).url, source: 'worktree' },
+      { number: 8, url: entry(8).url, source: 'review' },
+    ]);
+    expect(result.prs.map((p) => p.source)).toEqual(['worktree', 'review']);
+    const reoffered = await upsertSessionPrs(filePath, [
+      { number: 7, url: entry(7).url },
+    ]);
+    expect(reoffered.alreadyBound).toEqual([7]);
+    expect(reoffered.prs[0]?.source).toBe('worktree');
   });
 
   it('reports url-less candidates as unresolved, counting already-bound ones separately', async () => {
@@ -387,6 +452,11 @@ describe('upsertSessionPrs', () => {
 });
 
 describe('updateSessionPrStates', () => {
+  const stamp = (number: number, state: 'open' | 'merged' | 'closed') => ({
+    url: entry(number).url,
+    state,
+  });
+
   it('rewrites states in place without touching order or createdAt', async () => {
     await writeSessionPrs(filePath, [
       { ...entry(100), state: 'open' },
@@ -395,8 +465,8 @@ describe('updateSessionPrStates', () => {
     const changed = await updateSessionPrStates(
       filePath,
       new Map([
-        [100, 'merged'],
-        [101, 'open'],
+        [100, stamp(100, 'merged')],
+        [101, stamp(101, 'open')],
       ]),
     );
     // Only the entry whose state actually differs counts as rewritten.
@@ -412,21 +482,50 @@ describe('updateSessionPrStates', () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, stamp(100, 'merged')]]),
+      ),
     ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
   it('returns 0 when the sidecar is absent', async () => {
     expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, stamp(100, 'merged')]]),
+      ),
     ).toBe(0);
+  });
+
+  it('skips an entry re-bound to another URL between the sweep read and the stamp', async () => {
+    // The sweep reads sidecars before its gh round-trip and writes after
+    // it. A concurrent re-bind of the same number to another repository
+    // during that window must not receive the stale repo's state — a
+    // wrong 'merged' stamp is terminal: merged entries are never queried
+    // again, so the badge stays wrong permanently.
+    await writeSessionPrs(filePath, [{ ...entry(5), state: 'open' }]);
+    await upsertSessionPr(filePath, {
+      number: 5,
+      url: 'https://github.com/other/repo/pull/5',
+      state: 'open',
+      source: 'create',
+    });
+    const changed = await updateSessionPrStates(
+      filePath,
+      new Map([[5, stamp(5, 'merged')]]),
+    );
+    expect(changed).toBe(0);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(persisted?.[0]?.state).toBe('open');
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
     const [changed, prs] = await Promise.all([
-      updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      updateSessionPrStates(filePath, new Map([[100, stamp(100, 'merged')]])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
     expect(changed).toBe(1);

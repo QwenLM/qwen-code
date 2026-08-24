@@ -142,7 +142,7 @@ export async function refreshWorkspaceSessionPrStates(
 
   let updated = 0;
   for (const target of pendingBindings) {
-    const states = new Map<number, SessionPrState>();
+    const states = new Map<number, { url: string; state: SessionPrState }>();
     for (const binding of target.bindings) {
       const bindingRepoKey = repoKeyFromWebUrl(binding.url);
       const state = bindingRepoKey
@@ -150,8 +150,13 @@ export async function refreshWorkspaceSessionPrStates(
         : undefined;
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
-      // supersedes a stale 'closed' after a reopen.
-      if (state !== undefined) states.set(binding.number, state);
+      // supersedes a stale 'closed' after a reopen. The stamp carries the
+      // URL it was resolved for: the writer verifies it inside the locked
+      // mutation, so a concurrent re-bind of the same number to another
+      // repo during this run's gh window never receives a stale state.
+      if (state !== undefined) {
+        states.set(binding.number, { url: binding.url, state });
+      }
     }
     if (states.size === 0) continue;
     updated += await updateSessionPrStates(target.prPath, states);

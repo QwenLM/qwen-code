@@ -26,9 +26,22 @@ export interface SessionPr {
   createdAt: string;
   /** Snapshot at last write/refresh; refreshed by the daemon timer. */
   state?: SessionPrState;
+  /**
+   * Binding provenance, ranked by the tail cap's eviction: the session's
+   * convention and created PRs outrank PRs it merely reviewed. Absent on
+   * entries persisted before provenance was recorded.
+   */
+  source?: SessionPrSource;
 }
 
 export type SessionPrState = 'open' | 'merged' | 'closed';
+
+/**
+ * Why a binding exists. The worktree slug/branch convention names the PR the
+ * session EXISTS FOR; a gh-verified create names the PR the session CREATED;
+ * a `/review` command names a PR it merely looked at.
+ */
+export type SessionPrSource = 'create' | 'worktree' | 'review';
 
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
@@ -70,7 +83,11 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     (v['state'] === undefined ||
       v['state'] === 'open' ||
       v['state'] === 'merged' ||
-      v['state'] === 'closed')
+      v['state'] === 'closed') &&
+    (v['source'] === undefined ||
+      v['source'] === 'create' ||
+      v['source'] === 'worktree' ||
+      v['source'] === 'review')
   );
 }
 
@@ -160,9 +177,50 @@ export function mergeSessionPrLists(
       byNumber.set(entry.number, entry);
     }
   }
-  return [...byNumber.values()]
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .slice(-SESSION_PR_LIST_LIMIT);
+  return capSessionPrListByAuthority(
+    [...byNumber.values()].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    ),
+  );
+}
+
+// Eviction rank for the tail cap. Entries persisted before provenance was
+// recorded sit between reviews and creates: they may be a session's created
+// or convention binding, so a weak candidate must never displace one — but
+// a verified create still outranks them.
+function evictionAuthority(entry: SessionPr): number {
+  switch (entry.source) {
+    case 'worktree':
+      return 3;
+    case 'create':
+      return 2;
+    case 'review':
+      return 0;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Caps a binding list at {@link SESSION_PR_LIST_LIMIT}, dropping the weakest
+ * entries first — lowest provenance authority, oldest position within the
+ * same authority. The created and convention bindings a session exists for
+ * survive an accumulation of reviewed numbers; offered-or-not plays no role,
+ * because the strongest bindings are never re-offered by most writers.
+ */
+function capSessionPrListByAuthority(list: SessionPr[]): SessionPr[] {
+  const overflow = list.length - SESSION_PR_LIST_LIMIT;
+  if (overflow <= 0) return list;
+  const evictPositions = new Set(
+    list
+      .map((_, index) => index)
+      .sort(
+        (a, b) =>
+          evictionAuthority(list[a]) - evictionAuthority(list[b]) || a - b,
+      )
+      .slice(0, overflow),
+  );
+  return list.filter((_, index) => !evictPositions.has(index));
 }
 
 // Cross-process file lock around every sidecar mutation. The live shell
@@ -239,9 +297,10 @@ function enqueuePrMutation<T>(
 
 /**
  * Insert or refresh a binding (matched by PR number) and persist the list,
- * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
- * number moves to the end (latest) with a fresh createdAt. An omitted
- * `state` preserves the existing entry's state on re-bind.
+ * keeping at most {@link SESSION_PR_LIST_LIMIT} entries. A re-bound number
+ * moves to the end (latest) with a fresh createdAt. An omitted `state`
+ * preserves the existing entry's state on re-bind; the persisted `source`
+ * likewise survives a re-bind that does not name one.
  *
  * Entries the read-side shape check would reject are declined here: the
  * reader fails the WHOLE list closed, so persisting one poisoned entry would
@@ -249,11 +308,17 @@ function enqueuePrMutation<T>(
  */
 export function upsertSessionPr(
   filePath: string,
-  pr: { number: number; url: string; state?: SessionPrState },
+  pr: {
+    number: number;
+    url: string;
+    state?: SessionPrState;
+    source?: SessionPrSource;
+  },
 ): Promise<SessionPr[]> {
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
     const known = existing.find((entry) => entry.number === pr.number);
+    const source = known?.source ?? pr.source;
     const entry: SessionPr = {
       number: pr.number,
       url: pr.url,
@@ -261,10 +326,11 @@ export function upsertSessionPr(
       ...((pr.state ?? known?.state)
         ? { state: (pr.state ?? known?.state) as SessionPrState }
         : {}),
+      ...(source ? { source } : {}),
     };
     if (!isValidSessionPr(entry)) return existing;
     const rest = existing.filter((e) => e.number !== pr.number);
-    const next = [...rest, entry].slice(-SESSION_PR_LIST_LIMIT);
+    const next = capSessionPrListByAuthority([...rest, entry]);
     await writeSessionPrs(filePath, next);
     return next;
   });
@@ -294,12 +360,12 @@ export interface SessionPrUpsertManyResult {
  * result. The read inside the lock sees bindings concurrent writers land
  * before this mutation.
  *
- * When the merged list overflows the cap, eviction drops entries this run
- * did NOT re-offer first (oldest position first), and only then the oldest
- * re-offered ones. The cap must not evict a binding the run's sources still
- * assert — across re-runs that re-offer a session's earliest (strongest,
- * e.g. its worktree convention) binding, plain head eviction would drop it
- * once enough weaker numbers accumulate.
+ * When the merged list overflows the cap, eviction is ranked by binding
+ * provenance — reviewed PRs first, then pre-provenance entries, then
+ * created, then the worktree convention; oldest position within the same
+ * rank. Offered-or-not plays no role: a session's created and convention
+ * bindings are never re-offered by most writers, and a weak run must not
+ * displace them.
  */
 export function upsertSessionPrs(
   filePath: string,
@@ -307,6 +373,7 @@ export function upsertSessionPrs(
     number: number;
     url?: string;
     state?: SessionPrState;
+    source?: SessionPrSource;
   }>,
 ): Promise<SessionPrUpsertManyResult> {
   return enqueuePrMutation(filePath, async () => {
@@ -330,6 +397,7 @@ export function upsertSessionPrs(
         url: candidate.url,
         createdAt: new Date().toISOString(),
         ...(candidate.state ? { state: candidate.state } : {}),
+        ...(candidate.source ? { source: candidate.source } : {}),
       };
       if (!isValidSessionPr(entry)) {
         unresolved.push(candidate.number);
@@ -342,23 +410,7 @@ export function upsertSessionPrs(
     if (appended.size === 0) {
       return { prs: existing, added: [], alreadyBound, unresolved };
     }
-    const offered = new Set(candidates.map((candidate) => candidate.number));
-    let overflow = next.length - SESSION_PR_LIST_LIMIT;
-    let prs: SessionPr[];
-    if (overflow <= 0) {
-      prs = next;
-    } else {
-      const survivors = next.filter((entry) => {
-        if (overflow > 0 && !offered.has(entry.number)) {
-          overflow -= 1;
-          return false;
-        }
-        return true;
-      });
-      // Remaining overflow means every survivor was re-offered; drop the
-      // oldest positions — the weakest the offer re-asserted.
-      prs = survivors.slice(overflow);
-    }
+    const prs = capSessionPrListByAuthority(next);
     const persistedNumbers = new Set(prs.map((entry) => entry.number));
     const added = [...appended].filter((number) =>
       persistedNumbers.has(number),
@@ -370,23 +422,33 @@ export function upsertSessionPrs(
 
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. Returns the
- * number of entries actually rewritten; 0 when the sidecar is absent/invalid
- * or nothing changed (no write then).
+ * a refresh sweep never reshuffles the badge's "latest" entry. Each stamp
+ * carries the URL the state was resolved under; an entry whose url no
+ * longer matches was re-bound to another PR during the sweep's gh window
+ * and is skipped — stamping by bare number across that window would write
+ * the stale repo's state onto the new binding. Returns the number of
+ * entries actually rewritten; 0 when the sidecar is absent/invalid or
+ * nothing changed (no write then).
  */
 export function updateSessionPrStates(
   filePath: string,
-  states: ReadonlyMap<number, SessionPrState>,
+  states: ReadonlyMap<number, { url: string; state: SessionPrState }>,
 ): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
     const existing = await readSessionPrs(filePath);
     if (!existing) return 0;
     let changed = 0;
     const next = existing.map((entry) => {
-      const state = states.get(entry.number);
-      if (state === undefined || state === entry.state) return entry;
+      const stamped = states.get(entry.number);
+      if (
+        stamped === undefined ||
+        stamped.url !== entry.url ||
+        stamped.state === entry.state
+      ) {
+        return entry;
+      }
       changed += 1;
-      return { ...entry, state };
+      return { ...entry, state: stamped.state };
     });
     if (changed === 0) return 0;
     await writeSessionPrs(filePath, next);

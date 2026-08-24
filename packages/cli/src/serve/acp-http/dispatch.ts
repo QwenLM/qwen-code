@@ -2943,6 +2943,7 @@ export class AcpDispatcher {
                     {
                       number: boundPr['number'],
                       url: boundPr['url'],
+                      source: 'create',
                       ...(boundState === 'open' ||
                       boundState === 'merged' ||
                       boundState === 'closed'

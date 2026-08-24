@@ -2333,6 +2333,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ? this.getGitHeadSync(cwd)
       : null;
 
+    // Snapshot the branch's current PR BEFORE spawn so bindGhPrCreate can
+    // tell a run that CREATED a PR from one that merely RESOLVED the
+    // branch's existing PR: the retry shape `gh pr create --fill || gh pr
+    // view` exits 0 through the view segment and prints the existing URL,
+    // and post-run gh resolution alone cannot distinguish the two. Awaited
+    // before spawn so the snapshot strictly precedes the command.
+    const preExistingPrNumber = commandRunsGhPrCreate(commandToExecute)
+      ? (await fetchCurrentBranchPullRequest(cwd))?.number
+      : undefined;
+
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Number.NEGATIVE_INFINITY;
     let isBinaryStream = false;
@@ -2729,7 +2739,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       result.aborted &&
       getShellAbortReasonKind(combinedSignal.reason) === 'background';
     if ((!result.aborted || wasPromoteRefused) && result.exitCode === 0) {
-      this.bindGhPrCreate(commandToExecute, result.output, cwd);
+      this.bindGhPrCreate(
+        commandToExecute,
+        result.output,
+        cwd,
+        preExistingPrNumber,
+      );
     }
 
     const abortReasonName = getAbortReasonName(combinedSignal);
@@ -3071,13 +3086,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
    * pattern; a failure must never shadow the tool result. gh itself is the
    * attribution authority: the binding is the PR gh resolves for the working
-   * branch, accepted only when it is OPEN and this command's output carries
-   * gh's URL — command/output text alone cannot attribute a printed URL to
-   * gh's own execution, and a retry that passes the execution gate
+   * branch, accepted only when it is OPEN, this command's output carries
+   * gh's URL, and the number did not already exist before the run —
+   * command/output text alone cannot attribute a printed URL to gh's own
+   * execution, and a retry that passes the execution gate
    * (`gh pr create || gh pr view`) resolves the branch's EXISTING PR, which
-   * the open-state check plus the no-re-bind persistence decline.
+   * the pre-run snapshot (`preExistingPrNumber`) declines.
    */
-  private bindGhPrCreate(command: string, output: string, cwd: string): void {
+  private bindGhPrCreate(
+    command: string,
+    output: string,
+    cwd: string,
+    preExistingPrNumber: number | undefined,
+  ): void {
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
@@ -3087,6 +3108,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd);
         if (!created || created.state !== 'open') return;
+        // The run resolved the branch's EXISTING PR — nothing was created
+        // (a retry's view segment exits 0 and prints the existing URL).
+        // Binding would stamp this session as creator of a PR it did not
+        // create, at a fresh createdAt that falsifies the badge's
+        // binding-time order.
+        if (created.number === preExistingPrNumber) return;
         if (!output.includes(created.url)) return;
         const prPath = this.config
           .getSessionService()
@@ -3097,7 +3124,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An already-bound number stays untouched (position and createdAt):
         // only a genuinely new binding persists and notifies — a re-bind
         // would move the entry to the tail with a fresh createdAt.
-        const applied = await upsertSessionPrs(prPath, [created]);
+        const applied = await upsertSessionPrs(prPath, [
+          { ...created, source: 'create' },
+        ]);
         if (!applied.added.includes(created.number)) return;
         // The daemon never sees this write; the notification carries the
         // catalog mark so live-state clients refetch it (~2s) instead of
