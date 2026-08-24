@@ -2289,6 +2289,84 @@ describe('Session', () => {
     );
   });
 
+  it('restores the stripped orphan when a retry send throws before re-pushing it', async () => {
+    // A retry strips the failed attempt's orphan before resending. If the
+    // resend throws before the user content is pushed (the same data-loss
+    // window continuations guard), the orphan must come back into history —
+    // otherwise the live session loses the entry while its record stays in
+    // the transcript and positional turns fall below recording boundaries.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockRejectedValue(new Error('hard-rescue stop'));
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'failed prompt' }],
+        _meta: { 'qwen.daemon.retry': true },
+      } as PromptRequest),
+    ).rejects.toThrow('hard-rescue stop');
+
+    expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+    const restored = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => call[0])
+      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
+    expect(restored).toBeDefined();
+    expect(restored).toEqual(
+      expect.objectContaining({
+        role: 'user',
+        parts: expect.arrayContaining([
+          expect.objectContaining({ text: 'failed prompt' }),
+        ]),
+      }),
+    );
+  });
+
+  it('does not restore the stripped orphan when the retry resend lands', async () => {
+    // The resend pushes the user content, advancing the push counter past
+    // the strip-time snapshot — the push-count gate must skip the restore
+    // so the resent turn is not duplicated.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    let userContentPushCount = 0;
+    (
+      mockChat as unknown as {
+        getUserContentPushCount: () => number;
+      }
+    ).getUserContentPushCount = vi.fn(() => userContentPushCount);
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      userContentPushCount += 1;
+      return createEmptyStream();
+    });
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    const restored = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => call[0])
+      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
+    expect(restored).toBeUndefined();
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()

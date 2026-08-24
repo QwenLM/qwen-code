@@ -5114,6 +5114,19 @@ export class Session implements SessionContext {
               const strippedRetryEntries =
                 this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                 [];
+              // The resend re-pushes the prompt below; if it throws before
+              // the push (hard-rescue compaction stop, UserPromptSubmit Stop,
+              // a compression abort rethrow, resolve failures), the stripped
+              // orphans would be permanently lost while their records stay in
+              // the transcript — the same window the continuation branch
+              // above guards. Hand them to the shared pair so the
+              // push-count-gated catch restore covers retries exactly like
+              // continuations (on success the resend advances the push
+              // counter past the snapshot, so no double-restore).
+              strippedOrphanEntries =
+                strippedRetryEntries.length > 0 ? strippedRetryEntries : null;
+              orphanPushCountSnapshot =
+                this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
               const promptIdentities = strippedRetryEntries
                 .map(getApiHistoryPromptId)
                 .filter((value): value is string => value !== undefined);
