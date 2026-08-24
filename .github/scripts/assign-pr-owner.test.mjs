@@ -76,6 +76,32 @@ describe('assign-pr-owner: pure routing', () => {
     );
   });
 
+  it('skips areas without a paths list instead of matching them', () => {
+    // paths stays optional in loadPolicy, so a label-only area is valid
+    // config; path routing must skip it rather than crash on the missing
+    // list.
+    const labelOnly = {
+      name: 'label-only',
+      labels: ['area: core'],
+      owners: [policy.areas[0].owners[0]],
+    };
+    const synthetic = {
+      requireLabels: [],
+      skipLabels: [],
+      areas: [labelOnly, ...policy.areas],
+    };
+    const area = matchAreaByPath(synthetic, [
+      { path: 'packages/core/src/x.ts' },
+    ]);
+    assert.equal(area?.name, 'core');
+    assert.equal(
+      matchAreaByPath({ ...synthetic, areas: [labelOnly] }, [
+        { path: 'packages/core/src/x.ts' },
+      ]),
+      null,
+    );
+  });
+
   it('skips closed, draft, and bot-authored PRs', () => {
     assert.equal(skipPrReason(corePr), null);
     assert.ok(skipPrReason({ ...corePr, state: 'MERGED' }));
