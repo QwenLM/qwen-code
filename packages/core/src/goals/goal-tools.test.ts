@@ -613,6 +613,20 @@ describe('UpdateGoalTool', () => {
                 preview: 'X',
                 proofKind: 'delivered_output',
               },
+              {
+                uuid: 'current-external-fact',
+                provenance: 'tool_result',
+                turnId: permit.turnId,
+                preview: 'permission denied',
+                proofKind: 'external_fact',
+              },
+              {
+                uuid: 'prior-delivered-output',
+                provenance: 'assistant_output',
+                turnId: 'prior-turn',
+                preview: 'Earlier output',
+                proofKind: 'delivered_output',
+              },
             ],
             lineageTurnIds: [permit.turnId],
           },
@@ -629,19 +643,16 @@ describe('UpdateGoalTool', () => {
       }),
     );
 
-    await invocation.execute(new AbortController().signal);
+    const result = await invocation.execute(new AbortController().signal);
 
     expect(recordTerminalProposal).toHaveBeenCalledWith(
       permit,
       expect.objectContaining({ evidenceRefs: ['letter-x'] }),
     );
-    expect(
-      JSON.parse(
-        String(
-          (await invocation.execute(new AbortController().signal)).llmContent,
-        ),
-      ),
-    ).not.toHaveProperty('autoCitedCurrentDeliveredOutput');
+    expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'autoCitedCurrentDeliveredOutput',
+    );
   });
 
   it('leaves a blocked proposal to cite whatever it chose', async () => {
