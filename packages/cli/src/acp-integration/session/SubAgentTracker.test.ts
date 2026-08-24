@@ -574,6 +574,36 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('forwards cancel reason metadata to nested tool confirmation', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+        _meta: {
+          'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'test_tool',
+        callId: 'call-123',
+        confirmationDetails: createInfoConfirmation(),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+            cancelMessage: 'approval_ui_unavailable',
+          },
+        );
+      });
+    });
+
     it('cancels outcomes that were not offered to the ACP host', async () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: {

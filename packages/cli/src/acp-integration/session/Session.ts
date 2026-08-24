@@ -511,6 +511,14 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
   return reason === 'timeout' || reason === 'session_closed';
 }
 
+function permissionCancelMessageFromResponse(
+  response: unknown,
+): string | undefined {
+  const reason = (response as { _meta?: Record<string, unknown> | null })
+    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+  return typeof reason === 'string' ? reason : undefined;
+}
+
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
@@ -12121,8 +12129,15 @@ export class Session implements SessionContext {
                 );
               }
 
+              const permissionCancelMessage =
+                outcome === ToolConfirmationOutcome.Cancel
+                  ? permissionCancelMessageFromResponse(output)
+                  : undefined;
               let confirmationPayload: ToolConfirmationPayload | undefined = {
                 answers: output.answers,
+                ...(permissionCancelMessage !== undefined
+                  ? { cancelMessage: permissionCancelMessage }
+                  : {}),
               };
               if (planShellDecision.classification !== 'not-applicable') {
                 const approval = await validatePlanModeShellApproval({
@@ -12228,9 +12243,8 @@ export class Session implements SessionContext {
                   // fabricated decline — leave the transcript dangling so a
                   // later load can re-hang the question. A deliberate user
                   // cancel persists, matching live decline handling.
-                  const cancelReason = (
-                    output as { _meta?: Record<string, unknown> | null }
-                  )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+                  const cancelReason =
+                    permissionCancelMessageFromResponse(output);
                   const unattendedRestore =
                     isUnattendedRestorePermissionCancel(cancelReason) &&
                     this.restoringAskUserQuestionCallIds?.has(callId) === true;
