@@ -4059,8 +4059,8 @@ export class GeminiClient {
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
         // Save cache-safe params here — before any early return — so that
-        // background extract/dream agents calling getCacheSafeParams() always
-        // see the current turn's history regardless of which path exits below.
+        // background readers calling getCacheSafeParams(sessionId) can see the
+        // current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;

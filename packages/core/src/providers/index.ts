@@ -57,6 +57,7 @@ export {
   kimiProvider,
   minimaxProvider,
   modelscopeProvider,
+  moonshotProvider,
   openRouterProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,

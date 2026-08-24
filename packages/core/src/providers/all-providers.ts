@@ -19,6 +19,7 @@ import { grokProvider } from './presets/grok.js';
 import { kimiProvider } from './presets/kimi.js';
 import { minimaxProvider } from './presets/minimax.js';
 import { zaiProvider } from './presets/zai.js';
+import { moonshotProvider } from './presets/moonshot.js';
 import { idealabProvider } from './presets/idealab.js';
 import { modelscopeProvider } from './presets/modelscope.js';
 import { xiaomiMimoProvider } from './presets/xiaomi-mimo.js';
@@ -36,6 +37,7 @@ export {
   kimiProvider,
   minimaxProvider,
   zaiProvider,
+  moonshotProvider,
   idealabProvider,
   modelscopeProvider,
   xiaomiMimoProvider,
@@ -64,6 +66,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   grokProvider,
   idealabProvider,
   kimiProvider,
+  moonshotProvider,
   minimaxProvider,
   modelscopeProvider,
   openRouterProvider,

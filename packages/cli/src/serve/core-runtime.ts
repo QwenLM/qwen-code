@@ -21,6 +21,7 @@ export {
   initializeDaemonMetrics,
   initializeTelemetry,
   normalizeBaseUrlForMatching,
+  readCronTasks,
   recordDaemonCancel,
   recordDaemonChannelLifecycle,
   recordDaemonPipeMessage,
