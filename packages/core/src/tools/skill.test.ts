@@ -1524,6 +1524,7 @@ describe('SkillTool', () => {
   describe('disabled-skill execute guard', () => {
     const createHiddenSkillInvocation = async (
       executor: ReturnType<Config['getModelInvocableCommandsExecutor']>,
+      params: SkillParams = { skill: 'mcp-prompt-a' },
     ) => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
         {
@@ -1551,7 +1552,7 @@ describe('SkillTool', () => {
 
       return (
         hiddenAwareTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'mcp-prompt-a' });
+      ).createInvocation(params);
     };
 
     it('runs the same-named MCP prompt instead of loading a hidden skill', async () => {
@@ -1603,6 +1604,18 @@ describe('SkillTool', () => {
       expect(partToString(result.llmContent)).toBe('MCP prompt failed');
       expect(result.returnDisplay).toBe('MCP prompt failed');
       expect(recordSkillInvocation).not.toHaveBeenCalled();
+    });
+
+    it('passes args to command alternatives for hidden skills', async () => {
+      const executor = vi.fn().mockResolvedValue('MCP prompt body');
+      const invocation = await createHiddenSkillInvocation(executor, {
+        skill: 'mcp-prompt-a',
+        args: 'arg text',
+      });
+      await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', 'arg text');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
     });
 
     it('falls through to not-found when hidden skill commandExecutor throws', async () => {
