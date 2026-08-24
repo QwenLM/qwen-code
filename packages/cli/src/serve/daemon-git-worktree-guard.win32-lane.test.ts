@@ -67,6 +67,12 @@ const cmdWorktree = path.join(cmdRoot, 'workspace', 'worktree');
 const cmdOutsideRepo = path.join(cmdRoot, 'outside', 'repo');
 fs.mkdirSync(path.join(cmdOutsideRepo, '.git'), { recursive: true });
 fs.mkdirSync(cmdWorktree, { recursive: true });
+// In-boundary directories the containment proofs resolve through: a plain
+// child, plus children named like cmd relink programs (`copy`/`xcopy`), so
+// a relink INTO such a name is a recorded destination, not skipped.
+fs.mkdirSync(path.join(cmdWorktree, 'nested'), { recursive: true });
+fs.mkdirSync(path.join(cmdWorktree, 'copy'), { recursive: true });
+fs.mkdirSync(path.join(cmdWorktree, 'xcopy'), { recursive: true });
 
 afterAll(() => {
   fs.rmSync(cmdRoot, { recursive: true, force: true });
@@ -96,14 +102,23 @@ describe('cmd.exe state-persisting builtins fail closed', () => {
     ).resolves.toMatchObject({ allowed: false });
   });
 
-  it('denies a relocation persisted through setx', async () => {
+  it('fails closed after setx, which never touches this session', async () => {
+    // setx writes the registry for FUTURE sessions; %GIT_WORK_TREE% in the
+    // running cmd is untouched. Recording a relocation would fabricate state
+    // the executed chain never sees, so only denial can follow it.
     await expect(
       guard(
         request(`setx GIT_WORK_TREE ${cmdOutsideRepo} && git reset --hard`),
       ),
     ).resolves.toMatchObject({
       allowed: false,
-      reason: expect.stringContaining(cmdOutsideRepo),
+      reason: expect.stringContaining('dynamic repository location'),
+    });
+    await expect(
+      guard(request(`setx GIT_WORK_TREE ${cmdWorktree} && git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('dynamic repository location'),
     });
   });
 
@@ -120,9 +135,14 @@ describe('cmd.exe state-persisting builtins fail closed', () => {
     await expect(
       guard(request(`set /p X=&& git reset --hard`)),
     ).resolves.toMatchObject({ allowed: false });
+    // The paired %...% dies at the cmd rewrite gate, before the set arm —
+    // pin that reason so the assertion cannot pass at an earlier gate.
     await expect(
       guard(request(`set GIT_WORK_TREE=%DYN%&& git reset --hard`)),
-    ).resolves.toMatchObject({ allowed: false });
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('cmd.exe rewrite syntax'),
+    });
   });
 
   it('denies a relocation through chdir, including /D', async () => {
@@ -141,12 +161,23 @@ describe('cmd.exe state-persisting builtins fail closed', () => {
   });
 
   it('denies git after path or doskey rewrote command resolution', async () => {
+    // Gate-clean operand: the earlier `;;` spelling died at the unmodelled-
+    // syntax gate on `;` and never reached the `path` arm it is named for.
+    // The unresolved state the arm records poisons the chained git run.
     await expect(
-      guard(request(`path ${cmdOutsideRepo};; && git reset --hard`)),
-    ).resolves.toMatchObject({ allowed: false });
+      guard(request(`path ${cmdOutsideRepo} && git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('dynamic repository location'),
+    });
+    // This run mentions git through the macro definition itself, so the
+    // unresolved state the arm records denies it on the spot.
     await expect(
       guard(request(`doskey git=evil.exe $* && git reset --hard`)),
-    ).resolves.toMatchObject({ allowed: false });
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unrecognized program'),
+    });
   });
 
   it('denies git after a cmd relink program', async () => {
@@ -158,5 +189,170 @@ describe('cmd.exe state-persisting builtins fail closed', () => {
     await expect(
       guard(request(`copy ${cmdOutsideRepo} bait && git -C bait reset --hard`)),
     ).resolves.toMatchObject({ allowed: false });
+  });
+});
+
+// cmd.exe environment variable names are case-insensitive: `git_work_tree`
+// and `GIT_WORK_TREE` are one variable, and git.exe reads the uppercase
+// spelling. The recorded-assignment machinery must fold the key before
+// matching, or a lowercase spelling slips past every set it is checked
+// against while cmd hands git the relocated environment anyway.
+
+describe('cmd.exe env assignments are case-insensitive', () => {
+  const guard = createDaemonToolGuard();
+  const request = (command: string) =>
+    ({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'run_shell_command',
+      arguments: { command },
+      effectiveCwd: cmdWorktree,
+    }) as never;
+
+  it('denies lowercase and mixed-case GIT_WORK_TREE spellings', async () => {
+    await expect(
+      guard(request(`set git_work_tree=${cmdOutsideRepo}&& git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(cmdOutsideRepo),
+    });
+    await expect(
+      guard(request(`set Git_Work_Tree=${cmdOutsideRepo}&& git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(cmdOutsideRepo),
+    });
+  });
+
+  it('denies lowercase GIT_DIR and GIT_* spellings alike', async () => {
+    // The `...\.git` value carries a git word, so the recorded relocation
+    // denies the set run itself rather than the chained one.
+    await expect(
+      guard(request(`set git_dir=${cmdOutsideRepo}\\.git&& git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unrecognized program'),
+    });
+    // Keys that mark the run unresolved are matched through the same sets.
+    await expect(
+      guard(request(`set git_exec_path=${cmdOutsideRepo}&& git reset --hard`)),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(
+      guard(request(`set path=${cmdOutsideRepo}&& git reset --hard`)),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(
+      guard(request(`set git_config_key_0=core.pager&& git reset --hard`)),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('keeps case-folding off shapes that stay in boundary', async () => {
+    await expect(
+      guard(request(`set git_work_tree=${cmdWorktree}&& git reset --hard`)),
+    ).resolves.toEqual({ allowed: true });
+  });
+});
+
+// cmd.exe's CD/CHDIR/PUSHD take their operand with no delimiter: `cd..`,
+// `cd\dir`, `cd/d X`. The POSIX word split reads those as one foreign
+// program word (`cd..`) or splits them on the backslash (`cd\dir` reports
+// the program word `dir`), so the move cmd.exe really makes is never
+// tracked and the following git is validated against the wrong directory.
+
+describe('cmd.exe delimiter-less cd forms are tracked', () => {
+  const guard = createDaemonToolGuard();
+  const request = (command: string) =>
+    ({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'run_shell_command',
+      arguments: { command },
+      effectiveCwd: cmdWorktree,
+    }) as never;
+
+  it('denies git after a delimiter-less climb out of the boundary', async () => {
+    for (const climb of ['cd..', 'chdir..', 'pushd..']) {
+      await expect(
+        guard(request(`${climb}&& git reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    }
+  });
+
+  it('denies a relocation through the fused /D switch', async () => {
+    await expect(
+      guard(request(`cd/d ${cmdOutsideRepo}&& git reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(cmdOutsideRepo),
+    });
+  });
+
+  it('keeps an in-boundary delimiter-less cd harmless', async () => {
+    await expect(
+      guard(request(`cd nested && git reset --hard`)),
+    ).resolves.toEqual({ allowed: true });
+  });
+});
+
+// A relink DESTINATION may be named like a relink program (`mv <outside>
+// copy`): skipping operands by program name hides exactly the target the
+// later containment proof has to check. Only the program word itself is
+// skipped; cmd `/FLAG` operands are switches, never paths, on the
+// windows-native lanes.
+
+describe('cmd.exe relink destinations stay tracked', () => {
+  const guard = createDaemonToolGuard();
+  const request = (command: string) =>
+    ({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'run_shell_command',
+      arguments: { command },
+      effectiveCwd: cmdWorktree,
+    }) as never;
+
+  it('denies git through a destination named like a relink program', async () => {
+    await expect(
+      guard(request(`mv ${cmdOutsideRepo} copy && git -C copy reset --hard`)),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('dynamic repository location'),
+    });
+    await expect(
+      guard(
+        request(`cp -r ${cmdOutsideRepo} xcopy && git -C xcopy reset --hard`),
+      ),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('dynamic repository location'),
+    });
+  });
+
+  it('does not record cmd switches as relinked paths', async () => {
+    // `/MIR` is a robocopy switch. Pre-fix it was resolved against the
+    // tracked cwd and recorded as a relinked path, which turned the later
+    // `git -C` into a dynamic-relocation denial instead of the ordinary
+    // outside-boundary one its target earns on its own.
+    await expect(
+      guard(
+        request(
+          `robocopy ${cmdOutsideRepo} bait /MIR && git -C /MIR reset --hard`,
+        ),
+      ),
+    ).resolves.toMatchObject({
+      allowed: false,
+      // Pre-fix the `/MIR` switch was resolved and recorded as a relinked
+      // path, so the later `-C /MIR` matched it and drew the dynamic-
+      // relocation denial. With the switch unrecorded, `/MIR` is judged on
+      // its own (unresolvable) merits and the reason names it.
+      reason: expect.stringContaining('/MIR'),
+    });
   });
 });

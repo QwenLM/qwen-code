@@ -150,6 +150,27 @@ const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 // stance as python or node — so the rule stays off there.
 const WINDOWS_SHELL_PROGRAMS = new Set(['cmd', 'powershell', 'pwsh']);
 
+// PowerShell relocates the session through its own cmdlets; `cd`/`chdir`/
+// `pushd`/`popd` are among their aliases and dispatch through the ordinary
+// chdir arm. `-Path`/`-LiteralPath` name the operand explicitly.
+const POWERSHELL_LOCATION_PROGRAMS = new Set([
+  'set-location',
+  'sl',
+  'push-location',
+  'pop-location',
+]);
+
+// PowerShell mutates the process environment through spellings no POSIX
+// assignment scan reads: `$env:NAME = value` / `${env:NAME} = value`
+// (leadingEnvAssignmentKey requires a bare `NAME=`) and the static
+// `[Environment]::SetEnvironmentVariable` API. A later git child inherits
+// the mutation, so the whole command fails closed — but a READ
+// (`echo $env:PATH`) carries no `=` and stays resolvable.
+const POWERSHELL_ENV_MUTATION_PATTERNS = [
+  /^\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?\s*\+?=(?!=)/i,
+  /^\[Environment\]::SetEnvironmentVariable\s*\(/i,
+];
+
 // `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
 // argv entry as the payload. `-o`/`-O` take values, so either one earlier in
 // the bundle consumes the rest of it and `-c` is not present.
@@ -443,12 +464,15 @@ interface TokenizedSegment {
 // executed argv. Escaping the following character along with the backslash
 // would glue the next word into the path (`C:\repo\ status` as one token),
 // letting a `-C`/`--git-dir`/`-c` placed after a trailing separator hide
-// inside the first relocation's value. A backslash quoted in double quotes
-// is the one spelling the tokenizer reads back as a literal backslash
-// WITHOUT swallowing the next character; before any other character a plain
-// escaped backslash suffices. Both quoted forms already keep backslashes
-// literal under POSIX rules, so they are left alone; a `$'…'` body starts
-// with `$`, marking its token dynamic either way. Git Bash sessions execute
+// inside the first relocation's value. Inside double quotes every backslash
+// is doubled instead: the POSIX tokenizer keeps backslashes literal there
+// except before another backslash or a quote — exactly the two characters
+// that are NOT escapes for cmd.exe and PowerShell — and a `"` closes the
+// region unconditionally on those lanes. Consuming `\"` as a POSIX escape
+// pair leaves the region open for the splitter and hides every separator
+// after it; single-quoted bodies already keep backslashes literal under
+// POSIX rules, so they are left alone. A `$'…'` body starts with `$`,
+// marking its token dynamic either way. Git Bash sessions execute
 // through bash, whose backslash escapes the POSIX tokeniser already models,
 // so the rewrite stays off there — applying it would split words the
 // executed argv keeps glued.
@@ -481,12 +505,12 @@ export function preserveWindowsPathSeparators(
       continue;
     }
     if (double) {
-      if (character === '\\' && index + 1 < segment.length) {
-        out += character + segment[index + 1];
-        index++;
+      if (character === '"') {
+        double = false;
+      } else if (character === '\\') {
+        out += '\\\\';
         continue;
       }
-      if (character === '"') double = false;
       out += character;
       continue;
     }
@@ -616,12 +640,30 @@ export function containsUnmodelledWindowsSyntax(
         index++;
         continue;
       }
+      // `2>&1` / `>&2` / `&>file` — a `&` adjacent to a redirection operator
+      // is file-descriptor plumbing, not a command separator, with the same
+      // meaning in cmd.exe, PowerShell and bash. The same exceptions
+      // readTopLevelSeparators and core splitCommands already make.
+      if (command[index + 1] === '>') {
+        index += command[index + 2] === '>' ? 2 : 1;
+        continue;
+      }
+      const previous = command[index - 1];
+      if (previous === '>' || previous === '<') continue;
       return true;
     }
     if (shell === 'cmd' && (character === '#' || character === ';')) {
       return true;
     }
     if (shell === 'powershell' && command.startsWith('--%', index)) {
+      return true;
+    }
+    if (
+      shell === 'powershell' &&
+      POWERSHELL_ENV_MUTATION_PATTERNS.some((pattern) =>
+        pattern.test(command.slice(index)),
+      )
+    ) {
       return true;
     }
   }
@@ -823,8 +865,16 @@ const TEXT_RELOCATION_MARKER_PATTERN =
 const GIT_PROGRAM_ENV_KEYS = new Set(['GIT_EXEC_PATH', 'PATH']);
 
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
-  const key = leadingEnvAssignmentKey(token.text);
-  if (key === null) return;
+  const rawKey = leadingEnvAssignmentKey(token.text);
+  if (rawKey === null) return;
+  // Environment variable names are case-insensitive to cmd.exe and
+  // PowerShell — `git_dir` and `GIT_DIR` are one variable, and git reads
+  // the uppercase spelling — so fold before matching. POSIX lanes keep
+  // case: there `git_dir` names no variable git reads.
+  const key =
+    process.platform === 'win32' && getShellConfiguration().shell !== 'bash'
+      ? rawKey.toUpperCase()
+      : rawKey;
   if (
     GIT_PROGRAM_ENV_KEYS.has(key) ||
     GIT_UNRESOLVABLE_ENV_KEYS.has(key) ||
@@ -1212,6 +1262,35 @@ const EXPORT_BUILTINS = new Set([
 // directory the shell actually enters.
 const CHDIR_OPTION_PATTERN = /^-[LPe@qs]+$/;
 
+// cmd.exe accepts CD/CHDIR/PUSHD with no delimiter before the operand —
+// `cd..`, `cd\dir`, `cd/d X` — and PowerShell resolves the same
+// delimiter-less `cd..`/`cd\` spellings. The POSIX word split reads those
+// as one foreign program word (`cd..`), or splits them on the backslash and
+// reports the operand as the program word (`cd\dir` → `dir`), so the move
+// the shell really makes is never tracked. Split the operand back off at
+// the program-word position before the dispatch looks at it.
+const FUSED_CHDIR_PATTERN = /^(cd|chdir|pushd|popd)([./\\].*)$/i;
+
+function splitFusedWindowsChdirs(run: GuardToken[]): GuardToken[] {
+  for (let index = 0; index < run.length; index++) {
+    const token = run[index]!;
+    if (token.redirect || token.ambiguousFd) continue;
+    if (leadingEnvAssignmentKey(token.text) !== null) continue;
+    if (LEADING_SHELL_KEYWORDS.has(token.text)) continue;
+    const match = token.dynamic ? null : FUSED_CHDIR_PATTERN.exec(token.text);
+    if (match === null) return run;
+    const replacement = run.slice();
+    replacement.splice(
+      index,
+      1,
+      { text: match[1]!, dynamic: false },
+      { text: match[2]!, dynamic: false },
+    );
+    return replacement;
+  }
+  return run;
+}
+
 function findChdirTarget(
   run: GuardToken[],
   start: number,
@@ -1361,6 +1440,9 @@ function analyzeRun(
   run: GuardToken[],
   platform: string = process.platform,
 ): RunAnalysis {
+  if (platform === 'win32' && getShellConfiguration().shell !== 'bash') {
+    run = splitFusedWindowsChdirs(run);
+  }
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
@@ -1407,30 +1489,27 @@ function analyzeRun(
       getShellConfiguration().shell !== 'bash' &&
       (program === 'set' || program === 'setx')
     ) {
-      // cmd.exe `set VAR=value` — and `setx VAR value`, which persists past
-      // the session — mutate the environment every later `&&`-chained command
-      // executes under, so they carry the same semantics as a POSIX
-      // `export VAR=value`; route the assignments through that machinery.
-      // Anything that is not a plain assignment (bare `set`, `/p`/`/a`,
-      // dynamic operands) is undecidable and fails closed.
       const operands = run.slice(index + 1);
-      if (program === 'setx') {
-        const [name, value] = operands;
-        if (
-          operands.length === 2 &&
-          !name!.dynamic &&
-          !value!.dynamic &&
-          /^[A-Za-z_][A-Za-z0-9_]*$/.test(name!.text)
-        ) {
-          recordEnvAssignment(
-            { text: `${name!.text}=${value!.text}`, dynamic: false },
-            state,
-          );
-          return { kind: 'export', state, operands };
-        }
+      if (
+        program === 'setx' ||
+        getShellConfiguration().shell === 'powershell'
+      ) {
+        // setx writes the registry for FUTURE sessions, and PowerShell's
+        // `set` is the Set-Variable alias: neither touches the process
+        // environment the later `&&`-chained children execute under.
+        // Recording a relocation would fabricate state the executed chain
+        // never sees — and a phantom git-dir relocation switches off the
+        // repository-discovery check real git falls back to — so these can
+        // only ever add denials.
         state.unresolved = true;
         return { kind: 'export', state, operands: [] };
       }
+      // cmd.exe `set VAR=value` mutates the environment every later
+      // `&&`-chained command executes under, so it carries the same
+      // semantics as a POSIX `export VAR=value`; route the assignment
+      // through that machinery. Anything that is not a plain assignment
+      // (bare `set`, `/p`/`/a`, dynamic operands) is undecidable and fails
+      // closed.
       for (const operand of operands) {
         if (operand.dynamic || leadingEnvAssignmentKey(operand.text) === null) {
           state.unresolved = true;
@@ -1521,18 +1600,35 @@ function analyzeRun(
       program === 'cd' ||
       program === 'pushd' ||
       program === 'popd' ||
-      (platform === 'win32' && program === 'chdir')
+      (platform === 'win32' && program === 'chdir') ||
+      (platform === 'win32' &&
+        getShellConfiguration().shell === 'powershell' &&
+        POWERSHELL_LOCATION_PROGRAMS.has(program))
     ) {
-      const variant = program === 'chdir' ? 'cd' : program;
+      const variant =
+        program === 'chdir' || program === 'set-location' || program === 'sl'
+          ? 'cd'
+          : program === 'push-location'
+            ? 'pushd'
+            : program === 'pop-location'
+              ? 'popd'
+              : program;
+      const rest = run.slice(index + 1);
+      // `Set-Location -Path X` names the directory through a flag; take the
+      // flag's value instead of failing the run on the flag itself.
+      const namedIndex = rest.findIndex(
+        (token) => token.text === '-Path' || token.text === '-LiteralPath',
+      );
       return {
         kind: 'cd',
         variant,
-        target: findChdirTarget(run, index + 1, variant, platform === 'win32'),
+        target:
+          namedIndex >= 0
+            ? rest[namedIndex + 1]
+            : findChdirTarget(rest, 0, variant, platform === 'win32'),
         // `cd -P` resolves each component through its symlinks before
         // applying `..`, which a lexical resolve cannot reproduce.
-        physical: run
-          .slice(index + 1)
-          .some((token) => /^-[A-Za-z]*P/.test(token.text)),
+        physical: rest.some((token) => /^-[A-Za-z]*P/.test(token.text)),
       };
     }
     return { kind: 'other', state, assignmentsOnly: false };
@@ -3040,14 +3136,27 @@ async function evaluateCommandWithCwd(
             platformNow === 'win32'
               ? WIN32_PATH_RELINKING_PROGRAMS
               : PATH_RELINKING_PROGRAMS;
-          if (run.some((t) => relinkPrograms.has(executableBaseName(t)))) {
-            // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
-            // the relinking program out of run[0], so scan the whole run.
-            for (const operand of run) {
+          // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
+          // the relinking program out of run[0], so find it in the whole
+          // run — but skip ONLY that token: a relink destination may itself
+          // be named like a relink program (`mv <outside> copy`), and the
+          // destination is exactly the path a later containment proof
+          // checks.
+          const relinkProgramIndex = run.findIndex(
+            (t) =>
+              !t.redirect &&
+              !t.ambiguousFd &&
+              relinkPrograms.has(executableBaseName(t)),
+          );
+          if (relinkProgramIndex >= 0) {
+            for (const [operandIndex, operand] of run.entries()) {
+              if (operandIndex === relinkProgramIndex) continue;
+              if (operand.redirect || operand.ambiguousFd) continue;
               if (operand.text.startsWith('-')) continue;
-              if (relinkPrograms.has(executableBaseName(operand))) {
-                continue;
-              }
+              // `/E`, `/MIR` — Windows program switches are never paths on
+              // the windows-native lanes. The Git-Bash lane keeps `/…`
+              // operands: there they are POSIX paths.
+              if (windowsNative && operand.text.startsWith('/')) continue;
               if (operand.dynamic || trackedCwd === undefined) {
                 scope.relink.gitDir = true;
                 continue;

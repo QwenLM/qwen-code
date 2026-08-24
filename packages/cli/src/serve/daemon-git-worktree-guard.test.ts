@@ -20,6 +20,7 @@ import {
 import {
   getShellConfiguration,
   GitWorktreeService,
+  splitCommands,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/bridgeOptions';
@@ -663,9 +664,24 @@ it -C ${outsideRepo} reset --hard`,
       expect(map(quoted, 'cmd')).toBe(quoted);
     });
 
-    it('leaves double-quoted bodies alone', () => {
-      const quoted = 'git -C "C:\\repo\\ path" status';
-      expect(map(quoted, 'cmd')).toBe(quoted);
+    it('doubles backslashes inside double-quoted bodies', () => {
+      // Neither cmd.exe nor PowerShell escapes with a backslash inside
+      // double quotes, and the POSIX tokenizer keeps `\\` literal there,
+      // so doubling is a fixed point for both readers.
+      expect(map('git -C "C:\\repo\\ path" status', 'cmd')).toBe(
+        'git -C "C:\\\\repo\\\\ path" status',
+      );
+    });
+
+    it('closes the double-quoted region at the quote after a backslash', () => {
+      // cmd.exe and PowerShell close the region on the `"` unconditionally;
+      // consuming `\"` as a POSIX escape pair leaves every splitter
+      // believing the quote is still open and swallows the separators
+      // after it.
+      expect(map('cd "src\\" && cd ..', 'cmd')).toBe('cd "src\\\\" && cd ..');
+      expect(map('git status "x\\" && git reset', 'powershell')).toBe(
+        'git status "x\\\\" && git reset',
+      );
     });
 
     it('stays off for bash-executed sessions on Windows', () => {
@@ -678,6 +694,18 @@ it -C ${outsideRepo} reset --hard`,
       expect(preserveWindowsPathSeparators(command, 'linux', 'cmd')).toBe(
         command,
       );
+    });
+
+    it('keeps splitCommands agreeing after a backslash-closed quote', () => {
+      // Pre-fix the pre-pass consumed `\"` as a POSIX escape pair, the
+      // quote never closed for splitCommands, and the whole line stayed
+      // one segment while cmd.exe executes three.
+      const normalized = preserveWindowsPathSeparators(
+        'cd "src\\" && cd ..\\..\\outside && git reset --hard',
+        'win32',
+        'cmd',
+      );
+      expect(splitCommands(normalized)).toHaveLength(3);
     });
   });
 
@@ -936,6 +964,12 @@ it -C ${outsideRepo} reset --hard`,
       () => ['powershell', 'git status; git log -1'],
       // A PowerShell pipeline does not scope the session's directory away.
       () => ['powershell', 'cd nested | Out-Null; git reset --hard'],
+      // `2>&1` and friends are file-descriptor plumbing in cmd.exe,
+      // PowerShell and bash alike — never a command separator.
+      () => ['cmd', 'git status 2>&1'],
+      () => ['cmd', 'git rev-parse HEAD 1>out.txt 2>&1'],
+      () => ['powershell', 'git status 2>&1'],
+      () => ['powershell', 'npm test 2>&1 > out.txt'],
     ])('still allows the agreed shape %#', async (build) => {
       const [lane, command] = build() as ['cmd' | 'powershell', string];
       spoofLane(lane);
@@ -971,6 +1005,12 @@ it -C ${outsideRepo} reset --hard`,
         expect(detects('git add -A && git commit -m "x"', shell)).toBe(false);
         expect(detects('git status | more', shell)).toBe(false);
         expect(detects('a || b', shell)).toBe(false);
+        // File-descriptor plumbing is identical in meaning across these
+        // shells; the same exception readTopLevelSeparators makes.
+        expect(detects('git status 2>&1', shell)).toBe(false);
+        expect(detects('git status >NUL 2>&1', shell)).toBe(false);
+        expect(detects('git status >&2', shell)).toBe(false);
+        expect(detects('npm test &> out', shell)).toBe(false);
       }
       expect(detects("git -C 'out' reset", 'powershell')).toBe(false);
       expect(detects('git -C in#x reset', 'powershell')).toBe(false);
@@ -1073,6 +1113,112 @@ it -C ${outsideRepo} reset --hard`,
       await expect(guard(request('echo cmd powershell pwsh'))).resolves.toEqual(
         { allowed: true },
       );
+    });
+  });
+
+  // PowerShell relocates the session and mutates the process environment
+  // through spellings the POSIX text model reads as ordinary programs
+  // (`Set-Location`, `$env:NAME = value`) or as nothing at all. The cd
+  // family is tracked like its POSIX twins; the environment mutation the
+  // model cannot read fails closed. Spoofed so every lane pins it — the
+  // merge_group Windows lane is otherwise the only lane that executes it.
+  describe('PowerShell state carriers (spoofed powershell lane)', () => {
+    const savedEnv: Record<string, string | undefined> = {};
+
+    const spoofPowershell = (): void => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        delete process.env[key];
+      }
+      process.env['ComSpec'] = 'powershell.exe';
+    };
+
+    beforeEach(() => {
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        savedEnv[key] = process.env[key];
+      }
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    });
+
+    it.each([
+      () => `Set-Location ${outsideRepo}; git reset --hard`,
+      () => `sl ${outsideRepo}; git reset --hard`,
+      () => `Push-Location ${outsideRepo}; git reset --hard`,
+      () => `Set-Location -Path ${outsideRepo}; git reset --hard`,
+    ])(
+      'denies a relocation persisted through the PowerShell cd family %#',
+      async (build) => {
+        spoofPowershell();
+        const guard = createDaemonToolGuard();
+        await expect(guard(request(build()))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining(outsideRepo),
+        });
+      },
+    );
+
+    it('fails closed on Pop-Location, whose destination is unresolvable', async () => {
+      spoofPowershell();
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('Pop-Location; git reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
+    });
+
+    it('keeps an in-boundary PowerShell move harmless', async () => {
+      spoofPowershell();
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`Set-Location ${insideNested}; git reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+    });
+
+    it.each([
+      () => `$env:GIT_DIR='${outsideRepo}/.git'; git reset --hard`,
+      () => `$env:GIT_WORK_TREE = '${outsideRepo}'; git reset --hard`,
+      () => `\${env:GIT_DIR}='${outsideRepo}/.git'; git reset --hard`,
+      () =>
+        `[Environment]::SetEnvironmentVariable('GIT_DIR','x'); git reset --hard`,
+    ])(
+      'denies PowerShell environment mutation it cannot model %#',
+      async (build) => {
+        spoofPowershell();
+        const guard = createDaemonToolGuard();
+        await expect(guard(request(build()))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('Windows shell syntax'),
+        });
+      },
+    );
+
+    it('leaves a PowerShell environment read alone', async () => {
+      spoofPowershell();
+      const guard = createDaemonToolGuard();
+      await expect(guard(request('echo $env:PATH'))).resolves.toEqual({
+        allowed: true,
+      });
+    });
+
+    it('fails closed on set, the Set-Variable alias that never touches the process environment', async () => {
+      spoofPowershell();
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`set GIT_DIR=${effectiveCwd}/gd; git reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
     });
   });
 

@@ -16,21 +16,49 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isSameFile } from './same-file.js';
 
 // Lets a test pose as a volume that exposes no inode numbers: statSync
 // reports ino 0 while enabled, everything else delegates to the real thing.
 const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
+// Lets a test pose as a case-insensitive volume (FAT/exFAT/SMB): every
+// registered case-variant spelling stats and canonicalises as the file it
+// names. The NATIVE canonicaliser reports the on-disk spelling — that is
+// what GetFinalPathNameByHandleW does on Windows — while the JS walker
+// echoes the caller's own spelling back.
+const caseInsensitiveVolume = vi.hoisted(() => ({
+  aliases: new Map<string, string>(),
+}));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const resolveAlias = (filePath: string): string =>
+    caseInsensitiveVolume.aliases.get(filePath) ?? filePath;
   const statSync = ((filePath: string) => {
-    const stats = actual.statSync(filePath);
+    const stats = actual.statSync(resolveAlias(String(filePath)));
     if (inoZeroVolume.enabled) stats.ino = 0;
     return stats;
   }) as typeof actual.statSync;
-  return { ...actual, statSync, default: { ...actual, statSync } };
+  const realpathSync = Object.assign(
+    (filePath: Parameters<typeof actual.realpathSync>[0]) => {
+      const caller = String(filePath);
+      const resolved = actual.realpathSync(resolveAlias(caller));
+      return caseInsensitiveVolume.aliases.has(caller)
+        ? join(dirname(resolved), basename(caller))
+        : resolved;
+    },
+    {
+      native: (filePath: Parameters<typeof actual.realpathSync>[0]) =>
+        actual.realpathSync(resolveAlias(String(filePath))),
+    },
+  ) as unknown as typeof actual.realpathSync;
+  return {
+    ...actual,
+    statSync,
+    realpathSync,
+    default: { ...actual, statSync, realpathSync },
+  };
 });
 
 describe('isSameFile', () => {
@@ -82,6 +110,31 @@ describe('isSameFile', () => {
       expect(isSameFile(throughLink, aliased)).toBe(true);
     } finally {
       inoZeroVolume.enabled = false;
+    }
+  });
+
+  it('equates case-variant spellings when inodes are unverifiable', () => {
+    // FAT/exFAT/SMB volumes are case-insensitive AND report ino 0 for every
+    // file, so both spellings of one file stat there. The fallback must
+    // compare through the canonicaliser that folds case (realpathSync.native
+    // — GetFinalPathNameByHandleW on Windows), not the JS walker that echoes
+    // the caller's spelling: a false `false` silently disables the
+    // anti-clobber guards that consume this predicate.
+    const real = join(dir, 'Report.md');
+    writeFileSync(real, '{}');
+    const variant = join(dir, 'report.md');
+    caseInsensitiveVolume.aliases.set(variant, real);
+    inoZeroVolume.enabled = true;
+    try {
+      expect(isSameFile(real, variant)).toBe(true);
+      expect(isSameFile(variant, real)).toBe(true);
+      // Two genuinely distinct files stay distinct under the same pose.
+      const other = join(dir, 'other.md');
+      writeFileSync(other, '{}');
+      expect(isSameFile(real, other)).toBe(false);
+    } finally {
+      inoZeroVolume.enabled = false;
+      caseInsensitiveVolume.aliases.clear();
     }
   });
 

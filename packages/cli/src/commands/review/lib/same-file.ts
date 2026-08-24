@@ -61,7 +61,12 @@ export function isSameFile(left: string, right: string): boolean {
     if (hasVerifiableInode(leftStat.ino) && hasVerifiableInode(rightStat.ino)) {
       return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
     }
-    return realpathSync(left) === realpathSync(right);
+    // realpathSync.native canonicalises case the way the volume does
+    // (GetFinalPathNameByHandleW on Windows); the JS walker echoes the
+    // caller's spelling — and every volume that reports ino 0 is
+    // case-insensitive, so the walker is wrong exactly where this branch
+    // fires.
+    return realpathSync.native(left) === realpathSync.native(right);
   }
   const leftIdentity =
     leftStat !== undefined ? realpathSync(left) : identityOfAbsent(left);
