@@ -199,7 +199,6 @@ export const legacyFilenames = [
   'loggingContentGenerator',
   'loopDetectionService',
   'lowlightLoader',
-  'LruCache',
   'lspCommand',
   'LspConfigLoader',
   'LspConnectionFactory',
