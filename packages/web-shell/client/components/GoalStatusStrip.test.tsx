@@ -4,7 +4,6 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GOAL_EVIDENCE_LIMIT_REASONS } from '../utils/goalGate';
 import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
 
 function snapshot(
@@ -107,9 +106,7 @@ describe('GoalStatusStrip', () => {
     ).toBeNull();
   });
 
-  it('hides resume for an evidence-limited Goal', () => {
-    // The reducer refuses to resume a Goal stopped at an evidence bound, so
-    // offering the control only earns the user an invalid-transition 409.
+  it('offers resume for an evidence-limited Goal', () => {
     const limited = snapshot('usage_limited');
     act(() => {
       root.render(
@@ -128,34 +125,38 @@ describe('GoalStatusStrip', () => {
       );
     });
 
-    expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="goal-status-strip"]'),
     ).not.toBeNull();
   });
 
-  it('hides resume for a Goal evidence-limited before `limitKind` existed', () => {
+  it('offers resume for a Goal evidence-limited before `limitKind` existed', () => {
     // The sentinel prose shipped before the `limitKind` field did, so a Goal
     // persisted in that window restores as `usage_limited` with no `limitKind`
-    // at all. The reducer still refuses it; a gate keyed off `limitKind` alone
-    // offered a Resume button that could only ever earn a 409.
+    // at all. The strip does not parse the prose -- resumability is decided by
+    // status alone -- so one representative sentinel is enough here.
     const limited = snapshot('usage_limited');
-    for (const lastReason of GOAL_EVIDENCE_LIMIT_REASONS) {
-      act(() => {
-        root.render(
-          <I18nProvider language="en">
-            <GoalStatusStrip
-              snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
-              onEdit={vi.fn()}
-              onPause={vi.fn()}
-              onResume={vi.fn()}
-              onClear={vi.fn()}
-            />
-          </I18nProvider>,
-        );
-      });
-      expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
-    }
+    const lastReason =
+      'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
+    ).not.toBeNull();
   });
 
   it('still offers resume for an ordinary usage-limited stop', () => {

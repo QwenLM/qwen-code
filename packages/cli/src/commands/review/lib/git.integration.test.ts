@@ -32,6 +32,11 @@ function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
 }
 
+// Git prints worktree paths with forward slashes on Windows, while
+// `join`/`realpathSync` build backslash spellings there; compare both sides
+// slash-normalized (the identity on POSIX).
+const fwd = (value: string): string => value.replace(/\\/g, '/');
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
 
@@ -75,7 +80,7 @@ describe('releaseWorktree', () => {
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
   });
 
   it('removes an unregistered non-empty leftover git no longer tracks', () => {
@@ -86,7 +91,7 @@ describe('releaseWorktree', () => {
     mkdirSync(join(repo, 'wt', 'junk'), { recursive: true });
     writeFileSync(join(repo, 'wt', 'junk', 'f'), 'x');
     // Negative control: it is not a registered worktree.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
 
     expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
       existed: true,
@@ -169,8 +174,8 @@ describe('releaseWorktree', () => {
     // macOS (`/var` → `/private/var`): the raw spelling passes there only by
     // accident — the canonical path happens to contain it as a substring —
     // and would not on a Linux fixture reached through a symlinked ancestor.
-    expect(git('worktree', 'list')).toContain(
-      join(realpathSync(repo), 'victim'),
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'victim')),
     );
     expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
   });
@@ -193,8 +198,8 @@ describe('releaseWorktree', () => {
     expect(got.freed).toBe(false);
     expect(got.reason).toContain('symlink');
     // Registered and on disk, both.
-    expect(git('worktree', 'list')).toContain(
-      join(realpathSync(repo), 'real', 'victim'),
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'real', 'victim')),
     );
     expect(existsSync(join(repo, 'real', 'victim', 'keep.txt'))).toBe(true);
   });

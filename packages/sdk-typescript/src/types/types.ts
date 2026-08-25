@@ -401,9 +401,18 @@ export interface QueryOptions {
 
   /**
    * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
-   * If specified, only matching core tools are registered for the session.
-   * This is separate from `permissions.allow`, which auto-approves matching
-   * tool calls but does not restrict tool registration.
+   * If specified, only matching core tools are registered for the session
+   * (non-core built-ins such as `send_message` are unaffected).
+   * Separately, `permissions.allow` in settings.json (requires restart)
+   * activates a registry-level allowlist: when at least one valid allow
+   * rule is configured there (malformed entries do not count), built-in
+   * tools not covered by any allow or ask rule are not registered either
+   * (MCP tools, the `--json-schema` `structured_output` contract, the
+   * plan-mode lifecycle tools, `task_stop`, `tool_search`, and the
+   * `computer_use__*` family are exempt) (#9827). The SDK `allowedTools`
+   * parameter cannot activate the allowlist on its own, but while the
+   * allowlist is active its rules are merged into the effective allow set
+   * and count toward coverage, keeping covered built-ins registered.
    * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
    * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
@@ -431,7 +440,7 @@ export interface QueryOptions {
   excludeTools?: string[];
 
   /**
-   * Equivalent to `permissions.allow` in settings.json.
+   * Equivalent to `permissions.allow` in settings.json for auto-approval.
    * List of tools that are allowed to run without confirmation.
    *
    * **Behavior:**
@@ -440,6 +449,14 @@ export interface QueryOptions {
    * - Checked after `excludeTools` but before `canUseTool` callback
    * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
+   * - Alone does NOT restrict tool registration: this parameter maps to the
+   *   CLI `--allowed-tools` flag and cannot activate the registry allowlist
+   *   by itself. While a settings-provided `permissions.allow` allowlist is
+   *   active, however, these rules are merged into the effective allow set
+   *   and count toward coverage, so covered built-ins stay registered
+   *   (#9827). To hide unlisted built-in tools from the model request, set
+   *   `permissions.allow` in settings.json (requires restart); that key
+   *   activates the registry allowlist
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
