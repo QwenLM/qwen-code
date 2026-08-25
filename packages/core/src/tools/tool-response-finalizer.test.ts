@@ -952,6 +952,159 @@ describe('tool response finalization', () => {
       expect(output).toContain(BATCH_BUDGET_FIT_PREFIX);
       expect(fittedDigest(output)).toBe(digest);
     });
+
+    it('does not adopt a quoted stub digest from label-leading content', async () => {
+      // A tool result or peer-authored board that STARTS with a quoted
+      // `Full output sha256: <hex>` line is content, not a stub: the guard
+      // side recognizes label-leading shapes shape-exactly, so the producer
+      // must hash the full text instead of carrying the quoted hex —
+      // pre-fix the fit carried the quoted hex and changes below the quoted
+      // line were invisible to the result-aware guards (issue #9450).
+      const quotedHex = 'ab'.repeat(32);
+      const quotedA = `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\n${'payload A line\n'.repeat(40)}`;
+      const quotedB = `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\n${'payload B line\n'.repeat(40)}`;
+
+      const fitDigestOf = async (text: string): Promise<string> => {
+        const finalized = await finalizeToolResponses(
+          config(150),
+          [
+            entry('call-a', [
+              {
+                functionResponse: {
+                  id: 'call-a',
+                  name: 'task_list',
+                  response: { output: text },
+                },
+              },
+            ]),
+          ],
+          new Map(),
+        );
+        return fittedDigest(
+          finalized[0].responseParts[0].functionResponse?.response?.[
+            'output'
+          ] as string,
+        );
+      };
+
+      expect(await fitDigestOf(quotedA)).toBe(boardDigest(quotedA));
+      expect(await fitDigestOf(quotedB)).toBe(boardDigest(quotedB));
+      expect(await fitDigestOf(quotedA)).not.toBe(quotedHex);
+    });
+
+    it('does not adopt a quoted digest buried in a fit-prefix-leading payload', async () => {
+      // Content starting with the fit prefix whose payload QUOTES a stub
+      // header carries no producer digest at the fixed header position: the
+      // carry-through must read that position only (where fitText writes
+      // it), never scan the payload — pre-fix the scan adopted the quoted
+      // hex, fingerprinting the fit to the quoted hex while the content
+      // below it changed (issue #9450).
+      const quotedHex = 'cd'.repeat(32);
+      const base =
+        `${BATCH_BUDGET_FIT_PREFIX}\n` +
+        `board quoting a stub header\n` +
+        `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\n`;
+      const textA = `${base}payload A ${'x'.repeat(400)}`;
+      const textB = `${base}payload B ${'y'.repeat(400)}`;
+
+      const fitDigestOf = async (text: string): Promise<string> => {
+        const finalized = await finalizeToolResponses(
+          config(200),
+          [
+            entry('call-a', [
+              {
+                functionResponse: {
+                  id: 'call-a',
+                  name: 'task_list',
+                  response: { output: text },
+                },
+              },
+            ]),
+          ],
+          new Map(),
+        );
+        return fittedDigest(
+          finalized[0].responseParts[0].functionResponse?.response?.[
+            'output'
+          ] as string,
+        );
+      };
+
+      expect(await fitDigestOf(textA)).toBe(boardDigest(textA));
+      expect(await fitDigestOf(textB)).toBe(boardDigest(textB));
+      expect(await fitDigestOf(textA)).not.toBe(quotedHex);
+    });
+
+    it('collides quoted-stub-leading content across the budget boundary and stays change-sensitive', async () => {
+      // Both directions of the label-leading divergence: identical content
+      // must fingerprint identically raw (under budget) and fitted (over
+      // budget), and content changing BELOW the quoted line must
+      // fingerprint differently (issue #9450).
+      const quotedHex = 'ef'.repeat(32);
+      const make = (tail: string) =>
+        `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\nquoted stub header above\n${tail}`;
+      const textA = make(`payload v1 ${'a'.repeat(400)}`);
+      const textB = make(`payload v2 ${'b'.repeat(400)}`);
+
+      const partsOf = (text: string): Part[] => [
+        {
+          functionResponse: {
+            id: 'call-a',
+            name: 'task_list',
+            response: { output: text },
+          },
+        },
+      ];
+      const fitParts = async (text: string): Promise<Part[]> => {
+        const finalized = await finalizeToolResponses(
+          config(150),
+          [entry('call-a', partsOf(text))],
+          new Map(),
+        );
+        return finalized[0].responseParts;
+      };
+
+      // Raw vs fitted representations of identical content collide.
+      expect(fingerprintToolResult(await fitParts(textA))).toBe(
+        fingerprintToolResult(partsOf(textA)),
+      );
+      // Changes below the quoted line stay visible across the boundary.
+      expect(fingerprintToolResult(await fitParts(textA))).not.toBe(
+        fingerprintToolResult(await fitParts(textB)),
+      );
+    });
+
+    it('collides a no-digest fit-prefix-leading value with its fit across the boundary', async () => {
+      // Entrance 2: content starting with the fit prefix but carrying no
+      // anchored digest line fingerprinted VERBATIM under budget (guard)
+      // while its over-budget fit wrapped to sha256(raw) — two
+      // representations of identical content that never collide, so a
+      // frozen board oscillating around the budget boundary never armed
+      // the cap's stuck signal. Both representations must reduce to the
+      // same sha256 (issue #9450).
+      const content =
+        `${BATCH_BUDGET_FIT_PREFIX}\n` +
+        `plain board content without any digest line\n` +
+        'board line\n'.repeat(40);
+
+      const partsOf = (text: string): Part[] => [
+        {
+          functionResponse: {
+            id: 'call-a',
+            name: 'task_list',
+            response: { output: text },
+          },
+        },
+      ];
+      const finalized = await finalizeToolResponses(
+        config(150),
+        [entry('call-a', partsOf(content))],
+        new Map(),
+      );
+      expect(fingerprintToolResult(finalized[0].responseParts)).toBe(
+        fingerprintToolResult(partsOf(content)),
+      );
+    });
   });
 
   describe('degenerate batch-budget fits stay content-dependent (issue #9450)', () => {

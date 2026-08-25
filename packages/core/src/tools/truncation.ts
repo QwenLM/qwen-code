@@ -62,36 +62,77 @@ export const TRUNCATION_SAVE_FAILURE_NOTE =
   '[Note: Could not save full output to file]';
 
 /**
+ * Extracts a full 64-hex stub digest occupying a FIXED position: the digest
+ * must span exactly `digestStart` .. `digestStart + 64` and end its line
+ * (terminator undefined, '\n' or '\r'). Returns null otherwise. Shared
+ * primitive for the positions the producers are known to write the digest
+ * at, so the producer-side carry-through and the loop guards' recognition
+ * parse one grammar and cannot drift (issue #9450).
+ */
+export function extractStubDigestAt(
+  value: string,
+  digestStart: number,
+): string | null {
+  const digest = value.slice(digestStart, digestStart + 64);
+  const terminator = value[digestStart + 64];
+  if (
+    /^[0-9a-f]{64}$/.test(digest) &&
+    (terminator === undefined || terminator === '\n' || terminator === '\r')
+  ) {
+    return digest;
+  }
+  return null;
+}
+
+/**
  * Extracts the sha256 digest a stub producer embedded for the FULL
  * pre-truncation output, anchored to a producer line: the label must start
  * its line and be followed by exactly 64 hex chars ending the line. A
  * mid-string mention of the label (e.g. board content quoting a stub) never
  * matches. Returns null when no anchored digest is present. Exported so the
  * batch-budget finalizer can carry a nested stub's digest through a fit
- * (see fitText there) instead of hashing the per-call unique envelope
- * (issue #9450); the loop guards keep their own private copy because they
- * already import from this module and the recognition must not drift from
- * the producer constants above.
+ * (see fitText there) instead of hashing the per-call unique envelope, and
+ * so the loop guards share this exact recognizer instead of hand-mirroring
+ * it — the recognition must not drift from the producer constants above
+ * (issue #9450).
  */
 export function extractAnchoredStubDigest(value: string): string | null {
   let searchFrom = 0;
   for (;;) {
     const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
     if (index < 0) return null;
-    const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
     const lineAnchored = index === 0 || value[index - 1] === '\n';
     if (lineAnchored) {
-      const digest = value.slice(digestStart, digestStart + 64);
-      const terminator = value[digestStart + 64];
-      if (
-        /^[0-9a-f]{64}$/.test(digest) &&
-        (terminator === undefined || terminator === '\n' || terminator === '\r')
-      ) {
-        return digest;
-      }
+      const digest = extractStubDigestAt(
+        value,
+        index + FULL_OUTPUT_DIGEST_LABEL.length,
+      );
+      if (digest !== null) return digest;
     }
     searchFrom = index + 1;
   }
+}
+
+/**
+ * Returns the digest of a digest-carrying shape that starts with the digest
+ * label itself: the batch-budget finalizer's degenerate digest-line-only
+ * fits (exactly `Full output sha256: <64-hex>`) and the save-failure
+ * fallback of `truncateAndSaveToFile` (label + head/tail payload +
+ * save-failure note). Recognition is SHAPE-EXACT and the digest is read at
+ * the fixed position right after the label — the same grammar the loop
+ * guards apply (stripPersistenceEnvelope): content merely STARTING with the
+ * label (a task board or tool result quoting a stub header) carries no
+ * producer digest and must keep fingerprinting as ordinary content, or the
+ * two sides of the batch-budget boundary fingerprint the same content
+ * differently (issue #9450). Returns null for any other text.
+ */
+export function extractDigestCarryingShapeDigest(text: string): string | null {
+  if (!text.startsWith(FULL_OUTPUT_DIGEST_LABEL)) return null;
+  const isDigestCarryingShape =
+    text.length === FULL_OUTPUT_DIGEST_LABEL.length + 64 ||
+    text.endsWith(TRUNCATION_SAVE_FAILURE_NOTE);
+  if (!isDigestCarryingShape) return null;
+  return extractStubDigestAt(text, FULL_OUTPUT_DIGEST_LABEL.length);
 }
 
 /**
@@ -102,9 +143,11 @@ export function extractAnchoredStubDigest(value: string): string | null {
  * with the digest label itself — the save-failure fallback of
  * `truncateAndSaveToFile` (label + head/tail payload + save-failure note)
  * and the batch-budget finalizer's degenerate digest-line-only fits.
- * Returns null for any other text (the anchored extraction below still
- * requires a line-anchored full 64-hex digest, so text that merely starts
- * with the label without one is not treated as a stub). Used by the
+ * Returns null for any other text: the label-leading shapes are recognized
+ * shape-exactly (see extractDigestCarryingShapeDigest), so content that
+ * merely STARTS with the label — a board quoting a stub header — is not
+ * treated as a stub and keeps fingerprinting as ordinary content
+ * (issue #9450). Used by the
  * batch-budget finalizer's fitText to make stub reduction idempotent across
  * nesting: the scheduler persists oversized results BEFORE the batch budget
  * runs, so a fit wrapping an already-persisted stub must carry the stub's
@@ -118,10 +161,13 @@ export function extractPersistedStubDigest(text: string): string | null {
   const isProducerStub =
     text.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
     text.startsWith(OUTPUT_TOO_LARGE_PREFIX) ||
-    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX) ||
-    text.startsWith(FULL_OUTPUT_DIGEST_LABEL);
-  if (!isProducerStub) return null;
-  return extractAnchoredStubDigest(text);
+    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX);
+  if (isProducerStub) return extractAnchoredStubDigest(text);
+  // Label-leading shapes are recognized shape-exactly: a quoted stub header
+  // (label + quoted hex + further payload) is content, not a stub, and
+  // adopting its quoted digest would fingerprint the fit to the quoted hex
+  // instead of the content (issue #9450).
+  return extractDigestCarryingShapeDigest(text);
 }
 
 /**

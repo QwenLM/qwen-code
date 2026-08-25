@@ -23,7 +23,10 @@ import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
-import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import {
+  BATCH_BUDGET_FIT_PREFIX,
+  enforceFunctionResponseBudget,
+} from '../tools/tool-response-finalizer.js';
 import {
   buildStub,
   FULL_OUTPUT_DIGEST_LABEL,
@@ -33,6 +36,7 @@ import {
 } from '../tools/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  extractToolResultText,
   fingerprintToolResult,
   LoopDetectionService,
 } from './loopDetectionService.js';
@@ -4956,6 +4960,84 @@ describe('LoopDetectionService', () => {
         }
         expect(fired).toBe(false);
         expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('stub grammar parity across the batch-budget boundary (issue #9450)', () => {
+      // fitText (producer) and stripPersistenceEnvelope (guard) must
+      // recognize stub shapes with ONE grammar: the shared recognizers in
+      // tools/truncation.ts. These tests pin the guard side at the fixed
+      // positions the producers write digests to — a quoted stub header in
+      // payload content must never hijack the fingerprint, and content with
+      // no producer digest must canonicalize identically on both sides of
+      // the budget boundary.
+      const quotedHex = '0123456789abcdef'.repeat(4);
+
+      const reducedText = (value: string): string =>
+        extractToolResultText(taskListResult(value)) ?? '';
+
+      it('reduces a fit header digest at the fixed position only, never from the payload', () => {
+        // A fit-prefix-leading value whose PAYLOAD quotes a stub header
+        // carries no producer digest: pre-fix the guard scanned the whole
+        // value for a line-anchored digest and reduced to the quoted hex —
+        // changes below the quoted line stayed invisible and the reduction
+        // diverged from fitText, which hashes the full text when the fixed
+        // header position carries no digest.
+        const value =
+          `${BATCH_BUDGET_FIT_PREFIX}\n` +
+          `board quoting a stub header\n` +
+          `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\n` +
+          'more payload';
+        const reduced = reducedText(value);
+        const expected = `<persisted-stub>sha256:${createHash('sha256')
+          .update(value)
+          .digest('hex')}`;
+        expect(reduced).toContain(expected);
+        expect(reduced).not.toContain(quotedHex);
+      });
+
+      it('collides a no-digest fit-prefix-leading value with its over-budget fit', () => {
+        // Content starting with the fit prefix but carrying no digest line
+        // fingerprinted VERBATIM pre-fix under budget while its over-budget
+        // fit wrapped to sha256(raw): two representations of identical
+        // content that never collide, so a frozen board oscillating around
+        // the budget boundary never accumulated unchanged-result evidence.
+        // Both sides must reduce to sha256(content).
+        const value = `${BATCH_BUDGET_FIT_PREFIX}\nplain content without any digest line`;
+        const digest = createHash('sha256').update(value).digest('hex');
+        const reduced = reducedText(value);
+        expect(reduced).toContain(`<persisted-stub>sha256:${digest}`);
+        // The over-budget fit of the same content (fitText writes the
+        // sha256 at the fixed header position) reduces to the SAME marker.
+        const fit =
+          `${BATCH_BUDGET_FIT_PREFIX}\n` +
+          `${FULL_OUTPUT_DIGEST_LABEL}${digest}\n` +
+          'Persisted tool-output artifact: /tmp/tool-results/call-a.txt';
+        expect(reducedText(fit)).toBe(reduced);
+      });
+
+      it('keeps the shape-exact label arm reducing producer shapes to their digest', () => {
+        // The degenerate digest-line-only fit and the save-failure fallback
+        // both start with the label itself and carry their digest at the
+        // fixed leading position: they must still reduce to that digest
+        // under the shared shape-exact recognizer.
+        const exactLine = `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}`;
+        expect(reducedText(exactLine)).toContain(
+          `<persisted-stub>sha256:${quotedHex}`,
+        );
+        // A quoted stub header (label + quoted hex + further payload) is
+        // content, not a stub: it canonicalizes to its own sha256 and its
+        // mutations stay visible.
+        const quotedA = `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\npayload A`;
+        const quotedB = `${FULL_OUTPUT_DIGEST_LABEL}${quotedHex}\npayload B`;
+        const reducedA = reducedText(quotedA);
+        expect(reducedA).toContain(
+          `<persisted-stub>sha256:${createHash('sha256')
+            .update(quotedA)
+            .digest('hex')}`,
+        );
+        expect(reducedA).not.toBe(reducedText(quotedB));
+        expect(reducedA).not.toContain(quotedHex);
       });
     });
   });

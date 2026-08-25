@@ -22,13 +22,15 @@ import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import { BATCH_BUDGET_FIT_PREFIX } from '../tools/tool-response-finalizer.js';
 import {
+  extractAnchoredStubDigest,
+  extractDigestCarryingShapeDigest,
+  extractStubDigestAt,
   FULL_OUTPUT_DIGEST_LABEL,
   OUTPUT_TOO_LARGE_PREFIX,
   PERSISTED_OUTPUT_OPEN_TAG,
   PERSISTED_PREVIEW_MARKER,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   TRUNCATED_PART_MARKER,
-  TRUNCATION_SAVE_FAILURE_NOTE,
 } from '../tools/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
@@ -217,7 +219,7 @@ export function shouldHaltOnTurnToolCallCap(
 // per-call unique artifact path in its envelope, which is exactly why it
 // must be reduced to its digest; content that merely contains (or even
 // starts with) the digest label carries no per-call path and is
-// fingerprinted verbatim instead.
+// fingerprinted as ordinary content instead.
 const STUB_PRODUCER_PREFIXES: readonly string[] = [
   PERSISTED_OUTPUT_OPEN_TAG,
   OUTPUT_TOO_LARGE_PREFIX,
@@ -227,31 +229,16 @@ const STUB_PRODUCER_PREFIXES: readonly string[] = [
 ];
 
 /**
- * Extracts the sha256 digest a stub producer embedded for the FULL
- * pre-truncation output, anchored to a producer line: the label must start
- * its line and be followed by exactly 64 hex chars ending the line. A
- * mid-string mention of the label (e.g. board content quoting a stub) never
- * matches. Returns null when no anchored digest is present.
+ * Canonicalizes a value no producer shape recognizes (see
+ * stripPersistenceEnvelope): its own sha256 under the `<persisted-stub>`
+ * sentinel, never the verbatim text — the batch-budget fit of the same
+ * content carries exactly this sha256 as its header digest (fitText), so
+ * both sides of the budget boundary collide.
  */
-function extractAnchoredStubDigest(value: string): string | null {
-  let searchFrom = 0;
-  for (;;) {
-    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
-    if (index < 0) return null;
-    const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
-    const lineAnchored = index === 0 || value[index - 1] === '\n';
-    if (lineAnchored) {
-      const digest = value.slice(digestStart, digestStart + 64);
-      const terminator = value[digestStart + 64];
-      if (
-        /^[0-9a-f]{64}$/.test(digest) &&
-        (terminator === undefined || terminator === '\n' || terminator === '\r')
-      ) {
-        return digest;
-      }
-    }
-    searchFrom = index + 1;
-  }
+function canonicalizeContent(value: string): string {
+  return `<persisted-stub>sha256:${createHash('sha256')
+    .update(value)
+    .digest('hex')}`;
 }
 
 /**
@@ -279,9 +266,16 @@ function extractAnchoredStubDigest(value: string): string | null {
  * that matches the payload.
  *
  * Stub recognition is gated on the producer prefixes (see
- * STUB_PRODUCER_PREFIXES) and the digest must be line-anchored with a full
- * 64-hex payload, so arbitrary result text that merely contains the label
- * is fingerprinted verbatim instead of being collapsed to a quoted window.
+ * STUB_PRODUCER_PREFIXES), and the guard parses stubs with the SAME grammar
+ * the producers write: the shared recognizers from tools/truncation.ts
+ * (extractAnchoredStubDigest / extractDigestCarryingShapeDigest /
+ * extractStubDigestAt) instead of a hand-mirrored copy. Digests are read
+ * only at the positions the producers write them — a batch-budget fit's
+ * header line right after its prefix, a label-leading shape's leading
+ * position — so a quoted stub header inside payload content can never
+ * hijack the fingerprint, and arbitrary result text that merely contains
+ * the label is canonicalized like ordinary content instead of being
+ * collapsed to a quoted window (issue #9450).
  *
  * Non-stub text is canonicalized to its own sha256 digest marker instead of
  * being carried verbatim: the batch-budget fit rewrites an over-budget
@@ -293,7 +287,13 @@ function extractAnchoredStubDigest(value: string): string | null {
  * Hashing the full text preserves every distinction a changed board makes
  * (including inside the band a fit would drop), and the `<persisted-stub>`
  * sentinel keeps a canonicalized result from ever colliding with a literal
- * small output that happens to match the raw text of another shape.
+ * small output that happens to match the raw text of another shape. The
+ * same collision rule applies to values that themselves start with a stub
+ * prefix but carry no producer digest (fit-prefix-leading board content):
+ * returning them verbatim would fingerprint them differently from their
+ * over-budget fit (whose digest is the sha256 of the full pre-fit text),
+ * so the cap's stuck signal could never arm for a frozen board oscillating
+ * around the boundary.
  */
 function stripPersistenceEnvelope(value: string): string {
   const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
@@ -311,33 +311,49 @@ function stripPersistenceEnvelope(value: string): string {
   // board oscillating across the budget boundary would fingerprint
   // differently per poll despite byte-identical content, the
   // consecutive-identical streak would never accumulate, and the cap's
-  // stuck signal would never arm (issue #9450). Recognition stays
-  // shape-exact — the label alone is not enough: board content merely
-  // STARTING with the label carries no producer digest and must keep
-  // fingerprinting as ordinary content (the injection rationale above).
-  const isDigestCarryingShape =
-    !isProducerStub &&
-    value.startsWith(FULL_OUTPUT_DIGEST_LABEL) &&
-    (value.length === FULL_OUTPUT_DIGEST_LABEL.length + 64 ||
-      value.endsWith(TRUNCATION_SAVE_FAILURE_NOTE));
-  if (!isProducerStub && !isDigestCarryingShape) {
-    return `<persisted-stub>sha256:${createHash('sha256')
-      .update(value)
-      .digest('hex')}`;
+  // stuck signal would never arm (issue #9450). Recognition is shape-exact
+  // and reads the digest at the fixed leading position — the producer-side
+  // recognizer itself (extractDigestCarryingShapeDigest), so a quoted stub
+  // header (label + quoted hex + further payload) keeps fingerprinting as
+  // ordinary content on BOTH sides of the budget boundary instead of the
+  // fit carrying the quoted hex while the guard hashes the content.
+  if (!isProducerStub) {
+    const shapeDigest = extractDigestCarryingShapeDigest(value);
+    if (shapeDigest !== null) {
+      return `<persisted-stub>sha256:${shapeDigest}`;
+    }
+    return canonicalizeContent(value);
+  }
+
+  // A batch-budget fit carries its digest at the fixed header position —
+  // the line right after the prefix. Read only there (fitText carries a
+  // nested digest through exactly that position): scanning the whole
+  // payload would adopt a quoted stub header from the fit's content, so the
+  // fingerprint would follow the quoted hex while content changes below it
+  // stay invisible. Without a header digest the value is canonicalized:
+  // fitText computes the same sha256 of the same text when it has no
+  // digest to carry, so the under-budget value and its over-budget fit
+  // collide even when the value itself starts with the fit prefix
+  // (issue #9450).
+  if (value.startsWith(BATCH_BUDGET_FIT_PREFIX)) {
+    const headerLabelStart = BATCH_BUDGET_FIT_PREFIX.length + 1;
+    const fitDigest =
+      value[BATCH_BUDGET_FIT_PREFIX.length] === '\n' &&
+      value.startsWith(FULL_OUTPUT_DIGEST_LABEL, headerLabelStart)
+        ? extractStubDigestAt(
+            value,
+            headerLabelStart + FULL_OUTPUT_DIGEST_LABEL.length,
+          )
+        : null;
+    if (fitDigest !== null) {
+      return `<persisted-stub>sha256:${fitDigest}`;
+    }
+    return canonicalizeContent(value);
   }
 
   const digest = extractAnchoredStubDigest(value);
   if (digest !== null) {
     return `<persisted-stub>sha256:${digest}`;
-  }
-  if (!isProducerStub) {
-    // A digest-carrying shape whose label is not followed by a full
-    // line-anchored 64-hex digest (should not happen for the producers,
-    // which always embed one): fall back to hashing the whole value like
-    // ordinary content instead of returning it verbatim.
-    return `<persisted-stub>sha256:${createHash('sha256')
-      .update(value)
-      .digest('hex')}`;
   }
 
   const isPreviewStub =
@@ -357,6 +373,10 @@ function stripPersistenceEnvelope(value: string): string {
     if (index >= 0) {
       return `<persisted-stub>${value.slice(index + marker.length)}`;
     }
+    // Truncation prefix with neither a digest line nor the truncated-part
+    // marker: no producer payload to fall back to — canonicalize for the
+    // same boundary-collision reason as the fit-prefix arm above.
+    return canonicalizeContent(value);
   }
   return value;
 }

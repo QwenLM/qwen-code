@@ -17,8 +17,8 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
-  extractAnchoredStubDigest,
   extractPersistedStubDigest,
+  extractStubDigestAt,
   FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
@@ -256,11 +256,23 @@ function fitText(
   // result-aware guards again (the guards' digest-first reduction would take
   // this header's outer digest), so carry the inner stub's own digest
   // instead — and likewise the digest of a prior batch-budget fit, whose
-  // header is per-call unique via its artifact note.
+  // header is per-call unique via its artifact note. The prior-fit digest is
+  // read at its FIXED header position (the line right after the prefix),
+  // never by scanning the payload: a quoted stub header inside the fit's
+  // content would otherwise be adopted as the digest, fingerprinting the fit
+  // to the quoted hex while content changes below it stay invisible — and
+  // diverging from the guard, which only recognizes producer-written
+  // positions (issue #9450).
+  const headerLabelStart = BATCH_BUDGET_FIT_PREFIX.length + 1;
   const digest =
     extractPersistedStubDigest(text) ??
-    (text.startsWith(BATCH_BUDGET_FIT_PREFIX)
-      ? extractAnchoredStubDigest(text)
+    (text.startsWith(BATCH_BUDGET_FIT_PREFIX) &&
+    text[BATCH_BUDGET_FIT_PREFIX.length] === '\n' &&
+    text.startsWith(FULL_OUTPUT_DIGEST_LABEL, headerLabelStart)
+      ? extractStubDigestAt(
+          text,
+          headerLabelStart + FULL_OUTPUT_DIGEST_LABEL.length,
+        )
       : null) ??
     createHash('sha256').update(text).digest('hex');
   const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
