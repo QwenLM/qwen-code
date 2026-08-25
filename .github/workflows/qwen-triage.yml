@@ -4939,8 +4939,8 @@ jobs:
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
-  # runner with the write PAT and never checks out PR code, so the write
-  # credential is isolated from the untrusted-code execution in verify above —
+  # runner with the write PAT and only checks out trusted base-repo publisher
+  # scripts, so credentials stay isolated from untrusted execution above —
   # the same split as publish-tmux. Unlike publish-tmux it also reports the
   # skip/na cases: /verify is always an explicit request, so silence would
   # read as a lost run.
@@ -4962,8 +4962,8 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    # Checks out nothing and runs no repository code (base-repo YAML events),
-    # so the persistent ECS pool is safe.
+    # Checks out only trusted base-repo scripts (never the PR ref), so the
+    # persistent ECS pool is safe.
     # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
@@ -4979,6 +4979,49 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
+      - name: 'Checkout the OSS publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          sparse-checkout: |-
+            scripts/upload-aliyun-oss-assets.js
+            scripts/release-script-utils.js
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 'Install ossutil'
+        # Evidence hosting is best-effort; the report still posts as text if
+        # the client cannot be installed.
+        continue-on-error: true
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          curl -fsSL --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          [ -n "$ossutil_path" ] || { echo '::error::ossutil binary not found'; exit 1; }
+          chmod +x "$ossutil_path"
+          install -m 0755 "$ossutil_path" "$RUNNER_TEMP/ossutil"
+          "$RUNNER_TEMP/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        continue-on-error: true
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          if [ -z "$ALIYUN_OSS_ACCESS_KEY_ID" ] || [ -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]; then
+            echo '::error::Missing Aliyun OSS credentials.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/ossutil" config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
 
       # The publish job runs on the persistent ECS pool and downloads into
       # a WORKSPACE-relative directory, which the runner does not clean
@@ -5017,6 +5060,8 @@ jobs:
           VERIFY_RESULT: '${{ needs.verify.result }}'
           DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
         # shellcheck disable=SC2016
         run: |-
           set -euo pipefail
@@ -5321,21 +5366,19 @@ jobs:
             printf '\n'
           }
 
-          # Host the agent's evidence images (if any) on a per-PR branch
-          # (pr-assets/<N>-verify, matching hand-run convention) and build
-          # a markdown section referencing them. Image bytes come from a run
+          # Host the agent's evidence images (if any) on Aliyun OSS and build a
+          # markdown section referencing them. Image bytes come from a run
           # that executed PR code: inert but untrusted, so filenames pass a
           # strict allowlist, count/size are capped (8 files, <2 MB each; the
           # find predicates enforce both), and any failure degrades to a
           # text-only comment rather than blocking the report. The
-          # VERIFY_ASSETS_REMOTE override exists as a test seam only.
+          # VERIFY_ASSETS_UPLOADER override exists as a test seam only.
           EVIDENCE_SECTION=''
           collect_and_host_evidence() {
             local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
-            local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-            local assets_branch="pr-assets/${PR_NUMBER}-verify"
-            local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
-            local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+            local prefix="pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            local stage_dir="${RUNNER_TEMP:-/tmp}/verify-assets-stage"
+            local uploader="${VERIFY_ASSETS_UPLOADER:-scripts/upload-aliyun-oss-assets.js}"
             # `|| true` on every find: the artifact download is
             # continue-on-error, so verify-results may not exist at all, and
             # a bare non-zero find under `pipefail` would abort the step
@@ -5352,19 +5395,8 @@ jobs:
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting caps (8 images, ≤2 MB each); see the run artifacts._"$'\n\n'
               return 0
             fi
-            rm -rf "$clone_dir"
-            if ! git clone -q --depth 1 --branch "$assets_branch" "$remote" "$clone_dir" 2>/dev/null; then
-              rm -rf "$clone_dir"
-              mkdir -p "$clone_dir"
-              git -C "$clone_dir" init -q
-              git -C "$clone_dir" checkout -q --orphan "$assets_branch"
-              git -C "$clone_dir" remote add origin "$remote"
-            fi
-            # Rebase in the racing-push retry needs a committer identity, so
-            # set it once on the clone instead of per-command -c flags.
-            git -C "$clone_dir" config user.name 'qwen-code-ci-bot'
-            git -C "$clone_dir" config user.email 'qwen-code-ci-bot@users.noreply.github.com'
-            mkdir -p "$clone_dir/$dest_dir"
+            rm -rf "$stage_dir"
+            mkdir -p "$stage_dir"
             for f in "${imgs[@]}"; do
               base="$(basename "$f")"
               safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
@@ -5377,10 +5409,10 @@ jobs:
               # Two artifact dirs can sanitize to the same name; the second
               # copy would silently overwrite the first and render twice.
               case "$seen" in *" $safe "*) continue ;; esac
-              # Extension is attacker-choosable; the magic bytes are what
-              # raw.githubusercontent.com will actually serve. PNG only.
+              # Extension is attacker-choosable; the magic bytes are what OSS
+              # will actually serve. PNG only.
               [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" = '89504e470d0a1a0a' ] || continue
-              cp "$f" "$clone_dir/$dest_dir/$safe" || continue
+              cp "$f" "$stage_dir/$safe" || continue
               seen="${seen}${safe} "
               hosted=$((hosted + 1))
             done
@@ -5389,26 +5421,24 @@ jobs:
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting checks (PNG magic, unique sanitized name, ≤2 MB, max 8); see the run artifacts._"$'\n\n'
               return 0
             fi
-            if ! (
-              cd "$clone_dir" &&
-              git add "$dest_dir" &&
-              git commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
-              {
-                git push -q origin "HEAD:$assets_branch" 2>/dev/null ||
-                {
-                  # One retry after a racing push from another assets job.
-                  git pull -q --rebase origin "$assets_branch" 2>/dev/null &&
-                  git push -q origin "HEAD:$assets_branch" 2>/dev/null
-                }
-              }
-            ); then
-              echo "::warning::Failed to push evidence images; posting a text-only report." >&2
+            local upload_cmd=()
+            if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
+              upload_cmd=("$uploader")
+            else
+              upload_cmd=(node "$uploader")
+            fi
+            if ! PATH="${RUNNER_TEMP:-/tmp}:${PATH}" "${upload_cmd[@]}" \
+              --bucket "$ALIYUN_OSS_BUCKET" \
+              --config "${RUNNER_TEMP:-/tmp}/.ossutilconfig" \
+              --prefix "$prefix" \
+              "$stage_dir"/*.png; then
+              echo "::warning::Failed to upload evidence images; posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi
-            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${assets_branch}/${dest_dir}"
+            local raw_base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${prefix}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
-            for f in "$clone_dir/$dest_dir"/*.png; do
+            for f in "$stage_dir"/*.png; do
               [ -f "$f" ] || continue
               safe="$(basename "$f")"
               EVIDENCE_SECTION+="![${safe%.png}](${raw_base}/${safe})"$'\n\n'
@@ -5853,3 +5883,7 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           fi
           echo "Posted verification result to PR #${PR_NUMBER} (verdict=${VERDICT}, agent=${AGENT_VERDICT:-none})." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

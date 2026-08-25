@@ -34,7 +34,7 @@ function main(argv) {
 function printUsage() {
   console.log(`Usage: node scripts/upload-aliyun-oss-assets.js [options] ASSET...
 
-Uploads local release assets to a public Aliyun OSS prefix via ossutil.
+Uploads local assets to a public Aliyun OSS prefix via ossutil.
 
 Options:
   --bucket NAME       OSS bucket name.

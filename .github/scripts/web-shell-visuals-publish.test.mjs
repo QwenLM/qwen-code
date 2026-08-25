@@ -5,6 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -22,6 +23,21 @@ import {
 const PNG = '89504e470d0a1a0a';
 const GIF89 = '474946383961';
 const GIF87 = '474946383761';
+const workflow = readFileSync(
+  '.github/workflows/web-shell-visuals-publish.yml',
+  'utf8',
+);
+
+test('workflow hosts visuals on OSS without writing Git refs', () => {
+  assert.match(workflow, /scripts\/upload-aliyun-oss-assets\.js/);
+  assert.match(
+    workflow,
+    /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}/,
+  );
+  assert.match(workflow, /ALIYUN_OSS_PUBLIC_BASE_URL/);
+  assert.doesNotMatch(workflow, /git push/);
+  assert.doesNotMatch(workflow, /checkout -q --orphan/);
+});
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(

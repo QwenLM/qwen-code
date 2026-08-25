@@ -3752,7 +3752,7 @@ describe('qwen-triage verify hardening round 2', () => {
   });
 
   // The evidence-hosting path carries the untrusted-image checks; exercise
-  // it end to end against a bare local remote.
+  // it end to end against a local OSS uploader stub.
   it('hosts only valid, unique, in-limit PNGs and degrades to text', () => {
     const publishStep = step('Post verification report comment');
     const script = publishStep
@@ -3762,10 +3762,28 @@ describe('qwen-triage verify hardening round 2', () => {
     const sh = (cmd, opts = {}) =>
       spawnSync('bash', ['-c', cmd], { encoding: 'utf8', ...opts });
     try {
-      // A bare remote with a pr-assets branch, plus a gh stub.
-      sh(`git init -q --bare "${dir}/assets.git"`);
-      sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/7999-verify`,
+      // The uploader stub preserves the object layout while avoiding network
+      // access. The gh stub captures the rendered report body.
+      writeFileSync(
+        join(dir, 'upload-assets'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'if [ "${OSS_STUB_FAIL:-}" = 1 ]; then exit 1; fi',
+          'bucket=""; prefix=""',
+          'while [ "$#" -gt 0 ]; do',
+          '  case "$1" in',
+          '    --bucket) bucket="$2"; shift 2 ;;',
+          '    --config) shift 2 ;;',
+          '    --prefix) prefix="$2"; shift 2 ;;',
+          '    *) break ;;',
+          '  esac',
+          'done',
+          'target="$OSS_STUB_ROOT/$bucket/$prefix"',
+          'mkdir -p "$target"',
+          'for file in "$@"; do cp "$file" "$target/$(basename "$file")"; done',
+        ].join('\n'),
+        { mode: 0o755 },
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -3822,29 +3840,27 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
         },
       });
       expect(res.status).toBe(0);
-      const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
-      )
-        .stdout.trim()
-        .split('\n')
-        .filter(Boolean);
+      const hosted = readdirSync(
+        join(dir, 'oss', 'assets-bucket', 'pr-assets', 'verify', 'pr7999-77-1'),
+      );
       // Valid + at the exact 2 MiB boundary are hosted; the text file, the
       // oversize file and the duplicate name are not.
-      expect(hosted.map((p) => p.split('/').pop()).sort()).toEqual([
-        '01-ab.png',
-        '04-edge.png',
-      ]);
+      expect(hosted.sort()).toEqual(['01-ab.png', '04-edge.png']);
       const comment = readFileSync(out, 'utf8');
-      expect(comment).toContain('![01-ab](');
+      expect(comment).toContain(
+        '![01-ab](https://assets.example.test/pr-assets/verify/pr7999-77-1/01-ab.png)',
+      );
       expect(comment).not.toContain('02-fake');
       expect(comment).toContain('did not pass the hosting checks');
 
-      // Unreachable remote -> text-only, never an aborted report.
-      sh(`rm -rf "${dir}/empty.git" && mkdir -p "${dir}/empty.git"`);
+      // Upload failure -> text-only, never an aborted report.
       const out2 = join(dir, 'comment2.md');
       const res2 = sh(script, {
         cwd: work,
@@ -3865,7 +3881,11 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/empty.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
+          OSS_STUB_FAIL: '1',
         },
       });
       expect(res2.status).toBe(0);
@@ -3873,19 +3893,8 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment2).toContain('Sandboxed verification');
       expect(comment2).not.toContain('Evidence images');
 
-      // FIRST RUN on a PR: the remote is valid but the per-PR branch does
-      // not exist yet, so the clone fails and the orphan-init path runs for
-      // real. Both scenarios above take the clone-failed branch too, but
-      // both then fail to push (one seeded the branch, the other has no
-      // remote), so neither proves orphan-init can actually DELIVER. Without
-      // this, a bug in `checkout --orphan` or a dropped `remote add origin`
-      // would silently discard every image on every PR's first run.
-      sh(`git -C "${dir}/assets.git" branch -D pr-assets/7999-verify`);
-      expect(
-        sh(
-          `git -C "${dir}/assets.git" branch --list pr-assets/7999-verify`,
-        ).stdout.trim(),
-      ).toBe('');
+      // A later run gets an immutable prefix instead of overwriting or
+      // accumulating commits in the same Git ref.
       const out3 = join(dir, 'comment3.md');
       const res3 = sh(script, {
         cwd: work,
@@ -3906,28 +3915,28 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
         },
       });
       expect(res3.status).toBe(0);
-      // The branch was created by orphan-init and carries this run's images.
-      const hosted3 = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
-      )
-        .stdout.trim()
-        .split('\n')
-        .filter(Boolean);
-      expect(hosted3.map((p) => p.split('/').pop()).sort()).toEqual([
-        '01-ab.png',
-        '04-edge.png',
-      ]);
-      // Orphan, not a graft onto unrelated history: exactly one commit.
       expect(
-        sh(
-          `git -C "${dir}/assets.git" rev-list --count pr-assets/7999-verify`,
-        ).stdout.trim(),
-      ).toBe('1');
-      expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
+        readdirSync(
+          join(
+            dir,
+            'oss',
+            'assets-bucket',
+            'pr-assets',
+            'verify',
+            'pr7999-79-1',
+          ),
+        ).sort(),
+      ).toEqual(['01-ab.png', '04-edge.png']);
+      expect(readFileSync(out3, 'utf8')).toContain(
+        'https://assets.example.test/pr-assets/verify/pr7999-79-1/01-ab.png',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -4000,7 +4009,6 @@ describe('qwen-triage verify hardening round 2', () => {
             AGENT_VERDICT: 'findings',
             SKIP_REASON: '',
             PREPARE_FAILURE_PHASE: '',
-            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
             ...env,
           },
         });
@@ -4360,7 +4368,6 @@ describe('qwen-triage verify publish fidelity', () => {
         AGENT_VERDICT: '',
         SKIP_REASON: '',
         PREPARE_FAILURE_PHASE: '',
-        VERIFY_ASSETS_REMOTE: join(dir, 'nonexistent.git'),
         ...env,
       },
     });
@@ -5235,24 +5242,22 @@ describe('qwen-triage verify round-3 hardening', () => {
     },
   );
 
-  // The publish job must host images on a per-PR branch that can coexist
-  // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
-  // cannot be created while `pr-assets/…` children exist.
-  it('hosts evidence on a per-PR branch, not a bare pr-assets leaf', () => {
+  it('hosts verification evidence on OSS without writing Git refs', () => {
     const publish = stepIn(
       'publish-verify',
       'Post verification report comment',
     );
-    expect(publish).toContain('pr-assets/${PR_NUMBER}-verify');
-    expect(publish).toContain('checkout -q --orphan');
-    expect(publish).not.toMatch(/--branch pr-assets["\s]/);
+    expect(publish).toContain(
+      'pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}',
+    );
+    expect(publish).toContain('scripts/upload-aliyun-oss-assets.js');
+    expect(publish).not.toContain('checkout -q --orphan');
+    expect(publish).not.toContain('git push');
   });
 
-  // Every `pr-assets/*` producer needs a deleter, or its branches are
-  // permanent: one single-commit branch per verified PR, forever, slowing
-  // `git ls-remote` and cluttering the branch list for every contributor.
-  // The verify lane became a second producer and was not added.
-  it('deletes both pr-assets producers when a PR closes', () => {
+  // Keep deleting legacy refs until the historical branch population has
+  // drained, even though new evidence is published to OSS.
+  it('deletes both legacy pr-assets refs when a PR closes', () => {
     const cleanup = readFileSync(
       '.github/workflows/web-shell-visuals-cleanup.yml',
       'utf8',
@@ -5978,7 +5983,6 @@ describe('qwen-triage verify maintainer-review round', () => {
             SKIP_REASON: '',
             PREPARE_FAILURE_PHASE: '',
             AGENT_VERDICT: '',
-            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
           },
         });
         return {
