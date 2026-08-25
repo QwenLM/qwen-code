@@ -23,8 +23,10 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
+import { isAoneCanonicalHost } from './lib/remote-match.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -37,6 +39,20 @@ export type ReviewEffort = 'low' | 'medium' | 'high';
  */
 export type ReviewSeverityFloor = 'critical' | 'suggestion';
 
+/**
+ * The review topology: which shape the run takes. `auto` is the standing
+ * effort-driven pipeline (the 3A/3B/3C fan-outs). `minimal` is the A/B
+ * comparison arm from issue #9783 — a single careful senior-engineer pass
+ * over the diff in the orchestrator's own context, at most fifteen findings,
+ * each carrying a concrete failure scenario; no subagent fan-out, no
+ * verification, no reverse audit, no posting. It exists so the full pipeline
+ * and the minimal prompt can be run over the same PR set and compared per
+ * model. It is deliberately orthogonal to `effort` — it is a different
+ * _shape_ of review, not a depth of the same one — and selecting it skips the
+ * agent machinery (roster, coverage, budget) entirely rather than shrinking it.
+ */
+export type ReviewTopology = 'auto' | 'minimal';
+
 export type ReviewTarget =
   | { type: 'pr-number'; number: number }
   | {
@@ -46,6 +62,16 @@ export type ReviewTarget =
       host: string;
       owner: string;
       repo: string;
+      /**
+       * The FULL group path (`group/subgroup/project`) when the URL grammar
+       * carries one — Aone nested-group repos. owner/repo collapse to the
+       * last two segments, which is non-injective: identity gates
+       * (match-remote, fetchDiff's origin guard) compare every segment when
+       * both sides carry a path, so a same-named repo in a different group
+       * can never pass as the target. Absent when the grammar holds exactly
+       * two segments (GitHub).
+       */
+      groupPath?: string;
       number: number;
     }
   | { type: 'file'; path: string }
@@ -99,6 +125,36 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /**
+   * The review topology. `auto` (the default) runs the standing effort-driven
+   * pipeline; `minimal` runs the single-pass A/B arm and, because it neither
+   * posts, edits, nor continues an interrupted pipeline run, forces
+   * `comment.effective`, `fix.effective`, and `resume.effective` to false.
+   */
+  topology: ReviewTopology;
+  topologySource: 'explicit' | 'default';
+  /** The `--host` flag's value, when present — recorded verbatim so the
+   *  write gate can bind a recorded bare-number target's platform (the
+   *  target itself carries no host in that spelling). */
+  host?: string;
+  /**
+   * `--resume`: continue an interrupted run of this same target instead of
+   * starting over — Step 1 passes it to `fetch-pr --resume`, which rules on
+   * the on-disk state itself and silently falls back to a fresh run when the
+   * state no longer matches. Gated on PR targets: only `fetch-pr` has a
+   * resume path (a local review's diff is captured from a live working tree
+   * that has no stable interrupted state to continue). `effective` is a
+   * TARGET-SHAPE gate, not a promise: a cross-repo `pr-url` with no matching
+   * remote routes to lightweight mode, which never calls `fetch-pr` — the
+   * parser cannot see remotes, so Step 1's lightweight branch owns telling
+   * the user the flag is inert there.
+   */
+  resume: {
+    /** `--resume` appeared in the arguments. */
+    requested: boolean;
+    /** `--resume` applies (the target is a PR). */
+    effective: boolean;
+  };
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -112,6 +168,24 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
   'high',
 ]);
 
+/**
+ * The `--effort` option for the three capture commands (fetch-pr,
+ * capture-local, plan-diff), defined once: its describe names what `medium`
+ * drops from the roster, so a roster change edits one string, not three
+ * byte-identical copies that can silently diverge. `run` and `save-artifact`
+ * keep their own shapes (per-target defaults; a resolved value without `low`).
+ */
+export const EFFORT_OPTION = {
+  type: 'string',
+  choices: [...EFFORT_LEVELS],
+  describe:
+    'The review effort. `medium` (balanced) drops the adversarial ' +
+    'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
+    'specialists (1d/1e) from the required roster; recorded in the plan ' +
+    'so check-coverage, agent-prompt --roster and compose-review all ' +
+    'read one value. Omit for the full (high) roster.',
+} as const;
+
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
   'suggestion',
@@ -119,6 +193,14 @@ export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   // default's name, so an operator typing `--severity-floor auto` means
   // "the round-adaptive rule" (overriding a configured floor), not a typo
   // to reject and then promote into a bogus file target.
+  'auto',
+]);
+
+export const TOPOLOGIES: ReadonlySet<string> = new Set([
+  'minimal',
+  // `auto` is a legal EXPLICIT value for the same reason it is for
+  // `--severity-floor`: typing `--topology auto` means "the standing
+  // effort-driven pipeline", not a typo to reject.
   'auto',
 ]);
 
@@ -130,6 +212,25 @@ export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
 // every derived value.
 const PR_URL_RE =
   /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
+
+// Aone Code CR URLs: `https://code.alibaba-inc.com/<group>[/subgroup…]/<project>/codereview/<global-id>`.
+// The trailing number is the global MR id (what the Aone refspec and `a1 mr
+// view` key on), carried as the target's `number` exactly like a GitHub PR
+// number; when this host is passed on to the subcommands as `--host`, it
+// decides the platform (the hint beats the cwd probe) — only WITHOUT a hint
+// does detection fall back to the clone's origin remote.
+// The group path may be nested (`group/subgroup/project`) — the repo identity
+// keeps the last two segments, mirroring aone.parseRemoteUrl. Unlike
+// `…/pull/<n>` (which any GHE host legitimately serves), the host is
+// constrained to a REAL Aone subdomain: `(?:[A-Za-z0-9-]+\.)+alibaba-inc.com`
+// requires a dot boundary, so lookalikes (`evilalibaba-inc.com`,
+// `notalibaba-inc.com`) hit the fail-closed invalid-url refusal instead of
+// becoming live targets. The family capture is shape-first only — the
+// classifier additionally gates the match on the CANONICAL pair
+// (isAoneCanonicalHost), so a family-only GHE host's `/codereview/` URL
+// stays `invalid-url` instead of becoming a misrouted live target.
+const AONE_CR_URL_RE =
+  /^(https?):\/\/((?:[A-Za-z0-9-]+\.)+alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
@@ -147,6 +248,11 @@ function asSeverityFloor(value: string): ReviewSeverityFloor | 'auto' | null {
   return SEVERITY_FLOORS.has(lower)
     ? (lower as ReviewSeverityFloor | 'auto')
     : null;
+}
+
+function asTopology(value: string): ReviewTopology | null {
+  const lower = value.toLowerCase();
+  return TOPOLOGIES.has(lower) ? (lower as ReviewTopology) : null;
 }
 
 /**
@@ -172,40 +278,9 @@ function isPrShapedToken(token: string): boolean {
   );
 }
 
-/**
- * Split a raw argument string on whitespace, honouring double- and
- * single-quoted segments so file paths with spaces survive.
- */
-export function tokenizeArgs(raw: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let sawAny = false;
-  for (const ch of raw) {
-    if (quote) {
-      if (ch === quote) {
-        quote = null;
-      } else {
-        current += ch;
-      }
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      sawAny = true;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current || sawAny) tokens.push(current);
-      current = '';
-      sawAny = false;
-      continue;
-    }
-    current += ch;
-  }
-  if (current || sawAny) tokens.push(current);
-  return tokens;
-}
+// tokenizeArgs lives in the CLI-level shared home (utils/shell-args.ts) so
+// /audit consumes it without importing across command groups.
+export { tokenizeArgs } from '../../utils/shell-args.js';
 
 /**
  * `'invalid-url'` marks a token that looks like a URL but is not a valid PR
@@ -222,12 +297,56 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (urlMatch) {
     const [, scheme, host, owner, repo, num] = urlMatch;
     const lowerHost = host.toLowerCase();
+    // Aone serves no `/pull/` pages — a `/pull/<n>` URL on a CANONICAL Aone
+    // host is a fabrication (the Aone CR grammar is `…/codereview/<id>`,
+    // keyed on the global MR id). Refuse it fail-closed, mirroring the
+    // Aone-only constraint on `/codereview/` (a non-Aone host there is
+    // refused too). The canonical pair only: a `*.alibaba-inc.com` GHE
+    // instance (`ghe.alibaba-inc.com`) legitimately serves `/pull/` pages,
+    // and the family wildcard once refused its real PR URLs.
+    if (isAoneCanonicalHost(lowerHost)) return 'invalid-url';
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,
       host: lowerHost,
       owner,
       repo,
+      number: Number(num),
+    };
+  }
+  const aoneMatch = AONE_CR_URL_RE.exec(token);
+  if (aoneMatch) {
+    const [, scheme, host, groupPath, num] = aoneMatch;
+    const lowerHost = host.toLowerCase();
+    // A `/codereview/` page exists only on the CANONICAL Aone pair. The
+    // grammar above deliberately captures the whole family (shape-first),
+    // but a family-only host is a GHE instance: accepting its
+    // `/codereview/` URL as a live target would let detection route the
+    // explicit GHE host to GitHub and aim fetch/submit at GHE PR #<id> —
+    // a target the supplied URL never named as a valid GHE resource.
+    // Fail closed, mirroring the `/pull/`-on-Aone refusal above.
+    if (!isAoneCanonicalHost(lowerHost)) return 'invalid-url';
+    // Nested-group repos collapse to the last two segments (mirroring
+    // aone.parseRemoteUrl), so `…/sub/maxcompute/odps_src/codereview/N`
+    // yields owner `maxcompute`, repo `odps_src`.
+    const segs = groupPath.split('/').filter(Boolean);
+    const owner = segs[segs.length - 2];
+    const repo = segs[segs.length - 1];
+    return {
+      type: 'pr-url',
+      // The canonicalized URL keeps the FULL path — a collapsed spelling
+      // would name a different (possibly nonexistent) repo to anything
+      // that re-reads it.
+      url: `${scheme.toLowerCase()}://${lowerHost}/${segs.join('/')}/codereview/${Number(num)}`,
+      host: lowerHost,
+      owner,
+      repo,
+      // Aone targets carry the FULL path — even two-segment ones: the
+      // URL pins an exact repo, and the identity gates must compare it
+      // against nested-group remotes in BOTH directions (a two-segment
+      // target must not match a three-segment remote sharing its tail,
+      // nor the reverse).
+      groupPath: segs.join('/'),
       number: Number(num),
     };
   }
@@ -267,8 +386,11 @@ export function parseReviewArgs(
 
   let commentRequestedByFlag = false;
   let fixRequested = false;
+  let resumeRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
+  let explicitTopology: ReviewTopology | null = null;
+  let recordedHostFlag: string | undefined;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -316,6 +438,8 @@ export function parseReviewArgs(
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
   const floorIssues: EffortIssue[] = [];
+  // `--topology` shares the value-token grammar too, for the same reason.
+  const topologyIssues: EffortIssue[] = [];
 
   // First pass: pull out flags (and each value-taking flag's value token,
   // when the spaced form legitimately consumes one). Non-flag tokens are kept
@@ -324,7 +448,7 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor';
+    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
   }
   const kept: Kept[] = [];
 
@@ -338,6 +462,26 @@ export function parseReviewArgs(
 
     if (token === '--fix') {
       fixRequested = true;
+      continue;
+    }
+
+    if (token === '--host' || token.startsWith('--host=')) {
+      // Recorded verbatim for the write gate's platform binding; the value
+      // is consumed either way and never leaks into the target tokens.
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value !== '') recordedHostFlag = value;
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next !== undefined && next !== '' && !isFlag(next)) {
+        recordedHostFlag = next;
+        i++;
+      }
+      continue;
+    }
+    if (token === '--resume') {
+      resumeRequested = true;
       continue;
     }
 
@@ -422,6 +566,40 @@ export function parseReviewArgs(
       continue;
     }
 
+    if (token === '--topology' || token.startsWith('--topology=')) {
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        const topologyValue = asTopology(value);
+        if (topologyValue !== null) {
+          explicitTopology = topologyValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--topology' });
+        } else {
+          topologyIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const nextTopology = next !== undefined ? asTopology(next) : null;
+      if (nextTopology !== null) {
+        explicitTopology = nextTopology;
+        i++;
+        continue;
+      }
+      if (next === '') {
+        topologyIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (next === undefined || isFlag(next)) {
+        topologyIssues.push({ kind: 'missing' });
+        continue;
+      }
+      kept.push({ token: next, invalidValueOf: '--topology' });
+      i++;
+      continue;
+    }
+
     if (isFlag(token)) {
       unknownFlags.push(token);
       warnings.push(`Unrecognized flag ${JSON.stringify(token)}; ignored.`);
@@ -449,8 +627,11 @@ export function parseReviewArgs(
   // wrong PR half the time, so both are refused, loudly, and the review
   // falls back to the local diff nothing contradicted.
   const soleCandidate = kept.length === 1;
-  const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
   const isPrShaped = isPrShapedToken;
+  const isPrUrlToken = (token: string): boolean => {
+    const c = classifyToken(token);
+    return c !== null && c !== 'invalid-url' && c.type === 'pr-url';
+  };
   // The pool counts BOTH spellings: an `=`-form invalid value never enters
   // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
   // is the same typed PR number — `--severity-floor=6711 --effort 6712`
@@ -468,7 +649,11 @@ export function parseReviewArgs(
     if (shape === null || shape === 'invalid-url') return `raw:${token}`;
     if (shape.type === 'pr-number') return `pr:${shape.number}`;
     if (shape.type === 'pr-url')
-      return `pr:${shape.number}@${shape.host}/${shape.owner}/${shape.repo}`;
+      // The FULL group path, not the collapsed owner/repo: two nested-group
+      // CR URLs that share their last two segments and the global id
+      // (`groupA/sub/app` vs `groupB/sub/app`, same N) are DIFFERENT
+      // targets and must not dedupe into one.
+      return `pr:${shape.number}@${shape.host}/${shape.groupPath ?? `${shape.owner}/${shape.repo}`}`;
     return `raw:${token}`;
   };
   const prShapedKeys = [
@@ -478,9 +663,56 @@ export function parseReviewArgs(
         .map((k) => targetKey(k.token)),
     ),
   ];
-  // A bare number and a same-number URL name one PR when no other repo is
-  // in play: collapse `pr:N` into `pr:N@…` for the count.
-  const distinctPr = new Set(prShapedKeys.map((k) => k.replace(/@.*$/, '')));
+  // Distinct TARGETS. A bare number and a same-number URL name one PR when
+  // no other repo is in play (the bare entry merges into the URL's key),
+  // but two DIFFERENT repo-qualified keys with the same number name two
+  // PRs — the number-only collapse once silently deduped them.
+  const distinctPr = new Set<string>();
+  for (const k of prShapedKeys) {
+    const bare = k.split('@')[0];
+    if (k.includes('@')) {
+      // Repo-qualified keys are distinct PRs; one subsumes a bare
+      // same-number entry already in the set.
+      if (distinctPr.has(bare)) distinctPr.delete(bare);
+      distinctPr.add(k);
+    } else if (
+      ![...distinctPr].some((e) => e === bare || e.startsWith(`${bare}@`))
+    ) {
+      distinctPr.add(k);
+    }
+  }
+  // VALID CANDIDATES, with the mixed-shape restatement carved out: when the
+  // rescue pool holds exactly one distinct PR and a URL spelling of it
+  // arrived as an invalid flag value, a POSITIONAL bare number of the same
+  // PR restates that PR — it is not a competing valid candidate. Letting it
+  // rank as one discarded the URL (the sole carrier of host/platform
+  // identity) and retargeted the run onto the cwd clone's same-number PR —
+  // `--effort <cr-url> 7` reviewed (and could POST to) the wrong platform
+  // (round-12 finding). A DIFFERENT number still outranks, as the user
+  // typed it outside any flag.
+  const poolKey = distinctPr.size === 1 ? [...distinctPr][0] : undefined;
+  const poolPrNumber =
+    poolKey !== undefined
+      ? Number(poolKey.split('@')[0].replace(/^pr:/, ''))
+      : undefined;
+  const poolHasUrlSpelling =
+    poolPrNumber !== undefined &&
+    kept.some((k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token));
+  const hasValidCandidate = kept.some((k) => {
+    if (k.invalidValueOf !== undefined) return false;
+    if (poolHasUrlSpelling) {
+      const c = classifyToken(k.token);
+      if (
+        c !== null &&
+        c !== 'invalid-url' &&
+        c.type === 'pr-number' &&
+        c.number === poolPrNumber
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
   if (!hasValidCandidate && distinctPr.size > 1) {
     const shown = kept
       .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
@@ -494,10 +726,32 @@ export function parseReviewArgs(
   // target; the rest are the same intent restated, not extra arguments —
   // pushing them all left the operator told "Ignoring extra argument(s)"
   // on the very invocation the dedupe blesses (round-9 finding).
+  //
+  // The repo-qualified URL spelling OUTRANKS the bare number as the
+  // rescued target: it is the only carrier of host/platform identity. A
+  // bare-number target flips detection onto the cwd fallback, and the run
+  // silently reviews the cwd clone's same-number PR instead of the named
+  // platform's — which spelling won depending on token order (round-10
+  // finding: a loud refusal at the merge base degraded to a silent
+  // wrong-platform retarget).
+  const preferredRescueToken =
+    !hasValidCandidate && distinctPr.size === 1
+      ? kept.find(
+          (k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token),
+        )?.token
+      : undefined;
+  // Each flag's deferred-warning list, keyed by the flag an invalid value
+  // arrived as; resolved inside the guard below, where `invalidValueOf` is
+  // known to be set.
+  const issueListFor = {
+    '--effort': effortIssues,
+    '--severity-floor': floorIssues,
+    '--topology': topologyIssues,
+  };
   let rescuedPr = false;
   for (const k of kept) {
-    const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
     if (k.invalidValueOf !== undefined) {
+      const issues = issueListFor[k.invalidValueOf];
       const survives = isPrShaped(k.token)
         ? !hasValidCandidate && distinctPr.size === 1
         : soleCandidate;
@@ -507,11 +761,28 @@ export function parseReviewArgs(
       }
       if (isPrShaped(k.token)) {
         if (rescuedPr) continue; // same PR, restated — not an extra token
+        // A bare number may not become the rescued target while the
+        // same-PR URL spelling is present — the URL carries the identity.
+        if (
+          preferredRescueToken !== undefined &&
+          k.token !== preferredRescueToken &&
+          !isPrUrlToken(k.token)
+        ) {
+          continue;
+        }
         rescuedPr = true;
       }
       issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
+  }
+  // Same preference for positional spellings: when the target tokens hold
+  // both a bare number and a same-number PR URL, the URL becomes the
+  // target regardless of arrival order.
+  const urlIdx = targetTokens.findIndex(isPrUrlToken);
+  if (urlIdx > 0) {
+    const [urlToken] = targetTokens.splice(urlIdx, 1);
+    targetTokens.unshift(urlToken);
   }
 
   // Pick the first classifiable target token. A token that looks like a URL
@@ -523,6 +794,19 @@ export function parseReviewArgs(
   const trailingExtras: string[] = [];
   for (const tok of targetTokens) {
     if (targetAssigned) {
+      // A bare number restating the assigned URL target's number is the
+      // same intent restated, not an extra argument (mirror of the
+      // rescue loop's restatement handling).
+      const classifiedRestate = classifyToken(tok);
+      if (
+        target.type === 'pr-url' &&
+        classifiedRestate !== null &&
+        classifiedRestate !== 'invalid-url' &&
+        classifiedRestate.type === 'pr-number' &&
+        classifiedRestate.number === target.number
+      ) {
+        continue;
+      }
       extraTokens.push(tok);
       trailingExtras.push(tok);
       continue;
@@ -530,7 +814,7 @@ export function parseReviewArgs(
     const classified = classifyToken(tok);
     if (classified === 'invalid-url') {
       warnings.push(
-        `Unrecognized URL ${JSON.stringify(tok)} — not a GitHub PR URL (expected …/pull/<number>); refusing to guess a target from it.`,
+        `Unrecognized URL ${JSON.stringify(tok)} — not a PR/CR URL (expected …/pull/<number> or …/codereview/<id>); refusing to guess a target from it.`,
       );
       extraTokens.push(tok);
       continue;
@@ -546,23 +830,64 @@ export function parseReviewArgs(
 
   const isPr = target.type === 'pr-number' || target.type === 'pr-url';
 
+  // The topology resolves like the effort — an explicit flag beats the
+  // standing `auto` default. There is no configured (settings) topology: the
+  // minimal arm is an explicit A/B comparison, never a background default.
+  const topology: ReviewTopology = explicitTopology ?? 'auto';
+  const topologySource: ParsedReviewArgs['topologySource'] =
+    explicitTopology !== null ? 'explicit' : 'default';
+  // The minimal arm is terminal-only — it neither posts to a PR nor edits a
+  // working tree — so both write operations are gated off it, and so is
+  // `--resume`: a fresh single pass cannot continue an interrupted pipeline
+  // run, and letting `fetch-pr --resume` consume that state would destroy a
+  // run this arm never continues. This keeps the guarantee in code rather
+  // than in whichever prose the orchestrator reads.
+  const isMinimal = topology === 'minimal';
+
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
-  const commentEffective = commentRequested && isPr;
+  const commentEffective = commentRequested && isPr && !isMinimal;
   if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
+    );
+  } else if (commentRequested && isPr && isMinimal) {
+    // Only when minimal is THE reason a would-be-effective comment is
+    // suppressed: on a non-PR target the comment does not apply anyway, and
+    // that case keeps its usual handling above. The text names the source
+    // the request actually came from, the same distinction the
+    // forced-by-comment warning makes: a setting-driven operator told the
+    // `--comment` flag is ignored goes hunting a flag they never typed.
+    warnings.push(
+      commentRequestedByFlag
+        ? 'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.'
+        : 'Warning: the `review.comment` setting is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
+    );
+  }
+
+  const resumeEffective = resumeRequested && isPr && !isMinimal;
+  if (resumeRequested && !isPr) {
+    warnings.push(
+      'Warning: `--resume` flag is ignored because the review target is not a PR — only a PR review has interrupted state to continue.',
+    );
+  } else if (resumeRequested && isPr && isMinimal) {
+    warnings.push(
+      'Warning: `--resume` is ignored because `--topology minimal` runs a fresh single pass — it neither continues nor consumes an interrupted run.',
     );
   }
 
   // `--fix` edits a working tree, so it needs one that outlives the review. A
   // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
   // `file` review's tree is the user's own checkout.
-  const fixEffective = fixRequested && !isPr;
+  const fixEffective = fixRequested && !isPr && !isMinimal;
   if (fixRequested && isPr) {
     warnings.push(
       'Warning: `--fix` flag is ignored because a PR review runs in an ephemeral ' +
         'worktree that is deleted when the review ends — there is no durable tree to ' +
         'fix. Use `--comment` to publish the findings instead.',
+    );
+  } else if (fixRequested && isMinimal) {
+    warnings.push(
+      'Warning: `--fix` is ignored because `--topology minimal` is terminal-only — the minimal arm edits nothing.',
     );
   }
 
@@ -707,6 +1032,37 @@ export function parseReviewArgs(
     );
   }
 
+  // The topology's deferred warnings, composed now that the resolution is
+  // final — the same shape as the effort's and the floor's.
+  const topologyResolution =
+    topologySource === 'explicit'
+      ? `--topology ${topology} (the last valid occurrence) is in effect`
+      : 'using the default topology (auto)';
+  for (const issue of topologyIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; ${topologyResolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--topology requires a value; ${topologyResolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)} discarded; ${topologyResolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; treating it as the review target — ${topologyResolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
   return {
     target,
     effort,
@@ -715,6 +1071,10 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    topology,
+    topologySource,
+    ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
+    resume: { requested: resumeRequested, effective: resumeEffective },
     extraTokens,
     unknownFlags,
     warnings,
@@ -759,7 +1119,7 @@ function reviewDefaultsFromSettings(): {
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, --topology, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {

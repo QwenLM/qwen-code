@@ -849,7 +849,7 @@ describe('<ModelDialog />', () => {
   it('shows only image-generation models and stores the exact provider route', async () => {
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
-    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    const persisted = `openai:dual-role-model\0${baseUrl}`;
     const { props, mockSettings, getByText, recordSlashCommand } =
       renderComponent({ isImageModelMode: true }, {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -860,11 +860,28 @@ describe('<ModelDialog />', () => {
             authType: AuthType.USE_OPENAI,
           },
           {
-            id: 'qwen-image-2.0',
-            label: 'Qwen Image 2.0',
+            id: 'dual-role-model',
+            label: 'Dual-role model',
             authType: AuthType.USE_OPENAI,
             baseUrl,
             envKey: 'IMAGE_API_KEY',
+            supportsImageGeneration: true,
+          },
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://legacy-images.example.com/api/v1',
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+          {
+            id: 'vision-only-model',
+            label: 'Vision-only model',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://vision.example.com/api/v1',
+            envKey: 'IMAGE_API_KEY',
+            visionOnly: true,
             imageOnly: true,
           },
           {
@@ -875,23 +892,45 @@ describe('<ModelDialog />', () => {
             imageOnly: true,
           },
         ]),
-        resolveImageGenerationModel: vi.fn((selector: string) =>
-          selector === persisted
-            ? {
-                model: 'qwen-image-2.0',
-                baseUrl,
-                apiKeyEnv: 'IMAGE_API_KEY',
-              }
-            : undefined,
-        ),
+        resolveImageGenerationModel: vi.fn((selector: string) => {
+          if (selector === persisted) {
+            return {
+              model: 'dual-role-model',
+              baseUrl,
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          if (selector.includes('qwen-image-2.0')) {
+            return {
+              model: 'qwen-image-2.0',
+              baseUrl: 'https://legacy-images.example.com/api/v1',
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          if (selector.includes('vision-only-model')) {
+            return {
+              model: 'vision-only-model',
+              baseUrl: 'https://vision.example.com/api/v1',
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          return undefined;
+        }),
         setImageModel,
       } as unknown as Partial<Config>);
 
     expect(getByText('Select Image Model')).toBeDefined();
     const selectProps = mockedSelect.mock.calls[0][0];
-    expect(selectProps.items).toHaveLength(1);
+    expect(selectProps.items).toHaveLength(3);
+    expect(selectProps.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: expect.stringContaining('vision-only-model'),
+        }),
+      ]),
+    );
     await selectProps.onSelect(
-      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+      `${AuthType.USE_OPENAI}::dual-role-model\0${baseUrl}`,
     );
 
     expect(mockSettings.setValue).toHaveBeenCalledWith(
@@ -904,10 +943,63 @@ describe('<ModelDialog />', () => {
       phase: 'result',
       rawCommand: '/model',
       outputHistoryItems: [
-        { type: 'success', text: 'Image Model: openai:qwen-image-2.0' },
+        { type: 'success', text: 'Image Model: openai:dual-role-model' },
       ],
     });
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps dual-role models in the main dialog and excludes legacy image-only models', () => {
+    renderComponent({}, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'dual-role-model',
+          label: 'Dual-role model',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::dual-role-model`);
+  });
+
+  it.each([
+    ['fast', { isFastModelMode: true }],
+    ['voice', { isVoiceModelMode: true }],
+    ['vision', { isVisionModelMode: true }],
+    ['compaction', { isCompactionModelMode: true }],
+  ] as const)('keeps dual-role models in the %s dialog', (_mode, modeProps) => {
+    renderComponent(modeProps, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'dual-role-model',
+          label: 'Dual-role model',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::dual-role-model`);
   });
 
   it('ignores duplicate input while an image model selection is in flight', async () => {

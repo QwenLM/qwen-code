@@ -33,6 +33,7 @@ import {
   priorSessionEntries,
   priorSessionIds,
   sessionEntryCount,
+  ledgerResumeCount,
   runSessionsPath,
   readResumeMarker,
   recordResume,
@@ -125,6 +126,52 @@ describe('sessionEntryCount — the cap term the gate must not swallow', () => {
     appendRunSession(plan, envOf('S1'));
     appendRunSession(plan, envOf('../evil'));
     expect(sessionEntryCount(plan)).toBe(1);
+  });
+});
+
+describe('ledgerResumeCount — entries past the original, no double subtraction', () => {
+  // The ledger's first entry is the original run's own session, which is
+  // not a resume. The resuming session is excluded from the REMAINDER — and
+  // when it IS the original, the exclusion has already removed the first
+  // entry, so subtracting the original again counts one resume short: the
+  // exact backstop shape (a deleted marker, the original session resuming)
+  // passed a cap it had already exhausted.
+  const now = Date.now();
+
+  function threeSessions(): void {
+    appendRunSession(plan, envOf('S0'), now);
+    appendRunSession(plan, envOf('S1'), now + 1000);
+    appendRunSession(plan, envOf('S2'), now + 2000);
+  }
+
+  it('counts the resumes past the original session', () => {
+    threeSessions();
+    expect(ledgerResumeCount(plan)).toBe(2);
+  });
+
+  it('excludes the original resuming without subtracting it twice', () => {
+    threeSessions();
+    // S0 resumes again: the exclusion removes the first entry, leaving S1
+    // and S2 — two resumes, the cap already out. The double subtraction
+    // read 1 here and admitted a third resume.
+    expect(ledgerResumeCount(plan, { excludeSessionId: 'S0' })).toBe(2);
+  });
+
+  it('excludes a resuming session that is not the original', () => {
+    threeSessions();
+    // S1 retries its own resume: S2 is the only OTHER resume.
+    expect(ledgerResumeCount(plan, { excludeSessionId: 'S1' })).toBe(1);
+  });
+
+  it('is zero on a fresh ledger, whatever excludes', () => {
+    appendRunSession(plan, envOf('S0'), now);
+    expect(ledgerResumeCount(plan)).toBe(0);
+    expect(ledgerResumeCount(plan, { excludeSessionId: 'S0' })).toBe(0);
+    expect(ledgerResumeCount(plan, { excludeSessionId: 'S9' })).toBe(0);
+  });
+
+  it('is zero when there is no ledger at all', () => {
+    expect(ledgerResumeCount(plan, { excludeSessionId: 'S0' })).toBe(0);
   });
 });
 
@@ -639,23 +686,28 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
-  it('refuses to append over a ledger it could not read', () => {
-    // A present-but-unreadable REGULAR file holds every recorded entry, and
-    // this append rewrites the whole file from what it read — proceeding on
-    // a transient fault would clobber attempt 1's address exactly when a
-    // resume needs it.
-    appendRunSession(plan, envOf('S1'));
-    const before = readFileSync(runSessionsPath(plan), 'utf8');
-    chmodSync(runSessionsPath(plan), 0o000);
-    try {
-      appendRunSession(plan, envOf('S2'));
-    } finally {
-      chmodSync(runSessionsPath(plan), 0o644);
-    }
-    expect(readFileSync(runSessionsPath(plan), 'utf8')).toBe(before);
-    authorize('S3');
-    expect(priorSessionIds(plan, envOf('S3'))).toEqual(['S1']);
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses to append over a ledger it could not read',
+    () => {
+      // A present-but-unreadable REGULAR file holds every recorded entry, and
+      // this append rewrites the whole file from what it read — proceeding on
+      // a transient fault would clobber attempt 1's address exactly when a
+      // resume needs it. chmod 0o000 is a POSIX-only fault: on Windows it
+      // toggles the read-only attribute and the file stays readable, and root
+      // bypasses the mode entirely — the repo convention for this shape.
+      appendRunSession(plan, envOf('S1'));
+      const before = readFileSync(runSessionsPath(plan), 'utf8');
+      chmodSync(runSessionsPath(plan), 0o000);
+      try {
+        appendRunSession(plan, envOf('S2'));
+      } finally {
+        chmodSync(runSessionsPath(plan), 0o644);
+      }
+      expect(readFileSync(runSessionsPath(plan), 'utf8')).toBe(before);
+      authorize('S3');
+      expect(priorSessionIds(plan, envOf('S3'))).toEqual(['S1']);
+    },
+  );
 
   it('does not write at all when the id fails the charset gate', () => {
     // The write-side guard, discriminated from the read-side one by looking

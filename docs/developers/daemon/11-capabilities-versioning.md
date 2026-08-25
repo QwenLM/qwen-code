@@ -108,7 +108,7 @@ Baseline tags are not present in the `Map` and are advertised unconditionally. T
 
 Foundation: `health`, `daemon_status`, `capabilities`.
 
-Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
+Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_storage_conflict_repair`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
 
 Streaming: `slow_client_warning`, `typed_event_schema`.
 
@@ -119,6 +119,8 @@ Permissions: `session_permission_vote`, `permission_vote`, **`permission_mediati
 Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_providers`, `workspace_acp_status`, `workspace_env`, `workspace_preflight`, `workspace_hooks`, `workspace_extensions`.
 
 Extension management: `extension_management_v2` adds the global `/extensions/*` catalog/mutation/operation contract and the workspace activation projection. It is separate from the published `workspace_extensions` compatibility surface and from `workspace_qualified_rest_core`.
+
+V2 Extension batch activation: `extension_batch_activation_v2` adds queued global default-activation and selected-workspace override batches to `extension_management_v2`. Clients must pre-flight it independently because older V2 daemons expose only singular activation routes.
 
 Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`, `workspace_archived_session_export`, `workspace_session_live_state`. The active and archived export tags are independent from each other and from `session_export` and `workspace_qualified_rest_core`, so clients must pre-flight the exact storage state they intend to export. Persisted transcript paging permits an untrusted secondary under its bounded read policy; both full export paths remain trusted-only. `workspace_session_live_state` is likewise independent from `workspace_qualified_rest_core` and is trusted-only: it serves the selected runtime's memory-only live-session snapshot and catalog version and does not extend the untrusted-secondary persisted read policy to live bridge state.
 

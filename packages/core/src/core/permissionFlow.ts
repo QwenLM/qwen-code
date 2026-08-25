@@ -19,8 +19,10 @@
  * `invocation.getConfirmationDetails()`.
  */
 
-import type { AnyToolInvocation, Config } from '../index.js';
-import { ApprovalMode, ToolNames } from '../index.js';
+import type { AnyToolInvocation } from '../tools/tools.js';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,

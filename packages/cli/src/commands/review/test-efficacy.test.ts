@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
   splitDiffIntoHunks,
@@ -27,11 +27,13 @@ import {
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
   findVitestBin,
-  exposeDependencies,
   MAX_MUTANTS,
   runControlMutant,
+  runOneMutant,
+  runOneHunkProbe,
+  committedSymlinkProbes,
 } from './test-efficacy.js';
-import { worktreeCreateFailureDetail } from './lib/worktree.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -39,19 +41,17 @@ import {
   symlinkSync,
   existsSync,
   readFileSync,
-  readdirSync,
-  lstatSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 // The real root `package.json` workspace list.
 const GLOBS = [
   'packages/*',
   'packages/channels/base',
   'packages/channels/telegram',
-  '!packages/desktop',
+  '!packages/desktop-shell',
 ];
 
 describe('isWorkspaceMember', () => {
@@ -77,22 +77,30 @@ describe('isWorkspaceMember', () => {
   });
 
   it('honours a negated glob', () => {
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', GLOBS)).toBe(
-      false,
-    );
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', GLOBS),
+    ).toBe(false);
   });
 
   it('honours workspace-glob ORDER — a positive after a negation re-includes', () => {
     // npm evaluates the list in order. Filtering all negations first let a
     // negation win wherever it sat, which would file a false `unreachable`.
-    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', globs)).toBe(
-      true,
-    );
-    const reordered = ['packages/*', 'packages/desktop', '!packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', reordered)).toBe(
-      false,
-    );
+    const globs = [
+      'packages/*',
+      '!packages/desktop-shell',
+      'packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', globs),
+    ).toBe(true);
+    const reordered = [
+      'packages/*',
+      'packages/desktop-shell',
+      '!packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', reordered),
+    ).toBe(false);
   });
 
   it('does not match a sibling directory by prefix', () => {
@@ -228,80 +236,36 @@ describe('findVitestBin', () => {
   });
 });
 
-describe('exposeDependencies', () => {
-  it('links top-level and scoped packages, counting what it linked', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
-    const nm = join(root, 'node_modules');
-    mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
-    mkdirSync(join(nm, '@scope', 'inner-pkg'), { recursive: true });
-    // A non-directory entry is skipped — neither linked nor counted as a failure.
-    writeFileSync(join(nm, 'stray-file'), 'x');
-
-    const got = exposeDependencies(probe, root);
-
-    expect(got).toEqual({ linked: 2, failed: 0 });
-    expect(readdirSync(join(probe, 'node_modules')).sort()).toEqual([
-      '@scope',
-      'plain-pkg',
-    ]);
-    expect(
-      lstatSync(join(probe, 'node_modules', 'plain-pkg')).isSymbolicLink(),
-    ).toBe(true);
-    expect(
-      lstatSync(
-        join(probe, 'node_modules', '@scope', 'inner-pkg'),
-      ).isSymbolicLink(),
-    ).toBe(true);
-  });
-
-  it('leaves an already-built probe farm untouched', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
-    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
-    mkdirSync(join(probe, 'node_modules'), { recursive: true });
-
-    expect(exposeDependencies(probe, root)).toEqual({ linked: 0, failed: 0 });
-    expect(readdirSync(join(probe, 'node_modules'))).toEqual([]);
-  });
-});
-
-describe('worktreeCreateFailureDetail', () => {
-  // The branch this string is built on fires only when `git worktree add` fails,
-  // which no real-git test can force portably (the one lever — an unwritable
-  // `.git/worktrees` — is bypassed by root and differs under CI's unprivileged
-  // user). The composition is the part with logic in it, so it is pinned here.
-  it('names the add failure, and folds in the sweep stderr that explains it', () => {
-    const got = worktreeCreateFailureDetail(
-      'probe',
-      new Error("fatal: '/w/wt-probe' already exists"),
-      "fatal: '/w/wt-probe' is not a working tree\n",
+/**
+ * Make a fixture directory the checkout a probe tree always is in production.
+ *
+ * `restoreProbeTreeTracked` refuses a tree with no `.git` — there is nothing to
+ * put it back to, and running the restore anyway would check the ENCLOSING
+ * repository out into it — so a bare `mkdtemp` no longer reaches the behaviour
+ * these tests are about. Commit whatever the test has already written, so the
+ * restore is a no-op and the test still pins its own thing.
+ */
+function asCheckout(dir: string): void {
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t.t',
+        '-c',
+        'user.name=t',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'core.hooksPath=/dev/null/no-hooks',
+        ...args,
+      ],
+      { cwd: dir, encoding: 'utf8' },
     );
-    expect(got).toContain('probe worktree could not be created');
-    expect(got).toContain("fatal: '/w/wt-probe' already exists");
-    // The sweep is usually the explanation for the add failure — keep it.
-    expect(got).toContain(
-      "(stale-tree sweep also reported: fatal: '/w/wt-probe' is not a working tree)",
-    );
-  });
-
-  it('omits the sweep clause when the sweep said nothing', () => {
-    // The normal case: no stale tree, so the sweep is silent. A dangling empty
-    // "(stale-tree sweep also reported: )" would be noise in the report.
-    const got = worktreeCreateFailureDetail(
-      'probe',
-      new Error('disk full'),
-      '   \n',
-    );
-    expect(got).toBe('probe worktree could not be created: disk full');
-  });
-
-  it('survives a non-Error throw', () => {
-    expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
-      'probe worktree could not be created: boom',
-    );
-  });
-});
+  git('init', '-q', '-b', 'main', '--template=', '.');
+  git('add', '-A');
+  git('commit', '-qm', 'fixture', '--no-verify', '--allow-empty');
+}
 
 describe('runControlMutant', () => {
   it('returns null — not false — when the probe file cannot be read', () => {
@@ -346,10 +310,168 @@ describe('runControlMutant', () => {
         }),
       );
       writeFileSync(join(vitestDir, 'index.js'), '');
+      asCheckout(dir);
       expect(() => runControlMutant(dir, 'a.test.ts')).toThrow();
       expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null — never injects through — a probe file that is a symlink', () => {
+    // A PR can commit its test as mode 120000 naming anywhere a relative path
+    // reaches — the shared review worktree sits at a predictable sibling path
+    // — and the injection would follow the link out of the probe tree. The
+    // control that never ran is `null`, and the link's target is untouched.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-control-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-control-target-'));
+    try {
+      const original = 'shared file content\n';
+      writeFileSync(join(outside, 'shared.test.ts'), original);
+      symlinkSync(join(outside, 'shared.test.ts'), join(dir, 'a.test.ts'));
+
+      expect(runControlMutant(dir, 'a.test.ts')).toBeNull();
+      expect(readFileSync(join(outside, 'shared.test.ts'), 'utf8')).toBe(
+        original,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('probe write sites refuse a symlinked target', () => {
+  // The mutant and hunk probes write the same way the control does; a leaf
+  // symlink would carry the mutation and its restore into whatever the link
+  // names. Both refuse the shape as inconclusive before anything runs.
+  const setup = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-probetree-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-probetree-target-'));
+    const original = 'line one\nline two\n';
+    writeFileSync(join(outside, 'shared.ts'), original);
+    symlinkSync(join(outside, 'shared.ts'), join(dir, 'target.ts'));
+    return { dir, outside, original };
+  };
+  const teardown = (dir: string, outside: string) => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  };
+
+  it('runOneMutant reports inconclusive and leaves the target untouched', () => {
+    const { dir, outside, original } = setup();
+    try {
+      const r = runOneMutant(
+        dir,
+        { file: 'target.ts', line: 1, statement: 'line one' },
+        [],
+      );
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('symlink');
+      expect(readFileSync(join(outside, 'shared.ts'), 'utf8')).toBe(original);
+    } finally {
+      teardown(dir, outside);
+    }
+  });
+
+  it('runOneHunkProbe reports inconclusive and leaves the target untouched', () => {
+    const { dir, outside, original } = setup();
+    try {
+      const r = runOneHunkProbe(
+        dir,
+        {
+          file: 'target.ts',
+          index: 0,
+          header: '@@ -1,2 +1,2 @@',
+          startLine: 1,
+          patch: 'irrelevant — the guard fires before git apply',
+        },
+        [],
+      );
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('symlink');
+      expect(readFileSync(join(outside, 'shared.ts'), 'utf8')).toBe(original);
+    } finally {
+      teardown(dir, outside);
+    }
+  });
+
+  it('refuses a target reached through a SYMLINKED ANCESTOR too — a leaf check cannot see it', () => {
+    // `lstat` resolves every intermediate component, so once a directory of a
+    // REUSED probe tree has been relinked by code that ran in it, a leaf-only
+    // check reports the outside file as ordinary and every later write
+    // follows the link out of the tree. The guard walks every component, the
+    // way `safeRmWithin` does on the delete side.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-probetree-anc-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-probetree-anc-target-'));
+    try {
+      const original = 'line one\nline two\n';
+      mkdirSync(join(outside, 'src'), { recursive: true });
+      writeFileSync(join(outside, 'src', 'lib.ts'), original);
+      symlinkSync(join(outside, 'src'), join(dir, 'src'));
+
+      const m = runOneMutant(
+        dir,
+        { file: 'src/lib.ts', line: 1, statement: 'line one' },
+        [],
+      );
+      expect(m.verdict).toBe('inconclusive');
+      expect(m.detail).toContain('symlink');
+
+      const h = runOneHunkProbe(
+        dir,
+        {
+          file: 'src/lib.ts',
+          index: 0,
+          header: '@@ -1,2 +1,2 @@',
+          startLine: 1,
+          patch: 'irrelevant — the guard fires before git apply',
+        },
+        [],
+      );
+      expect(h.verdict).toBe('inconclusive');
+      expect(h.detail).toContain('symlink');
+
+      expect(runControlMutant(dir, 'src/lib.ts')).toBeNull();
+
+      expect(readFileSync(join(outside, 'src', 'lib.ts'), 'utf8')).toBe(
+        original,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('committedSymlinkProbes', () => {
+  // A test committed as mode 120000 is collected by vitest THROUGH the link —
+  // every verdict it could produce is about code the probe tree never mutated,
+  // and no write guard sees it, because the harness never WRITES probe files.
+  it('names the probes committed as symlinks and nothing else', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'qwen-symlink-mode-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'real.test.ts'), 'x\n');
+      writeFileSync(join(repo, 'target.ts'), 'y\n');
+      symlinkSync('target.ts', join(repo, 'linked.test.ts'));
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+
+      const got = committedSymlinkProbes(repo, [
+        'real.test.ts',
+        'linked.test.ts',
+        'absent.test.ts',
+      ]);
+      expect([...got]).toEqual(['linked.test.ts']);
+    } finally {
+      isolation.dispose();
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 });
@@ -388,6 +510,94 @@ describe('probeCleanupFailureDetail', () => {
   });
 });
 
+describe('restoreProbeTreeTracked, through runOneMutant', () => {
+  it('refuses to run when the tree carries NO .git at all', () => {
+    // The state the tree can never be put back from, and the cheapest one to
+    // reach: `.git` is an untracked pointer file inside the directory the PR's
+    // own suite runs in, so one `rm` used to turn every later restore into
+    // "nothing to restore" and let the plants stand. Running the restore
+    // anyway is not the alternative either — with no `.git`, discovery walks
+    // UP and checks the enclosing repository out into this tree.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-nogit-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('no .git');
+      expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to run when the index hides a tracked file from the restore', () => {
+    // `checkout --force` SILENTLY skips a file carrying skip-worktree, and
+    // `clean` never touches a tracked file — so a bit the guest suite sets with
+    // `update-index` leaves its tampered content standing through a restore
+    // that answered "as the commit left it", with `git status` reading empty.
+    // `scratch-tree` documents this shape for the identical reset and refuses;
+    // this function did not read the bits at all.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-skipwt-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // A second tracked file, so `checkout -- .` still has something to do:
+      // with the only tracked path hidden the pathspec matches nothing and git
+      // fails for a different reason — fail-closed either way, but this test is
+      // about the oracle, not about that.
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      asCheckout(dir);
+      execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
+        cwd: dir,
+      });
+      writeFileSync(join(dir, 'a.ts'), 'MUTANT\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('skip-worktree');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to run when the tree HAS a .git it cannot resolve', () => {
+    // The gate skips a directory with no `.git` because there is no commit to
+    // restore FROM — but `.git` is untracked, so nothing ever restores IT, and
+    // a guest that overwrites it once would buy "proceed, nothing to put back"
+    // from every later phase: the planted content stands and the verdicts are
+    // the plant's. Present-but-unresolvable is a failure, not a skip. Same
+    // discipline the residue probe's oracles fail closed under.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-brokengit-'));
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.git'), 'gitdir: /nonexistent-repo\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be put back');
+      // And the mutation never happened.
+      expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('safeRmWithin', () => {
   // A reviewer reproduced a P0: the revert set is PR-controlled, and `rmSync`
   // follows symlinks in the path prefix, so a PR that turns `dir` into a symlink
@@ -407,6 +617,30 @@ describe('safeRmWithin', () => {
     safeRmWithin(root, 'realdir/f');
     expect(existsSync(join(root, 'realdir', 'f'))).toBe(false);
   });
+
+  // A backslash is a legal filename character on POSIX and a separator on
+  // Windows, so the shape only exists off Windows — which is where it bites.
+  it.skipIf(process.platform === 'win32')(
+    'treats a backslash in a POSIX name as a NAME, not as a separator',
+    () => {
+      // One committed file whose single-component name contains backslashes.
+      // Splitting on them unconditionally turned that name into three
+      // components — two of them `..` — and `join` normalises those away
+      // silently, so a PR-controlled name became a delete anywhere the tree's
+      // parent reaches, starting with the shared review worktree next door.
+      const { root, outside } = setup();
+      const escaping = `\\..\\${basename(outside)}\\victim`;
+
+      expect(() => safeRmWithin(root, escaping)).not.toThrow();
+
+      expect(readFileSync(join(outside, 'victim'), 'utf8')).toBe(
+        'must survive',
+      );
+      // ...and a name that really does climb is refused outright rather than
+      // resolved, whichever separator spelled it.
+      expect(() => safeRmWithin(root, '../victim')).toThrow(/parent reference/);
+    },
+  );
 
   it('refuses to delete through a symlinked ancestor, sparing the outside file', () => {
     const { root, outside } = setup();

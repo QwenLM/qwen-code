@@ -364,6 +364,7 @@ const EN: Messages = {
   'agentType.general-purpose': 'General-purpose',
   'agentType.explore': 'Explore',
   'agentType.statusline-setup': 'Status Line Setup',
+  'agentType.review-agent': 'Review Agent',
   'agentType.test-engineer': 'Test Engineer',
   'agentType.fork': 'Fork',
   'timeline.parallelAgents': 'Parallel agents',
@@ -505,6 +506,15 @@ const EN: Messages = {
   'toast.dismissShort': 'Dismiss',
   'insight.ready': 'Insight report generated successfully!',
   'request.cancelled': 'Request cancelled.',
+  'visionBridge.model': 'vision model',
+  'visionBridge.skipped': (v) =>
+    `Vision bridge cancelled.${v?.egressOccurred === 1 ? ` Your image and prompt/context were sent to ${v?.target ?? ''}.` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `Vision bridge (${v?.modelName ?? ''}) failed: the vision model request failed. Your image and prompt/context were sent to ${v?.target ?? ''}. The image was not interpreted.`
+      : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
+  'visionBridge.ok': (v) =>
+    `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -539,6 +549,16 @@ const EN: Messages = {
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
   'composer.upload.drop': 'Drop files',
+  'composer.dropChoice.title': (v) =>
+    Number(v?.count) === 1
+      ? 'Add dropped file'
+      : `Add ${v?.count ?? 0} dropped files`,
+  'composer.dropChoice.description':
+    'Attach the files to this message for the agent to read, or upload them to the workspace and insert @ references.',
+  'composer.dropChoice.cancel': 'Cancel',
+  'composer.dropChoice.upload': 'Upload to workspace',
+  'composer.dropChoice.reference': 'Attach to message',
+  'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -1014,7 +1034,7 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported file(s) were skipped.`,
+    `${v?.count ?? 0} file(s) were unavailable and skipped.`,
   'editor.imagesReadFailed': (v) =>
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
@@ -1133,6 +1153,8 @@ const EN: Messages = {
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
+  'scheduledTasks.error.goalActive':
+    'Cannot start a scheduled task while a Goal is active.',
   'scheduledTasks.error.toggleFailed': 'Failed to update task',
   'scheduledTasks.error.deleteFailed': 'Failed to delete task',
   'scheduledTasks.edit': 'Edit',
@@ -1214,6 +1236,13 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'rightPanel.add': 'Add panel',
+  'attachment.showPreview': 'Preview',
+  'attachment.showSource': 'Source',
+  'attachment.previewUnsupported':
+    'Preview is not available for this file type.',
+  'attachment.readFailed': 'Failed to read attachment.',
+  'attachment.loadingFile': 'Loading file...',
+  'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.promptFailed': 'Failed to send the side-task question',
@@ -1221,6 +1250,9 @@ const EN: Messages = {
   'turnOutputs.preview': 'Preview',
   'turnOutputs.collapseFiles': 'Collapse files',
   'turnOutputs.showMoreFiles': (v) => `Show ${v?.count ?? 0} more files`,
+  'turnOutputs.collapseArtifacts': 'Collapse artifacts',
+  'turnOutputs.showMoreArtifacts': (v) =>
+    `Show ${v?.count ?? 0} more artifacts`,
   'turnOutputs.previousTurn': 'Previous turn',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
@@ -1347,6 +1379,9 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
@@ -1390,6 +1425,7 @@ const EN: Messages = {
     'Unsupported theme. Use /theme light or /theme dark.',
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
+  'queue.insert': 'Insert',
   'queue.cleared': 'Queue cleared.',
   'queue.deleteTip': 'Remove from queue',
   'queue.editTip': 'Remove from queue and edit again',
@@ -1397,22 +1433,22 @@ const EN: Messages = {
   'queue.midTurnQueued': 'Queued...',
   'queue.serverQueued': 'Queued on server...',
   'queue.editing': 'Editing...',
+  'queue.inserting': 'Inserting...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
   'queue.summaryEditDisabled':
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.mayCorrespond':
-    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
   'queue.continueEditingConfirm':
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
-  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
+  'queue.commandGoalBlocked':
+    'Slash commands are unavailable while a Goal owns the session or its state is loading.',
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
   'queue.shellDropped': (v) => {
@@ -1424,6 +1460,9 @@ const EN: Messages = {
   'queue.queueFailed': 'Failed to queue message',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
+  'queue.insertFailed': 'Failed to insert queued message',
+  'queue.insertTip': 'Insert into the current turn',
+  'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -1600,8 +1639,6 @@ const EN: Messages = {
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -2037,6 +2074,17 @@ const EN: Messages = {
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
+  'goal.status.active': 'In progress',
+  'goal.status.paused': 'Paused',
+  'goal.status.blocked': 'Blocked',
+  'goal.status.usage_limited': 'Usage limited',
+  'goal.status.complete': 'Complete',
+  'goal.activity.idle': 'Waiting',
+  'goal.activity.running': 'Working',
+  'goal.activity.verifying': 'Verifying',
+  'goal.edit': 'Edit goal',
+  'goal.pause': 'Pause goal',
+  'goal.resume': 'Resume goal',
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
@@ -2056,6 +2104,10 @@ const EN: Messages = {
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
+  'goals.saving': 'Saving…',
+  'goals.save': 'Save',
+  'goals.edit': 'Edit goal',
+  'goals.objective': 'Objective',
   'goals.clear': 'Clear goal',
   'goals.clearConfirm': (v) => `Clear the goal "${v?.condition ?? ''}"?`,
   'goals.running': 'Working',
@@ -2068,7 +2120,21 @@ const EN: Messages = {
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
   'goals.error.createFailed': 'Failed to start the goal',
+  'goals.error.saveFailed': 'Failed to save the goal',
+  'goals.error.goalUnavailable': 'The goal is no longer available.',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} requires an objective.`,
+  'goals.error.invalidCommand': 'Invalid /goal command',
+  'goals.error.goalsUnavailable':
+    'The goals view is not available on this surface.',
+  'goals.error.attachmentsUnsupported':
+    'Remove attachments before using /goal.',
+  'goals.error.editFailed': 'Failed to edit the goal',
+  'goals.error.pauseFailed': 'Failed to pause the goal',
+  'goals.error.resumeFailed': 'Failed to resume the goal',
   'goals.error.clearFailed': 'Failed to clear the goal',
+  'goals.error.controlBusy':
+    'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
   'memory.autoDream': (v) =>
@@ -2549,6 +2615,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -3136,6 +3204,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -3150,6 +3219,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -3372,6 +3442,7 @@ const ZH: Messages = {
   'agentType.general-purpose': '通用',
   'agentType.explore': '探索',
   'agentType.statusline-setup': '状态栏设置',
+  'agentType.review-agent': '代码评审',
   'agentType.test-engineer': '测试工程师',
   'agentType.fork': '分支',
   'timeline.parallelAgents': '并行智能体',
@@ -3510,6 +3581,15 @@ const ZH: Messages = {
   'toast.dismissShort': '关闭',
   'insight.ready': 'Insight 报告已生成！',
   'request.cancelled': '请求已取消。',
+  'visionBridge.model': '视觉模型',
+  'visionBridge.skipped': (v) =>
+    `视觉桥接已取消。${v?.egressOccurred === 1 ? `你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `视觉桥接（${v?.modelName ?? ''}）失败：视觉模型请求失败。你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。图片未被解析。`
+      : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
+  'visionBridge.ok': (v) =>
+    `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -3543,6 +3623,13 @@ const ZH: Messages = {
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',
   'composer.upload.drop': '拖放文件',
+  'composer.dropChoice.title': (v) => `添加拖入的 ${v?.count ?? 0} 个文件`,
+  'composer.dropChoice.description':
+    '可作为当前消息的附件供 Agent 读取，或上传到工作区并插入 @ 引用。',
+  'composer.dropChoice.cancel': '取消',
+  'composer.dropChoice.upload': '上传到工作区',
+  'composer.dropChoice.reference': '添加为附件',
+  'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -3988,7 +4075,7 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -4099,6 +4186,7 @@ const ZH: Messages = {
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
+  'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',
   'scheduledTasks.error.toggleFailed': '更新任务失败',
   'scheduledTasks.error.deleteFailed': '删除任务失败',
   'scheduledTasks.edit': '编辑',
@@ -4176,6 +4264,12 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'rightPanel.add': '添加页签',
+  'attachment.showPreview': '预览',
+  'attachment.showSource': '源码',
+  'attachment.previewUnsupported': '暂不支持预览此文件类型。',
+  'attachment.readFailed': '读取附件失败。',
+  'attachment.loadingFile': '正在加载文件...',
+  'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.promptFailed': '发送侧边任务问题失败',
@@ -4183,15 +4277,15 @@ const ZH: Messages = {
   'turnOutputs.preview': '预览',
   'turnOutputs.collapseFiles': '收起文件',
   'turnOutputs.showMoreFiles': (v) => `再展示 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.collapseArtifacts': '收起产物',
+  'turnOutputs.showMoreArtifacts': (v) => `再展示 ${v?.count ?? 0} 个产物`,
   'turnOutputs.previousTurn': '上轮对话',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
   'turnOutputs.artifactUnavailable': (v) =>
-    v?.path
-      ? `工作区中未找到该文件 · ${v.path}`
-      : '工作区中未找到该文件',
+    v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
@@ -4303,6 +4397,9 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
@@ -4345,6 +4442,7 @@ const ZH: Messages = {
     '不支持该主题。请使用 /theme light 或 /theme dark。',
   'queue.delete': '删除',
   'queue.edit': '编辑',
+  'queue.insert': '插入',
   'queue.cleared': '队列已清空。',
   'queue.deleteTip': '移出队列',
   'queue.editTip': '移出队列并将内容放回输入框',
@@ -4352,25 +4450,28 @@ const ZH: Messages = {
   'queue.midTurnQueued': '排队中...',
   'queue.serverQueued': '服务器排队中...',
   'queue.editing': '编辑中...',
+  'queue.inserting': '插入中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.mayCorrespond':
-    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
-  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
+  'queue.commandGoalBlocked':
+    'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
+  'queue.insertFailed': '插入排队消息失败',
+  'queue.insertTip': '插入当前回合',
+  'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
@@ -4526,7 +4627,6 @@ const ZH: Messages = {
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -4927,6 +5027,17 @@ const ZH: Messages = {
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
+  'goal.status.active': '进行中',
+  'goal.status.paused': '已暂停',
+  'goal.status.blocked': '已阻塞',
+  'goal.status.usage_limited': '用量受限',
+  'goal.status.complete': '已完成',
+  'goal.activity.idle': '等待中',
+  'goal.activity.running': '执行中',
+  'goal.activity.verifying': '验证中',
+  'goal.edit': '编辑目标',
+  'goal.pause': '暂停目标',
+  'goal.resume': '继续目标',
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
@@ -4944,6 +5055,10 @@ const ZH: Messages = {
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
+  'goals.saving': '正在保存…',
+  'goals.save': '保存',
+  'goals.edit': '编辑目标',
+  'goals.objective': '目标',
   'goals.clear': '清除目标',
   'goals.clearConfirm': (v) => `确定清除目标“${v?.condition ?? ''}”？`,
   'goals.running': '工作中',
@@ -4956,7 +5071,18 @@ const ZH: Messages = {
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
+  'goals.error.saveFailed': '保存目标失败',
+  'goals.error.goalUnavailable': '该目标已不可用。',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} 需要提供目标内容。`,
+  'goals.error.invalidCommand': '无效的 /goal 命令',
+  'goals.error.goalsUnavailable': '当前界面不支持打开目标视图。',
+  'goals.error.attachmentsUnsupported': '使用 /goal 前请先移除附件。',
+  'goals.error.editFailed': '编辑目标失败',
+  'goals.error.pauseFailed': '暂停目标失败',
+  'goals.error.resumeFailed': '继续目标失败',
   'goals.error.clearFailed': '清除目标失败',
+  'goals.error.controlBusy': '还有一个目标操作正在进行，请等它完成后再试。',
   'memory.add': '添加',
   'memory.add.desc': '写入一条持久 memory',
   'memory.autoDream': (v) =>
@@ -5408,6 +5534,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
@@ -5877,9 +6004,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

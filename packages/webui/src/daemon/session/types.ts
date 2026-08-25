@@ -15,7 +15,8 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentReference,
+  DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
@@ -33,12 +34,16 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -89,6 +94,8 @@ export interface DaemonConnectionState {
   displayName?: string;
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
+  /** Authoritative Goal v2 state for the current session. */
+  goalState?: GoalSnapshotV2;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -138,6 +145,14 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /**
+   * Maximum estimated bytes of transcript blocks retained in memory.
+   * Trimming evicts oldest blocks until the estimate is back under this
+   * budget; a block-count window alone is not a memory ceiling because
+   * blocks can carry large raw tool payloads. Defaults to the transcript
+   * store's built-in budget.
+   */
+  maxRetainedBytes?: number;
   /** Latest persisted records requested during an existing-session load. */
   historyPageSize?: number;
   /** Keep the full subagent transcript, or retain only bounded root summaries. */
@@ -209,7 +224,11 @@ export type DaemonNoticeOperation =
   | 'load_context_usage'
   | 'load_tasks'
   | 'load_artifacts'
+  | 'read_attachment'
+  | 'remove_attachment'
   | 'cancel_task'
+  | 'load_goal'
+  | 'control_goal'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -263,6 +282,7 @@ export interface DaemonModelInfo {
   baseUrl?: string;
   envKey?: string;
   isRuntime?: boolean;
+  reasoningPreview?: DaemonReasoningControls;
 }
 
 export interface DaemonCommandInfo {
@@ -318,7 +338,8 @@ export interface DaemonPromptImage {
 
 export interface DaemonPromptFile {
   name: string;
-  text: string;
+  data?: Blob;
+  text?: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -446,17 +467,21 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
-  uploadMedia(
-    image: DaemonPromptImage,
-    opts?: { signal?: AbortSignal },
-  ): Promise<DaemonSessionMediaReference>;
-  removeMedia(mediaId: string, opts?: { sessionId?: string }): Promise<boolean>;
+  uploadAttachment(
+    attachment: DaemonPromptImage | DaemonPromptFile,
+    opts?: { signal?: AbortSignal; sessionId?: string },
+  ): Promise<DaemonSessionAttachmentReference>;
+  readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  removeAttachment(
+    attachmentId: string,
+    opts?: { sessionId?: string },
+  ): Promise<boolean>;
   /**
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
    * on an ambiguous transport failure so the caller can reconcile. `content`
-   * carries image blocks — pre-flight the daemon's
-   * `session_media` capability before attaching them.
+   * carries attachment blocks — pre-flight the daemon's
+   * `session_attachments` capability before attaching references.
    */
   enqueueMidTurnMessage(
     message: string,
@@ -464,6 +489,7 @@ export interface DaemonSessionActions {
       signal?: AbortSignal;
       messageId?: string;
       content?: PromptContentBlock[];
+      onAdmissionStarted?: () => void;
     },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
@@ -494,6 +520,15 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  getGoal(): Promise<GoalStateResponse>;
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
+  /**
+   * Install a Goal snapshot obtained outside the session action layer — a
+   * workspace-scoped control against the session this connection is attached
+   * to — reconciled like any other snapshot. A no-op once the connection has
+   * moved to another session.
+   */
+  applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2): void;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
@@ -520,6 +555,9 @@ export interface DaemonWorkspaceEventSignals {
   agentsVersion: number;
   toolsVersion: number;
   settingsVersion: number;
+  skillsVersion: number;
+  lastSkillMutation?: DaemonSkillToggleMutation;
+  skillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;

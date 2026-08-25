@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -17,7 +18,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyHandOffPolicy,
   run,
+  resumeWouldDestroyReport,
   runBuildTest,
   type BuildTestReport,
   trimOutput,
@@ -38,11 +41,19 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...mock, default: mock };
 });
 
+let reviewSettingsIsolation: ReturnType<typeof isolateOperatorReviewSettings>;
+
 beforeEach(() => {
   // Plenty of disk by default, so this suite behaves the same on a nearly-full
   // machine as on an empty one — the low-disk cases below opt in explicitly.
   statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+  // ...and the same for the operator's review policy: with `required` set in
+  // their own settings the phase gate refuses every run here, correctly, and
+  // 82 of this file's tests report that instead of what they measure.
+  reviewSettingsIsolation = isolateOperatorReviewSettings();
 });
+
+afterEach(() => reviewSettingsIsolation?.dispose());
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
@@ -449,6 +460,30 @@ describe('runBuildTest', () => {
     expect(rep.testScope?.caveat).toBeUndefined();
     expect(rep.note).toContain('no package to build');
     expect(rep.note).toContain('complete answer');
+    // Not a probe: the stamp must not appear on an ordinary zero-affected run.
+    expect(rep.buildOnly).toBeUndefined();
+
+    // The probe stamp rides the zero-affected return too — this producer
+    // path branches on buildOnly for its note but used to drop the stamp,
+    // so a resumed probe report lost its probe answer.
+    const probe = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      buildOnly: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(probe.buildOnly).toBe(true);
   });
 
   it('runs nothing but discloses the caveat for out-of-workspace files that are not inert', () => {
@@ -931,6 +966,12 @@ describe('runBuildTest', () => {
     // And the note must not claim tests it did not run.
     expect(buildOnly.note).toContain('build-only');
     expect(buildOnly.note).not.toContain('ran the tests');
+    // The WRITE half of the probe stamp, on the main results-initializer
+    // path: a probe report without it read as a completed zero-suite run on
+    // --resume — the probe/completed misclassification the split exists to
+    // prevent. The non-probe sibling must not carry it.
+    expect(buildOnly.buildOnly).toBe(true);
+    expect(withTests.buildOnly).toBeUndefined();
   });
 
   it('scopes build AND tests to the changed workspace and its dependents', () => {
@@ -1577,6 +1618,11 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('defines no test script');
     expect(rep.note).toContain('not run: .');
     expect(rep.ok).toBe(true);
+    // The structural stamp: build green, no probe, no scope — without it the
+    // resume split read this exact report as COMPLETED with no suite to run,
+    // certified the one existing suite as finished, and dropped the fresh
+    // re-run advice that is the only path to ever running it.
+    expect(rep.endedBeforeTests).toBe(true);
   });
 
   it('runs the AFFECTED workspace first, so the budget trims dependents, never the changed suite', () => {
@@ -2010,7 +2056,7 @@ describe('runBuildTest', () => {
   });
 
   it('discloses a diff inside a negated member — softly, never as an incomplete scope', () => {
-    // packages/desktop is a separate toolchain (its own lockfile); a diff
+    // packages/desktop-shell is a separate toolchain (its own lockfile); a diff
     // inside it cannot fail any npm workspace's suite, so "nothing to run"
     // stays the answer — disclosed softly (its own suite did not run), never
     // as an incomplete scope.
@@ -2018,7 +2064,7 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({
         name: 'r',
-        workspaces: ['packages/*', '!packages/desktop'],
+        workspaces: ['packages/*', '!packages/desktop-shell'],
         scripts: { test: 'exit 0' },
       }),
     );
@@ -2026,11 +2072,11 @@ describe('runBuildTest', () => {
       name: '@x/core',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/desktop', {
+    pkg('packages/desktop-shell', {
       name: '@x/desktop',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    writePlan(['packages/desktop/src/main.rs']);
+    writePlan(['packages/desktop-shell/src/main.rs']);
 
     const rep = runBuildTest({
       plan: planPath,
@@ -2042,7 +2088,9 @@ describe('runBuildTest', () => {
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
     expect(rep.testScope?.workspaces).toEqual([]);
-    expect(rep.testScope?.caveat).toContain('packages/desktop/src/main.rs');
+    expect(rep.testScope?.caveat).toContain(
+      'packages/desktop-shell/src/main.rs',
+    );
     expect(rep.testScope?.caveat).toContain('were not run');
     expect(rep.note).toContain('were not run');
   });
@@ -2286,7 +2334,7 @@ describe('runBuildTest', () => {
 
   it('excludes a negated workspace from the build set (integration)', () => {
     // `!packages/excluded` must keep that package out — building it could fail on a
-    // repo where it is a separate toolchain (e.g. packages/desktop, its own lockfile).
+    // repo where it is a separate toolchain (e.g. packages/desktop-shell, its own lockfile).
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -3204,6 +3252,114 @@ describe('runBuildTest', () => {
       expect(rep.note).not.toContain('reached every suite');
     });
 
+    it('a COMPLETED zero-suite run is not "ended before its test phase"', () => {
+      // A single-root package with no test script finishes a fresh run
+      // completely: test [], no scope, ok true. Calling that "ended before
+      // its test phase" was self-contradictory beside the report's own note
+      // ("defines no test script, so no tests ran"), and its re-run advice
+      // re-derived the same zero-suite answer at the price of a full fresh
+      // install+build. The split is structural — ok and the buildOnly stamp
+      // — never the note's prose.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const base = {
+        toolchain: 'npm',
+        run: runId(),
+        affected: ['packages/core'],
+        buildSet: ['packages/core'],
+        widenedWith: [],
+        install: okResult('npm ci --no-audit --no-fund'),
+        build: [okResult('npm run build --workspace="packages/core"')],
+        test: [],
+        ok: true,
+        timedOut: [],
+        note: 'the package defines no test script, so no tests ran',
+      };
+      writeFileSync(outPath, JSON.stringify(base));
+      const attempt = () =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        });
+      const completed = attempt();
+      expect(completed.note).toContain('completed with no suite to run');
+      expect(completed.note).not.toContain('ended before its test phase');
+      expect(completed.note).not.toContain('Re-run build-test');
+
+      // The deliberate probe keeps the early-end message: its report has no
+      // tests and no scope BY CHOICE, and only the stamp tells it apart.
+      writeFileSync(outPath, JSON.stringify({ ...base, buildOnly: true }));
+      expect(attempt().note).toContain('ended before its test phase');
+
+      // And the budget-floor shape keeps it too — build green, ok true, no
+      // scope, but the fresh path stamped that the test phase ran nothing.
+      // This is the shape whose real suite the false-completion answer
+      // certified as finished.
+      writeFileSync(
+        outPath,
+        JSON.stringify({ ...base, endedBeforeTests: true }),
+      );
+      const floored = attempt();
+      expect(floored.note).toContain('ended before its test phase');
+      expect(floored.note).toContain('Re-run build-test without --resume');
+      expect(floored.note).not.toContain('completed with no suite to run');
+    });
+
+    it('a continuation that runs suites drops the stale endedBeforeTests stamp', () => {
+      // The stamp is a phase-level claim — "the test phase ENTERED and ran
+      // nothing" — and the merge must recompute it for the same staleness
+      // reason it recomputes `ok`, `note`, and `caveat`: a continuation that
+      // runs the starved suites falsifies it. Persisting the stale stamp
+      // beside a non-empty test[] would assert "nothing ran" for a run that
+      // ran — and the stamp exists so a reader never has to parse prose.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [],
+          ok: true,
+          endedBeforeTests: true,
+          timedOut: [],
+          note:
+            'the whole-call budget (16s) was spent with 3 suite(s) still ' +
+            'to run — not run: packages/a, packages/b, packages/core',
+          testScope: {
+            workspaces: [],
+            notRun: ['packages/a', 'packages/b', 'packages/core'],
+          },
+        }),
+      );
+
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+
+      expect(rep.test).toHaveLength(3);
+      expect(rep.ok).toBe(true);
+      // Suites ran, so the stamp is now false and must not survive the merge.
+      expect(rep.endedBeforeTests).toBeUndefined();
+      expect(JSON.stringify(rep)).not.toContain('"endedBeforeTests"');
+    });
+
     it('keeps reporting work left when a retry is killed AGAIN by the budget', () => {
       // The ordinary outcome when an expensive suite is admitted late: it is
       // re-clamped rather than finished. Reporting that as a completed run
@@ -3337,6 +3493,85 @@ describe('runBuildTest', () => {
 
       expect(rep.note).not.toContain('Every suite in scope has now run');
       expect(rep.note).toContain('npm test --workspace="packages/a"');
+      // Named ONCE. The unattempted retry rides both lists — its command is
+      // still-to-run, its stale clamped entry survives in the merged test[]
+      // — and two additive-looking clauses both naming it made one command
+      // read as two against the continuation budget, with the provisional
+      // clause claiming it was "killed on a deadline the budget shortened"
+      // this call, false for a retry never started. The still-to-run clause
+      // fully describes it; the provisional clause must not repeat it.
+      expect(rep.note).toContain('still to run');
+      expect(rep.note).not.toContain('still provisional');
+    });
+
+    it('the caveat names BOTH halves when work is unattempted AND re-clamped', () => {
+      // An else-if kept the provisional half out of the caveat whenever
+      // outstanding work existed — and the brief quotes the caveat as the
+      // live limitation, so a reader of it alone under-counted what is
+      // left. The two segments stay disjoint: a re-clamped suite killed
+      // again THIS call is provisional; an unreached workspace is still to
+      // run.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [
+            {
+              command: 'npm test --workspace="packages/core"',
+              exitCode: null,
+              seconds: 100,
+              timedOut: true,
+              output: '',
+              deadlineMs: 100_000,
+              clamped: true,
+            },
+          ],
+          ok: false,
+          timedOut: [],
+          note: 'one clamped, one unreached',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/b'],
+          },
+        }),
+      );
+
+      // The retry is admitted with a budget-shortened deadline and killed
+      // again (exec burns ~6s and reports the timeout); what remains is
+      // below the attempt floor, so packages/b is never started.
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 20,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6000);
+          return {
+            command,
+            exitCode: null,
+            seconds: 6,
+            timedOut: true,
+            output: '',
+          };
+        },
+      });
+
+      const caveat = rep.testScope?.caveat ?? '';
+      expect(caveat).toContain('still to run');
+      expect(caveat).toContain('packages/b');
+      expect(caveat).toContain('provisional');
+      expect(caveat).toContain('npm test --workspace="packages/core"');
     });
 
     it("runs the AFFECTED pending suite first — the fresh path's invariant", () => {
@@ -3713,6 +3948,59 @@ describe('runBuildTest', () => {
         { toolchain: 'npm', test: [] },
         { toolchain: 'npm', test: [], build: [] },
         { toolchain: 'npm', test: [], timedOut: [] },
+        // The `test` clause needs its own UNMASKED witness: a fixture that
+        // also omitted `affected` and `ok` was refused by their clauses
+        // whatever happened to the `test` clause, so deleting
+        // `!commandsOk(shape.test)` kept every refusal green while a report
+        // truncated of only its `test` key cleared the mutated gate and
+        // died at `previous.test.filter` — the raw crash the gate exists to
+        // replace. Every other walked field is present and valid here, so
+        // the refusal rides on the `test` clause alone.
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          build: [],
+          timedOut: [],
+        },
+        // The two newest clauses need their own witnesses too: a corrupted
+        // stamp must refuse here, not steer the nothing-to-resume message
+        // off a non-boolean truthiness ('"buildOnly": "yes"' or
+        // '"endedBeforeTests": "yes"' fails `=== true` and would read as a
+        // completed zero-suite run).
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          buildOnly: 'yes',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          endedBeforeTests: 'yes',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: 'false',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          test: [],
+          build: [],
+          timedOut: [],
+        },
       ]) {
         writeFileSync(outPath, JSON.stringify(partial));
         expect(() =>
@@ -4206,5 +4494,69 @@ describe('runBuildTest', () => {
       expect(calls).toEqual([]);
       expect(rep.note).toContain('Nothing to resume');
     });
+  });
+});
+
+describe('applyHandOffPolicy', () => {
+  const handOff = {
+    toolchain: 'unsupported' as const,
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    ok: true,
+    note: 'build-test could not scope this repo',
+  };
+
+  it('converts a hand-off to a refusal under `required`', () => {
+    // The hand-off tells the agent to install and build with its own shell,
+    // which nothing here contains. This conversion has been wrong twice — once
+    // as a precondition that was never true, once as a wrapper on two of the
+    // three routes that produce it — so what it produces is pinned here rather
+    // than left to the call site.
+    const got = applyHandOffPolicy(handOff, 'required');
+    expect(got.toolchain).toBe('refused');
+    // NOT `ok`, or a reader treats it as a clean hand-off and does by hand
+    // exactly what the policy refused.
+    expect(got.ok).toBe(false);
+    expect(got.note).toContain('do not run the commands by hand');
+    expect(got.build).toEqual([]);
+    expect(got.test).toEqual([]);
+  });
+
+  it('leaves a hand-off alone under the other policies', () => {
+    for (const policy of ['off', 'auto'] as const) {
+      expect(applyHandOffPolicy(handOff, policy)).toBe(handOff);
+    }
+  });
+
+  it('refuses to convert on a --resume, which would destroy the report', () => {
+    // The invariant the other two continuation exits enforce with a throw:
+    // "a continuation must never answer with a FRESH report". This conversion
+    // was added after both and returns one — which the handler writes over the
+    // report the call was asked to continue, and that refusal carries no run
+    // identity, so every later resume fails the identity check. A policy
+    // tightened between the first call and the resume is enough to trigger it,
+    // on the unscopeable repo shapes that reach a hand-off in the first place.
+    expect(resumeWouldDestroyReport(handOff, true, 'required')).toBe(true);
+    // A fresh call converts normally — that is the whole point of the
+    // conversion.
+    expect(resumeWouldDestroyReport(handOff, false, 'required')).toBe(false);
+    // And a resume of a real run is never touched.
+    expect(
+      resumeWouldDestroyReport(
+        { ...handOff, toolchain: 'npm' },
+        true,
+        'required',
+      ),
+    ).toBe(false);
+  });
+
+  it('never converts a real run', () => {
+    const real = { ...handOff, toolchain: 'npm' as const };
+    expect(applyHandOffPolicy(real, 'required')).toBe(real);
   });
 });
