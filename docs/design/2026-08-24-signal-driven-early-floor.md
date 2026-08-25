@@ -137,9 +137,9 @@ backstop's stated job — and the posted body discloses the move.
      `CriticalFloorKind 'auto-signaled'`;
    - the #9410 residual-risk advisory's floor-engagement conjunct reads the
      caller's signal-inclusive enforcement state (`floorEnforcementEngaged`),
-     not a schedule-only re-derivation: it surfaces from the signal-engaged
-     round, not the round the schedule first proves (round 5, not round 7,
-     in the scenario above);
+     not a schedule-only re-derivation: it surfaces from the first round the
+     signal-engaged floor can prove — never the engaging round itself
+     (round 5, not round 7, in the scenario above);
    - the marker stamps `flatRounds` beside `churnRounds`.
 4. `lib/convergence.ts`: `CriticalFloorKind` gains `'auto-signaled'` with
    rendering wording.
