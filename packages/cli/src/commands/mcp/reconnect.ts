@@ -96,6 +96,23 @@ interface ReconnectError extends Error {
 }
 
 /**
+ * Thrown when discovery deliberately skips a server BEFORE any connection
+ * attempt (disabled, `.mcp.json` pending approval, untrusted workspace).
+ * Typed so result-aggregating callers can tell a skip from a failed
+ * connection attempt: `--all` must not count skips toward its failure total,
+ * or one intentionally-skipped server would force exit code 1 forever.
+ */
+class SkippedConnectionError extends Error {
+  readonly skipReason: string;
+
+  constructor(skipReason: string) {
+    super(`no connection attempt was made: ${skipReason}`);
+    this.name = 'SkippedConnectionError';
+    this.skipReason = skipReason;
+  }
+}
+
+/**
  * The reconnect command runs in its own short-lived process: it can verify
  * (and refresh) its own connection, but it has no channel into a running
  * Qwen Code session. Say so plainly in the success output so it is not read
@@ -156,10 +173,11 @@ async function discoverAndVerifyConnection(
   const status = getMCPServerStatus(serverName);
   if (status !== MCPServerStatus.CONNECTED) {
     const skippedReason = describeSkippedConnectionReason(config, serverName);
+    if (skippedReason) {
+      throw new SkippedConnectionError(skippedReason);
+    }
     throw new Error(
-      skippedReason
-        ? `no connection attempt was made: ${skippedReason}`
-        : `connection attempt finished without a live connection (status: ${status})`,
+      `connection attempt finished without a live connection (status: ${status})`,
     );
   }
 }
@@ -227,6 +245,15 @@ async function reconnectAllMcpServers(): Promise<void> {
         await discoverAndVerifyConnection(config, serverName);
         writeStdoutLine(`✓ ${serverName}: Reconnected successfully`);
       } catch (error) {
+        if (error instanceof SkippedConnectionError) {
+          // An intentional skip is not a failure — the client never tried to
+          // connect. Report it informationally and keep it out of failedCount:
+          // counting it would force exit code 1 on every run (alerting
+          // `qwen mcp reconnect --all || alert` wrappers forever) even though
+          // nothing actually failed.
+          writeStdoutLine(`- ${serverName}: Skipped - ${error.skipReason}`);
+          continue;
+        }
         failedCount++;
         const message = error instanceof Error ? error.message : String(error);
         writeStdoutLine(`✗ ${serverName}: Failed - ${message}`);

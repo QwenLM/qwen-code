@@ -563,5 +563,71 @@ describe('mcp reconnect command', () => {
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
     });
+
+    it('--all reports a deliberately skipped server without counting it as a failure', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+            'server-two': { command: '/path/to/server2', scope: 'workspace' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockImplementation((name: string) =>
+        name === 'server-one' ? 'connected' : 'disconnected',
+      );
+      mockConfig.isMcpServerPendingApproval.mockImplementation(
+        (name: string) => name === 'server-two',
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✓ server-one: Reconnected successfully',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '- server-two: Skipped - server is pending approval (.mcp.json)',
+      );
+      // Nothing was attempted-and-failed: no failure summary, exit 0. A
+      // wrapper running `qwen mcp reconnect --all || alert` must not alert
+      // on an intentional skip.
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      expect(mockProcessExit).not.toHaveBeenCalled();
+    });
+
+    it('--all counts only attempted-and-failed servers when skips are present', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+            'server-two': { command: '/path/to/server2', scope: 'workspace' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockConfig.isMcpServerPendingApproval.mockImplementation(
+        (name: string) => name === 'server-two',
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✗ server-one: Failed - connection attempt finished without a live connection (status: disconnected)',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '- server-two: Skipped - server is pending approval (.mcp.json)',
+      );
+      // 1 attempted-and-failed of 2 configured — the skip is not counted.
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect 1 of 2 configured server(s).',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
   });
 });
