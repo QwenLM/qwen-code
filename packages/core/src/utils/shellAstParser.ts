@@ -633,6 +633,36 @@ export async function initParser(): Promise<void> {
 }
 
 /**
+ * Node types inside a redirect that carry no statement of their own: the
+ * heredoc's own delimiters and body, and the words and expansions naming a
+ * redirect's destination, which `evaluateRedirectionSafety` already owns.
+ *
+ * Deliberately a skip-list rather than an allow-list. tree-sitter-bash nests
+ * whatever follows `&&`, `||` or `;` on the opener line *inside* the redirect
+ * node, and that is an open set — `pipeline`, `negated_command`,
+ * `if_statement`, `for_statement`, `c_style_for_statement`,
+ * `select_statement`, `declaration_command` and more all appear there.
+ * Enumerating them has been wrong twice. Anything not listed here is handed to
+ * `evaluateStatementSafety`, whose default arm floors an unrecognised type at
+ * `unknown`, so a shape nobody anticipated prompts instead of vanishing.
+ */
+const INERT_REDIRECT_CHILD: ReadonlySet<string> = new Set([
+  'command_substitution',
+  'concatenation',
+  'expansion',
+  'file_descriptor',
+  'heredoc_body',
+  'heredoc_end',
+  'heredoc_start',
+  'number',
+  'process_substitution',
+  'raw_string',
+  'simple_expansion',
+  'string',
+  'word',
+]);
+
+/**
  * Parse a shell command string into a tree-sitter Tree.
  * Initialises the parser lazily if needed.
  */
@@ -1100,6 +1130,26 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
         .map((child) => evaluateStatementSafety(child)),
+      // Whatever follows the heredoc opener on the same line is parsed
+      // *inside* the redirect node — `cat <<EOF && rm -rf build` puts the
+      // `rm` beside the heredoc body, and `cat <<EOF >out.txt` puts the
+      // write redirect there — so filtering the redirect out above dropped
+      // both from the analysis entirely.
+      ...node.namedChildren
+        .filter((child) => child.type.endsWith('_redirect'))
+        .flatMap((redirect) => [
+          // A redirect nested in a redirect is a redirect, not a statement:
+          // it belongs to the redirection axis, which never reached inside
+          // the heredoc node because it only walks direct children.
+          evaluateRedirectionSafety(redirect),
+          ...redirect.namedChildren
+            .filter(
+              (child) =>
+                !INERT_REDIRECT_CHILD.has(child.type) &&
+                !child.type.endsWith('_redirect'),
+            )
+            .map((child) => evaluateStatementSafety(child)),
+        ]),
       evaluateRedirectionSafety(node),
     );
   if (/^variable_assignments?$/.test(node.type))
