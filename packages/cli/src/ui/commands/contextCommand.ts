@@ -26,6 +26,7 @@ import {
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  estimateContextTextTokens,
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
@@ -46,26 +47,6 @@ function currentTier(
   if (tokens >= thresholds.auto) return 'auto';
   if (tokens >= thresholds.warn) return 'warn';
   return 'safe';
-}
-
-/**
- * Estimate token count for a string using a character-based heuristic.
- * ASCII chars ≈ 4 chars/token, CJK/non-ASCII chars ≈ 1.5 tokens/char.
- */
-function estimateTokens(text: string): number {
-  if (!text || text.length === 0) return 0;
-  let asciiChars = 0;
-  let nonAsciiChars = 0;
-  for (let i = 0; i < text.length; i++) {
-    const charCode = text.charCodeAt(i);
-    if (charCode < 128) {
-      asciiChars++;
-    } else {
-      nonAsciiChars++;
-    }
-  }
-  // CJK and other non-ASCII characters typically produce 1.5-2 tokens each
-  return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
 }
 
 /**
@@ -96,7 +77,7 @@ function parseMemoryFiles(
         path.resolve(workingDir, filePath),
         workingDir,
       ),
-      tokens: estimateTokens(content),
+      tokens: estimateContextTextTokens(content),
     });
   }
 
@@ -104,7 +85,7 @@ function parseMemoryFiles(
   if (results.length === 0 && memoryContent.trim().length > 0) {
     results.push({
       path: t('memory'),
-      tokens: estimateTokens(memoryContent),
+      tokens: estimateContextTextTokens(memoryContent),
     });
   }
 
@@ -139,7 +120,7 @@ export async function collectContextData(
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
-  const systemPromptTokens = estimateTokens(systemPromptText);
+  const systemPromptTokens = estimateContextTextTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
@@ -153,7 +134,7 @@ export async function collectContextData(
     ? toolRegistry.getFunctionDeclarations()
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
-  const allToolsTokens = estimateTokens(toolsJsonStr);
+  const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
@@ -162,7 +143,7 @@ export async function collectContextData(
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);
-    const tokens = estimateTokens(toolJsonStr);
+    const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
@@ -182,14 +163,14 @@ export async function collectContextData(
   if (autoMemoryPrompt) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateTokens(autoMemoryPrompt),
+      tokens: estimateContextTextTokens(autoMemoryPrompt),
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
   const skillToolDefinitionTokens = skillTool
-    ? estimateTokens(JSON.stringify(skillTool.schema))
+    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =
@@ -204,7 +185,7 @@ export async function collectContextData(
   const disabledSkillNames = config.getDisabledSkillNames();
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
-    const listingTokens = estimateTokens(
+    const listingTokens = estimateContextTextTokens(
       `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
     );
     const isLoaded = loadedSkillNames.has(skill.name);
@@ -213,7 +194,9 @@ export async function collectContextData(
       const baseDir = skill.filePath
         ? skill.filePath.replace(/\/[^/]+$/, '')
         : '';
-      bodyTokens = estimateTokens(buildSkillLlmContent(baseDir, skill.body));
+      bodyTokens = estimateContextTextTokens(
+        buildSkillLlmContent(baseDir, skill.body),
+      );
       loadedBodiesTokens += bodyTokens;
     }
     return {

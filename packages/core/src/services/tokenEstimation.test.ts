@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { Content } from '@google/genai';
 import {
   estimateContentTokens,
+  estimateContextTextTokens,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from './tokenEstimation.js';
@@ -15,6 +16,18 @@ import {
 const textContent = (text: string): Content => ({
   role: 'user',
   parts: [{ text }],
+});
+
+describe('estimateContextTextTokens', () => {
+  it('uses the shared ASCII and CJK context-reporting heuristic', () => {
+    expect(estimateContextTextTokens('abcdefgh')).toBe(2);
+    expect(estimateContextTextTokens('中文')).toBe(3);
+    expect(estimateContextTextTokens('abcd中')).toBe(3);
+  });
+
+  it('returns zero for empty text', () => {
+    expect(estimateContextTextTokens('')).toBe(0);
+  });
 });
 
 describe('estimateContentTokens', () => {

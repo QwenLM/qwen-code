@@ -329,6 +329,14 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getSessionId: () =>
       (configContent['sessionId'] as string | undefined) ?? 'test-session',
     getTelemetryUserId: () => configContent['userId'] as string | undefined,
+    getUserMemory: () => (configContent['userMemory'] as string) ?? '',
+    getAutoMemoryPrompt: () =>
+      (configContent['autoMemoryPrompt'] as string) ?? '',
+    getAutoCompactThreshold: () =>
+      configContent['autoCompactThreshold'] as number | undefined,
+    getToolRegistry: () =>
+      configContent['toolRegistry'] ?? { getTool: () => undefined },
+    getSkillManager: () => configContent['skillManager'] ?? null,
   } as Config;
 };
 
@@ -457,6 +465,105 @@ describe('LoggingContentGenerator', () => {
         userId: 'owner-user',
       }),
     );
+  });
+
+  it('snapshots context usage before a non-stream request starts', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        config: { systemInstruction: 'system' },
+      },
+      'context-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toMatchObject({
+      version: 1,
+      window_size_tokens: 100_000,
+      breakdown: {
+        system_prompt_tokens: 2,
+        messages_tokens: 2,
+      },
+      estimated: true,
+    });
+  });
+
+  it('snapshots context usage before a stream is iterated', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield createResponse('resp-context', 'test-model', [{ text: 'ok' }]);
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-stream-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(100_000);
+    for await (const _chunk of stream) {
+      // Drain the stream so span finalization runs.
+    }
+  });
+
+  it('skips context snapshot work when telemetry is disabled', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-disabled-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toBeUndefined();
   });
 
   it('uses the final logical-parent session for API logs', async () => {
@@ -3285,6 +3392,10 @@ describe('LoggingContentGenerator', () => {
 
       // logApiRequest should NOT be called for internal prompts
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
       const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
@@ -3354,6 +3465,10 @@ describe('LoggingContentGenerator', () => {
       }
 
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       expect(logApiResponse).toHaveBeenCalled();
       const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
       expect(responseEvent.response_text).toBeUndefined();
