@@ -33,8 +33,6 @@ import {
   DRIVE_SENTINEL,
   parseCaptureSpecs,
   extractCaptures,
-  installSignalTeardown,
-  TEARDOWN_SIGNALS,
   type ExecResult,
 } from './drive.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -606,41 +604,6 @@ describe('the log cap', () => {
     rmSync(dir, { recursive: true, force: true });
     expect(r.outcome).toBe('overflowed');
     expect(r.output).toBe(''); // never read — not the 300 MiB (trimmed) tail
-  });
-});
-
-describe('signal teardown', () => {
-  it('installs handlers on the kill signals and removes them again', () => {
-    const before = TEARDOWN_SIGNALS.map((s) => process.listenerCount(s));
-    const uninstall = installSignalTeardown(() => {});
-    TEARDOWN_SIGNALS.forEach((s, i) =>
-      expect(process.listenerCount(s)).toBe(before[i] + 1),
-    );
-    uninstall();
-    TEARDOWN_SIGNALS.forEach((s, i) =>
-      expect(process.listenerCount(s)).toBe(before[i]),
-    );
-  });
-
-  it('runs the teardown and exits 128+signal when a kill signal fires', () => {
-    // Node's default action for these signals terminates without unwinding, so
-    // the drive's finally never runs and the tmux keeper leaks with the
-    // untrusted script still executing. The handler must kill-server first.
-    const exitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => undefined) as never);
-    let torndown = 0;
-    const uninstall = installSignalTeardown(() => {
-      torndown++;
-    });
-    // Invoke the just-installed SIGTERM handler directly rather than
-    // process.emit('SIGTERM'), which would also trip vitest's own listeners.
-    const handler = process.listeners('SIGTERM').at(-1) as () => void;
-    handler();
-    expect(torndown).toBe(1);
-    expect(exitSpy).toHaveBeenCalledWith(143); // 128 + SIGTERM(15)
-    uninstall();
-    exitSpy.mockRestore();
   });
 });
 

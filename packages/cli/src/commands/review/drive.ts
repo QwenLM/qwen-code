@@ -437,46 +437,6 @@ export function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** 128 + the signal number, the shell's convention for "died on this signal". */
-const SIGNAL_EXIT_CODES: Partial<Record<NodeJS.Signals, number>> = {
-  SIGHUP: 129,
-  SIGINT: 130,
-  SIGTERM: 143,
-};
-export const TEARDOWN_SIGNALS = Object.keys(
-  SIGNAL_EXIT_CODES,
-) as NodeJS.Signals[];
-
-/**
- * Install best-effort teardown on the signals whose default action skips a
- * `finally`. Node terminates on SIGTERM/SIGINT/SIGHUP without unwinding, so a
- * cancelled CI job or a Ctrl+C would leave the tmux keeper — which setsids out
- * of the caller's process group and so is unreachable by any group kill — and
- * every running arm alive, the untrusted driven script executing past its
- * `--timeout`. `onSignal` (a best-effort `kill-server`) runs, then the process
- * exits 128+signal. Returns an uninstaller for the caller's `finally`, so the
- * handlers live only for the drive's own duration and never accumulate across
- * the many in-process test calls.
- */
-export function installSignalTeardown(onSignal: () => void): () => void {
-  const installed = new Map<NodeJS.Signals, () => void>();
-  for (const signal of TEARDOWN_SIGNALS) {
-    const handler = (): void => {
-      try {
-        onSignal();
-      } catch {
-        /* best effort — a lost verdict is not worth a crash in the handler */
-      }
-      process.exit(SIGNAL_EXIT_CODES[signal] ?? 1);
-    };
-    installed.set(signal, handler);
-    process.on(signal, handler);
-  }
-  return () => {
-    for (const [signal, handler] of installed) process.off(signal, handler);
-  };
-}
-
 /**
  * The production exec: 30s hang guard, 64MB buffer, null-status-means-failure.
  * Exported for `ab-drive`, which owns the same tmux mechanics across two arms
@@ -662,13 +622,16 @@ export function runDrive(args: DriveArgs): DriveReport {
   let output = '';
   let exitCode: number | null = null;
   let outcome: DriveOutcome = 'timed-out';
-  // The poll loop below can block for the whole --timeout; a SIGTERM/SIGINT/
-  // SIGHUP there would skip the finally and leak the keeper (which setsids out
-  // of reach of a group kill) with the untrusted script still running. Best-
-  // effort the same kill-server on the way out; the finally uninstalls it.
-  const uninstallSignalTeardown = installSignalTeardown(() => {
-    tmux('kill-server');
-  });
+  // NOTE — deliberately NO signal handler here. The poll loop is fully
+  // synchronous (spawnSync + Atomics.wait + sync fs), so the event loop never
+  // turns during a drive, and a `process.on('SIGTERM')` callback is only ever
+  // delivered on an event-loop turn. Registering one would not run the
+  // teardown mid-loop AND would suppress Node's default terminate action — so
+  // SIGTERM/SIGINT/SIGHUP would be silently IGNORED for the whole --timeout
+  // (measured: the drive ran to completion and exited 0), strictly worse than
+  // the default. The keeper that a signalled process leaks (it setsids out of
+  // reach of a group kill) is the accepted same-uid teardown-reachability
+  // residual; closing it needs an async loop or an out-of-process watchdog.
   try {
     // The SCRIPT writes the log, not the pane. `pipe-pane` attaches after
     // `new-session` has already started the script, so a fast drive finishes —
@@ -749,7 +712,6 @@ export function runDrive(args: DriveArgs): DriveReport {
       waitMs(POLL_MS);
     }
   } finally {
-    uninstallSignalTeardown();
     // Unconditional. The 87% that clean up by hand are the 87% that remembered;
     // a leaked server is the next run's wrong observation.
     tmux('kill-server');

@@ -851,6 +851,76 @@ describe('runRevertHunk', () => {
     expect(r.note).toContain('gitlink/submodule');
   });
 
+  it('refuses submodule ADDITION and DELETION hunks, not only pointer changes', () => {
+    // git emits a submodule deletion as `deleted file mode 160000` + an index
+    // line whose other side is all-zero (no trailing 160000), and an addition
+    // as `new file mode 160000` — neither matches the trailing-mode index
+    // regex, so only the file-mode markers catch them. Without this, git apply
+    // -R exits 0 without moving the gitlink and applied:true is a false witness.
+    const del = [
+      'diff --git a/vendor/lib b/vendor/lib',
+      'deleted file mode 160000',
+      'index cc9a958ccccccccccccccccccccccccccccccccc..0000000000000000000000000000000000000000',
+      '--- a/vendor/lib',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-Subproject commit cc9a958ccccccccccccccccccccccccccccccccc',
+      '',
+    ].join('\n');
+    const add = [
+      'diff --git a/vendor/lib b/vendor/lib',
+      'new file mode 160000',
+      'index 0000000000000000000000000000000000000000..cc9a958ccccccccccccccccccccccccccccccccc',
+      '--- /dev/null',
+      '+++ b/vendor/lib',
+      '@@ -0,0 +1 @@',
+      '+Subproject commit cc9a958ccccccccccccccccccccccccccccccccc',
+      '',
+    ].join('\n');
+    for (const [label, text] of [
+      ['delete', del],
+      ['add', add],
+    ] as const) {
+      const dir = tempDir(`rh-sub-${label}-`);
+      const diffPath = join(dir, 'sub.diff');
+      writeFileSync(diffPath, text);
+      const r = runRevertHunk({
+        diff: diffPath,
+        tree: dir,
+        hunk: 'vendor/lib:1',
+      });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.note).toContain('gitlink/submodule');
+    }
+  });
+
+  it('refuses a section mixing rename/copy metadata with a /dev/null side', () => {
+    // A contradictory shape git never emits (a real rename/copy has two real
+    // paths). Left through, extractHunkPatch's old-side rewrite fires on
+    // isMoveOrCopy and rewrites the /dev/null token into a fabricated real
+    // path, reverse-applying over the WRONG mutation with applied:true.
+    const dir = tempDir('rh-rendevnull-');
+    const diffPath = join(dir, 'x.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/old b/new',
+        'rename from old',
+        'rename to new',
+        '--- /dev/null',
+        '+++ b/new',
+        '@@ -0,0 +1 @@',
+        '+content',
+        '',
+      ].join('\n'),
+    );
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'new:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('/dev/null');
+  });
+
   it('does not count a format-patch signature trailer as a removed line', () => {
     // `git format-patch -1 --stdout` appends an mbox trailer (`-- \n<version>`)
     // after the last hunk; parseDiff leaves that hunk's range open to EOF, so a

@@ -65,7 +65,6 @@ import {
   MAX_READ_BYTES,
   POLL_MS,
   SERVER_NAME_RE,
-  installSignalTeardown,
   logBytes,
   sentinelExitCode,
   shellQuote,
@@ -293,6 +292,12 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   }
 
   const tmux = (...a: string[]) => exec('tmux', ['-L', args.server, ...a]);
+  // tmux resolves a bare `-t <name>` by PREFIX match, so a same-uid driven
+  // script (it inherits $TMUX and so the socket) can forge the session-liveness
+  // channel by creating a DECOY session whose name has ours as a prefix — not a
+  // file, so reading the session rather than a sentinel does not close it.
+  // `=<name>` forces exact match, the only form that names one session.
+  const exact = (name: string) => `=${name}`;
   const killedStale = tmux('kill-server').status === 0;
 
   // mkdtemp at BOTH levels, not a server-keyed fixed path. The run dir: a
@@ -490,17 +495,16 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
    * confound. `has-session` is not reachable through that file channel.
    */
   const sharedAlive = (): boolean =>
-    shared !== null && tmux('has-session', '-t', shared.name).status === 0;
+    shared !== null &&
+    tmux('has-session', '-t', exact(shared.name)).status === 0;
   let note = '';
 
-  // Each arm's poll loop can block for the whole --timeout; a SIGTERM/SIGINT/
-  // SIGHUP there would skip the finally and leak the keeper (unreachable by a
-  // group kill — it setsids away) with every running arm's untrusted script
-  // still executing. Best-effort the same kill-server on the way out; the
-  // finally uninstalls it.
-  const uninstallSignalTeardown = installSignalTeardown(() => {
-    tmux('kill-server');
-  });
+  // NOTE — deliberately NO signal handler (see drive.ts). Each arm's poll loop
+  // is fully synchronous, so a `process.on('SIGTERM')` callback would never be
+  // delivered mid-loop, and registering one only suppresses Node's default
+  // terminate action — making SIGTERM/SIGINT/SIGHUP be silently ignored for the
+  // whole run instead of ending it. The keeper a signalled process leaks is the
+  // accepted same-uid teardown residual.
   try {
     const runArm = (arm: 'a' | 'b'): AbArmReport | 'stop' => {
       const root = resolve(arm === 'a' ? args.armA : args.armB);
@@ -517,7 +521,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         // arm b's whole window, kills shared-b at birth, and the note then
         // sends the verifier to fix the wrong component.
         if (args.shared && mode === 'per-arm' && shared !== null) {
-          tmux('kill-session', '-t', shared.name);
+          tmux('kill-session', '-t', exact(shared.name));
           shared = null;
         }
         return {
@@ -680,7 +684,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
         // at one uid — the residual exposure the whole review shares.)
         if (
           exitCode !== null &&
-          tmux('has-session', '-t', `arm-${arm}`).status !== 0
+          tmux('has-session', '-t', exact(`arm-${arm}`)).status !== 0
         ) {
           // Re-read the log now that the sentinel is there and the session
           // has ended: the read above
@@ -718,12 +722,12 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       // overflowed writer keeps growing its log through arm b's whole
       // window. Killing a session that already exited on completion is a
       // no-op, so this is unconditional.
-      tmux('kill-session', '-t', `arm-${arm}`);
+      tmux('kill-session', '-t', exact(`arm-${arm}`));
       // Liveness is read BEFORE the per-arm teardown, so "alive at end" means
       // "outlived the arm", not "survived our own kill".
       const sharedAliveAtEnd = shared === null ? null : sharedAlive();
       if (args.shared && mode === 'per-arm' && shared !== null) {
-        tmux('kill-session', '-t', shared.name);
+        tmux('kill-session', '-t', exact(shared.name));
         shared = null;
       }
       const { text, truncated } = trimCapture(output);
@@ -753,7 +757,6 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     const b = runArm('b');
     if (b !== 'stop') armReports.b = b;
   } finally {
-    uninstallSignalTeardown();
     // Neither teardown may throw out of the finally and discard the report:
     // an untrusted arm can leave runDir un-removable (a chmod, a mount), and
     // tmux can fail transiently — best-effort both, a leak is not worth a

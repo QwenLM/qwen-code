@@ -146,7 +146,9 @@ function harness(opts: {
       return ok();
     }
     if (cmd === 'tmux' && args[2] === 'has-session') {
-      const target = args[4];
+      // Production targets sessions with tmux's exact-match `=<name>` form; the
+      // harness keys on the bare name.
+      const target = args[4].replace(/^=/, '');
       if ((opts.vanishedSessions ?? []).includes(target)) return fail();
       // A dead-at-birth shared session has GONE — liveness is the session,
       // not a sentinel file (which the arm's own code could plant).
@@ -154,7 +156,7 @@ function harness(opts: {
       return endedSessions.has(target) ? fail() : ok();
     }
     if (cmd === 'tmux' && args[2] === 'kill-session') {
-      const target = args[4];
+      const target = args[4].replace(/^=/, '');
       if (target.startsWith('shared-')) {
         sharedServing = false;
       }
@@ -205,11 +207,16 @@ function harness(opts: {
     return ok();
   };
   // Log rows are [cmd, ...args]: the tmux verb sits at index 3, the session
-  // name at 6 (new-session) / 5 (kill-session).
+  // name at 6 (new-session) / 5 (kill-session). kill-session names carry the
+  // exact-match `=` prefix in production; strip it so events read by bare name.
   const events = () =>
     log
       .filter((l) => l[3] === 'new-session' || l[3] === 'kill-session')
-      .map((l) => (l[3] === 'new-session' ? `new:${l[6]}` : `kill:${l[5]}`));
+      .map((l) =>
+        l[3] === 'new-session'
+          ? `new:${l[6]}`
+          : `kill:${l[5].replace(/^=/, '')}`,
+      );
   return { exec, log, events, bashCmds };
 }
 
@@ -260,6 +267,25 @@ describe('runAbDrive, harnessed', () => {
     const r = runAbDrive(baseArgs({ exec: h.exec }));
     expect(r.observed).toBe(false);
     expect(r.note).toContain('tmux is not available');
+  });
+
+  it('targets tmux sessions by exact match (=name), never bare prefix', () => {
+    // tmux resolves a bare `-t <name>` by PREFIX match, so a same-uid driven
+    // script (it has $TMUX) can forge the session-liveness channel with a decoy
+    // session. Every has-session / kill-session must use the `=<name>` form.
+    const args = baseArgs({ shared: 'sleep 1', sharedReady: 'true' });
+    const h = harness({ server: args.server });
+    runAbDrive({ ...args, exec: h.exec });
+    const targets = h.log
+      .filter(
+        (l) =>
+          l[0] === 'tmux' &&
+          (l[3] === 'has-session' || l[3] === 'kill-session') &&
+          l[4] === '-t',
+      )
+      .map((l) => l[5]);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const t of targets) expect(t.startsWith('=')).toBe(true);
   });
 
   it('returns a fail report, not exit 1, when the run directory cannot be created', () => {

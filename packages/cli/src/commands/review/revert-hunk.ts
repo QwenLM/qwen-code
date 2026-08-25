@@ -307,6 +307,15 @@ export function sectionUnsafeToRevert(
   // has differing sides — only two REAL paths differing without metadata is
   // the move-inducing shape.
   const bothReal = minus !== '/dev/null' && plus !== '/dev/null';
+  // Rename/copy metadata together with a /dev/null side is a contradictory
+  // shape git never emits (a real rename/copy has two real paths). Left
+  // through, extractHunkPatch's old-side rewrite fires on isMoveOrCopy and
+  // rewrites the /dev/null token into a fabricated real path, reverse-applying
+  // over the WRONG mutation while reporting applied:true. Inside the
+  // arbitrary-diff threat model; refuse it where mutating is not safe.
+  if (isMoveOrCopy && !bothReal) {
+    return `hunk sits in a section carrying rename/copy metadata together with a /dev/null (creation or deletion) side — a contradictory shape git does not emit, whose reverse-apply would rewrite the /dev/null side into a real path and mutate the wrong file. This command reverts git-produced diffs; recapture with git.`;
+  }
   if (bothReal && strip(minus) !== strip(plus) && !isMoveOrCopy) {
     return `hunk sits in a section whose --- and +++ paths differ with no rename/copy metadata — a reverse-apply would move the file rather than revert its content. This command reverts git-produced diffs; recapture with git.`;
   }
@@ -451,8 +460,14 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   if (
     rawSection.some(
       (l) =>
+        // A pointer CHANGE carries a mode line and/or a trailing-mode index.
         l.startsWith('old mode 160000') ||
         l.startsWith('new mode 160000') ||
+        // A submodule ADDITION / DELETION carries these instead, with an index
+        // line whose other side is all-zero (no trailing mode) — so the index
+        // regex below never matches them and only these markers catch them.
+        l.startsWith('new file mode 160000') ||
+        l.startsWith('deleted file mode 160000') ||
         /^index [0-9a-f]+\.\.[0-9a-f]+ 160000$/.test(l),
     )
   ) {
