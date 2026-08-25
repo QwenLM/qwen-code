@@ -87,12 +87,31 @@ const MCP_CONNECTION_ERROR_PATTERNS = [
 // classification here.
 const MCP_REQUEST_TIMEOUT_CODE = -32001;
 
+// Structural dead-session signal. Per the MCP spec, an HTTP server that no
+// longer recognizes a request's `mcp-session-id` (the canonical state right
+// after a restart) MUST answer the POST with 404; the SDK surfaces that as
+// a `StreamableHTTPError` whose `code` is the HTTP status. The prose a
+// server wraps the 404 in is NOT spec-pinned — "Unknown session" is just as
+// dead as "Session not found" — so the structural code must trigger
+// recovery on its own, alongside `MCP_DEAD_SESSION_ERROR_PATTERN` (which
+// only covers enumerated phrasings) (issue #9944).
+const MCP_DEAD_SESSION_HTTP_CODE = 404;
+
 function isMcpRequestTimeout(error: unknown): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
     (error as { code?: unknown }).code === MCP_REQUEST_TIMEOUT_CODE
+  );
+}
+
+function isMcpDeadSessionHttpError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === MCP_DEAD_SESSION_HTTP_CODE
   );
 }
 
@@ -522,6 +541,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+      return true;
+    }
+
+    // Spec-pinned structural signal: HTTP 404 on the session POST means the
+    // server no longer knows our `mcp-session-id`, regardless of the prose
+    // it wrapped the 404 in — the patterns below only cover enumerated
+    // phrasings (issue #9944).
+    if (isMcpDeadSessionHttpError(error)) {
       return true;
     }
 

@@ -2201,6 +2201,52 @@ describe('DiscoveredMCPTool', () => {
       },
     );
 
+    it('routes an HTTP 404 dead-session response to the reconnect path even with unenumerated prose (issue #9944)', async () => {
+      // Per spec, a restarted HTTP server MUST answer a POST carrying a
+      // stale `mcp-session-id` with 404 (the SDK surfaces it as a
+      // StreamableHTTPError whose `code` is the HTTP status); the prose it
+      // wraps the 404 in is server-defined. "Unknown session" matches none
+      // of the enumerated `MCP_DEAD_SESSION_ERROR_PATTERN` phrasings, so
+      // only the structural `code: 404` signal can trigger recovery here —
+      // without it every subsequent call re-POSTs the stale session id and
+      // fails.
+      const unknownSessionError = Object.assign(new Error('Unknown session'), {
+        code: 404,
+      });
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(unknownSessionError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        undefined, // no annotations → no replay, but repair must still run
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
     it('should not retry on non-connection errors', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {
