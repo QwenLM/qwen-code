@@ -4978,7 +4978,44 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rewinds conversation history when the matching file snapshot is missing', () => {
+    it('fails closed a file rewind whose identified target owns no snapshot', () => {
+      // A target whose snapshot is missing used to proceed with
+      // survivingSnapshots undefined: the conversation truncated while the
+      // snapshot store stayed untouched, and the agent's
+      // FileHistoryService.rewind then threw 'The selected snapshot was
+      // not found' — leaving the session half-rewound (conversation back,
+      // files forward) behind success:true. The legacy arm fail-closes the
+      // identical shape; refuse it here too.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      mockFileHistoryService.getSnapshots.mockReturnValue([]);
+
+      expect(() => session.rewindToPrompt('prompt-1')).toThrow(
+        'Its file snapshot is missing',
+      );
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Its file snapshot is missing',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+    });
+
+    it('still rewinds conversation-only when the matching file snapshot is missing', () => {
+      // Conversation-only rewinds (the Web Shell RewindDialog's only
+      // rewind action) never enter the file arm, so a snapshot-less
+      // identified target keeps working there.
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -4991,7 +5028,9 @@ describe('Session', () => {
       mockFileHistoryService.isEnabled.mockReturnValue(true);
       mockFileHistoryService.getSnapshots.mockReturnValue([]);
 
-      expect(session.rewindToPrompt('prompt-1')).toEqual({
+      expect(
+        session.rewindToPrompt('prompt-1', { rewindFiles: false }),
+      ).toEqual({
         targetTurnIndex: 0,
         apiTruncateIndex: 0,
         promptId: 'prompt-1',

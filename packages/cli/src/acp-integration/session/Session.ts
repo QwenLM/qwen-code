@@ -3808,6 +3808,21 @@ export class Session implements SessionContext {
           targetSnapshotIndex = effectivePromptId
             ? snapshotIndexes.get(effectivePromptId)
             : undefined;
+          // A file rewind whose target owns no snapshot cannot proceed:
+          // the conversation would truncate while the snapshot store stays
+          // untouched, and the agent's FileHistoryService.rewind then
+          // throws 'The selected snapshot was not found' — leaving the
+          // session half-rewound (conversation back, files forward) behind
+          // success:true. The legacy arm fail-closes the identical shape
+          // above, and getRewindableSnapshotTargets already filters such
+          // targets out of what is advertised. Conversation-only rewinds
+          // (rewindFiles:false) never enter this branch.
+          if (targetSnapshotIndex === undefined) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Cannot rewind to the requested turn. Its file snapshot is missing.',
+            );
+          }
         } else if (
           legacySnapshotsAligned &&
           target.turnIndex < snapshots.length
