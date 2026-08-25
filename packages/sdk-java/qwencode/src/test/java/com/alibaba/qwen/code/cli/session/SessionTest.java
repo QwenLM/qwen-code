@@ -14,6 +14,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.qwen.code.cli.QwenCodeCli;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
@@ -36,7 +39,6 @@ import com.alibaba.qwen.code.cli.session.exception.SessionSendPromptException;
 import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
 import com.alibaba.qwen.code.cli.utils.Timeout;
-
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
@@ -47,6 +49,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionTest {
 
@@ -268,22 +271,28 @@ class SessionTest {
         Session session = new Session(transport);
         AtomicInteger controlResponses = new AtomicInteger();
         AtomicInteger results = new AtomicInteger();
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
 
-        session.sendPrompt("hello", new SessionEventSimpleConsumers() {
-            @Override
-            public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
-                controlResponses.incrementAndGet();
-            }
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+                @Override
+                public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
+                    controlResponses.incrementAndGet();
+                }
 
-            @Override
-            public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
-                results.incrementAndGet();
-            }
-        });
+                @Override
+                public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                    results.incrementAndGet();
+                }
+            });
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
 
         assertEquals(3, transport.getProcessedPromptLineCount());
         assertEquals(1, controlResponses.get());
         assertEquals(1, results.get());
+        assertTrue(hasControlResponseErrorWarning(logAppender));
     }
 
     @Test
@@ -294,10 +303,16 @@ class SessionTest {
                 "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
 
         Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
 
-        session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
 
         assertEquals(2, transport.getProcessedPromptLineCount());
+        assertTrue(hasControlResponseErrorWarning(logAppender));
     }
 
     @Test
@@ -319,6 +334,28 @@ class SessionTest {
 
         assertEquals(2, transport.getProcessedPromptLineCount());
         assertEquals(1, results.get());
+    }
+
+    private static ListAppender<ILoggingEvent> attachSessionLogAppender() {
+        ch.qos.logback.classic.Logger sessionLogger = (ch.qos.logback.classic.Logger) LoggerFactory
+                .getLogger(Session.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        sessionLogger.addAppender(appender);
+        return appender;
+    }
+
+    private static void detachSessionLogAppender(ListAppender<ILoggingEvent> appender) {
+        ch.qos.logback.classic.Logger sessionLogger = (ch.qos.logback.classic.Logger) LoggerFactory
+                .getLogger(Session.class);
+        sessionLogger.detachAppender(appender);
+        appender.stop();
+    }
+
+    private static boolean hasControlResponseErrorWarning(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .anyMatch(event -> event.getLevel().equals(Level.WARN)
+                        && event.getFormattedMessage().contains("control_response error"));
     }
 
     @Test
