@@ -12320,11 +12320,6 @@ class QwenAgent implements Agent {
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
     );
-    if (this.sessionWorkflowEnabledOverride !== undefined) {
-      config.setSessionWorkflowEnabledProvider?.(
-        () => this.sessionWorkflowEnabledOverride === true,
-      );
-    }
     let published = false;
     try {
       // After `new Session` (which wires the spawner the tool needs) and before
@@ -12333,6 +12328,19 @@ class QwenAgent implements Agent {
       await registerCreateSubSessionTool(config);
       options.primeSession?.(session);
       config.hydrateSessionRestoreFileHistory?.();
+      // Pin the workflow gate synchronously adjacent to publication. A write
+      // that lands while `registerCreateSubSessionTool` is suspended finds
+      // the session in neither the construction-time view nor the ext
+      // handler's live-session loop (it is not in `this.sessions` yet), so
+      // the recorded override must be applied here; from `sessions.set`
+      // onward concurrent writes reach the session through that loop. No
+      // await sits between the pin and the publication, so no write can land
+      // in between.
+      if (this.sessionWorkflowEnabledOverride !== undefined) {
+        config.setSessionWorkflowEnabledProvider?.(
+          () => this.sessionWorkflowEnabledOverride === true,
+        );
+      }
       this.sessions.set(sessionId, session);
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon
