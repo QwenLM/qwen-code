@@ -1,12 +1,26 @@
+/*
+ * Workflow execution graph — flat visual language.
+ *
+ * One surface (--background), one hairline (--border), status carried by a
+ * single accent colour per node/edge. No gradients, drop shadows, glows, or
+ * dot grids: depth is expressed only through borders and tint, so the graph
+ * reads the same in the light and dark themes.
+ */
+
 .root {
   container-type: inline-size;
   display: grid;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--background);
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.4;
 }
+
+/* ---------- history strip ---------- */
 
 .historyBar {
   display: flex;
@@ -14,24 +28,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px 10px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--muted) 24%, var(--background));
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .historyLead {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 7px;
-}
-
-.historyActions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 6px;
+  gap: 8px;
 }
 
 .historyLead > span:not(.historyMark, .cachedBadge) {
@@ -40,31 +47,36 @@
   white-space: nowrap;
 }
 
+.historyActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
 .cachedBadge {
   flex: 0 0 auto;
-  padding: 2px 6px;
-  border: 1px solid color-mix(in srgb, var(--success-color) 32%, transparent);
+  padding: 1px 7px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--success-color) 8%, transparent);
+  background: color-mix(in srgb, var(--success-color) 12%, transparent);
   color: var(--success-color);
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .compareButton {
   flex: 0 0 auto;
-  padding: 3px 7px;
-  border: 1px solid transparent;
+  padding: 3px 8px;
+  border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
+  font-size: 12px;
 }
 
-.compareButton:hover {
-  border-color: var(--border);
-  background: var(--background);
+.compareButton:hover:not(:disabled) {
+  background: var(--secondary);
   color: var(--foreground);
 }
 
@@ -75,15 +87,16 @@
 
 .compareButton:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
+
+/* ---------- saved-run ledger ---------- */
 
 .historyLedger {
   display: grid;
-  max-height: 214px;
+  max-height: 224px;
   overflow-y: auto;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--muted) 18%, var(--background));
 }
 
 .historyTools {
@@ -95,12 +108,11 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 6px 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-  background: color-mix(in srgb, var(--muted) 76%, var(--background));
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .historyTools label {
@@ -110,18 +122,19 @@
 }
 
 .historyTools select {
-  min-width: 92px;
-  padding: 3px 20px 3px 6px;
+  min-width: 100px;
+  padding: 3px 22px 3px 7px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--background);
   color: var(--foreground);
   font: inherit;
+  font-size: 11px;
 }
 
 .historyTools select:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
 .historyTools > span {
@@ -131,9 +144,9 @@
 }
 
 .historyEmpty {
-  padding: 14px 10px;
+  padding: 14px 12px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .historyRun {
@@ -141,7 +154,7 @@
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: stretch;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-bottom: 1px solid var(--border);
 }
 
 .historyRun:last-child {
@@ -150,22 +163,27 @@
 
 .historyRun:hover,
 .historyRun[data-selected='true'] {
-  background: color-mix(in srgb, var(--primary) 7%, transparent);
+  background: var(--secondary);
+}
+
+.historyRun[data-selected='true'] {
+  box-shadow: inset 2px 0 0 var(--agent-blue-500);
 }
 
 .historyRunSelect {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(148px, 1fr) 62px 46px 42px 54px;
+  grid-template-columns: minmax(150px, 1fr) 68px 48px 44px 56px;
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: 10px;
+  padding: 7px 12px;
   border: 0;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
   text-align: left;
 }
 
@@ -178,26 +196,28 @@
 .confirmDeleteButton {
   align-self: center;
   margin-right: 8px;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
+  padding: 3px 8px;
+  border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 8px;
+  font: inherit;
+  font-size: 11px;
   white-space: nowrap;
 }
 
-.historyDeleteButton:hover {
-  border-color: var(--error-color);
+.historyDeleteButton:hover:not(:disabled) {
   color: var(--error-color);
 }
 
 .confirmDeleteButton {
   border-color: var(--error-color);
-  background: color-mix(in srgb, var(--error-color) 12%, transparent);
   color: var(--error-color);
+}
+
+.confirmDeleteButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
 }
 
 .confirmDeleteButton:disabled,
@@ -209,7 +229,7 @@
 .historyDeleteButton:focus-visible,
 .confirmDeleteButton:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--error-color) 52%, transparent);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
 .historyRunIdentity {
@@ -222,6 +242,8 @@
 .historyRunIdentity code {
   overflow: hidden;
   color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -229,7 +251,7 @@
 .historyRunIdentity small {
   flex: 0 0 auto;
   color: var(--muted-foreground);
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .historyRunStatus {
@@ -254,20 +276,21 @@
   color: var(--warning-color);
 }
 
+/* ---------- run comparison ---------- */
+
 .comparison {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(66px, 0.6fr) repeat(2, minmax(88px, 1fr));
+  grid-template-columns: minmax(72px, 0.6fr) repeat(2, minmax(96px, 1fr));
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--muted) 24%, var(--background));
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .comparison > * {
   min-width: 0;
-  padding: 6px 8px;
+  padding: 6px 12px;
   border-right: 1px solid var(--border);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-bottom: 1px solid var(--border);
 }
 
 .comparison > :nth-child(3n) {
@@ -303,7 +326,7 @@
 
 .comparisonValue {
   color: var(--foreground);
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .comparisonValue[data-status='running'] {
@@ -324,30 +347,31 @@
   color: var(--warning-color);
 }
 
-.summary {
+/* ---------- toolbar: metrics + run controls ---------- */
+
+.toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.metrics {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 5px 14px;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--muted) 16%, var(--background));
+  gap: 4px 14px;
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
-.summary strong {
+.metrics strong {
   color: var(--foreground);
   font-weight: 600;
-}
-
-.graphOmission {
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--warning-color) 7%, var(--background));
-  color: var(--muted-foreground);
-  font-size: 10px;
 }
 
 .approvalMetric,
@@ -355,87 +379,113 @@
   color: var(--warning-color);
 }
 
+.toolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* The controls come from the task panel with its own classes; restate only
+   the geometry here so they sit flush with the strip. Colour is left to the
+   owner so the danger/primary variants keep their meaning. */
+.toolbarActions button {
+  min-height: 26px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.toolbarActions button:not([data-tone='primary']) {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+
+.toolbarActions button:not([data-tone='primary']):hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--secondary);
+}
+
+.graphOmission {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  box-shadow: inset 2px 0 0 var(--warning-color);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* ---------- graph ---------- */
+
 .workbench {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) 224px;
+  grid-template-columns: minmax(0, 1fr) 232px;
 }
 
 .viewport {
   min-width: 0;
-  min-height: 224px;
+  min-height: 200px;
   overflow: auto;
-  background:
-    radial-gradient(
-      circle at 66% 42%,
-      color-mix(in srgb, var(--agent-blue-500) 6%, transparent),
-      transparent 34%
-    ),
-    var(--background);
+  background: var(--background);
 }
 
 .canvas {
   position: relative;
   min-width: 100%;
-  min-height: 224px;
-  background-image: radial-gradient(
-    color-mix(in srgb, var(--muted-foreground) 20%, transparent) 0.7px,
-    transparent 0.7px
-  );
-  background-size: 18px 18px;
 }
 
 .lane {
   position: absolute;
   top: 0;
   bottom: 0;
-  border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--muted) 45%, transparent),
-    transparent 95px
-  );
+  border-right: 1px solid var(--border);
 }
 
-.lane[data-active='true'] {
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--agent-blue-500) 10%, transparent),
-    transparent 112px
-  );
-}
-
-.lane[data-active='true'] .laneHeading strong {
-  color: var(--agent-blue-400);
+.lane[data-last='true'] {
+  border-right: 0;
 }
 
 .laneHeading {
   display: flex;
   min-width: 0;
-  align-items: baseline;
-  gap: 7px;
-  padding: 11px 12px 0;
+  height: var(--workflow-lane-header-height, 40px);
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
 }
 
-.laneHeading span,
-.lane > small {
+.laneIndex {
+  flex: 0 0 auto;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .laneHeading strong {
   overflow: hidden;
   color: var(--foreground);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.lane > small {
-  display: block;
-  padding: 3px 12px 0 36px;
+.laneHeading small {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lane[data-active='true'] .laneHeading {
+  box-shadow: inset 0 -2px 0 var(--agent-blue-500);
+}
+
+.lane[data-active='true'] .laneHeading strong {
+  color: var(--agent-blue-500);
 }
 
 .edges {
@@ -447,35 +497,30 @@
 
 .edges marker path {
   fill: var(--muted-foreground);
+  fill: context-stroke;
 }
 
 .edge {
   fill: none;
-  stroke: color-mix(in srgb, var(--muted-foreground) 58%, transparent);
+  stroke: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
   stroke-width: 1.25px;
-  opacity: 0.78;
   transition:
     opacity 120ms ease,
-    stroke-width 120ms ease,
-    filter 120ms ease;
+    stroke-width 120ms ease;
   vector-effect: non-scaling-stroke;
 }
 
 .edge[data-status='running'] {
   stroke: var(--agent-blue-500);
-  stroke-width: 1.7px;
-  filter: drop-shadow(
-    0 0 3px color-mix(in srgb, var(--agent-blue-500) 55%, transparent)
-  );
 }
 
 .edge[data-status='queued'] {
-  stroke-dasharray: 4 5;
+  stroke-dasharray: 3 4;
 }
 
 .edge[data-status='completed'],
 .edge[data-status='cached'] {
-  stroke: color-mix(in srgb, var(--success-color) 72%, transparent);
+  stroke: var(--success-color);
 }
 
 .edge[data-status='failed'] {
@@ -483,16 +528,12 @@
 }
 
 .edge[data-path-emphasis='related'] {
-  stroke-width: 2.3px;
+  stroke-width: 2px;
   opacity: 1;
-  filter: drop-shadow(
-    0 0 3px color-mix(in srgb, currentColor 48%, transparent)
-  );
 }
 
 .edge[data-path-emphasis='dimmed'] {
-  opacity: 0.1;
-  filter: none;
+  opacity: 0.15;
 }
 
 .node {
@@ -501,51 +542,47 @@
   display: grid;
   width: var(--workflow-node-width);
   height: var(--workflow-node-height);
-  grid-template-columns: 23px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
-  padding: 8px 9px;
-  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--background) 96%, var(--muted));
-  box-shadow: 0 5px 14px color-mix(in srgb, black 14%, transparent);
+  gap: 9px;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--workflow-node-accent);
+  border-radius: 6px;
+  background: var(--background);
   color: var(--foreground);
   cursor: pointer;
+  font: inherit;
   text-align: left;
   transition:
-    border-color 140ms ease,
-    box-shadow 140ms ease,
-    opacity 140ms ease;
+    border-color 120ms ease,
+    background-color 120ms ease,
+    opacity 120ms ease;
 }
 
-.node:hover,
-.node[aria-pressed='true'] {
+.node:hover {
+  border-color: color-mix(in srgb, var(--foreground) 28%, var(--border));
+  border-left-color: var(--workflow-node-accent);
+}
+
+.node:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.node[aria-pressed='true'],
+.node[data-path-emphasis='active'] {
   border-color: var(--workflow-node-accent);
-}
-
-.node[aria-pressed='true'] {
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--workflow-node-accent) 20%, transparent),
-    0 10px 24px color-mix(in srgb, black 24%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--workflow-node-accent) 6%,
+    var(--background)
+  );
+  opacity: 1;
 }
 
 .node[data-status='running'] {
   --workflow-node-accent: var(--agent-blue-500);
-  background: linear-gradient(
-    110deg,
-    color-mix(in srgb, var(--agent-blue-500) 10%, var(--background)),
-    var(--background) 56%
-  );
-}
-
-.node[data-workflow-approval] {
-  --workflow-node-accent: var(--warning-color);
-  opacity: 1;
-  background: linear-gradient(
-    110deg,
-    color-mix(in srgb, var(--warning-color) 12%, var(--background)),
-    var(--background) 62%
-  );
 }
 
 .node[data-status='completed'],
@@ -557,57 +594,52 @@
   --workflow-node-accent: var(--error-color);
 }
 
+.node[data-workflow-approval] {
+  --workflow-node-accent: var(--warning-color);
+  opacity: 1;
+}
+
 .node[data-status='queued'],
 .node[data-status='cancelled'] {
   opacity: 0.62;
 }
 
-.node[data-path-emphasis='active'] {
-  border-color: var(--workflow-node-accent);
-  opacity: 1;
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--workflow-node-accent) 20%, transparent),
-    0 10px 24px color-mix(in srgb, black 24%, transparent);
+.node[data-status='queued'] {
+  border-style: dashed;
+  border-left-style: solid;
 }
 
 .node[data-path-emphasis='related'] {
-  opacity: 0.9;
+  opacity: 0.92;
 }
 
 .node[data-path-emphasis='dimmed'] {
-  opacity: 0.22;
-  box-shadow: none;
+  opacity: 0.24;
 }
 
 .nodeState {
   display: grid;
-  width: 23px;
-  height: 23px;
+  width: 18px;
+  height: 18px;
   place-items: center;
-  border: 1px solid
-    color-mix(in srgb, var(--workflow-node-accent) 65%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--workflow-node-accent) 10%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--workflow-node-accent) 14%, transparent);
   color: var(--workflow-node-accent);
-  font-size: 10px;
-  font-weight: 800;
+}
+
+.nodeState svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.4;
 }
 
 .node[data-status='running'] .nodeState::after {
-  width: 8px;
-  height: 8px;
-  border: 1px solid color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--agent-blue-500) 30%, transparent);
   border-top-color: var(--agent-blue-500);
   border-radius: 50%;
   animation: workflow-spin 0.8s linear infinite;
-  content: '';
-}
-
-.node[data-status='queued'] .nodeState::after {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
   content: '';
 }
 
@@ -615,68 +647,87 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .nodeCopy strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.nodeCopy small,
-.nodeTime {
+.nodeCopy small {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.nodeStatus {
+  overflow: hidden;
+  color: var(--workflow-node-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node[data-status='queued'] .nodeStatus,
+.node[data-status='cancelled'] .nodeStatus {
   color: var(--muted-foreground);
-  font-size: 9px;
 }
 
 .nodeTime {
-  align-self: end;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
+
+/* ---------- inspector ---------- */
 
 .inspector {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 12px;
-  padding: 13px;
+  padding: 12px 14px 14px;
   border-left: 1px solid var(--border);
-  background: color-mix(in srgb, var(--muted) 30%, var(--background));
+  background: var(--background);
 }
 
 .inspectorHeading {
-  position: relative;
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-  padding-right: 72px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 3px 10px;
 }
 
 .inspectorHeading > span {
+  grid-column: 1 / -1;
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .inspectorHeading > strong {
   overflow: hidden;
   font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .inspectorHeading > small {
-  position: absolute;
-  top: 19px;
-  right: 0;
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .inspectorHeading > small[data-status='running'] {
@@ -693,13 +744,13 @@
 }
 
 .inspectorPrompt {
-  max-height: 132px;
+  max-height: 140px;
   margin: 0;
-  padding-right: 5px;
+  padding-right: 4px;
   overflow-y: auto;
   overscroll-behavior: contain;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
   scrollbar-gutter: stable;
@@ -707,81 +758,87 @@
 
 .inspector dl {
   display: grid;
-  gap: 1px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px 14px;
   margin: 0;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--border);
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .inspector dl > div {
-  min-width: 0;
-  padding: 8px;
-  background: var(--background);
+  display: contents;
 }
 
 .inspector dt {
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .inspector dd {
-  margin: 3px 0 0;
+  margin: 0;
   overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.dispatchError,
+.approvalCallout {
+  padding: 8px 10px;
+  border-radius: 0 4px 4px 0;
+  box-shadow: inset 2px 0 0 var(--error-color);
+  background: color-mix(in srgb, var(--error-color) 8%, transparent);
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .dispatchError {
-  padding: 8px;
-  border-left: 2px solid var(--error-color);
-  background: color-mix(in srgb, var(--error-color) 9%, transparent);
-  color: var(--error-color);
   font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
+  font-size: 11px;
 }
 
 .approvalCallout {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 9px;
-  border-left: 2px solid var(--warning-color);
-  background: color-mix(in srgb, var(--warning-color) 9%, transparent);
-  font-size: 10px;
-  line-height: 1.45;
+  gap: 3px;
+  box-shadow: inset 2px 0 0 var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 8%, transparent);
+  color: var(--foreground);
 }
 
 .approvalCallout strong {
   color: var(--warning-color);
-}
-
-.approvalCallout span {
-  overflow-wrap: anywhere;
+  font-weight: 600;
 }
 
 .approvalCallout small {
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
-}
-
-.empty {
-  padding: 12px;
-  color: var(--muted-foreground);
   font-size: 11px;
 }
 
+.empty {
+  padding: 16px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* ---------- narrow container ---------- */
+
 @container (max-width: 680px) {
-  .historyBar {
+  .historyBar,
+  .toolbar {
     align-items: flex-start;
     flex-wrap: wrap;
   }
 
-  .historyActions {
+  .historyActions,
+  .toolbarActions {
     width: 100%;
   }
 
@@ -794,7 +851,7 @@
   }
 
   .historyRunSelect {
-    grid-template-columns: minmax(128px, 1fr) 58px 42px;
+    grid-template-columns: minmax(128px, 1fr) 60px 44px;
   }
 
   .historyRunSelect > :nth-child(4),

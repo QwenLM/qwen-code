@@ -1,28 +1,46 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from 'react';
 import type {
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
 } from '@qwen-code/sdk/daemon';
+import {
+  BanIcon,
+  CheckCheckIcon,
+  CheckIcon,
+  CircleHelpIcon,
+  ClockIcon,
+  XIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { formatTimestamp } from '../MessageTimestamp';
 import styles from './WorkflowExecutionView.module.css';
 
-const LANE_WIDTH = 214;
-const LANE_HEADER_HEIGHT = 54;
-const NODE_WIDTH = 172;
-const NODE_HEIGHT = 58;
-const NODE_GAP = 22;
-const CANVAS_PADDING = 22;
+/**
+ * Lanes are one phase visit each. They stretch to share the viewport width
+ * between LANE_MIN_WIDTH and LANE_MAX_WIDTH so a three-phase run fills a wide
+ * card instead of leaving a blank strip; nodes grow with their lane up to
+ * NODE_MAX_WIDTH.
+ */
+const LANE_MIN_WIDTH = 196;
+const LANE_MAX_WIDTH = 336;
+const LANE_HEADER_HEIGHT = 40;
+const LANE_INSET = 12;
+const NODE_MAX_WIDTH = 300;
+const NODE_HEIGHT = 54;
+const NODE_GAP = 12;
+const CANVAS_PADDING = 14;
 export const WORKFLOW_GRAPH_RENDER_LIMITS = {
   lanes: 64,
   nodes: 240,
@@ -45,6 +63,8 @@ interface WorkflowGraphEdge {
 export interface WorkflowGraphLayout {
   width: number;
   height: number;
+  laneWidth: number;
+  nodeWidth: number;
   lanes: Array<{ id: string | null; title: string; index: number }>;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
@@ -57,7 +77,13 @@ export interface WorkflowGraphLayout {
 
 export function buildWorkflowGraphLayout(
   task: DaemonSessionWorkflowTaskStatus,
+  options: { laneWidth?: number } = {},
 ): WorkflowGraphLayout {
+  const laneWidth = Math.min(
+    LANE_MAX_WIDTH,
+    Math.max(LANE_MIN_WIDTH, Math.floor(options.laneWidth ?? LANE_MIN_WIDTH)),
+  );
+  const nodeWidth = Math.min(NODE_MAX_WIDTH, laneWidth - LANE_INSET * 2);
   const hasUnphased = task.dispatches.some(
     (dispatch) => dispatch.phaseVisitId === null,
   );
@@ -96,7 +122,7 @@ export function buildWorkflowGraphLayout(
     rowByLane.set(visibleLaneIndex, row + 1);
     nodes.push({
       dispatch,
-      x: visibleLaneIndex * LANE_WIDTH + CANVAS_PADDING,
+      x: visibleLaneIndex * laneWidth + LANE_INSET,
       y: LANE_HEADER_HEIGHT + CANVAS_PADDING + row * (NODE_HEIGHT + NODE_GAP),
     });
   }
@@ -114,11 +140,11 @@ export function buildWorkflowGraphLayout(
       if (edges.length >= WORKFLOW_GRAPH_RENDER_LIMITS.edges) break;
       const source = nodeById.get(dependencyId);
       if (!source) continue;
-      const startX = source.x + NODE_WIDTH;
+      const startX = source.x + nodeWidth;
       const startY = source.y + NODE_HEIGHT / 2;
       const endX = target.x;
       const endY = target.y + NODE_HEIGHT / 2;
-      const bend = Math.max(34, Math.abs(endX - startX) * 0.45);
+      const bend = Math.max(24, Math.abs(endX - startX) * 0.5);
       edges.push({
         from: dependencyId,
         to: target.dispatch.id,
@@ -128,12 +154,14 @@ export function buildWorkflowGraphLayout(
   }
   const maxRows = Math.max(1, ...rowByLane.values());
   return {
-    width: lanes.length * LANE_WIDTH,
+    width: lanes.length * laneWidth,
     height:
       LANE_HEADER_HEIGHT +
       CANVAS_PADDING * 2 +
       maxRows * NODE_HEIGHT +
       Math.max(0, maxRows - 1) * NODE_GAP,
+    laneWidth,
+    nodeWidth,
     lanes,
     nodes,
     edges,
@@ -155,11 +183,22 @@ function statusLabel(
   return t(`workflow.dispatch.${status}`);
 }
 
-function statusGlyph(status: DaemonWorkflowDispatchStatus): string {
-  if (status === 'completed' || status === 'cached') return '✓';
-  if (status === 'failed') return '!';
-  if (status === 'cancelled') return '×';
-  return '';
+function statusIcon(status: DaemonWorkflowDispatchStatus): ReactNode {
+  switch (status) {
+    case 'completed':
+      return <CheckIcon aria-hidden="true" />;
+    case 'cached':
+      return <CheckCheckIcon aria-hidden="true" />;
+    case 'failed':
+      return <XIcon aria-hidden="true" />;
+    case 'cancelled':
+      return <BanIcon aria-hidden="true" />;
+    case 'queued':
+      return <ClockIcon aria-hidden="true" />;
+    default:
+      // Running draws its own spinner in CSS.
+      return null;
+  }
 }
 
 function dispatchRuntime(
@@ -262,16 +301,42 @@ export function WorkflowExecutionView({
   historyTasks = [],
   historyActionBusy = false,
   onDeleteHistory,
+  actions,
 }: {
   task: DaemonSessionWorkflowTaskStatus;
   sourceTask?: DaemonSessionWorkflowTaskStatus;
   historyTasks?: readonly DaemonSessionWorkflowTaskStatus[];
   historyActionBusy?: boolean;
   onDeleteHistory?: (runId: string) => void;
+  /** Run controls (pause / stop / rerun …) shown at the end of the metrics strip. */
+  actions?: ReactNode;
 }) {
   const { t } = useI18n();
   const markerId = `workflow-arrow-${useId().replaceAll(':', '')}`;
-  const layout = useMemo(() => buildWorkflowGraphLayout(task), [task]);
+  const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const [viewportWidth, setViewportWidth] = useState(0);
+  useLayoutEffect(() => {
+    if (!viewportElement || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setViewportWidth(viewportElement.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewportElement);
+    return () => observer.disconnect();
+  }, [viewportElement]);
+  const baseLayout = useMemo(() => buildWorkflowGraphLayout(task), [task]);
+  const laneWidth =
+    viewportWidth > 0
+      ? Math.floor(viewportWidth / baseLayout.lanes.length)
+      : LANE_MIN_WIDTH;
+  const layout = useMemo(
+    () =>
+      laneWidth <= LANE_MIN_WIDTH
+        ? baseLayout
+        : buildWorkflowGraphLayout(task, { laneWidth }),
+    [baseLayout, laneWidth, task],
+  );
   const [selectedId, setSelectedId] = useState(() => initialDispatchId(task));
   const [hoveredDispatchId, setHoveredDispatchId] = useState('');
   const [focusedDispatchId, setFocusedDispatchId] = useState('');
@@ -633,6 +698,12 @@ export function WorkflowExecutionView({
     return (
       <div className={styles.root} data-plan-interactive>
         {history}
+        {actions && (
+          <div className={styles.toolbar}>
+            <div className={styles.metrics} />
+            <div className={styles.toolbarActions}>{actions}</div>
+          </div>
+        )}
         <div className={styles.empty}>
           {task.isHistorical
             ? t('workflow.graph.notRecorded')
@@ -649,32 +720,35 @@ export function WorkflowExecutionView({
       data-selected-dispatch={selected?.id}
     >
       {history}
-      <div className={styles.summary} data-workflow-summary>
-        <span>
-          <strong>
-            {task.agentsCompleted}/{task.agentsDispatched}
-          </strong>{' '}
-          {t('workflow.metric.agents')}
-        </span>
-        {running > 0 && (
+      <div className={styles.toolbar} data-workflow-summary>
+        <div className={styles.metrics}>
           <span>
-            <strong>{running}</strong> {t('workflow.metric.running')}
+            <strong>
+              {task.agentsCompleted}/{task.agentsDispatched}
+            </strong>{' '}
+            {t('workflow.metric.agents')}
           </span>
-        )}
-        {queued > 0 && (
+          {running > 0 && (
+            <span>
+              <strong>{running}</strong> {t('workflow.metric.running')}
+            </span>
+          )}
+          {queued > 0 && (
+            <span>
+              <strong>{queued}</strong> {t('workflow.metric.queued')}
+            </span>
+          )}
           <span>
-            <strong>{queued}</strong> {t('workflow.metric.queued')}
+            <strong>{tokenText}</strong> {t('workflow.metric.tokens')}
           </span>
-        )}
-        <span>
-          <strong>{tokenText}</strong> {t('workflow.metric.tokens')}
-        </span>
-        {task.pendingApprovalCount > 0 && (
-          <span className={styles.approvalMetric}>
-            <strong>{task.pendingApprovalCount}</strong>{' '}
-            {t('workflow.approvalNeeded')}
-          </span>
-        )}
+          {task.pendingApprovalCount > 0 && (
+            <span className={styles.approvalMetric}>
+              <strong>{task.pendingApprovalCount}</strong>{' '}
+              {t('workflow.approvalNeeded')}
+            </span>
+          )}
+        </div>
+        {actions && <div className={styles.toolbarActions}>{actions}</div>}
       </div>
       {(layout.omittedLanes > 0 ||
         layout.omittedNodes > 0 ||
@@ -692,37 +766,48 @@ export function WorkflowExecutionView({
         </div>
       )}
       <div className={styles.workbench}>
-        <div className={styles.viewport}>
+        <div className={styles.viewport} ref={setViewportElement}>
           <div
             className={styles.canvas}
-            style={{
-              width: `${layout.width}px`,
-              height: `${layout.height}px`,
-            }}
+            style={
+              {
+                minWidth: `max(100%, ${layout.width}px)`,
+                height: `${layout.height}px`,
+                '--workflow-lane-header-height': `${LANE_HEADER_HEIGHT}px`,
+              } as CSSProperties
+            }
           >
-            {layout.lanes.map((lane) => {
+            {layout.lanes.map((lane, position) => {
               const dispatchCount =
                 layout.dispatchCountByLaneId.get(lane.id) ?? 0;
+              const isLast = position === layout.lanes.length - 1;
               return (
                 <div
                   key={lane.id ?? 'no-phase'}
                   className={styles.lane}
                   data-workflow-lane={lane.id ?? 'no-phase'}
                   data-active={lane.id === activePhaseVisitId || undefined}
+                  data-last={isLast || undefined}
                   style={{
-                    left: `${lane.index * LANE_WIDTH}px`,
-                    width: `${LANE_WIDTH}px`,
+                    left: `${lane.index * layout.laneWidth}px`,
+                    // The last lane absorbs any width the canvas has beyond
+                    // the lane grid so the graph never ends in a blank column.
+                    ...(isLast
+                      ? { right: 0 }
+                      : { width: `${layout.laneWidth}px` }),
                   }}
                 >
                   <div className={styles.laneHeading}>
-                    <span>{String(lane.index + 1).padStart(2, '0')}</span>
+                    <span className={styles.laneIndex}>
+                      {String(lane.index + 1).padStart(2, '0')}
+                    </span>
                     <strong>
                       {lane.id === null ? t('workflow.noPhase') : lane.title}
                     </strong>
+                    <small>
+                      {t('workflow.dispatchCount', { count: dispatchCount })}
+                    </small>
                   </div>
-                  <small>
-                    {t('workflow.dispatchCount', { count: dispatchCount })}
-                  </small>
                 </div>
               );
             })}
@@ -803,24 +888,30 @@ export function WorkflowExecutionView({
                     {
                       left: `${x}px`,
                       top: `${y}px`,
-                      '--workflow-node-width': `${NODE_WIDTH}px`,
+                      '--workflow-node-width': `${layout.nodeWidth}px`,
                       '--workflow-node-height': `${NODE_HEIGHT}px`,
                     } as CSSProperties
                   }
                 >
                   <span className={styles.nodeState}>
-                    {approval ? '?' : statusGlyph(dispatch.status)}
+                    {approval ? (
+                      <CircleHelpIcon aria-hidden="true" />
+                    ) : (
+                      statusIcon(dispatch.status)
+                    )}
                   </span>
                   <span className={styles.nodeCopy}>
                     <strong>{dispatch.label}</strong>
                     <small>
-                      {approval
-                        ? t('workflow.approvalNeeded')
-                        : statusLabel(dispatch.status, t)}
+                      <span className={styles.nodeStatus}>
+                        {approval
+                          ? t('workflow.approvalNeeded')
+                          : statusLabel(dispatch.status, t)}
+                      </span>
+                      <span className={styles.nodeTime}>
+                        {dispatchRuntime(task, dispatch)}
+                      </span>
                     </small>
-                  </span>
-                  <span className={styles.nodeTime}>
-                    {dispatchRuntime(task, dispatch)}
                   </span>
                 </button>
               );

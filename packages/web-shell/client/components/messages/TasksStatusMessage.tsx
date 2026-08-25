@@ -1546,6 +1546,7 @@ function TaskDetail({
               <button
                 type="button"
                 className={`${styles.actionButton} ${styles.primaryActionButton}`}
+                data-tone="primary"
                 disabled={busy}
                 onClick={() => onWorkflowAction('retry')}
               >
@@ -1599,14 +1600,18 @@ function TaskDetail({
     </div>
   ) : null;
 
+  // Workflow controls live in the execution graph's own toolbar, next to the
+  // metrics they act on, instead of floating above the card.
+  const topActions = task.kind === 'workflow' ? null : actionControls;
+
   return (
     <div className={styles.detail}>
-      {(headerContent || actionControls) && (
+      {(headerContent || topActions) && (
         <div className={styles.detailTop}>
           {headerContent && (
             <div className={styles.detailTopMain}>{headerContent}</div>
           )}
-          {actionControls}
+          {topActions}
         </div>
       )}
 
@@ -1723,6 +1728,7 @@ function TaskDetail({
           historyTasks={workflowHistoryTasks}
           historyActionBusy={busy}
           onDeleteHistory={onDeleteWorkflowHistory}
+          actions={actionControls}
         />
       )}
 

@@ -37,40 +37,31 @@
 
 .savedList {
   display: grid;
-  gap: 6px;
-}
-
-.savedCard {
-  position: relative;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 12px;
   overflow: hidden;
-  padding: 9px 10px 9px 14px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);
 }
 
-.savedCard::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--agent-blue-500);
+.savedCard {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
 }
 
-.savedCard[data-scope='user']::before {
-  background: var(--agent-purple-600);
+.savedCard:last-child {
+  border-bottom: 0;
 }
 
 .savedIdentity {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .savedName {
@@ -96,8 +87,7 @@
   gap: 12px;
   padding: 22px 16px;
   border: 1px dashed var(--border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--secondary) 58%, transparent);
+  border-radius: 8px;
 }
 
 .savedEmpty > svg {
@@ -105,7 +95,7 @@
   height: 18px;
   flex: 0 0 auto;
   margin-top: 1px;
-  color: var(--agent-blue-500);
+  color: var(--muted-foreground);
 }
 
 .savedEmptyTitle {
