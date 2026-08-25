@@ -34,9 +34,9 @@ export class WebViewContent {
    */
   static generate(host: WebviewHost, extensionUri: vscode.Uri): string {
     const webview = this.getWebview(host);
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
-    );
+    const scriptUri = webview
+      .asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'))
+      .with({ query: `v=${Date.now()}` });
 
     // Convert extension URI for webview access - this allows frontend to construct resource paths
     const extensionUriForWebview = webview.asWebviewUri(extensionUri);
@@ -48,7 +48,7 @@ export class WebViewContent {
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
     // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
     // grants both wasm-unsafe-eval and data: fonts.
-    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
+    const csp = `default-src 'none'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="en">

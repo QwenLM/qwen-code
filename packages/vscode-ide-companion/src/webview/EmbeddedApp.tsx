@@ -4,66 +4,110 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type {
-  EmbeddedWebShellPermissionRequest,
-  EmbeddedWebShellSession,
-  EmbeddedWebShellSubmit,
-  WebShellAtProvider,
-  WebShellComposerInput,
-  WebShellTheme,
-} from '@qwen-code/web-shell';
-import type { AvailableCommand, ModelInfo } from '@agentclientprotocol/sdk';
-import { useVSCode } from './hooks/useVSCode.js';
-import { useSessionManagement } from './hooks/session/useSessionManagement.js';
 import {
-  useFileContext,
-  type WorkspaceFile,
-} from './hooks/file/useFileContext.js';
-import { useMessageHandling } from './hooks/message/useMessageHandling.js';
-import { useToolCalls } from './hooks/useToolCalls.js';
-import { useWebViewMessages } from './hooks/useWebViewMessages.js';
-import { useAcpTranscript } from './hooks/useAcpTranscript.js';
-import type {
-  PermissionOption,
-  PermissionToolCall,
-} from './types/permissionTypes.js';
-import type { Question } from '../types/acpTypes.js';
-import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
-import type { UsageStatsPayload } from '../types/chatTypes.js';
-import { isDisplayableImagePath } from '../utils/imageSupport.js';
-import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
+  WebShellWithProviders,
+  type ComposerToolbarAction,
+  type TurnOutputOpenRequest,
+  type WebShellApi,
+  type WebShellComposerApi,
+  type WebShellTheme,
+} from '@qwen-code/web-shell';
+import {
+  DaemonClient,
+  type DaemonSessionSummary,
+  type DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import {
+  ChevronDown,
+  FileText,
+  LoaderCircle,
+  Plus,
+  X,
+} from 'lucide-react';
+import { useVSCode } from './hooks/useVSCode.js';
+import { QwenOnboarding } from './components/QwenOnboarding.js';
+import { SessionHistoryDropdown } from './components/SessionHistoryDropdown.js';
 import {
   findBlockByRowKey,
   findLastAssistantText,
   formatBlocksForCopyAll,
   getBlockCopyText,
 } from './utils/copyTranscript.js';
+import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
 
-type AccountInfo = {
-  authType?: string | null;
-  baseUrl?: string | null;
-  envKey?: string | null;
-  modelId?: string | null;
-  error?: string;
+const COMPOSER_TOOLBAR_ACTIONS = [
+  'approvalMode',
+  'contextUsage',
+  'model',
+  'voice',
+] as const satisfies readonly ComposerToolbarAction[];
+
+const VSCODE_SLASH_COMMANDS = [
+  {
+    name: 'model',
+    description: 'Switch the active model',
+    completionLabel: 'Switch model...',
+    completionSection: 'Model',
+    completionPriority: -110,
+    autoSubmit: true,
+  },
+  {
+    name: 'auth',
+    description: 'Configure Coding Plan or API Key',
+    completionSection: 'Account',
+    completionPriority: -100,
+    autoSubmit: true,
+  },
+  {
+    name: 'account',
+    description: 'Show current account and authentication info',
+    completionLabel: 'Account',
+    completionSection: 'Account',
+    completionPriority: -100,
+    autoSubmit: true,
+  },
+  {
+    name: 'export',
+    description: 'Export the current conversation',
+    completionSection: 'Session',
+    completionPriority: -90,
+    subcommands: ['html', 'md', 'json', 'jsonl'],
+  },
+] as const;
+
+const VSCODE_HIDDEN_SLASH_COMMANDS = [
+  'theme',
+  'language',
+  'settings',
+  'release',
+  'schedule',
+  'extensions',
+  'workspace',
+  'fork',
+  'branch',
+  'diff',
+  'log',
+  'prs',
+  'new',
+  'clear',
+  'reset',
+  'rename',
+  'resume',
+  'agents',
+  'tasks',
+] as const;
+
+const ROOT_STYLE: CSSProperties = {
+  display: 'flex',
+  flex: '1 1 auto',
+  width: '100%',
+  height: '100%',
+  minWidth: 0,
+  minHeight: 0,
+  overflow: 'hidden',
 };
-
-type InsightProgress = {
-  stage: string;
-  progress: number;
-  detail?: string;
-};
-
-const LIGHT_THEME_RE = /light/i;
 
 const VSCODE_THEME_STYLE = {
   '--font-sans':
@@ -89,14 +133,16 @@ const VSCODE_THEME_STYLE = {
   '--destructive': 'var(--vscode-errorForeground)',
   '--error-border': 'var(--vscode-inputValidation-errorBorder)',
   '--chat-editor-bg-primary': 'var(--vscode-input-background)',
-  '--chat-editor-bg-tertiary': 'var(--vscode-sideBar-background)',
+  '--chat-editor-bg-tertiary': 'var(--vscode-toolbar-hoverBackground)',
   '--chat-editor-border-color':
     'var(--vscode-input-border, var(--vscode-widget-border))',
   '--chat-editor-text-primary': 'var(--vscode-input-foreground)',
   '--chat-editor-text-secondary': 'var(--vscode-descriptionForeground)',
   '--chat-editor-text-dimmed': 'var(--vscode-input-placeholderForeground)',
   '--chat-editor-accent-color': 'var(--vscode-focusBorder)',
-  '--agent-gray-200': 'var(--vscode-input-border, var(--vscode-widget-border))',
+  '--agent-gray-200':
+    'var(--vscode-input-border, var(--vscode-widget-border))',
+  '--agent-gray-500': 'var(--vscode-descriptionForeground)',
   '--success-color': 'var(--vscode-testing-iconPassed, #89d185)',
   '--warning-color': 'var(--vscode-editorWarning-foreground, #cca700)',
   '--error-color': 'var(--vscode-errorForeground, #f48771)',
@@ -105,233 +151,443 @@ const VSCODE_THEME_STYLE = {
   '--scrollbar-track': 'transparent',
 } as CSSProperties;
 
-const EmbeddedWebShell = lazy(() =>
-  import('@qwen-code/web-shell').then((module) => ({
-    default: module.EmbeddedWebShell,
-  })),
-);
+const SHELL_STYLE: CSSProperties = {
+  ...ROOT_STYLE,
+  ...VSCODE_THEME_STYLE,
+  height: '100%',
+};
+
+const VSCODE_EMBEDDED_CSS = `
+  @keyframes qwen-vscode-spin { to { transform: rotate(360deg); } }
+  .qwen-vscode-header-button:hover,
+  .qwen-vscode-header-button:focus-visible,
+  .qwen-vscode-toolbar-button:hover,
+  .qwen-vscode-toolbar-button:focus-visible {
+    background: var(--vscode-toolbar-hoverBackground);
+    outline: none;
+  }
+  .qwen-vscode-toolbar-start {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 2px;
+  }
+  .qwen-vscode-active-file-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (max-width: 380px) {
+    .qwen-vscode-active-file {
+      width: 28px !important;
+      max-width: 28px !important;
+      padding: 0 6px !important;
+    }
+    .qwen-vscode-active-file-label { display: none; }
+  }
+`;
 
 function readTheme(): WebShellTheme {
-  if (typeof document === 'undefined') return 'dark';
   const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
-  return LIGHT_THEME_RE.test(kind) ? 'light' : 'dark';
+  return /light/i.test(kind) ? 'light' : 'dark';
 }
 
-function mapPermissionKind(
-  kind: string | undefined,
-  optionId: string,
-): 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always' {
-  if (
-    kind === 'allow_once' ||
-    kind === 'allow_always' ||
-    kind === 'reject_once' ||
-    kind === 'reject_always'
-  ) {
-    return kind;
+function readLanguage(): 'en' | 'zh-CN' {
+  const language = document.documentElement.lang || navigator.language;
+  return language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+}
+
+interface RuntimeConfig {
+  baseUrl: string;
+  token?: string;
+  clientId?: string;
+  workspaceCwd?: string;
+  sessionId?: string;
+  hostKind?: 'view' | 'panel';
+}
+
+function readRuntimeConfig(): RuntimeConfig | null {
+  const baseUrl = document.body.dataset.qwenDaemonBaseUrl;
+  if (!baseUrl) return null;
+  return {
+    baseUrl,
+    token: document.body.dataset.qwenDaemonToken || undefined,
+    clientId: document.body.dataset.qwenDaemonClientId || undefined,
+    workspaceCwd: document.body.dataset.qwenWorkspaceCwd || undefined,
+    sessionId: document.body.dataset.qwenSessionId || undefined,
+    hostKind:
+      document.body.dataset.qwenHostKind === 'panel'
+        ? 'panel'
+        : document.body.dataset.qwenHostKind === 'view'
+          ? 'view'
+          : undefined,
+  };
+}
+
+interface ActiveFileContext {
+  fileName: string;
+  filePath: string;
+  selection?: { startLine: number; endLine: number };
+}
+
+interface HostNotice {
+  tone: 'info' | 'error';
+  text: string;
+  action?: { label: string; path: string };
+}
+
+interface AccountInfo {
+  authType?: string | null;
+  baseUrl?: string | null;
+  envKey?: string | null;
+  modelId?: string | null;
+  error?: string;
+}
+
+interface InsightProgress {
+  stage: string;
+  progress: number;
+  detail?: string;
+}
+
+interface EditingMessage {
+  turnIndex: number;
+}
+
+function isAutomaticApprovalMode(modeId: unknown): boolean {
+  return modeId === 'auto-edit' || modeId === 'yolo';
+}
+
+interface PermissionDiffPreview {
+  path: string;
+  oldText: string;
+  newText: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function firstString(
+  record: Record<string, unknown> | undefined,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    if (typeof record?.[key] === 'string') return record[key] as string;
   }
-  const normalized = optionId.toLowerCase();
-  const reject = normalized.includes('reject') || normalized.includes('cancel');
-  const always = normalized.includes('always') || normalized.includes('server');
-  if (reject) return always ? 'reject_always' : 'reject_once';
-  return always ? 'allow_always' : 'allow_once';
+  return undefined;
 }
 
-function mapPermissionRequest(
-  request: { options: PermissionOption[]; toolCall: PermissionToolCall } | null,
-): EmbeddedWebShellPermissionRequest | null {
-  if (!request) return null;
-  const toolCall = request.toolCall;
-  const id = toolCall.toolCallId || `permission-${Date.now()}`;
-  const content = (toolCall.content ?? []).map((item) => {
-    const text =
-      typeof item.text === 'string'
-        ? item.text
-        : typeof item.content === 'string'
-          ? item.content
-          : JSON.stringify(item);
-    return { type: 'text' as const, text };
-  });
-  const rawInput =
-    toolCall.rawInput && typeof toolCall.rawInput === 'object'
-      ? toolCall.rawInput
-      : undefined;
-  return {
-    id,
-    toolCallId: toolCall.toolCallId,
-    title: toolCall.title,
-    toolKind: toolCall.kind,
-    toolName: toolCall.toolName,
-    kind: toolCall.kind,
-    rawInput,
-    content,
-    options: request.options.map((option) => ({
-      id: option.optionId,
-      label: option.name || option.optionId,
-      kind: mapPermissionKind(option.kind, option.optionId),
-    })),
-  };
-}
+function permissionDiffPreview(
+  block: Extract<DaemonTranscriptBlock, { kind: 'permission' }>,
+): PermissionDiffPreview | undefined {
+  if (block.preview.kind === 'file_diff') {
+    const { path, oldText, newText } = block.preview;
+    if (
+      typeof path === 'string' &&
+      typeof oldText === 'string' &&
+      typeof newText === 'string'
+    ) {
+      return { path, oldText, newText };
+    }
+  }
 
-function mapQuestionRequest(
-  request: { questions: Question[]; sessionId: string } | null,
-): EmbeddedWebShellPermissionRequest | null {
-  if (!request) return null;
-  return {
-    id: request.sessionId || 'ask-user-question',
-    sessionId: request.sessionId,
-    kind: 'ask_user_question',
-    title: 'Ask User Question',
-    content: [],
-    rawInput: { questions: request.questions },
-    options: [
-      { id: 'proceed_once', label: 'Submit', kind: 'allow_once' },
-      { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
-    ],
-  };
-}
+  const toolCall = asRecord(block.toolCall);
+  const location = Array.isArray(toolCall?.locations)
+    ? asRecord(toolCall.locations[0])
+    : undefined;
+  const locationPath = firstString(location, ['path', 'filePath', 'file_path']);
+  const meta = asRecord(toolCall?._meta);
+  const toolName = firstString(meta, ['toolName', 'name']);
+  const toolKind = firstString(toolCall, ['kind']);
+  const title = firstString(toolCall, ['title']);
+  const editLike =
+    toolKind === 'edit' ||
+    /(?:^|[_-])(edit|write|create|replace|patch|update|overwrite)(?:$|[_-])/i.test(
+      toolName ?? '',
+    ) ||
+    /\b(edit|write|create|replace|patch|update|overwrite)\b/i.test(title ?? '');
 
-function modelId(model: ModelInfo): string {
-  const candidate = (model as ModelInfo & { modelId?: unknown }).modelId;
-  return typeof candidate === 'string' && candidate ? candidate : model.name;
-}
+  if (Array.isArray(toolCall?.content)) {
+    for (const value of toolCall.content) {
+      const content = asRecord(value);
+      if (content?.type !== 'diff') continue;
+      const path =
+        firstString(content, ['path', 'filePath', 'file_path']) ?? locationPath;
+      const oldText = firstString(content, [
+        'oldText',
+        'old_text',
+        'oldString',
+        'old_string',
+      ]);
+      const newText = firstString(content, [
+        'newText',
+        'new_text',
+        'newString',
+        'new_string',
+      ]);
+      if (path && oldText !== undefined && newText !== undefined) {
+        return { path, oldText, newText };
+      }
+    }
+  }
 
-function modelLabel(model: ModelInfo): string {
-  const name = (model as ModelInfo & { name?: unknown }).name;
-  return typeof name === 'string' && name ? name : modelId(model);
-}
+  const rawInputs = [
+    toolCall?.rawInput,
+    toolCall?.input,
+    toolCall?.args,
+    toolCall,
+  ];
+  for (const value of rawInputs) {
+    const input = asRecord(value);
+    const path =
+      firstString(input, ['path', 'filePath', 'file_path', 'absolutePath']) ??
+      locationPath;
+    const oldText = firstString(input, [
+      'oldText',
+      'old_text',
+      'oldString',
+      'old_string',
+      'originalContent',
+      'original_content',
+    ]);
+    const newText = firstString(input, [
+      'newText',
+      'new_text',
+      'newString',
+      'new_string',
+      ...(editLike ? ['newContent', 'new_content', 'content'] : []),
+    ]);
+    if (path && oldText !== undefined && newText !== undefined) {
+      return { path, oldText, newText };
+    }
+  }
 
-function mapCommands(commands: AvailableCommand[]) {
-  return commands.map((command) => ({
-    name: command.name,
-    description: command.description,
-    argumentHint: command.input?.hint,
-  }));
-}
-
-function mapSessions(
-  sessions: Array<Record<string, unknown>>,
-): EmbeddedWebShellSession[] {
-  return sessions.flatMap((session) => {
-    const id =
-      typeof session.id === 'string'
-        ? session.id
-        : typeof session.sessionId === 'string'
-          ? session.sessionId
-          : null;
-    if (!id) return [];
-    const title =
-      (typeof session.title === 'string' && session.title) ||
-      (typeof session.name === 'string' && session.name) ||
-      'Past Conversations';
-    const updatedAt =
-      typeof session.updatedAt === 'string' ||
-      typeof session.updatedAt === 'number'
-        ? session.updatedAt
-        : undefined;
-    const messageCount =
-      typeof session.messageCount === 'number'
-        ? session.messageCount
-        : undefined;
-    return [{ id, title, updatedAt, messageCount }];
-  });
-}
-
-function mapImageAttachment(
-  image: { data: string; media_type: string },
-  index: number,
-) {
-  const payload = image.data.replace(/^data:[^;]+;base64,/, '');
-  return {
-    id: `embedded-image-${Date.now()}-${index}`,
-    name: `pasted-image-${index + 1}`,
-    type: image.media_type,
-    size: Math.max(1, Math.floor((payload.length * 3) / 4)),
-    data: image.data,
-    timestamp: Date.now(),
-  };
-}
-
-function accountNotice(info: AccountInfo): string {
-  if (info.error) return `Account: ${info.error}`;
-  const rows = [
-    info.authType ? `Auth: ${info.authType}` : '',
-    info.modelId ? `Model: ${info.modelId}` : '',
-    info.envKey ? `API key: ${info.envKey}` : '',
-    info.baseUrl ? `Base URL: ${info.baseUrl}` : '',
-  ].filter(Boolean);
-  return rows.length > 0
-    ? rows.join(' · ')
-    : 'Account information unavailable.';
+  return undefined;
 }
 
 export function EmbeddedApp() {
   const vscode = useVSCode();
-  const sessionManagement = useSessionManagement(vscode);
-  const fileContext = useFileContext(vscode);
-  const messageHandling = useMessageHandling();
-  const {
-    inProgressToolCalls,
-    handleToolCallUpdate,
-    clearToolCalls,
-    rewindToolCallsToTimestamp,
-  } = useToolCalls();
-
-  const blocks = useAcpTranscript();
-  const [permissionRequest, setPermissionRequest] = useState<{
-    options: PermissionOption[];
-    toolCall: PermissionToolCall;
-  } | null>(null);
-  const [questionRequest, setQuestionRequest] = useState<{
-    questions: Question[];
-    sessionId: string;
-    metadata?: { source?: string };
-  } | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
-  const [availableCommands, setAvailableCommands] = useState<
-    AvailableCommand[]
-  >([]);
-  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
-  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [editMode, setEditMode] = useState<ApprovalModeValue>('default');
-  const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
-  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
-  const [insightProgress, setInsightProgress] =
-    useState<InsightProgress | null>(null);
-  const [insightReportPath, setInsightReportPath] = useState<string | null>(
-    null,
-  );
-  const [uiError, setUiError] = useState<string | null>(null);
-  const [webShellTheme, setWebShellTheme] = useState<WebShellTheme>(readTheme);
-  const [composerInput, setComposerInput] = useState<WebShellComposerInput>();
-  const [composerInputVersion, setComposerInputVersion] = useState(0);
-  const [editingMessage, setEditingMessage] = useState<{
-    targetTurnIndex: number;
-    content: string;
-  } | null>(null);
+  const [theme, setTheme] = useState<WebShellTheme>(readTheme);
+  const initialRuntime = useMemo(readRuntimeConfig, []);
+  const [runtime, setRuntime] = useState(initialRuntime);
+  const [runtimeError, setRuntimeError] = useState<string>();
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [authConnecting, setAuthConnecting] = useState(false);
+  const [authError, setAuthError] = useState<string>();
+  const [hostNotice, setHostNotice] = useState<HostNotice>();
+  const [accountInfo, setAccountInfo] = useState<AccountInfo>();
+  const [insightProgress, setInsightProgress] = useState<InsightProgress>();
+  const [insightReportPath, setInsightReportPath] = useState<string>();
+  const [activeFile, setActiveFile] = useState<ActiveFileContext>();
   const [includeActiveFile, setIncludeActiveFile] = useState(true);
-  const composerTextRef = useRef('');
-  const transcriptBlocksRef = useRef(blocks);
+  const [sessionTitle, setSessionTitle] = useState('New Session');
+  const [sessionHistoryOpen, setSessionHistoryOpen] = useState(false);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
+  const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
+  const [sessionCursor, setSessionCursor] = useState<string>();
+  const [sessionListLoading, setSessionListLoading] = useState(false);
+  const [sessionListError, setSessionListError] = useState<string>();
+  const [switchingSessionId, setSwitchingSessionId] = useState<string>();
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<EditingMessage>();
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const shellRef = useRef<WebShellApi | null>(null);
+  const composerRef = useRef<WebShellComposerApi | null>(null);
+  const currentModelIdRef = useRef<string>();
+  const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
+  const openPermissionDiffsRef = useRef(new Map<string, string>());
+  const focusedPermissionRequestIdRef = useRef<string>();
   const contextMenuRowKeyRef = useRef<string | null>(null);
+  const daemonClient = useMemo(
+    () =>
+      runtime
+        ? new DaemonClient({ baseUrl: runtime.baseUrl, token: runtime.token })
+        : null,
+    [runtime?.baseUrl, runtime?.token],
+  );
 
-  useEffect(() => {
-    transcriptBlocksRef.current = blocks;
-  }, [blocks]);
+  const clearInsight = useCallback(() => {
+    setInsightProgress(undefined);
+    setInsightReportPath(undefined);
+  }, []);
 
-  useEffect(() => {
-    const trackTarget = (event: MouseEvent) => {
-      const target = event.target instanceof Element ? event.target : null;
-      const row = target?.closest('[data-message-row-key]');
-      const root = target?.closest('[data-web-shell-embedded-host]');
-      contextMenuRowKeyRef.current =
-        root && row ? row.getAttribute('data-message-row-key') : null;
-      if (root) {
-        vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
+  const cancelMessageEditing = useCallback(() => {
+    setEditingMessage(undefined);
+    composerRef.current?.clear({ text: true, tags: true });
+    composerRef.current?.focus?.();
+  }, []);
+
+  const loadSessionHistory = useCallback(
+    async (cursor?: string) => {
+      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) return;
+      setSessionListLoading(true);
+      setSessionListError(undefined);
+      try {
+        const page = await daemonClient
+          .workspaceByCwd(runtime.workspaceCwd)
+          .listWorkspaceSessionsPage({
+            pageSize: 20,
+            cursor,
+            archiveState: 'active',
+          });
+        const pageSessions = Array.isArray(page.sessions)
+          ? page.sessions
+          : [];
+        setSessions((current) => {
+          const merged = new Map(
+            current.map((session) => [session.sessionId, session]),
+          );
+          for (const session of pageSessions) {
+            merged.set(session.sessionId, session);
+          }
+          if (
+            runtime.sessionId &&
+            !merged.has(runtime.sessionId) &&
+            runtime.workspaceCwd
+          ) {
+            merged.set(runtime.sessionId, {
+              sessionId: runtime.sessionId,
+              workspaceCwd: runtime.workspaceCwd,
+              displayName: sessionTitle || undefined,
+            });
+          }
+          return Array.from(merged.values());
+        });
+        setSessionCursor(page.nextCursor);
+      } catch (error) {
+        setSessionListError(
+          error instanceof Error ? error.message : 'Failed to load sessions.',
+        );
+      } finally {
+        setSessionListLoading(false);
       }
+    },
+    [
+      daemonClient,
+      runtime?.sessionId,
+      runtime?.workspaceCwd,
+      sessionListLoading,
+      sessionTitle,
+    ],
+  );
+
+  const openSessionHistory = useCallback(() => {
+    setSessionHistoryOpen(true);
+    setSessionSearchQuery('');
+    void loadSessionHistory();
+  }, [loadSessionHistory]);
+
+  const closeSessionHistory = useCallback(() => {
+    setSessionHistoryOpen(false);
+    historyButtonRef.current?.focus();
+  }, []);
+
+  const openReviewDiff = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      if (request.kind !== 'review' || request.changes.length === 0) return;
+      vscode.postMessage({
+        type: 'openDiffList',
+        data: {
+          selectedPath: request.selectedPath,
+          changes: request.changes.map((change) => ({
+            path: change.path,
+            additions: change.additions,
+            deletions: change.deletions,
+            diffs: change.diffs,
+          })),
+        },
+      });
+    },
+    [vscode],
+  );
+
+  const closeOpenPermissionDiffs = useCallback(() => {
+    for (const path of openPermissionDiffsRef.current.values()) {
+      vscode.postMessage({ type: 'closeDiff', data: { path } });
+    }
+    openPermissionDiffsRef.current.clear();
+  }, [vscode]);
+
+  const updateTranscript = useCallback(
+    (blocks: readonly DaemonTranscriptBlock[]) => {
+      transcriptBlocksRef.current = blocks;
+      const pendingIds = new Set<string>();
+      let permissionToFocus: string | undefined;
+      for (const block of blocks) {
+        if (block.kind !== 'permission' || block.resolved) {
+          continue;
+        }
+        permissionToFocus = block.requestId;
+        const diff = permissionDiffPreview(block);
+        if (!diff) continue;
+        const { path, oldText, newText } = diff;
+        pendingIds.add(block.requestId);
+        if (openPermissionDiffsRef.current.has(block.requestId)) continue;
+        openPermissionDiffsRef.current.set(block.requestId, path);
+        vscode.postMessage({
+          type: 'openDiff',
+          data: { path, oldText, newText, source: 'web-shell' },
+        });
+      }
+      for (const [requestId, path] of openPermissionDiffsRef.current) {
+        if (pendingIds.has(requestId)) continue;
+        openPermissionDiffsRef.current.delete(requestId);
+        vscode.postMessage({ type: 'closeDiff', data: { path } });
+      }
+      if (
+        permissionToFocus &&
+        focusedPermissionRequestIdRef.current !== permissionToFocus
+      ) {
+        focusedPermissionRequestIdRef.current = permissionToFocus;
+        window.requestAnimationFrame(() => {
+          const option = document.querySelector<HTMLButtonElement>(
+            '[data-web-shell-permission-panel] [data-web-shell-permission-option][tabindex="0"]',
+          );
+          option?.focus();
+        });
+      }
+    },
+    [vscode],
+  );
+
+  useEffect(
+    () => () => {
+      closeOpenPermissionDiffs();
+    },
+    [closeOpenPermissionDiffs],
+  );
+
+  useEffect(() => {
+    const openWorkspaceFile = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const anchor = target?.closest('a');
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      const filePath = resolveFileLinkFromAnchor(anchor);
+      if (!filePath) return;
+      event.preventDefault();
+      event.stopPropagation();
+      vscode.postMessage({ type: 'openFile', data: { path: filePath } });
     };
-    document.addEventListener('contextmenu', trackTarget, true);
-    return () => document.removeEventListener('contextmenu', trackTarget, true);
+    document.addEventListener('click', openWorkspaceFile, true);
+    return () => document.removeEventListener('click', openWorkspaceFile, true);
+  }, [vscode]);
+
+  useEffect(() => {
+    const trackContextMenu = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      contextMenuRowKeyRef.current =
+        target
+          ?.closest('[data-message-row-key]')
+          ?.getAttribute('data-message-row-key') ?? null;
+      vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
+    };
+    document.addEventListener('contextmenu', trackContextMenu, true);
+    return () =>
+      document.removeEventListener('contextmenu', trackContextMenu, true);
   }, [vscode]);
 
   useEffect(() => {
@@ -340,7 +596,8 @@ export function EmbeddedApp() {
         type?: string;
         data?: { action?: string };
       };
-      if (message?.type !== 'copyCommand') return;
+      if (message.type !== 'copyCommand') return;
+
       const blocks = transcriptBlocksRef.current;
       let text: string | null = null;
       if (message.data?.action === 'copyMessage') {
@@ -360,105 +617,7 @@ export function EmbeddedApp() {
   }, [vscode]);
 
   useEffect(() => {
-    const root = document.querySelector<HTMLElement>(
-      '[data-web-shell-embedded-host]',
-    );
-    if (!root) return;
-    if (blocks.length > 0 || messageHandling.isStreaming) {
-      root.setAttribute(
-        'data-vscode-context',
-        JSON.stringify({ webviewSection: 'chat-messages' }),
-      );
-    } else {
-      root.removeAttribute('data-vscode-context');
-    }
-  }, [blocks.length, messageHandling.isStreaming]);
-
-  const appendComposerText = useCallback((text: string) => {
-    const current = composerTextRef.current;
-    const separator = current && !/\s$/.test(current) ? ' ' : '';
-    const next = `${current}${separator}${text}`;
-    composerTextRef.current = next;
-    setComposerInput({ text: next });
-    setComposerInputVersion((version) => version + 1);
-  }, []);
-
-  const beginEditingMessage = useCallback(
-    (targetTurnIndex: number, content: string) => {
-      if (
-        messageHandling.isStreaming ||
-        messageHandling.isWaitingForResponse
-      ) {
-        return;
-      }
-      fileContext.clearFileReferences();
-      composerTextRef.current = content;
-      setEditingMessage({ targetTurnIndex, content });
-      setComposerInput({ text: content, tags: [], clearAttachments: true });
-      setComposerInputVersion((version) => version + 1);
-    },
-    [fileContext, messageHandling],
-  );
-
-  const cancelEditingMessage = useCallback(() => {
-    composerTextRef.current = '';
-    setEditingMessage(null);
-    setComposerInput({ text: '', tags: [], clearAttachments: true });
-    setComposerInputVersion((version) => version + 1);
-    fileContext.clearFileReferences();
-  }, [fileContext]);
-
-  useEffect(() => {
-    const clearEditingOnBoundary = (event: MessageEvent) => {
-      const type = event.data?.type;
-      if (
-        type === 'conversationLoaded' ||
-        type === 'qwenSessionSwitched' ||
-        type === 'conversationCleared' ||
-        type === 'sessionExpired'
-      ) {
-        setEditingMessage(null);
-      }
-    };
-    window.addEventListener('message', clearEditingOnBoundary);
-    return () => window.removeEventListener('message', clearEditingOnBoundary);
-  }, []);
-
-
-  useWebViewMessages({
-    sessionManagement,
-    fileContext,
-    messageHandling,
-    handleToolCallUpdate,
-    clearToolCalls,
-    rewindToolCallsToTimestamp,
-    setPlanEntries: () => undefined,
-    handlePermissionRequest: setPermissionRequest,
-    handleAskUserQuestion: setQuestionRequest,
-    appendComposerText,
-    setEditMode,
-    setIsAuthenticated,
-    setUsageStats: (stats) => setUsageStats(stats ?? null),
-    setModelInfo,
-    setAvailableCommands,
-    setAvailableSkills,
-    setAvailableModels,
-    setAccountInfo: (info) => setAccountInfo(info),
-    setInsightProgress,
-    setInsightReportPath,
-  });
-
-  useEffect(() => {
-    if (isAuthenticated !== null) {
-      setIsLoading(false);
-      return;
-    }
-    const timeout = setTimeout(() => setIsLoading(false), 30_000);
-    return () => clearTimeout(timeout);
-  }, [isAuthenticated]);
-
-  useEffect(() => {
-    const observer = new MutationObserver(() => setWebShellTheme(readTheme()));
+    const observer = new MutationObserver(() => setTheme(readTheme()));
     observer.observe(document.body, {
       attributes: true,
       attributeFilter: ['data-vscode-theme-kind', 'class'],
@@ -466,411 +625,1078 @@ export function EmbeddedApp() {
     return () => observer.disconnect();
   }, []);
 
-  const pendingPermission = useMemo(
-    () => mapPermissionRequest(permissionRequest),
-    [permissionRequest],
-  );
-  const pendingQuestion = useMemo(
-    () => mapQuestionRequest(questionRequest),
-    [questionRequest],
-  );
-  const sessions = useMemo(
-    () => mapSessions(sessionManagement.filteredSessions),
-    [sessionManagement.filteredSessions],
-  );
-  const commands = useMemo(
-    () => mapCommands(availableCommands),
-    [availableCommands],
-  );
-  const skills = useMemo(
-    () => availableSkills.map((name) => ({ name, description: '' })),
-    [availableSkills],
-  );
-  const models = useMemo(
-    () =>
-      availableModels.map((model) => ({
-        id: modelId(model),
-        label: modelLabel(model),
-      })),
-    [availableModels],
-  );
-  const atProviders = useMemo<readonly WebShellAtProvider[]>(
-    () => [
-      {
-        id: 'files',
-        label: 'Files',
-        description: 'Search workspace files',
-        search: async ({
-          query,
-          signal,
-        }: {
-          query: string;
-          signal: AbortSignal;
-        }) => {
-          const files = await fileContext.searchWorkspaceFiles(query, signal);
-          if (signal.aborted) return [];
-          return files.map((file: WorkspaceFile) => ({
-            id: file.id,
-            label: file.label,
-            description: file.description,
-            insertText: `@${file.description} `,
-          }));
-        },
-      },
-    ],
-    [fileContext],
-  );
+  useEffect(() => {
+    if (!accountInfo) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAccountInfo(undefined);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [accountInfo]);
 
-  const onSubmit = useCallback(
-    (submission: EmbeddedWebShellSubmit): boolean => {
-      const text = submission.text.trim();
-      if (text === '/auth' || text === '/login') {
-        vscode.postMessage({ type: 'auth', data: {} });
-        messageHandling.setWaitingForResponse();
-        return true;
-      }
-      if (text === '/account') {
-        vscode.postMessage({ type: 'getAccountInfo', data: {} });
-        return true;
-      }
+  useEffect(() => {
+    const receiveBootstrap = (event: MessageEvent) => {
+      const message = event.data as {
+        type?: string;
+        data?: Record<string, unknown> | ReturnType<typeof readRuntimeConfig>;
+      };
       if (
-        !text &&
-        (!submission.images || submission.images.length === 0) &&
-        (!submission.files || submission.files.length === 0)
+        message.type === 'webShellBootstrap' &&
+        typeof message.data?.baseUrl === 'string'
       ) {
-        return false;
+        setRuntime(
+          message.data as NonNullable<ReturnType<typeof readRuntimeConfig>>,
+        );
+      } else if (message.type === 'webShellBootstrapError') {
+        const errorMessage = (message.data as { message?: unknown } | null)
+          ?.message;
+        setRuntimeError(
+          typeof errorMessage === 'string'
+            ? errorMessage
+            : 'Qwen Code failed to start.',
+        );
+      } else if (message.type === 'error') {
+        const text = (message.data as { message?: unknown } | null)?.message;
+        if (typeof text === 'string') setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'accountInfo' && message.data) {
+        setAccountInfo(message.data as AccountInfo);
+      } else if (message.type === 'authState') {
+        const state = (message.data as { authenticated?: unknown } | null)
+          ?.authenticated;
+        setAuthenticated(typeof state === 'boolean' ? state : null);
+        if (state === false) {
+          setAuthConnecting(false);
+          clearInsight();
+        } else if (state === true) {
+          setAuthConnecting(false);
+          setAuthError(undefined);
+        }
+      } else if (
+        message.type === 'authSuccess' ||
+        message.type === 'agentConnected'
+      ) {
+        setAuthenticated(true);
+        setAuthConnecting(false);
+        setAuthError(undefined);
+        if (message.type === 'authSuccess') {
+          setHostNotice({ tone: 'info', text: 'Signed in successfully.' });
+        }
+      } else if (message.type === 'authCancelled') {
+        setAuthenticated(false);
+        setAuthConnecting(false);
+        setAuthError(undefined);
+        clearInsight();
+      } else if (
+        message.type === 'authError' ||
+        message.type === 'agentConnectionError'
+      ) {
+        const data = message.data as
+          | { message?: unknown; error?: unknown }
+          | null;
+        const text =
+          typeof data?.message === 'string'
+            ? data.message
+            : typeof data?.error === 'string'
+              ? data.error
+              : 'Failed to connect to Qwen Code.';
+        setAuthenticated(false);
+        setAuthConnecting(false);
+        setAuthError(text);
+        clearInsight();
+      } else if (message.type === 'insightProgress' && message.data) {
+        const data = message.data as {
+          stage?: unknown;
+          progress?: unknown;
+          detail?: unknown;
+        };
+        if (
+          typeof data.stage === 'string' &&
+          typeof data.progress === 'number'
+        ) {
+          setInsightReportPath(undefined);
+          setInsightProgress({
+            stage: data.stage,
+            progress: data.progress,
+            detail:
+              typeof data.detail === 'string' ? data.detail : undefined,
+          });
+        }
+      } else if (message.type === 'insightProgressCleared') {
+        clearInsight();
+      } else if (message.type === 'insightReportReady') {
+        const path = (message.data as { path?: unknown } | null)?.path;
+        setInsightProgress(undefined);
+        setInsightReportPath(typeof path === 'string' ? path : undefined);
+      } else if (message.type === 'message' && message.data) {
+        const data = message.data as {
+          content?: unknown;
+          localOnly?: unknown;
+        };
+        if (data.localOnly && typeof data.content === 'string') {
+          setHostNotice({ tone: 'info', text: data.content });
+        }
+      } else if (message.type === 'exportCompleted' && message.data) {
+        const data = message.data as {
+          format?: unknown;
+          filename?: unknown;
+          filePath?: unknown;
+        };
+        if (
+          typeof data.format === 'string' &&
+          typeof data.filename === 'string' &&
+          typeof data.filePath === 'string'
+        ) {
+          setHostNotice({
+            tone: 'info',
+            text: `Session exported to ${data.format}: ${data.filename}`,
+            action: { label: 'Open', path: data.filePath },
+          });
+        }
+      } else if (message.type === 'activeEditorChanged') {
+        const data = message.data as {
+          fileName?: unknown;
+          filePath?: unknown;
+          selection?: ActiveFileContext['selection'];
+        };
+        if (
+          typeof data.fileName === 'string' &&
+          typeof data.filePath === 'string'
+        ) {
+          setActiveFile({
+            fileName: data.fileName,
+            filePath: data.filePath,
+            selection: data.selection,
+          });
+          setIncludeActiveFile(true);
+        } else {
+          setActiveFile(undefined);
+        }
+      } else if (message.type === 'modeChanged' || message.type === 'modeInfo') {
+        const modeData = message.data as
+          | { modeId?: unknown; currentModeId?: unknown }
+          | null;
+        const modeId = modeData?.modeId ?? modeData?.currentModeId;
+        if (isAutomaticApprovalMode(modeId)) {
+          closeOpenPermissionDiffs();
+        } else {
+          updateTranscript(transcriptBlocksRef.current);
+        }
+      } else if (message.type === 'fileAttached') {
+        const data = message.data as {
+          id?: unknown;
+          name?: unknown;
+          value?: unknown;
+        };
+        if (
+          typeof data.name === 'string' &&
+          typeof data.value === 'string'
+        ) {
+          composerRef.current?.addTags([
+            {
+              id:
+                typeof data.id === 'string'
+                  ? data.id
+                  : `vscode-file:${data.value}`,
+              kind: 'file',
+              label: data.name,
+              value: data.value,
+              metadata: { path: data.value },
+              serialized: `@${data.value}`,
+            },
+          ]);
+          composerRef.current?.focus?.();
+        }
       }
+    };
+    window.addEventListener('message', receiveBootstrap);
+    vscode.postMessage({ type: 'webShellReady', data: {} });
+    return () => window.removeEventListener('message', receiveBootstrap);
+  }, [clearInsight, closeOpenPermissionDiffs, updateTranscript, vscode]);
 
-      const context: Array<{
-        type: string;
-        name: string;
-        value: string;
-        startLine?: number;
-        endLine?: number;
-        isImage?: boolean;
-      }> = fileContext.getFileReferences(submission.text).map((ref) => ({
-        type: 'file',
-        name: ref.name,
-        value: ref.value,
-        isImage: isDisplayableImagePath(ref.value),
-      }));
-      if (fileContext.activeFilePath && includeActiveFile) {
-        context.push({
-          type: 'file',
-          name: fileContext.activeFileName || 'current file',
-          value: fileContext.activeFilePath,
-          startLine: fileContext.activeSelection?.startLine,
-          endLine: fileContext.activeSelection?.endLine,
-          isImage: isDisplayableImagePath(fileContext.activeFilePath),
-        });
-      }
-
-      const fileContextForMessage =
-        fileContext.activeFilePath && includeActiveFile
-          ? {
-              fileName: fileContext.activeFileName || 'current file',
-              filePath: fileContext.activeFilePath,
-              startLine: fileContext.activeSelection?.startLine,
-              endLine: fileContext.activeSelection?.endLine,
-            }
-          : undefined;
-      const attachments = submission.images?.map(mapImageAttachment);
-
-      try {
-        messageHandling.setWaitingForResponse();
-        vscode.postMessage({
-          type: editingMessage ? 'editMessage' : 'sendMessage',
-          data: {
-            text: submission.text,
-            context: context.length > 0 ? context : undefined,
-            fileContext: fileContextForMessage,
-            attachments:
-              attachments && attachments.length > 0 ? attachments : undefined,
-            inlineFiles: submission.files?.flatMap(
-              (file: NonNullable<EmbeddedWebShellSubmit['files']>[number]) =>
-                typeof file.text === 'string'
-                  ? [
-                      {
-                        name: file.name,
-                        mediaType: file.media_type,
-                        text: file.text,
-                      },
-                    ]
-                  : [],
-            ),
-            inputAnnotations: submission.inputAnnotations,
-            ...(editingMessage
-              ? { targetTurnIndex: editingMessage.targetTurnIndex }
-              : {}),
-          },
-        });
-        setEditingMessage(null);
-        fileContext.clearFileReferences();
-        return true;
-      } catch (error) {
-        messageHandling.clearWaitingForResponse();
-        setUiError(error instanceof Error ? error.message : String(error));
-        return false;
-      }
-    },
-    [editingMessage, fileContext, includeActiveFile, messageHandling, vscode],
-  );
-
-  const onCancel = useCallback(() => {
-    if (messageHandling.isStreaming) {
-      messageHandling.endStreaming();
-      messageHandling.addMessage({
-        role: 'assistant',
-        content: 'Interrupted',
-        timestamp: Date.now(),
-        localOnly: true,
-      });
-    }
-    vscode.postMessage({ type: 'cancelStreaming', data: {} });
-  }, [messageHandling, vscode]);
-
-  const onPermissionResponse = useCallback(
-    (requestId: string, optionId: string) => {
-      void requestId;
-      vscode.postMessage({ type: 'permissionResponse', data: { optionId } });
-      setPermissionRequest(null);
-    },
-    [vscode],
-  );
-
-  const onQuestionResponse = useCallback(
-    async (
-      requestId: string,
-      optionId: string,
-      answers?: Record<string, string>,
-    ): Promise<boolean> => {
-      void requestId;
-      vscode.postMessage({
-        type: 'askUserQuestionResponse',
-        data: { answers: answers ?? {}, cancelled: optionId === 'cancel' },
-      });
-      setQuestionRequest(null);
-      return true;
-    },
-    [vscode],
-  );
-
-  const onLinkClick = useCallback(
-    (href: string, anchorText: string): boolean => {
-      const anchor = document.createElement('a');
-      anchor.setAttribute('href', href);
-      anchor.textContent = anchorText;
-      const filePath = resolveFileLinkFromAnchor(anchor);
-      if (!filePath) return false;
-      vscode.postMessage({ type: 'openFile', data: { path: filePath } });
-      return true;
-    },
-    [vscode],
-  );
-
-  const onOpenAccount = useCallback(() => {
-    setUiError(null);
-    vscode.postMessage({ type: 'getAccountInfo', data: {} });
-  }, [vscode]);
-  const onAuthenticate = useCallback(() => {
-    vscode.postMessage({ type: 'auth', data: {} });
-    messageHandling.setWaitingForResponse();
-  }, [messageHandling, vscode]);
-  const onSelectMode = useCallback(
-    (modeId: string) =>
-      vscode.postMessage({ type: 'setApprovalMode', data: { modeId } }),
-    [vscode],
-  );
-  const onSelectModel = useCallback(
-    (selectedModelId: string) =>
-      vscode.postMessage({
-        type: 'setModel',
-        data: { modelId: selectedModelId },
-      }),
-    [vscode],
-  );
-
-  const notices = useMemo(() => {
-    const next: Array<{
-      id: string;
-      message: string;
-      tone?: 'info' | 'error';
-      actionLabel?: string;
-    }> = [];
-    if (uiError) {
-      next.push({
-        id: 'embedded-error',
-        message: uiError,
-        tone: 'error',
-        actionLabel: 'Dismiss',
-      });
-    }
-    if (accountInfo) {
-      next.push({
-        id: 'account-info',
-        message: accountNotice(accountInfo),
-        actionLabel: 'Dismiss',
-      });
-    }
-    if (insightProgress) {
-      next.push({
-        id: 'insight-progress',
-        message: `${insightProgress.stage} ${Math.round(insightProgress.progress)}%${insightProgress.detail ? ` · ${insightProgress.detail}` : ''}`,
-      });
-    }
-    if (insightReportPath) {
-      next.push({
-        id: 'insight-report',
-        message: `Insight report: ${insightReportPath}`,
-        actionLabel: 'Open report',
-      });
-    }
-    for (const [index, message] of messageHandling.messages.entries()) {
-      if (message.localOnly) {
-        next.push({
-          id: `local-${message.timestamp}-${index}`,
-          message: message.content,
-          tone: message.content.toLowerCase().includes('failed')
-            ? 'error'
-            : 'info',
-        });
-      }
-    }
-    return next;
-  }, [
-    accountInfo,
-    insightProgress,
-    insightReportPath,
-    messageHandling.messages,
-    uiError,
-  ]);
-
-  const usageInputTokens =
-    usageStats?.usage?.inputTokens ?? usageStats?.usage?.promptTokens ?? 0;
-  const contextWindow =
-    usageStats?.tokenLimit ??
-    (typeof modelInfo?._meta?.['contextLimit'] === 'number'
-      ? modelInfo._meta['contextLimit']
-      : 0);
+  if (!runtime) {
+    return (
+      <div
+        role="status"
+        style={{
+          display: 'flex',
+          flex: '1 1 auto',
+          minWidth: 0,
+          minHeight: 0,
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+          color: 'var(--vscode-descriptionForeground)',
+        }}
+      >
+        {!runtimeError && (
+          <>
+            <style>
+              {'@keyframes qwen-vscode-spin{to{transform:rotate(360deg)}}'}
+            </style>
+            <LoaderCircle
+              size={18}
+              aria-hidden="true"
+              style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
+            />
+          </>
+        )}
+        <span>{runtimeError ?? 'Starting Qwen Code...'}</span>
+      </div>
+    );
+  }
 
   return (
-    <Suspense
-      fallback={
+    <div
+      style={{ ...ROOT_STYLE, position: 'relative', flexDirection: 'column' }}
+      data-vscode-context='{"webviewSection":"chat-messages"}'
+    >
+      <style>{VSCODE_EMBEDDED_CSS}</style>
+      {sessionHistoryOpen && (
+        <SessionHistoryDropdown
+          sessions={sessions}
+          currentSessionId={runtime.sessionId}
+          searchQuery={sessionSearchQuery}
+          loading={sessionListLoading}
+          hasMore={Boolean(sessionCursor)}
+          error={sessionListError}
+          onSearchChange={setSessionSearchQuery}
+          onClose={closeSessionHistory}
+          onLoadMore={() => void loadSessionHistory(sessionCursor)}
+          onSelect={(session) => {
+            if (session.sessionId === runtime.sessionId) return;
+            closeOpenPermissionDiffs();
+            clearInsight();
+            closeSessionHistory();
+            setEditingMessage(undefined);
+            composerRef.current?.clear({ text: true, tags: true });
+            setSwitchingSessionId(session.sessionId);
+            setSessionTitle(session.displayName || 'Past Conversations');
+            setRuntime((current) =>
+              current && current.sessionId !== session.sessionId
+                ? { ...current, sessionId: session.sessionId }
+                : current,
+            );
+          }}
+          onRename={async (session, title) => {
+            if (!daemonClient || !runtime.workspaceCwd) return;
+            setSessionListError(undefined);
+            try {
+              const result = await daemonClient
+                .workspaceByCwd(runtime.workspaceCwd)
+                .updateSessionMetadata(session.sessionId, {
+                  displayName: title,
+                });
+              const displayName = result.displayName || title;
+              setSessions((current) =>
+                current.map((entry) =>
+                  entry.sessionId === session.sessionId
+                    ? { ...entry, displayName }
+                    : entry,
+                ),
+              );
+              if (session.sessionId === runtime.sessionId) {
+                setSessionTitle(displayName);
+                if (runtime.hostKind === 'panel') {
+                  vscode.postMessage({
+                    type: 'updatePanelTitle',
+                    data: { title: displayName },
+                  });
+                }
+              }
+            } catch (error) {
+              setSessionListError(
+                error instanceof Error
+                  ? error.message
+                  : 'Failed to rename session.',
+              );
+            }
+          }}
+          onDelete={async (session) => {
+            if (!daemonClient || session.sessionId === runtime.sessionId) return;
+            setSessionListError(undefined);
+            try {
+              await daemonClient
+                .workspaceByCwd(runtime.workspaceCwd)
+                .deleteSessionsData([session.sessionId]);
+              setSessions((current) =>
+                current.filter(
+                  (entry) => entry.sessionId !== session.sessionId,
+                ),
+              );
+            } catch (error) {
+              setSessionListError(
+                error instanceof Error
+                  ? error.message
+                  : 'Failed to delete session.',
+              );
+            }
+          }}
+        />
+      )}
+      {(switchingSessionId || creatingSession) && (
         <div
           role="status"
           style={{
-            display: 'grid',
-            height: '100vh',
-            placeItems: 'center',
+            position: 'absolute',
+            inset: '30px 0 0',
+            zIndex: 900,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            background:
+              'color-mix(in srgb, var(--vscode-sideBar-background) 82%, transparent)',
             color: 'var(--vscode-descriptionForeground)',
+            backdropFilter: 'blur(2px)',
           }}
         >
-          Preparing Qwen Code...
+          <LoaderCircle
+            size={18}
+            aria-hidden="true"
+            style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
+          />
+          <span>
+            {creatingSession ? 'Starting new session…' : 'Loading conversation…'}
+          </span>
         </div>
-      }
-    >
-      <EmbeddedWebShell
-        blocks={blocks}
-        theme={webShellTheme}
-        style={VSCODE_THEME_STYLE}
-        loading={isLoading || sessionManagement.isSwitchingSession}
-        loadingLabel={
-          sessionManagement.isSwitchingSession
-            ? 'Loading conversation...'
-            : 'Preparing Qwen Code...'
-        }
-        authenticated={isAuthenticated}
-        sessionId={sessionManagement.currentSessionId ?? undefined}
-        sessionTitle={sessionManagement.currentSessionTitle}
-        sessions={sessions}
-        historyOpen={sessionManagement.showSessionSelector}
-        historySearch={sessionManagement.sessionSearchQuery}
-        historyLoading={sessionManagement.isLoading}
-        historyHasMore={sessionManagement.hasMore}
-        isResponding={
-          messageHandling.isStreaming ||
-          messageHandling.isWaitingForResponse ||
-          inProgressToolCalls.length > 0
-        }
-        isPreparing={isLoading || sessionManagement.isSwitchingSession}
-        commands={commands}
-        skills={skills}
-        availableModels={models}
-        currentModel={modelInfo ? modelId(modelInfo) : ''}
-        currentMode={editMode}
-        tokenCount={usageInputTokens}
-        contextWindow={contextWindow}
-        composerInput={composerInput}
-        composerInputVersion={composerInputVersion}
-        editingMessage={editingMessage}
-        onComposerTextChange={(text: string) => {
-          composerTextRef.current = text;
+      )}
+      <div
+        style={{
+          display: 'flex',
+          height: 30,
+          flex: '0 0 30px',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 10px',
+          borderBottom: '1px solid var(--vscode-panel-border)',
+          background: 'var(--vscode-sideBar-background)',
+          color: 'var(--vscode-sideBar-foreground)',
         }}
-        atProviders={atProviders}
-        activeFile={
-          fileContext.activeFilePath
-            ? {
-                name: fileContext.activeFileName || 'Current file',
-                path: fileContext.activeFilePath,
-                startLine: fileContext.activeSelection?.startLine,
-                endLine: fileContext.activeSelection?.endLine,
-                included: includeActiveFile,
+      >
+        <button
+          ref={historyButtonRef}
+          type="button"
+          className="qwen-vscode-header-button"
+          title="Past conversations"
+          aria-label="Past conversations"
+          aria-haspopup="dialog"
+          aria-expanded={sessionHistoryOpen}
+          aria-controls={sessionHistoryOpen ? 'qwen-session-history' : undefined}
+          disabled={Boolean(switchingSessionId || creatingSession)}
+          onClick={() => {
+            if (sessionHistoryOpen) closeSessionHistory();
+            else openSessionHistory();
+          }}
+          style={{
+            display: 'inline-flex',
+            minWidth: 0,
+            maxWidth: 'calc(100% - 32px)',
+            alignItems: 'center',
+            gap: 5,
+            overflow: 'hidden',
+            padding: '2px 6px',
+            border: 0,
+            borderRadius: 4,
+            background: 'transparent',
+            color: 'inherit',
+            font: 'inherit',
+            fontWeight: 600,
+            cursor:
+              switchingSessionId || creatingSession ? 'wait' : 'pointer',
+            opacity: switchingSessionId || creatingSession ? 0.55 : 1,
+          }}
+        >
+          <span
+            style={{
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {sessionTitle}
+          </span>
+          <ChevronDown size={15} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          className="qwen-vscode-header-button"
+          title="New Session"
+          aria-label="New session"
+          disabled={Boolean(
+            switchingSessionId || creatingSession || authenticated === false,
+          )}
+          onClick={() => {
+            setSessionHistoryOpen(false);
+            if (runtime.hostKind === 'panel') {
+              vscode.postMessage({
+                type: 'openNewChatTab',
+                data: currentModelIdRef.current
+                  ? { modelId: currentModelIdRef.current }
+                  : {},
+              });
+              return;
+            }
+            closeOpenPermissionDiffs();
+            clearInsight();
+            const createNewSession = shellRef.current?.createNewSession;
+            if (!createNewSession) return;
+            setEditingMessage(undefined);
+            composerRef.current?.clear({ text: true, tags: true });
+            setCreatingSession(true);
+            void createNewSession()
+              .then((created) => {
+                if (created) {
+                  setSessionTitle('New Session');
+                  return;
+                }
+                setHostNotice({
+                  tone: 'error',
+                  text: 'Failed to create a new session.',
+                });
+              })
+              .catch((error) => {
+                setHostNotice({
+                  tone: 'error',
+                  text:
+                    error instanceof Error
+                      ? error.message
+                      : 'Failed to create a new session.',
+                });
+              })
+              .finally(() => setCreatingSession(false));
+          }}
+          style={{
+            display: 'inline-flex',
+            width: 24,
+            height: 24,
+            flex: '0 0 auto',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 0,
+            border: 0,
+            borderRadius: 4,
+            background: 'transparent',
+            color: 'inherit',
+            cursor:
+              switchingSessionId || creatingSession
+                ? 'wait'
+                : authenticated === false
+                  ? 'not-allowed'
+                  : 'pointer',
+            opacity:
+              switchingSessionId ||
+              creatingSession ||
+              authenticated === false
+                ? 0.55
+                : 1,
+          }}
+        >
+          <Plus size={16} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+      </div>
+      {hostNotice && (
+        <div
+          role={hostNotice.tone === 'error' ? 'alert' : 'status'}
+          style={{
+            display: 'flex',
+            minWidth: 0,
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 10px',
+            borderBottom: '1px solid var(--vscode-panel-border)',
+            color:
+              hostNotice.tone === 'error'
+                ? 'var(--vscode-errorForeground)'
+                : 'var(--vscode-foreground)',
+            background: 'var(--vscode-sideBarSectionHeader-background)',
+            fontSize: 12,
+          }}
+        >
+          <span
+            style={{
+              minWidth: 0,
+              flex: 1,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={hostNotice.text}
+          >
+            {hostNotice.text}
+          </span>
+          {hostNotice.action && (
+            <button
+              type="button"
+              onClick={() =>
+                vscode.postMessage({
+                  type: 'openFile',
+                  data: { path: hostNotice.action?.path },
+                })
               }
-            : null
-        }
-        pendingPermission={isAuthenticated ? pendingPermission : null}
-        pendingQuestion={isAuthenticated ? pendingQuestion : null}
-        notices={notices}
-        onSubmit={onSubmit}
-        onCancel={onCancel}
-        onAuthenticate={onAuthenticate}
-        onOpenAccount={onOpenAccount}
-        onNewSession={() =>
-          sessionManagement.handleNewQwenSession(
-            modelInfo ? modelId(modelInfo) : null,
-          )
-        }
-        onHistoryOpenChange={(open: boolean) => {
-          if (open) sessionManagement.handleLoadQwenSessions();
-          else sessionManagement.setShowSessionSelector(false);
-        }}
-        onHistorySearchChange={sessionManagement.setSessionSearchQuery}
-        onSessionSelect={sessionManagement.handleSwitchSession}
-        onLoadMoreSessions={sessionManagement.handleLoadMoreSessions}
-        onSelectModel={onSelectModel}
-        onSelectMode={onSelectMode}
-        onShowContextUsage={() =>
+              style={{
+                flex: '0 0 auto',
+                padding: '2px 6px',
+                border: 0,
+                borderRadius: 3,
+                background: 'var(--vscode-button-secondaryBackground)',
+                color: 'var(--vscode-button-secondaryForeground)',
+                font: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              {hostNotice.action.label}
+            </button>
+          )}
+          <button
+            type="button"
+            title="Dismiss"
+            aria-label="Dismiss"
+            onClick={() => setHostNotice(undefined)}
+            style={{
+              display: 'inline-flex',
+              width: 20,
+              height: 20,
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 0,
+              border: 0,
+              background: 'transparent',
+              color: 'inherit',
+              cursor: 'pointer',
+            }}
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+      {(insightProgress || insightReportPath) && (
+        <div
+          data-testid="insight-status"
+          role="status"
+          style={{
+            display: 'flex',
+            minWidth: 0,
+            alignItems: 'center',
+            gap: 10,
+            padding: '6px 10px',
+            borderBottom: '1px solid var(--vscode-panel-border)',
+            background: 'var(--vscode-sideBarSectionHeader-background)',
+            color: 'var(--vscode-foreground)',
+            fontSize: 12,
+          }}
+        >
+          {insightProgress ? (
+            <>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {insightProgress.stage}
+                </div>
+                <div
+                  title={
+                    insightProgress.detail ?? 'Processing your chat history…'
+                  }
+                  style={{
+                    overflow: 'hidden',
+                    color: 'var(--vscode-descriptionForeground)',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {insightProgress.detail ?? 'Processing your chat history…'}
+                </div>
+              </div>
+              <span style={{ flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' }}>
+                {Math.max(0, Math.min(100, Math.round(insightProgress.progress)))}%
+              </span>
+            </>
+          ) : (
+            <>
+              <span
+                title={insightReportPath}
+                style={{
+                  minWidth: 0,
+                  flex: 1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Insight report generated: {insightReportPath}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  vscode.postMessage({
+                    type: 'openInsightReport',
+                    data: { path: insightReportPath },
+                  })
+                }
+                style={{
+                  flex: '0 0 auto',
+                  padding: '2px 8px',
+                  border: 0,
+                  borderRadius: 3,
+                  background: 'var(--vscode-button-secondaryBackground)',
+                  color: 'var(--vscode-button-secondaryForeground)',
+                  font: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                Open
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {authenticated === false ? (
+        <QwenOnboarding
+          connecting={authConnecting}
+          error={authError}
+          onGetStarted={() => {
+            setAuthConnecting(true);
+            setAuthError(undefined);
+            vscode.postMessage({ type: 'auth', data: {} });
+          }}
+        />
+      ) : (
+        <WebShellWithProviders
+        baseUrl={runtime.baseUrl}
+        token={runtime.token}
+        clientId={runtime.clientId}
+        lockWorkspaceCwd={runtime.workspaceCwd}
+        sessionId={runtime.sessionId}
+        className="qwen-code-vscode-web-shell"
+        style={SHELL_STYLE}
+        theme={theme}
+        language={readLanguage()}
+        shellRef={shellRef}
+        header={{ items: [] }}
+        onSessionIdChange={(sessionId) => {
+          if (switchingSessionId && sessionId !== switchingSessionId) return;
+          clearInsight();
+          setEditingMessage(undefined);
           vscode.postMessage({
-            type: 'sendMessage',
-            data: { text: '/context' },
-          })
-        }
-        onAttachFile={() =>
-          vscode.postMessage({ type: 'attachFile', data: {} })
-        }
-        onFocusActiveFile={fileContext.focusActiveEditor}
-        onActiveFileIncludedChange={setIncludeActiveFile}
-        onEditUserMessage={beginEditingMessage}
-        onCancelEdit={cancelEditingMessage}
-        onPermissionResponse={onPermissionResponse}
-        onQuestionResponse={onQuestionResponse}
-        onNoticeAction={(noticeId: string) => {
-          if (noticeId === 'embedded-error') {
-            setUiError(null);
-          } else if (noticeId === 'account-info') {
-            setAccountInfo(null);
-          } else if (noticeId === 'insight-report' && insightReportPath) {
-            vscode.postMessage({
-              type: 'openInsightReport',
-              data: { path: insightReportPath },
-            });
+            type: 'webShellSessionChanged',
+            data: { sessionId, workspaceCwd: runtime.workspaceCwd },
+          });
+          setRuntime((current) =>
+            current && current.sessionId !== sessionId
+              ? { ...current, sessionId }
+              : current,
+          );
+          if (sessionId === switchingSessionId) {
+            setSwitchingSessionId(undefined);
           }
         }}
-        onError={(error: unknown) =>
-          setUiError(error instanceof Error ? error.message : String(error))
+        onSessionInfoChange={({ sessionId, sessionName }) => {
+          if (!switchingSessionId || sessionId === switchingSessionId) {
+            const title = sessionName || 'New Session';
+            setSessionTitle(title);
+            if (runtime.hostKind === 'panel') {
+              vscode.postMessage({
+                type: 'updatePanelTitle',
+                data: { title },
+              });
+            }
+          }
+        }}
+        onError={(error) => {
+          clearInsight();
+          setEditingMessage(undefined);
+          setSwitchingSessionId(undefined);
+          setCreatingSession(false);
+          setHostNotice({
+            tone: 'error',
+            text: error.message || 'Failed to load the Qwen Code session.',
+          });
+        }}
+        sidebar={false}
+        compactThinking
+        collapseCompletedTurns
+        composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
+        compactComposerOverlays
+        autoSubmitSlashCommands
+        additionalSlashCommands={VSCODE_SLASH_COMMANDS}
+        hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
+        onSlashCommand={({ command, input }) => {
+          if (command === 'auth' || command === 'login') {
+            vscode.postMessage({ type: 'auth', data: {} });
+            return true;
+          }
+          if (command === 'account') {
+            vscode.postMessage({ type: 'getAccountInfo', data: {} });
+            return true;
+          }
+          if (command === 'export') {
+            vscode.postMessage({
+              type: 'exportSession',
+              data: { text: input, sessionId: runtime.sessionId },
+            });
+            return true;
+          }
+          return false;
+        }}
+        contextUsageAlwaysVisible
+        userMessageEditing
+        cycleModeOnTab
+        onUserMessageEditRequest={(turnIndex, content) => {
+          composerRef.current?.clear({ text: true, tags: true });
+          composerRef.current?.setText(content);
+          composerRef.current?.focus?.();
+          setEditingMessage({ turnIndex });
+          return true;
+        }}
+        messageTurnOutputs={['file']}
+        onFileReviewOpen={openReviewDiff}
+        onInsightReportOpen={(path) =>
+          vscode.postMessage({
+            type: 'openInsightReport',
+            data: { path },
+          })
         }
-        onLinkClick={onLinkClick}
-      />
-    </Suspense>
+        onTranscriptChange={updateTranscript}
+        composerPlaceholders={{
+          idle: 'Ask Qwen Code or @ a file',
+        }}
+        composerRef={composerRef}
+        prepareSubmit={async (submission) => {
+          if (editingMessage) {
+            const sessionId = submission.sessionId ?? runtime.sessionId;
+            if (!daemonClient || !sessionId) {
+              throw new Error('The message cannot be edited before the session is ready.');
+            }
+            const { snapshots } = await daemonClient.getRewindSnapshots(
+              sessionId,
+            );
+            const snapshot = snapshots.find(
+              (entry) => entry.turnIndex === editingMessage.turnIndex,
+            );
+            if (!snapshot) {
+              throw new Error('The original message can no longer be edited.');
+            }
+            await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+              clientId: runtime.clientId,
+              rewindFiles: false,
+            });
+            setEditingMessage(undefined);
+            clearInsight();
+          }
+
+          if (!activeFile || !includeActiveFile) return undefined;
+          const normalizedWorkspace = runtime.workspaceCwd?.replace(/\\/g, '/');
+          const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
+          const relativePath =
+            normalizedWorkspace &&
+            normalizedFile.startsWith(`${normalizedWorkspace}/`)
+              ? normalizedFile.slice(normalizedWorkspace.length + 1)
+              : activeFile.fileName;
+          const reference = `@${relativePath}`;
+          const selectedLines = activeFile.selection
+            ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`
+            : '';
+          const alreadyIncluded = submission.inputAnnotations.some(
+            (annotation) =>
+              annotation.reference.value === activeFile.filePath,
+          );
+          const prefix =
+            alreadyIncluded || submission.prompt.startsWith(reference)
+              ? ''
+              : `${reference}${selectedLines} `;
+          const prompt = `${prefix}${submission.prompt}`;
+          const inputAnnotations = submission.inputAnnotations.map(
+            (annotation) =>
+              prefix
+                ? {
+                    ...annotation,
+                    start: annotation.start + prefix.length,
+                    end: annotation.end + prefix.length,
+                  }
+                : annotation,
+          );
+          if (!alreadyIncluded) {
+            inputAnnotations.unshift({
+              type: 'reference',
+              start: 0,
+              end: reference.length,
+              text: reference,
+              reference: {
+                id: `vscode-active-file:${activeFile.filePath}`,
+                kind: 'file',
+                label: activeFile.fileName,
+                value: activeFile.filePath,
+                metadata: {
+                  path: activeFile.filePath,
+                  selection: activeFile.selection,
+                },
+                serialized: reference,
+              },
+            });
+          }
+          return {
+            prompt,
+            inputAnnotations,
+          };
+        }}
+        renderComposerHeader={() =>
+          editingMessage ? (
+            <div
+              style={{
+                display: 'flex',
+                minWidth: 0,
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                color: 'var(--vscode-descriptionForeground)',
+                fontSize: 12,
+              }}
+            >
+              <span
+                style={{
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Editing message
+              </span>
+              <button
+                type="button"
+                className="qwen-vscode-toolbar-button"
+                title="Cancel editing"
+                aria-label="Cancel editing"
+                onClick={cancelMessageEditing}
+                style={{
+                  display: 'inline-flex',
+                  width: 22,
+                  height: 22,
+                  flex: '0 0 22px',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 0,
+                  border: 0,
+                  borderRadius: 4,
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null
+        }
+        renderComposerToolbarStart={({ disabled, currentModel }) => {
+          currentModelIdRef.current = currentModel || undefined;
+          return (
+            <span className="qwen-vscode-toolbar-start">
+            <button
+              type="button"
+              className="qwen-vscode-toolbar-button"
+              title="Add context"
+              aria-label="Add context"
+              disabled={disabled}
+              onClick={() =>
+                vscode.postMessage({ type: 'attachFile', data: {} })
+              }
+              style={{
+                display: 'inline-flex',
+                width: 28,
+                height: 28,
+                flex: '0 0 28px',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                border: 0,
+                borderRadius: 6,
+                color: 'var(--agent-gray-500)',
+                background: 'transparent',
+                opacity: disabled ? 0.45 : 1,
+                cursor: disabled ? 'default' : 'pointer',
+              }}
+            >
+              <Plus size={16} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            {activeFile && (
+              <button
+                type="button"
+                className="qwen-vscode-toolbar-button qwen-vscode-active-file"
+                title={`${includeActiveFile ? 'Included' : 'Excluded'}: ${activeFile.filePath}`}
+                aria-label={`${includeActiveFile ? 'Exclude' : 'Include'} active file context`}
+                onClick={() => setIncludeActiveFile((current) => !current)}
+                style={{
+                  display: 'inline-flex',
+                  minWidth: 28,
+                  maxWidth: 'min(150px, 38vw)',
+                  height: 28,
+                  alignItems: 'center',
+                  gap: 4,
+                  overflow: 'hidden',
+                  padding: '0 7px',
+                  border: 0,
+                  borderRadius: 6,
+                  color: 'var(--agent-gray-500)',
+                  background: 'transparent',
+                  opacity: includeActiveFile ? 1 : 0.5,
+                  cursor: 'pointer',
+                }}
+              >
+                <FileText
+                  size={15}
+                  strokeWidth={1.75}
+                  aria-hidden="true"
+                  style={{ flex: '0 0 auto' }}
+                />
+                <span className="qwen-vscode-active-file-label">
+                  {activeFile.selection
+                    ? `${activeFile.selection.endLine - activeFile.selection.startLine + 1} lines selected`
+                    : activeFile.fileName}
+                </span>
+              </button>
+            )}
+            </span>
+          );
+        }}
+        />
+      )}
+      {accountInfo && (
+        <div
+          role="presentation"
+          onClick={() => setAccountInfo(undefined)}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 1100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 12,
+            background: 'rgba(0, 0, 0, 0.45)',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="qwen-account-info-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              display: 'flex',
+              width: 'min(480px, 100%)',
+              maxHeight: 'min(480px, calc(100% - 24px))',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              border: '1px solid var(--vscode-widget-border)',
+              borderRadius: 6,
+              background: 'var(--vscode-editorWidget-background)',
+              color: 'var(--vscode-editorWidget-foreground)',
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '10px 12px',
+                borderBottom: '1px solid var(--vscode-widget-border)',
+              }}
+            >
+              <strong id="qwen-account-info-title" style={{ flex: 1 }}>
+                Account Information
+              </strong>
+              <button
+                type="button"
+                title="Close"
+                aria-label="Close"
+                onClick={() => setAccountInfo(undefined)}
+                style={{
+                  display: 'inline-flex',
+                  width: 22,
+                  height: 22,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 0,
+                  border: 0,
+                  borderRadius: 3,
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'max-content minmax(0, 1fr)',
+                gap: '8px 14px',
+                overflow: 'auto',
+                padding: 12,
+                fontSize: 12,
+              }}
+            >
+              {accountInfo.error ? (
+                <>
+                  <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                    Error
+                  </span>
+                  <span style={{ color: 'var(--vscode-errorForeground)' }}>
+                    {accountInfo.error}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                    Auth Method
+                  </span>
+                  <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                    {accountInfo.authType || 'Unknown'}
+                  </span>
+                  {accountInfo.envKey && (
+                    <>
+                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                        API Key Env
+                      </span>
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                        {accountInfo.envKey}
+                      </span>
+                    </>
+                  )}
+                  {accountInfo.baseUrl && (
+                    <>
+                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                        Base URL
+                      </span>
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                        {accountInfo.baseUrl}
+                      </span>
+                    </>
+                  )}
+                  {accountInfo.modelId && (
+                    <>
+                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                        Current Model
+                      </span>
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                        {accountInfo.modelId}
+                      </span>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

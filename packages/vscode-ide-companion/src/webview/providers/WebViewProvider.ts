@@ -42,10 +42,25 @@ import {
   parseInsightMessage,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
+import { QwenDaemonProcess } from '../../services/qwenDaemonProcess.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
 const MAX_WEBVIEW_LOG_LENGTH = 10_000;
+
+const daemonProcesses = new WeakMap<
+  vscode.ExtensionContext,
+  QwenDaemonProcess
+>();
+
+function getDaemonProcess(context: vscode.ExtensionContext): QwenDaemonProcess {
+  const current = daemonProcesses.get(context);
+  if (current) return current;
+  const daemon = new QwenDaemonProcess();
+  daemonProcesses.set(context, daemon);
+  context.subscriptions.push(daemon);
+  return daemon;
+}
 
 /** Possible tab-dot colours. */
 const DotColor = {
@@ -94,11 +109,31 @@ function isInsightCommand(command: string): boolean {
   return firstToken.replace(/^\/+/, '') === 'insight';
 }
 
+const WEB_SHELL_SESSION_STATE_PREFIX = 'qwenCode.webShellSessionId:';
+
+function getRestorableDaemonSessionId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const sessionId = value.trim();
+  if (
+    !sessionId ||
+    /^conv_/i.test(sessionId) ||
+    /^temp(?:$|[-_])/i.test(sessionId)
+  ) {
+    return undefined;
+  }
+  return sessionId;
+}
+
+function webShellSessionStateKey(workspaceCwd: string): string {
+  return `${WEB_SHELL_SESSION_STATE_PREFIX}${workspaceCwd}`;
+}
+
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
   private agentManager: QwenAgentManager;
   private conversationStore: ConversationStore;
+  private daemonProcess: QwenDaemonProcess;
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
@@ -153,6 +188,7 @@ export class WebViewProvider {
     private context: vscode.ExtensionContext,
     private extensionUri: vscode.Uri,
   ) {
+    this.daemonProcess = getDaemonProcess(context);
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
@@ -880,9 +916,8 @@ export class WebViewProvider {
       });
     }
 
-    // Re-initialize when the view becomes visible after being hidden,
-    // in case the agent was never connected (e.g. sidebar opened but collapsed).
-    // Also reset dotState so it doesn't leak into a future editor-tab panel.
+    // Re-check authentication when the view becomes visible in case the
+    // initial connection was never established.
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
         this.dotState = null;
@@ -900,10 +935,6 @@ export class WebViewProvider {
       this.disposables.forEach((d) => d.dispose());
     });
 
-    // Attempt to restore auth state and initialize connection
-    logger.log(
-      '[WebViewProvider] Attempting to restore auth state and connection for view...',
-    );
     await this.attemptAuthStateRestoration();
   }
 
@@ -1080,10 +1111,6 @@ export class WebViewProvider {
       });
     }
 
-    // Attempt to restore authentication state and initialize connection
-    logger.log(
-      '[WebViewProvider] Attempting to restore auth state and connection...',
-    );
     await this.attemptAuthStateRestoration();
   }
 
@@ -1753,6 +1780,11 @@ export class WebViewProvider {
       case 'authError':
         this.authState = false;
         break;
+      case 'authCancelled':
+        if (this.authState === null) {
+          this.authState = false;
+        }
+        break;
       default:
         break;
     }
@@ -1812,6 +1844,20 @@ export class WebViewProvider {
     }
   }
 
+  private async replayAuthState(webview: vscode.Webview): Promise<void> {
+    const authenticated =
+      typeof this.authState === 'boolean'
+        ? this.authState
+        : this.agentInitialized
+          ? Boolean(this.agentManager.currentSessionId)
+          : null;
+    if (authenticated === null) return;
+    await webview.postMessage({
+      type: 'authState',
+      data: { authenticated },
+    });
+  }
+
   /**
    * Context-aware handler for the "New Chat" action (openNewChatTab message).
    *
@@ -1862,6 +1908,96 @@ export class WebViewProvider {
     message: { type: string; data?: unknown },
     webview: vscode.Webview,
   ): Promise<boolean> {
+    if (message.type === 'webShellSessionChanged') {
+      const data = message.data as
+        | { sessionId?: unknown; workspaceCwd?: unknown }
+        | undefined;
+      const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
+      this.messageHandler.setCurrentConversationId(sessionId);
+      if (this.isViewHost && typeof data?.workspaceCwd === 'string') {
+        await this.context.workspaceState.update(
+          webShellSessionStateKey(data.workspaceCwd),
+          sessionId ?? undefined,
+        );
+      }
+      return true;
+    }
+    if (message.type === 'webShellReady') {
+      const workspaceCwd =
+        (vscode.window.activeTextEditor
+          ? vscode.workspace.getWorkspaceFolder(
+              vscode.window.activeTextEditor.document.uri,
+            )?.uri.fsPath
+          : undefined) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!workspaceCwd) {
+        await webview.postMessage({
+          type: 'webShellBootstrapError',
+          data: { message: 'Open a folder to use Qwen Code.' },
+        });
+        return true;
+      }
+      try {
+        const runtime = await this.daemonProcess.start(
+          resolveQwenCliEntryPath(
+            this.extensionUri,
+            this.context.extensionMode,
+          ),
+          workspaceCwd,
+        );
+        const serializedSessionId = getRestorableDaemonSessionId(
+          this.messageHandler.getCurrentConversationId(),
+        );
+        const viewSessionId = this.isViewHost
+          ? getRestorableDaemonSessionId(
+              this.context.workspaceState.get<string>(
+                webShellSessionStateKey(workspaceCwd),
+              ),
+            )
+          : undefined;
+        const restoredSessionId = this.isViewHost
+          ? viewSessionId
+          : serializedSessionId;
+        await webview.postMessage({
+          type: 'webShellBootstrap',
+          data: {
+            ...runtime,
+            workspaceCwd,
+            hostKind: this.isViewHost ? 'view' : 'panel',
+            ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
+          },
+        });
+        await this.replayAuthState(webview);
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          const filePath = editor.document.uri.fsPath || null;
+          await webview.postMessage({
+            type: 'activeEditorChanged',
+            data: {
+              fileName: filePath ? getFileName(filePath) : null,
+              filePath,
+              selection: editor.selection.isEmpty
+                ? null
+                : {
+                    startLine: editor.selection.start.line + 1,
+                    endLine: editor.selection.end.line + 1,
+                  },
+            },
+          });
+        }
+      } catch (error) {
+        logger.error(
+          '[WebViewProvider] Failed to start WebShell daemon:',
+          error,
+        );
+        await webview.postMessage({
+          type: 'webShellBootstrapError',
+          data: {
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      return true;
+    }
     if (message.type === 'log') {
       const data = message.data as
         | { level?: unknown; message?: unknown }
@@ -1879,7 +2015,8 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'openDiff' && this.isAutoMode()) {
-      return true;
+      const source = (message.data as { source?: unknown } | undefined)?.source;
+      if (source !== 'web-shell') return true;
     }
     if (message.type === 'webviewReady') {
       this.handleWebviewReady();
@@ -2446,10 +2583,6 @@ export class WebViewProvider {
 
     logger.log('[WebViewProvider] Panel restored successfully');
 
-    // Attempt to restore authentication state and initialize connection
-    logger.log(
-      '[WebViewProvider] Attempting to restore auth state and connection after restore...',
-    );
     await this.attemptAuthStateRestoration();
   }
 

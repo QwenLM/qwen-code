@@ -366,6 +366,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(

@@ -35,6 +35,7 @@ export function AtMentionPanel({
   menu,
   anchorRef,
   panelRef,
+  compact,
   onSelect,
   onAccept,
   onBack,
@@ -44,6 +45,7 @@ export function AtMentionPanel({
   menu: AtMentionMenuState;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
+  compact?: boolean;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
   onBack: () => boolean;
@@ -117,8 +119,11 @@ export function AtMentionPanel({
       const maxHeight = Math.max(96, Math.min(300, rect.top - safeTop - 8));
       const next = {
         left: Math.max(
-          12,
-          Math.min(rect.left + 16, window.innerWidth - panelWidth - 12),
+          compact ? 8 : 12,
+          Math.min(
+            rect.left + (compact ? 0 : 16),
+            window.innerWidth - panelWidth - (compact ? 8 : 12),
+          ),
         ),
         bottom: window.innerHeight - rect.top + 8,
         width: rect.width,
@@ -158,7 +163,7 @@ export function AtMentionPanel({
       window.removeEventListener('resize', scheduleUpdatePosition);
       window.removeEventListener('scroll', scheduleUpdatePosition, true);
     };
-  }, [anchorRef, panelRef]);
+  }, [anchorRef, compact, panelRef]);
 
   const rows =
     menu.level === 'categories'
@@ -223,6 +228,7 @@ export function AtMentionPanel({
         ref={panelRef}
         className={styles.atPanel}
         data-at-mention-panel="true"
+        data-web-shell-compact-overlay={compact ? '' : undefined}
         style={
           {
             ...themeVars,

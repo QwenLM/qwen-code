@@ -192,6 +192,7 @@ export function mapSupportedCommands(
     name: command.name,
     description: command.description || '',
     ...(command.input?.hint ? { argumentHint: command.input.hint } : {}),
+    ...(command.input === null ? { autoSubmit: true } : {}),
     ...mapCommandMeta(command._meta),
     raw: command,
   }));
@@ -764,6 +765,7 @@ function mapAvailableCommandsUpdate(
         ...(daemonCommand.input?.hint
           ? { argumentHint: daemonCommand.input.hint }
           : {}),
+        ...(daemonCommand.input === null ? { autoSubmit: true } : {}),
         ...mapCommandMeta(daemonCommand._meta),
         raw: daemonCommand,
       },

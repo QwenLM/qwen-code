@@ -276,7 +276,12 @@ import {
 } from './utils/composerInputState';
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
-import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
+import type {
+  ACPToolCall,
+  CommandInfo,
+  Message,
+  PermissionRequest,
+} from './adapters/types';
 import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
@@ -913,6 +918,11 @@ export interface WebShellProps {
     workspaceId?: string,
     workspaceCwd?: string,
   ) => void;
+  /** Called when the active session id or display name changes. */
+  onSessionInfoChange?: (session: {
+    sessionId?: string;
+    sessionName?: string;
+  }) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
@@ -954,6 +964,12 @@ export interface WebShellProps {
    * a turn output such as review changes, an artifact, or a scheduled task.
    */
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  /** Override file-review links without replacing the other right panels. */
+  onFileReviewOpen?: (
+    request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
+  ) => void;
+  /** Open a completed Insight report in a host-native surface. */
+  onInsightReportOpen?: (path: string) => void;
   /**
    * Controls which turn output cards appear below messages. Defaults to all.
    */
@@ -962,6 +978,26 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Stack completion details vertically for narrow embedded hosts. */
+  compactComposerOverlays?: boolean;
+  /** Submit slash items marked as immediate actions when selected. */
+  autoSubmitSlashCommands?: boolean;
+  /** Host-only slash entries or presentation overrides. */
+  additionalSlashCommands?: readonly CommandInfo[];
+  /** Keep Context Usage available while restored-session usage is loading. */
+  contextUsageAlwaysVisible?: boolean;
+  /** Let the host expose the last user turn's edit-and-resend action. */
+  userMessageEditing?: boolean;
+  /**
+   * Called before WebShell starts its built-in user-message edit flow. Return
+   * true when the host owns the edit-and-resend lifecycle.
+   */
+  onUserMessageEditRequest?: (
+    turnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Cycle the approval mode when an otherwise-unhandled Tab is pressed. */
+  cycleModeOnTab?: boolean;
   /**
    * Main-composer copy by semantic state. Omitted or blank entries retain the
    * WebShell localized default; shell-mode and follow-up copy still wins.
@@ -1137,6 +1173,7 @@ type SessionActionsWithCreate = {
 };
 
 const emptyComposerApi: WebShellComposerApi = {
+  focus: () => {},
   insertText: () => {},
   setText: () => {},
   addTags: () => {},
@@ -1874,6 +1911,7 @@ function readScopedModelSetting(
 
 export function App({
   onSessionIdChange,
+  onSessionInfoChange,
   onSessionCreated,
   theme: providedTheme,
   onThemeChange,
@@ -1921,9 +1959,18 @@ export function App({
   onSplitSessionIdsChange,
   renderPaneHeaderActions,
   onRightPanelOpen,
+  onFileReviewOpen,
+  onInsightReportOpen,
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  compactComposerOverlays = false,
+  autoSubmitSlashCommands = false,
+  additionalSlashCommands = [],
+  contextUsageAlwaysVisible = false,
+  userMessageEditing = false,
+  onUserMessageEditRequest,
+  cycleModeOnTab = false,
   composerPlaceholders,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -3722,6 +3769,10 @@ export function App({
   );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      if (request.kind === 'review' && onFileReviewOpen) {
+        onFileReviewOpen(request);
+        return;
+      }
       if (onRightPanelOpen) {
         onRightPanelOpen(request);
         return;
@@ -3819,6 +3870,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
@@ -5739,6 +5791,16 @@ export function App({
     return false;
   }, [pushToast, t]);
   const sessionDisplayName = connection.displayName ?? sessionStatusDisplayName;
+  useEffect(() => {
+    onSessionInfoChange?.({
+      sessionId: connection.sessionId,
+      sessionName: sessionDisplayName,
+    });
+  }, [
+    connection.sessionId,
+    onSessionInfoChange,
+    sessionDisplayName,
+  ]);
   const [currentMode, setCurrentMode] = useState('default');
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
@@ -9130,6 +9192,35 @@ export function App({
     [sessionActions],
   );
 
+  const editUserMessage = useCallback(
+    async (turnIndex: number, content: string) => {
+      if (onUserMessageEditRequest?.(turnIndex, content) === true) return;
+
+      const restoreComposer = () => {
+        editorRef.current?.setText(content);
+        editorRef.current?.focus();
+      };
+
+      restoreComposer();
+      window.setTimeout(restoreComposer, 0);
+      try {
+        const { snapshots } = await sessionActions.getRewindSnapshots();
+        const snapshot = snapshots.find(
+          (entry) => entry.turnIndex === turnIndex,
+        );
+        if (!snapshot) throw new Error(t('rewind.empty'));
+        await sessionActions.rewindSession(snapshot.promptId, {
+          rewindFiles: false,
+        });
+      } catch (error) {
+        reportError(error, t('rewind.failed', { reason: String(error) }));
+      } finally {
+        restoreComposer();
+      }
+    },
+    [onUserMessageEditRequest, reportError, sessionActions, t],
+  );
+
   const handleRewindError = useCallback(
     (error: unknown) => {
       if (isAlreadyDispatched(error)) return;
@@ -11311,6 +11402,7 @@ export function App({
         retainedCommands,
         refreshedSkillCommands,
         getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
+        [...additionalSlashCommands],
       ),
       t,
     )
@@ -11327,6 +11419,7 @@ export function App({
         };
       });
   }, [
+    additionalSlashCommands,
     connection.commands,
     connection.skills,
     hiddenCommands,
@@ -12846,6 +12939,15 @@ export function App({
                                     : visibleFailedPromptBlock?.id
                                 }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
+                                onEditUserMessage={
+                                  userMessageEditing
+                                    ? (turnIndex, content) =>
+                                        void editUserMessage(
+                                          turnIndex,
+                                          content,
+                                        )
+                                    : undefined
+                                }
                                 onBranchSession={handleBranchCurrentSession}
                                 bottomOverlayInset={bottomPanelInset}
                                 welcomeHeader={
@@ -12878,6 +12980,7 @@ export function App({
                                 onTurnOutputOpen={handleTurnOutputOpen}
                                 onImagePreview={openImagePanel}
                                 onAttachmentPreview={openAttachmentPanel}
+                                onInsightReportOpen={onInsightReportOpen}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -13205,6 +13308,7 @@ export function App({
                         )}
                         <ChatEditor
                           ref={setEditorHandle}
+                          compactOverlays={compactComposerOverlays}
                           onSubmit={handleEditorSubmit}
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
@@ -13214,6 +13318,7 @@ export function App({
                           onImagePreview={openImagePanel}
                           onAttachmentPreview={openAttachmentPanel}
                           onCycleMode={handleCycleMode}
+                          cycleModeOnTab={cycleModeOnTab}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
                           isRunning={
@@ -13234,6 +13339,7 @@ export function App({
                           commands={commands}
                           skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
+                          autoSubmitSlashCommands={autoSubmitSlashCommands}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
@@ -13278,6 +13384,9 @@ export function App({
                           }
                           tokenCount={connection.tokenCount ?? 0}
                           contextWindow={connection.contextWindow ?? 0}
+                          contextUsageAlwaysVisible={
+                            contextUsageAlwaysVisible
+                          }
                           onShowContextUsage={handleShowContextUsage}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
