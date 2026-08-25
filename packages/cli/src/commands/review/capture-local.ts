@@ -227,6 +227,24 @@ function invisibleStopRefusal(invisible: string[] | null): string {
 }
 
 /**
+ * Why a decided stop is withheld when the round ran with `--no-untracked` —
+ * shared by the two incremental stops; the clean-tree stop's exclusion has
+ * its own shape-specific sentence. The anchor gate admits no round NARROWER
+ * than the cache, so the cached round ran narrow too: neither ever
+ * enumerated untracked files, and a brand-new one is invisible to both.
+ */
+function untrackedStopRefusal(): string {
+  return (
+    'The incremental scope kept nothing to review, but untracked files ' +
+    'were not enumerated (--no-untracked) — not by this round and not by ' +
+    'the round the cache records — so a brand-new file is invisible to ' +
+    'both, and this is NOT a decided nothing-to-review: report the ' +
+    'untracked scope under "Not reviewed" and end the round without the ' +
+    'stop.'
+  );
+}
+
+/**
  * Why the cache candidate is withheld when tracked paths carry a visibility
  * bit — or when the bits themselves could not be enumerated.
  */
@@ -853,11 +871,20 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       if (stateMoved.length === 0 && stateChanged.length === 0) {
         const invisible = invisibleTracked();
         if (invisible !== null && invisible.length === 0) {
-          nothingToReview = { reason: 'unchanged-since-last-round' };
-          writeStderrLine(
-            `No changes since the last local review round (same model, same ` +
-              `HEAD, same content) — nothing to re-review.`,
-          );
+          if (args.untracked !== false) {
+            nothingToReview = { reason: 'unchanged-since-last-round' };
+            writeStderrLine(
+              `No changes since the last local review round (same model, ` +
+                `same HEAD, same content) — nothing to re-review.`,
+            );
+          } else {
+            // …but "same content" was only proven over tracked paths: the
+            // gate admits no narrower round than the cache, so the cached
+            // round ran `--no-untracked` too — neither enumerated untracked
+            // files, and a brand-new one is invisible to both. The same
+            // exclusion the clean-tree stop carries, out loud.
+            writeStderrLine(untrackedStopRefusal());
+          }
         } else {
           // …but "unchanged" was only proven over what `git diff` can see:
           // a marked path's edit leaves every comparison above standing
@@ -996,7 +1023,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // the refusal is said out loud like the unchanged stop's own.
     const invisible = invisibleTracked();
     if (invisible !== null && invisible.length === 0) {
-      nothingToReview = { reason: 'scope-emptied' };
+      if (args.untracked !== false) {
+        nothingToReview = { reason: 'scope-emptied' };
+      } else {
+        // The emptied scope proves only the TRACKED content returned to the
+        // cached state — neither round enumerated untracked files (the gate
+        // admits no narrower round than the cache). The same exclusion both
+        // sibling stops carry, out loud.
+        writeStderrLine(untrackedStopRefusal());
+      }
     } else {
       writeStderrLine(invisibleStopRefusal(invisible));
     }
