@@ -214,7 +214,7 @@ function parseRequiredSessionId(
 function serviceError(
   code: StandaloneSessionServiceErrorCode,
   sessionId: string,
-  retryable = false,
+  retryable = code === 'working_directory_missing',
 ): StandaloneSessionServiceError {
   const messages: Record<StandaloneSessionServiceErrorCode, string> = {
     invalid_request: 'The standalone session request is invalid.',

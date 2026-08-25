@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionIdCaseConflictError,
   SessionStorageEntryError,
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
@@ -1751,7 +1752,9 @@ export function registerSessionRoutes(
           }),
         );
       } catch (err) {
-        sendBridgeError(res, err, { route, sessionId });
+        if (!res.headersSent) {
+          sendBridgeError(res, err, { route, sessionId });
+        }
       }
     };
 
@@ -1791,7 +1794,9 @@ export function registerSessionRoutes(
           Promise.resolve(handler(req, res, sessionId, runtime)),
         );
       } catch (err) {
-        sendBridgeError(res, err, { route, sessionId });
+        if (!res.headersSent) {
+          sendBridgeError(res, err, { route, sessionId });
+        }
       }
     };
 
@@ -3428,8 +3433,19 @@ export function registerSessionRoutes(
             runtime,
             async () => {
               const service = createWorkspaceRuntimeSessionService(runtime);
-              const storageSessionId =
-                await service.findSessionIdIgnoringCase(sessionId);
+              let storageSessionId: string | undefined;
+              try {
+                storageSessionId =
+                  await service.findSessionIdIgnoringCase(sessionId);
+              } catch (error) {
+                if (
+                  error instanceof SessionIdCaseConflictError &&
+                  error.candidateSessionId === sessionId
+                ) {
+                  return false;
+                }
+                throw error;
+              }
               if (storageSessionId === undefined) return false;
               const source = await readLoadableConversationSession(
                 storageSessionId,

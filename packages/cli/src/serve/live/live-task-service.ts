@@ -1275,15 +1275,9 @@ export class LiveTaskService {
                     (error instanceof StandaloneSessionServiceError &&
                       (error.code === 'standalone_session_not_found' ||
                         error.code === 'invalid_request')) ||
-                    // A quarantined, draining, or otherwise unavailable
-                    // Conversations runtime cannot serve this thread — treat
-                    // it as absent so the scan still reaches healthy runtimes
-                    // instead of rejecting the whole Promise.all.
-                    error instanceof ConversationRuntimeOwnershipError ||
                     error instanceof DaemonDrainingError ||
-                    (error instanceof Error &&
-                      error.message ===
-                        'Live conversation runtime is unavailable.')
+                    (error instanceof ConversationRuntimeOwnershipError &&
+                      error.code === 'conversation_runtime_unavailable')
                   ) {
                     return false;
                   }

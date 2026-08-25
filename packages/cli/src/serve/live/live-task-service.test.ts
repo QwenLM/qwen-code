@@ -18,6 +18,8 @@ import type {
 import { isLiveTaskToolName, LiveTaskService } from './live-task-service.js';
 import { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
@@ -472,6 +474,44 @@ describe('LiveTaskService', () => {
       code: 'conversation_runtime_unavailable',
       retryable: true,
     });
+  });
+
+  it.each([
+    [
+      'an unavailable Conversations runtime',
+      () =>
+        new ConversationRuntimeOwnershipError(
+          'conversation_runtime_unavailable',
+          true,
+        ),
+    ],
+    ['a draining Conversations runtime', () => new DaemonDrainingError()],
+  ])('reads a healthy project task past %s', async (_label, makeError) => {
+    const harness = makeHarness();
+    const sessionId = 'project-task';
+    const summary: BridgeSessionSummary = {
+      sessionId,
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:03.000Z',
+      displayName: 'Project task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    persistedSessions.set(sessionId, persisted(sessionId));
+    persistedSessionOwners.set(sessionId, '/project');
+    harness.standaloneSessionService.get.mockRejectedValueOnce(makeError());
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [summary],
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: sessionId },
+      }),
+    ).resolves.toMatchObject({ thread: { id: sessionId } });
   });
 
   it('lists existing tasks in the current Codex wire shape without creating one', async () => {

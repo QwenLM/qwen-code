@@ -33913,6 +33913,7 @@ describe('Live conversation runtime lifecycle', () => {
       inode: number;
       inodeVerifiable: boolean;
     }> = {},
+    serveOverrides: Partial<ServeOptions> = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -34014,7 +34015,7 @@ describe('Live conversation runtime lifecycle', () => {
       })),
       disposeRuntime: vi.fn(async () => undefined),
     };
-    const app = createServeApp(baseOpts, undefined, {
+    const app = createServeApp({ ...baseOpts, ...serveOverrides }, undefined, {
       bridge: primaryBridge,
       workspaceRegistry: registry,
       createWorkspaceRuntime,
@@ -34902,6 +34903,7 @@ describe('Live conversation runtime lifecycle', () => {
         .send({ directive: 'review the current code' });
       expect(fork.status).toBe(409);
       expect(fork.body.code).toBe('working_directory_missing');
+      expect(fork.body.retryable).toBe(true);
       expect(setup.liveBridge.forkCalls).toHaveLength(0);
 
       const syncLanguage = await request(setup.app)
@@ -34910,6 +34912,7 @@ describe('Live conversation runtime lifecycle', () => {
         .send({ language: 'zh', syncOutputLanguage: true });
       expect(syncLanguage.status).toBe(409);
       expect(syncLanguage.body.code).toBe('working_directory_missing');
+      expect(syncLanguage.body.retryable).toBe(true);
       expect(setup.liveBridge.setLanguageCalls).toHaveLength(0);
 
       const userLanguageOnly = await request(setup.app)
@@ -34991,25 +34994,117 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
-    const setup = setupLiveRuntime();
+  it('keeps a sent standalone continuation response when the runtime changes afterward', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+    let restored = false;
+    const setupRef: { current?: ReturnType<typeof setupLiveRuntime> } = {};
+    const setup = setupLiveRuntime(
+      {
+        loadImpl: async (req) => {
+          restored = true;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            currentCwd: req.workspaceCwd,
+            attached: false,
+            clientId: req.clientId ?? 'client-continue-race',
+            sourceType: req.sourceType,
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+        summaryImpl: (id) => {
+          if (!restored) throw new SessionNotFoundError(id);
+          const current = setupRef.current!;
+          return {
+            sessionId: id,
+            workspaceCwd: current.root.canonicalRoot,
+            currentCwd: `${current.root.canonicalRoot}/conversation-${id}`,
+            createdAt: '2026-08-24T00:00:00.000Z',
+            sourceType: 'standalone',
+            clientCount: 0,
+            hasActivePrompt: false,
+          };
+        },
+        continueSessionImpl: async () => {
+          const current = setupRef.current!;
+          const entry = current.registry.getManagedEntryByWorkspaceId(
+            current.liveRuntime.workspaceId,
+          );
+          expect(entry).toBeDefined();
+          expect(current.registry.beginReplacement(entry!, 'policy-2')).toBe(
+            true,
+          );
+          return { accepted: true, interruption: 'none' as const };
+        },
+      },
+      {},
+      { token: 'secret' },
+    );
+    setupRef.current = setup;
     setup.registry.add(setup.liveRuntime);
-    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
-    const storageSessionId = canonicalSessionId.toUpperCase();
     const findSessionId = vi
       .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-      .mockImplementation(async (sessionId) =>
-        sessionId === canonicalSessionId ? storageSessionId : sessionId,
-      );
+      .mockResolvedValue(sessionId);
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
     const readCreationMetadata = vi
-      .spyOn(SessionService.prototype, 'readCreationMetadata')
-      .mockResolvedValue({
-        sourceType: 'default',
-        sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValue({ sourceType: 'default' });
+    try {
+      const load = await request(setup.app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(load.status).toBe(200);
+
+      const continued = await request(setup.app)
+        .post(`/session/${sessionId}/continue`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({});
+      expect(continued.status).toBe(200);
+      expect(continued.body).toEqual({
+        accepted: true,
+        interruption: 'none',
       });
+    } finally {
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const exactConflictSessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = canonicalSessionId.toUpperCase();
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) => {
+        if (sessionId === exactConflictSessionId) {
+          throw new SessionIdCaseConflictError(sessionId, sessionId);
+        }
+        return sessionId === canonicalSessionId ? storageSessionId : sessionId;
+      });
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockImplementation(async (sessionId) =>
+        sessionId === exactConflictSessionId ? 'conflict' : 'active',
+      );
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockImplementation(async (sessionId) => ({
+        sourceType: 'default',
+        sourceId: `realtime_voice:p1:h1:a1:${sessionId}`,
+      }));
     const readCreationMetadataIfReadable = vi
       .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
       .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
@@ -35037,6 +35132,15 @@ describe('Live conversation runtime lifecycle', () => {
       expect(readCreationMetadataIfReadable).toHaveBeenCalledWith(
         storageSessionId,
         'active',
+      );
+
+      const exactConflict = await request(setup.app)
+        .post(`/session/${exactConflictSessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(exactConflict.status).toBe(200);
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({ sessionId: exactConflictSessionId }),
       );
 
       findSessionId.mockRejectedValueOnce(

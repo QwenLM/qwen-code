@@ -294,7 +294,10 @@ import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
-import { conversationRootCompromisedError } from './conversations/conversation-runtime-errors.js';
+import {
+  conversationRootCompromisedError,
+  conversationRuntimeUnavailableError,
+} from './conversations/conversation-runtime-errors.js';
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import {
@@ -1553,7 +1556,7 @@ export function createServeApp(
   const ensureConversationRuntimeWithLifecycle = async () => {
     await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
     if (!liveRuntimeBootResult) {
-      throw new Error('Live conversation runtime is unavailable.');
+      throw conversationRuntimeUnavailableError();
     }
     return liveRuntimeBootResult;
   };
@@ -2948,6 +2951,7 @@ export function createServeApp(
           },
         }
       : {}),
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
