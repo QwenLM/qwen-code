@@ -3077,6 +3077,11 @@ export function App({
             .keys()
             .next().value;
           if (oldestSessionId) {
+            const oldestState =
+              artifactPanelStateBySessionRef.current.get(oldestSessionId);
+            for (const tab of oldestState?.tabs ?? []) {
+              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
+            }
             artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
         }

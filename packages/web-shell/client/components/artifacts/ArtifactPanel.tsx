@@ -597,6 +597,7 @@ export function ArtifactPanel({
               <TerminalPanel
                 terminalId={tab.id}
                 cwd={tab.workspaceCwd ?? workspaceCwd}
+                active={tab.id === activeTab?.id}
               />
             </div>
           ))}

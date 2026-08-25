@@ -2754,10 +2754,7 @@ describe('createServeApp', () => {
       // Conditional tags (currently `require_auth`) are absent unless
       // a runtime toggle is supplied; this is the "no toggles passed"
       // baseline that older clients see on a default-loopback daemon.
-      expect(getAdvertisedServeFeatures()).toEqual([
-        ...EXPECTED_STAGE1_FEATURES,
-        'web_terminal',
-      ]);
+      expect(getAdvertisedServeFeatures()).toEqual(EXPECTED_STAGE1_FEATURES);
       expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
     });
 
@@ -2794,10 +2791,13 @@ describe('createServeApp', () => {
       ).toContain('voice_transcribe');
     });
 
-    it('advertises `web_terminal` for frontend version compatibility', () => {
-      expect(getAdvertisedServeFeatures(undefined, {})).toContain(
-        'web_terminal',
-      );
+    it('advertises `web_terminal` only with the ACP HTTP surface', () => {
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
+      ).toContain('web_terminal');
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+      ).not.toContain('web_terminal');
     });
 
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
@@ -3376,6 +3376,18 @@ describe('createServeApp', () => {
               acpHttpEnabled: true,
               realtimeVoiceEnabled: true,
             }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+          ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'web_terminal') {
+          expect(predicate({ acpHttpEnabled: true })).toBe(true);
+          expect(predicate({ acpHttpEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
           ).toContain(feature);
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),

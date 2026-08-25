@@ -15,4 +15,6 @@ PTY. Hiding the panel, switching tabs or losing the WebSocket only detaches the
 client, so reconnect can replay the same session. A detached session is killed
 after the idle timeout even if its command is still running. Exited sessions
 replay both scrollback and exit state. Binary WebSocket frames contain UTF-8
-terminal input and output; text frames are reserved for control messages.
+terminal input and output; NUL-prefixed text frames contain control messages.
+Reloading the page loses the in-memory terminal id, so the detached session is
+reclaimed after the idle timeout rather than restored into the new page.

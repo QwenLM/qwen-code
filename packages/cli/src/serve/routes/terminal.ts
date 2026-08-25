@@ -13,6 +13,7 @@ const TERMINAL_WS_PATH = '/terminal';
 const CONTROL_FRAME_PREFIX = '\x00';
 const MAX_PENDING_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_DIMENSION = 1000;
+const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
 
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
@@ -23,8 +24,15 @@ type TerminalControl =
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'release' };
 
-function sendOutput(ws: WebSocket, text: string): void {
-  if (ws.readyState === ws.OPEN) ws.send(Buffer.from(text));
+function sendOutput(ws: WebSocket, text: string): boolean {
+  if (
+    ws.readyState !== ws.OPEN ||
+    ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
+  ) {
+    return false;
+  }
+  ws.send(Buffer.from(text));
+  return true;
 }
 
 function sendControl(ws: WebSocket, payload: unknown): void {
@@ -58,7 +66,7 @@ function parseControl(data: string): TerminalControl | null {
       };
     }
   } catch {
-    // Not a valid control frame; preserve it as terminal input.
+    // Malformed control frames are dropped by the caller.
   }
   return null;
 }
@@ -85,9 +93,15 @@ export function createTerminalWsHandler(
     path: TERMINAL_WS_PATH,
     bypassPrimaryDrain: true,
     onConnection: async (ws: WebSocket, req: IncomingMessage) => {
+      let closed = false;
+      const markClosed = () => {
+        closed = true;
+      };
+      ws.on('error', markClosed);
       const url = new URL(req.url ?? '', 'http://localhost');
       const terminalId = url.searchParams.get('terminalId');
       const selector = url.searchParams.get('cwd');
+      const releaseOnly = url.searchParams.get('release') === '1';
       const workspace = selector ? resolveWorkspace(selector) : undefined;
       if (!terminalId || terminalId.length > 256 || !selector || !workspace) {
         sendControl(ws, {
@@ -97,17 +111,18 @@ export function createTerminalWsHandler(
         ws.close(4002, 'Terminal workspace unavailable');
         return;
       }
+      if (releaseOnly) {
+        registry.release(terminalId, workspace.workspaceCwd);
+        ws.close(4004, 'Terminal released');
+        return;
+      }
       const workspaceSelector = selector;
 
-      let closed = false;
       let created = false;
       let inputRejected = false;
       let releaseRequested = false;
       let pendingBytes = 0;
       const pending: Array<{ text: string; isBinary: boolean }> = [];
-      const markClosed = () => {
-        closed = true;
-      };
       const bufferMessage = (data: unknown, isBinary = false) => {
         const text = toText(data);
         if (!isBinary && parseControl(text)?.type === 'release') {
@@ -120,7 +135,7 @@ export function createTerminalWsHandler(
             type: 'error',
             message: 'Terminal input too large',
           });
-          ws.close(4001, 'Terminal input too large');
+          ws.close(1013, 'Terminal input too large');
           return;
         }
         pending.push({ text, isBinary });
@@ -230,12 +245,23 @@ export function createTerminalWsHandler(
           ws.close(4002, 'Terminal workspace unavailable');
           return;
         }
-        registry.write(terminalId, text);
+        if (!registry.write(terminalId, text)) {
+          sendControl(ws, {
+            type: 'error',
+            message: 'Terminal input backpressure',
+          });
+          cleanup();
+          registry.release(terminalId, workspace.workspaceCwd);
+          ws.close(1013, 'Terminal input backpressure');
+        }
       };
 
-      detach.output = registry.addOutputListener(terminalId, (data) =>
-        sendOutput(ws, data),
-      );
+      detach.output = registry.addOutputListener(terminalId, (data) => {
+        if (!sendOutput(ws, data)) {
+          cleanup();
+          ws.close(1013, 'Terminal output backpressure');
+        }
+      });
       if (!detach.output) {
         sendControl(ws, { type: 'error', message: 'Session unavailable' });
         ws.close(4002, 'Session unavailable');
@@ -255,8 +281,13 @@ export function createTerminalWsHandler(
       ws.off('message', bufferMessage);
       ws.on('message', onMessage);
       ws.on('close', cleanup);
+      ws.off('error', markClosed);
       ws.on('error', cleanup);
-      sendOutput(ws, snapshot.output);
+      if (!sendOutput(ws, snapshot.output)) {
+        cleanup();
+        ws.close(1013, 'Terminal output backpressure');
+        return;
+      }
       if (snapshot.exited) {
         finishExited(snapshot.exitCode);
         return;

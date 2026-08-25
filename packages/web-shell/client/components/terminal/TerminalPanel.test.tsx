@@ -29,12 +29,24 @@ vi.mock('@xterm/addon-fit', () => ({
 }));
 vi.mock('../../themeContext', () => ({ useTheme: () => 'light' }));
 vi.mock('../../config/daemon', () => ({ getDaemonToken: () => '' }));
+vi.mock('../../i18n', () => ({
+  useI18n: () => ({
+    t: (key: string, values?: Record<string, string>) =>
+      ({
+        'terminal.notice.exited': `Process exited with code ${values?.['exitCode'] ?? '?'}`,
+        'terminal.notice.error': `Error: ${values?.['message'] ?? ''}`,
+        'terminal.notice.unknownError': 'Unknown error',
+        'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+      })[key] ?? key,
+  }),
+}));
 
 import { releaseWebTerminal, TerminalPanel } from './TerminalPanel';
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
+  static readonly CLOSING = 2;
   static readonly CLOSED = 3;
   static readonly instances: FakeWebSocket[] = [];
 
@@ -88,7 +100,7 @@ describe('TerminalPanel', () => {
       },
     );
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      callback(0);
+      callback(16);
       return 1;
     });
     container = document.createElement('div');
@@ -103,9 +115,15 @@ describe('TerminalPanel', () => {
     vi.unstubAllGlobals();
   });
 
-  function render(): FakeWebSocket {
+  function render(active = true): FakeWebSocket {
     act(() => {
-      root.render(<TerminalPanel terminalId="terminal:one" cwd="/workspace" />);
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={active}
+        />,
+      );
     });
     return FakeWebSocket.instances[0]!;
   }
@@ -139,7 +157,7 @@ describe('TerminalPanel', () => {
     );
   });
 
-  it.each([4000, 4001, 4002, 4003, 4004])(
+  it.each([4000, 4001, 4002, 4004])(
     'does not reconnect after non-retryable close code %s',
     async (code) => {
       const ws = render();
@@ -184,5 +202,78 @@ describe('TerminalPanel', () => {
     act(() => releaseWebTerminal('terminal:one'));
 
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
+
+  it('releases an exited session through a release handshake', async () => {
+    const ws = render();
+    act(() => ws.open());
+    act(() => ws.closeWith(4000));
+
+    act(() => releaseWebTerminal('terminal:one'));
+
+    const releaseSocket = FakeWebSocket.instances[1]!;
+    expect(new URL(releaseSocket.url).searchParams.get('release')).toBe('1');
+    act(() => releaseSocket.open());
+    expect(releaseSocket.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    act(() => releaseSocket.closeWith(4004));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it('retries a failed release handshake a bounded number of times', async () => {
+    const ws = render();
+    act(() => ws.open());
+    act(() => ws.closeWith(4000));
+    act(() => releaseWebTerminal('terminal:one'));
+
+    act(() => FakeWebSocket.instances[1]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    expect(
+      new URL(FakeWebSocket.instances[2]!.url).searchParams.get('release'),
+    ).toBe('1');
+  });
+
+  it('sends the connection contract and initial terminal size', () => {
+    const ws = render();
+
+    expect(ws.binaryType).toBe('arraybuffer');
+    const url = new URL(ws.url);
+    expect(url.pathname).toBe('/terminal');
+    expect(url.searchParams.get('terminalId')).toBe('terminal:one');
+    expect(url.searchParams.get('cwd')).toBe('/workspace');
+
+    act(() => ws.open());
+    expect(ws.send).toHaveBeenCalledWith(
+      '\x00{"type":"resize","cols":80,"rows":24}',
+    );
+  });
+
+  it('does not reconnect after an exit control frame', async () => {
+    const ws = render();
+    act(() => ws.open());
+
+    act(() => ws.message('\x00{"type":"exit","exitCode":0}'));
+    act(() => ws.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+
+    expect(terminal.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('Process exited with code 0'),
+    );
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('restores focus when its terminal tab becomes active', () => {
+    render(false);
+    terminal.focus.mockClear();
+
+    act(() => {
+      root.render(
+        <TerminalPanel terminalId="terminal:one" cwd="/workspace" active />,
+      );
+    });
+
+    expect(terminal.focus).toHaveBeenCalledOnce();
   });
 });

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { getPty } from '../utils/getPty.js';
 
 /**
@@ -27,8 +28,6 @@ export interface CreateWebTerminalOptions {
   terminalId?: string;
   workspaceCwd: string;
   env?: Readonly<NodeJS.ProcessEnv>;
-  cols?: number;
-  rows?: number;
 }
 
 export interface CreateWebTerminalResult {
@@ -38,6 +37,7 @@ export interface CreateWebTerminalResult {
 /** Upper bound on replayed scrollback per PTY session (roughly 4 MB). */
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+const MAX_UNACKNOWLEDGED_INPUT_BYTES = 256 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
@@ -47,16 +47,48 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
+  unacknowledgedInputBytes: number;
   exited: boolean;
   exitCode?: number;
   outputListeners: Set<(data: string) => void>;
   exitListeners: Set<(e: { exitCode: number; signal?: number }) => void>;
   reclaimTimer?: ReturnType<typeof setTimeout>;
+  dataDisposable?: { dispose(): void };
+  exitDisposable?: { dispose(): void };
 }
 
 interface SpawnedWebTerminalPty extends WebTerminalPty {
-  onData(callback: (data: string) => void): void;
-  onExit(callback: (e: { exitCode: number; signal?: number }) => void): void;
+  onData(callback: (data: string) => void): { dispose(): void } | undefined;
+  onExit(
+    callback: (e: { exitCode: number; signal?: number }) => void,
+  ): { dispose(): void } | undefined;
+}
+
+function killPtyTree(pty: WebTerminalPty): void {
+  if (process.platform === 'win32') {
+    const taskkill = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+    try {
+      spawnSync(taskkill, ['/f', '/t', '/pid', String(pty.pid)], {
+        windowsHide: true,
+      });
+    } catch {
+      // Fall through to the node-pty host cleanup.
+    }
+  } else {
+    if (pty.pid > 1) {
+      try {
+        process.kill(-pty.pid, 'SIGKILL');
+        return;
+      } catch {
+        // Fall through when the process group has already exited.
+      }
+    }
+  }
+  try {
+    pty.kill();
+  } catch {
+    // Already gone.
+  }
 }
 
 export function resolveWebTerminalShell(
@@ -101,7 +133,7 @@ export class WebTerminalRegistry {
       this.sessions.size + this.creating.size >=
       MAX_CONCURRENT_WEB_TERMINALS
     ) {
-      return { error: 'Web terminal limit reached' };
+      return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
     let ptyImpl;
@@ -131,11 +163,52 @@ export class WebTerminalRegistry {
     delete env['npm_config_prefix'];
     let spawned: SpawnedWebTerminalPty;
     let proc: WebTerminalPty;
+    const sessionRef: { current?: PtySession } = {};
+    const earlyOutput: string[] = [];
+    let earlyExit: { exitCode: number; signal?: number } | undefined;
+    const handleData = (data: string) => {
+      const session = sessionRef.current;
+      if (!session) {
+        earlyOutput.push(data);
+        return;
+      }
+      session.unacknowledgedInputBytes = 0;
+      if (Buffer.byteLength(data) > MAX_BUFFER_BYTES) {
+        data = Buffer.from(data).subarray(-MAX_BUFFER_BYTES).toString('utf8');
+        while (Buffer.byteLength(data) > MAX_BUFFER_BYTES) data = data.slice(1);
+        session.buffer = [];
+        session.bufferBytes = 0;
+      }
+      session.buffer.push(data);
+      session.bufferBytes += Buffer.byteLength(data);
+      while (
+        session.buffer.length > MAX_BUFFER_CHUNKS ||
+        session.bufferBytes > MAX_BUFFER_BYTES
+      ) {
+        const dropped = session.buffer.shift();
+        if (dropped !== undefined) {
+          session.bufferBytes -= Buffer.byteLength(dropped);
+        }
+      }
+      for (const listener of session.outputListeners) listener(data);
+    };
+    const handleExit = (e: { exitCode: number; signal?: number }) => {
+      const session = sessionRef.current;
+      if (!session) {
+        earlyExit = e;
+        return;
+      }
+      session.exited = true;
+      session.exitCode = e.exitCode;
+      for (const listener of session.exitListeners) listener(e);
+    };
+    let dataDisposable: { dispose(): void } | undefined;
+    let exitDisposable: { dispose(): void } | undefined;
     try {
       spawned = ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
-        cols: options.cols ?? 80,
-        rows: options.rows ?? 24,
+        cols: 80,
+        rows: 24,
         cwd: options.workspaceCwd,
         env: {
           ...env,
@@ -145,6 +218,8 @@ export class WebTerminalRegistry {
           PROMPT_EOL_MARK: '',
         },
       }) as SpawnedWebTerminalPty;
+      dataDisposable = spawned.onData(handleData);
+      exitDisposable = spawned.onExit(handleExit);
       proc = {
         pid: spawned.pid,
         write: (data) => spawned.write(data),
@@ -161,33 +236,18 @@ export class WebTerminalRegistry {
       workspaceCwd: options.workspaceCwd,
       buffer: [],
       bufferBytes: 0,
+      unacknowledgedInputBytes: 0,
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
+      dataDisposable,
+      exitDisposable,
     };
+    sessionRef.current = session;
     this.sessions.set(terminalId, session);
     this.finishCreating(terminalId);
-
-    spawned.onData((data: string) => {
-      session.buffer.push(data);
-      session.bufferBytes += Buffer.byteLength(data);
-      while (
-        session.buffer.length > MAX_BUFFER_CHUNKS ||
-        session.bufferBytes > MAX_BUFFER_BYTES
-      ) {
-        const dropped = session.buffer.shift();
-        if (dropped !== undefined) {
-          session.bufferBytes -= Buffer.byteLength(dropped);
-        }
-      }
-      for (const listener of session.outputListeners) listener(data);
-    });
-
-    spawned.onExit((e: { exitCode: number; signal?: number }) => {
-      session.exited = true;
-      session.exitCode = e.exitCode;
-      for (const listener of session.exitListeners) listener(e);
-    });
+    for (const data of earlyOutput) handleData(data);
+    if (earlyExit) handleExit(earlyExit);
     this.scheduleReclaim(terminalId, session);
 
     return { terminalId };
@@ -202,6 +262,7 @@ export class WebTerminalRegistry {
     session.outputListeners.add(listener);
     this.clearReclaim(session);
     return () => {
+      if (this.sessions.get(terminalId) !== session) return;
       session.outputListeners.delete(listener);
       if (session.outputListeners.size === 0)
         this.scheduleReclaim(terminalId, session);
@@ -233,8 +294,16 @@ export class WebTerminalRegistry {
   write(terminalId: string, data: string): boolean {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited) return false;
+    const bytes = Buffer.byteLength(data);
+    if (
+      session.unacknowledgedInputBytes + bytes >
+      MAX_UNACKNOWLEDGED_INPUT_BYTES
+    ) {
+      return false;
+    }
     try {
       session.pty.write(data);
+      session.unacknowledgedInputBytes += bytes;
       return true;
     } catch {
       return false;
@@ -277,11 +346,16 @@ export class WebTerminalRegistry {
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
     if (!session.exited) {
-      try {
-        session.pty.kill();
-      } catch {
-        // Ignore.
+      for (const listener of session.exitListeners) {
+        listener({ exitCode: 143, signal: 15 });
       }
+    }
+    session.dataDisposable?.dispose();
+    session.exitDisposable?.dispose();
+    session.outputListeners.clear();
+    session.exitListeners.clear();
+    if (!session.exited) {
+      killPtyTree(session.pty);
     }
     return true;
   }
@@ -314,7 +388,13 @@ export class WebTerminalRegistry {
   private scheduleReclaim(terminalId: string, session: PtySession): void {
     if (session.reclaimTimer) clearTimeout(session.reclaimTimer);
     session.reclaimTimer = setTimeout(() => {
-      if (session.outputListeners.size === 0) this.release(terminalId);
+      if (
+        !this.disposed &&
+        this.sessions.get(terminalId) === session &&
+        session.outputListeners.size === 0
+      ) {
+        this.release(terminalId);
+      }
     }, IDLE_RECLAIM_MS);
     session.reclaimTimer.unref?.();
   }

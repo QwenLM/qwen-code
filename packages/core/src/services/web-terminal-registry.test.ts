@@ -25,12 +25,16 @@ describe('WebTerminalRegistry', () => {
   let write: ReturnType<typeof vi.fn>;
   let resize: ReturnType<typeof vi.fn>;
   let kill: ReturnType<typeof vi.fn>;
+  let disposeData: ReturnType<typeof vi.fn>;
+  let disposeExit: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
+    disposeData = vi.fn();
+    disposeExit = vi.fn();
     spawn.mockReturnValue({
       pid: 1,
       write,
@@ -38,9 +42,11 @@ describe('WebTerminalRegistry', () => {
       kill,
       onData: vi.fn((listener) => {
         onData = listener;
+        return { dispose: disposeData };
       }),
       onExit: vi.fn((listener) => {
         onExit = listener;
+        return { dispose: disposeExit };
       }),
     });
     getPty.mockResolvedValue({ module: { spawn }, name: 'node-pty' });
@@ -150,7 +156,10 @@ describe('WebTerminalRegistry', () => {
         terminalId: 'terminal:over-limit',
         workspaceCwd: '/workspace',
       }),
-    ).resolves.toEqual({ error: 'Web terminal limit reached' });
+    ).resolves.toEqual({
+      error: 'Web terminal limit reached',
+      retryable: true,
+    });
     resolvePty?.({ module: { spawn }, name: 'node-pty' });
     await pending;
 
@@ -210,7 +219,9 @@ describe('WebTerminalRegistry', () => {
 
     onData('界'.repeat(1_500_000));
 
-    expect(registry.readSnapshot('terminal:utf8-buffer')?.output).toBe('');
+    const output = registry.readSnapshot('terminal:utf8-buffer')?.output ?? '';
+    expect(output.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(4 * 1024 * 1024);
   });
 
   it('releases a live PTY immediately and only once', async () => {
@@ -223,7 +234,44 @@ describe('WebTerminalRegistry', () => {
     expect(registry.release('terminal:release')).toBe(true);
     expect(registry.release('terminal:release')).toBe(false);
     expect(kill).toHaveBeenCalledOnce();
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
+  });
+
+  it('forwards live output and bounds unacknowledged PTY input', async () => {
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:io',
+      workspaceCwd: '/workspace',
+    });
+    const listener = vi.fn();
+    registry.addOutputListener('terminal:io', listener);
+
+    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(true);
+    expect(registry.write('terminal:io', 'x')).toBe(false);
+    expect(write).toHaveBeenCalledOnce();
+    expect(registry.resize('terminal:io', 120, 40)).toBe(true);
+    expect(resize).toHaveBeenCalledWith(120, 40);
+
+    onData('ready');
+    expect(listener).toHaveBeenCalledWith('ready');
+    expect(registry.write('terminal:io', 'x')).toBe(true);
+  });
+
+  it('preserves a clean exit code in snapshots', async () => {
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:clean-exit',
+      workspaceCwd: '/workspace',
+    });
+
+    onExit({ exitCode: 0 });
+
+    expect(registry.readSnapshot('terminal:clean-exit')).toMatchObject({
+      exited: true,
+      exitCode: 0,
+    });
   });
 
   it('does not spawn a PTY after disposal wins an in-flight create', async () => {
@@ -346,10 +394,8 @@ describe('WebTerminalRegistry', () => {
       workspaceCwd: '/workspace-a',
     });
     const killA = kill;
-    const exitA = onExit;
     const exitListener = vi.fn();
     registry.addExitListener('terminal:a', exitListener);
-    killA.mockImplementation(() => exitA({ exitCode: 0 }));
     await registry.create({
       terminalId: 'terminal:b',
       workspaceCwd: '/workspace-b',
@@ -358,7 +404,7 @@ describe('WebTerminalRegistry', () => {
     registry.releaseWorkspace('/workspace-a');
 
     expect(killA).toHaveBeenCalledOnce();
-    expect(exitListener).toHaveBeenCalledWith({ exitCode: 0 });
+    expect(exitListener).toHaveBeenCalledWith({ exitCode: 143, signal: 15 });
     expect(registry.readSnapshot('terminal:a')).toBeUndefined();
     expect(registry.readSnapshot('terminal:b')).toBeDefined();
   });
@@ -390,5 +436,28 @@ describe('WebTerminalRegistry', () => {
     await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
     expect(kill).toHaveBeenCalledOnce();
     expect(registry.readSnapshot('terminal:idle')).toBeUndefined();
+  });
+
+  it('does not let a stale detach reclaim a reused terminal id', async () => {
+    vi.useFakeTimers();
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:reused',
+      workspaceCwd: '/workspace',
+    });
+    const detach = registry.addOutputListener('terminal:reused', vi.fn());
+
+    registry.release('terminal:reused');
+    detach?.();
+    kill.mockClear();
+    await registry.create({
+      terminalId: 'terminal:reused',
+      workspaceCwd: '/workspace',
+    });
+    registry.addOutputListener('terminal:reused', vi.fn());
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(registry.readSnapshot('terminal:reused')).toBeDefined();
   });
 });

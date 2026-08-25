@@ -24,6 +24,7 @@ const request = {
 class FakeWebSocket extends EventEmitter {
   readonly OPEN = 1;
   readonly readyState = this.OPEN;
+  bufferedAmount = 0;
   readonly sent: unknown[] = [];
   readonly send = vi.fn((data: unknown) => this.sent.push(data));
   readonly close = vi.fn();
@@ -50,8 +51,8 @@ function registryWithSnapshot(
     readSnapshot: vi.fn(() => snapshot),
     addOutputListener: vi.fn(() => vi.fn()),
     addExitListener: vi.fn(() => vi.fn()),
-    resize: vi.fn(),
-    write: vi.fn(),
+    resize: vi.fn(() => true),
+    write: vi.fn(() => true),
     release: vi.fn(),
     releaseWorkspace: vi.fn(),
   } as unknown as WebTerminalRegistry;
@@ -120,6 +121,51 @@ describe('terminal WebSocket route', () => {
       'terminal:manual-1',
       'echo ready\r',
     );
+  });
+
+  it('handles socket errors while terminal creation is pending', async () => {
+    let resolveCreate: ((value: { terminalId: string }) => void) | undefined;
+    const registry = registryWithSnapshot(undefined);
+    vi.mocked(registry.create).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const ws = new FakeWebSocket();
+    const connected = createTerminalWsHandler(
+      registry,
+      resolveWorkspace,
+    ).onConnection(ws as unknown as WebSocket, request);
+
+    expect(() => ws.emit('error', new Error('socket failed'))).not.toThrow();
+    resolveCreate?.({ terminalId: 'terminal:manual-1' });
+    await connected;
+
+    expect(registry.addOutputListener).not.toHaveBeenCalled();
+  });
+
+  it('releases an exited session from the connection handshake', async () => {
+    const registry = registryWithSnapshot({
+      output: 'done',
+      exited: true,
+      exitCode: 0,
+      workspaceCwd: '/workspace',
+    });
+    const ws = new FakeWebSocket();
+
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      {
+        url: `${request.url}&release=1`,
+      } as IncomingMessage,
+    );
+
+    expect(registry.release).toHaveBeenCalledWith(
+      'terminal:manual-1',
+      '/workspace',
+    );
+    expect(registry.addOutputListener).not.toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalledWith(4004, 'Terminal released');
   });
 
   it('replays the exit state and closes instead of swallowing input', async () => {
@@ -361,12 +407,111 @@ describe('terminal WebSocket route', () => {
     resolveCreate?.({ terminalId: 'terminal:manual-1' });
     await connected;
 
-    expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal input too large');
+    expect(ws.close).toHaveBeenCalledWith(1013, 'Terminal input too large');
     expect(registry.release).toHaveBeenCalledWith(
       'terminal:manual-1',
       '/workspace',
     );
     expect(registry.addOutputListener).not.toHaveBeenCalled();
+  });
+
+  it('flushes a resize buffered while PTY creation is pending', async () => {
+    let resolveCreate: ((value: { terminalId: string }) => void) | undefined;
+    const registry = registryWithSnapshot(undefined);
+    vi.mocked(registry.create).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    vi.mocked(registry.readSnapshot)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue({
+        output: '',
+        exited: false,
+        workspaceCwd: '/workspace',
+      });
+    const ws = new FakeWebSocket();
+    const connected = createTerminalWsHandler(
+      registry,
+      resolveWorkspace,
+    ).onConnection(ws as unknown as WebSocket, request);
+
+    ws.emit('message', '\x00{"type":"resize","cols":120,"rows":40}');
+    resolveCreate?.({ terminalId: 'terminal:manual-1' });
+    await connected;
+
+    expect(registry.resize).toHaveBeenCalledWith('terminal:manual-1', 120, 40);
+  });
+
+  it('closes and releases a session when PTY input backpressure is hit', async () => {
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.write).mockReturnValueOnce(false);
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+
+    ws.emit('message', Buffer.from('large paste'), true);
+
+    expect(registry.release).toHaveBeenCalledWith(
+      'terminal:manual-1',
+      '/workspace',
+    );
+    expect(ws.close).toHaveBeenCalledWith(1013, 'Terminal input backpressure');
+  });
+
+  it('detaches and closes a stalled output connection', async () => {
+    let output: ((data: string) => void) | undefined;
+    const detachOutput = vi.fn();
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.addOutputListener).mockImplementationOnce(
+      (_terminalId, listener) => {
+        output = listener;
+        return detachOutput;
+      },
+    );
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+    ws.bufferedAmount = 1024 * 1024 + 1;
+
+    output?.('more output');
+
+    expect(detachOutput).toHaveBeenCalledOnce();
+    expect(ws.close).toHaveBeenCalledWith(1013, 'Terminal output backpressure');
+  });
+
+  it('detaches listeners after an attached socket closes', async () => {
+    const detachOutput = vi.fn();
+    const detachExit = vi.fn();
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.addOutputListener).mockReturnValueOnce(detachOutput);
+    vi.mocked(registry.addExitListener).mockReturnValueOnce(detachExit);
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+
+    ws.emit('close');
+
+    expect(detachOutput).toHaveBeenCalledOnce();
+    expect(detachExit).toHaveBeenCalledOnce();
   });
 
   it('prevents a terminal id from being claimed by another workspace', async () => {

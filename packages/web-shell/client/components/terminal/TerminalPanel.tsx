@@ -10,18 +10,20 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { useTheme, type WebShellTheme } from '../../themeContext';
 import { getDaemonToken } from '../../config/daemon';
+import { useI18n } from '../../i18n';
 
 interface TerminalPanelProps {
   /** Stable id shared with the backend PTY session; reconnects reuse it. */
   terminalId: string;
   cwd?: string;
+  active?: boolean;
 }
 
 const CONTROL_FRAME_PREFIX = '\x00';
 /** Exponential backoff bounds for automatic WebSocket reconnection. */
 const RECONNECT_INITIAL_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
-const NON_RETRYABLE_CLOSE_CODES = new Set([4000, 4001, 4002, 4003, 4004]);
+const NON_RETRYABLE_CLOSE_CODES = new Set([4000, 4001, 4002, 4004]);
 const releaseCallbacks = new Map<string, () => void>();
 
 export function releaseWebTerminal(terminalId: string): void {
@@ -52,12 +54,17 @@ function wsProtocols(): string[] {
   return token ? [WS_AUTH_SUBPROTOCOL, bearerSubprotocol(token)] : [];
 }
 
-function buildWsUrl(terminalId: string, cwd: string | undefined): string {
+function buildWsUrl(
+  terminalId: string,
+  cwd: string | undefined,
+  release = false,
+): string {
   const isSecure = window.location.protocol === 'https:';
   const base = `${isSecure ? 'wss:' : 'ws:'}//${window.location.host}`;
   const url = new URL('/terminal', base);
   url.searchParams.set('terminalId', terminalId);
   if (cwd) url.searchParams.set('cwd', cwd);
+  if (release) url.searchParams.set('release', '1');
   return url.toString();
 }
 
@@ -75,8 +82,13 @@ function xtermTheme(theme: WebShellTheme) {
       };
 }
 
-export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
+export function TerminalPanel({
+  terminalId,
+  cwd,
+  active = true,
+}: TerminalPanelProps) {
   const theme = useTheme();
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -95,7 +107,7 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
-      fontFamily: 'var(--font-mono, Menlo, Monaco, "Courier New", monospace)',
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       theme: xtermTheme(theme),
     });
     const fit = new FitAddon();
@@ -104,16 +116,32 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
     termRef.current = term;
     fitRef.current = fit;
 
+    const sendCurrentResize = () => {
+      const ws = wsRef.current;
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      ws.send(
+        CONTROL_FRAME_PREFIX +
+          JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }),
+      );
+    };
+
     requestAnimationFrame(() => {
       try {
         fit.fit();
+        sendCurrentResize();
       } catch {
-        // Container may not be laid out yet — retry on next frame.
-        requestAnimationFrame(() => fit.fit());
+        requestAnimationFrame(() => {
+          if (termRef.current !== term) return;
+          try {
+            fit.fit();
+            sendCurrentResize();
+          } catch {
+            // The panel may have been removed before the retry.
+          }
+        });
       }
     });
 
-    const wsUrl = buildWsUrl(terminalId, cwd);
     const protocols = wsProtocols();
 
     let disposed = false;
@@ -122,6 +150,8 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
     let lostNoticeWritten = false;
     let resizeTimeout: ReturnType<typeof setTimeout> | undefined;
     let releaseRequested = false;
+    let releaseAttempts = 0;
+    let releaseRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let ended = false;
 
     function handleControl(raw: string): boolean {
@@ -136,13 +166,17 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
           const exitCode =
             typeof ctrl.exitCode === 'number' ? String(ctrl.exitCode) : '?';
           term.writeln(
-            `\r\n\x1b[33m[Process exited with code ${exitCode}]\x1b[0m`,
+            `\r\n\x1b[33m[${t('terminal.notice.exited', { exitCode })}]\x1b[0m`,
           );
           return true;
         } else if (ctrl.type === 'error') {
           const message =
-            typeof ctrl.message === 'string' ? ctrl.message : 'Unknown error';
-          term.writeln(`\r\n\x1b[31m[Error: ${message}]\x1b[0m`);
+            typeof ctrl.message === 'string'
+              ? ctrl.message
+              : t('terminal.notice.unknownError');
+          term.writeln(
+            `\r\n\x1b[31m[${t('terminal.notice.error', { message })}]\x1b[0m`,
+          );
           return true;
         }
       } catch {
@@ -158,6 +192,7 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
     }
 
     function handleMessage(event: MessageEvent) {
+      if (disposed) return;
       if (typeof event.data === 'string') {
         writeMessage(event.data);
       } else {
@@ -165,10 +200,11 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
       }
     }
 
-    function connect() {
-      if (disposed) return;
+    function connect(releaseOnly = false) {
+      if (disposed && !releaseOnly) return;
+      if (releaseOnly) releaseAttempts += 1;
       const ws = new WebSocket(
-        wsUrl,
+        buildWsUrl(terminalId, cwd, releaseOnly),
         protocols.length > 0 ? protocols : undefined,
       );
       ws.binaryType = 'arraybuffer';
@@ -201,17 +237,28 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
         }
       };
 
-      ws.onmessage = handleMessage;
+      ws.onmessage = releaseOnly ? null : handleMessage;
 
       ws.onerror = () => {
         // Errors surface through close; reconnect is handled there.
       };
 
       ws.onclose = (event) => {
+        if (releaseOnly) {
+          if (event.code !== 4004 && releaseAttempts < 3) {
+            releaseRetryTimer = setTimeout(
+              () => connect(true),
+              RECONNECT_INITIAL_MS,
+            );
+          }
+          return;
+        }
         if (disposed || releaseRequested) return;
         if (ended || NON_RETRYABLE_CLOSE_CODES.has(event.code)) return;
         if (!lostNoticeWritten) {
-          term.writeln('\r\n\x1b[33m[Connection lost — reconnecting…]\x1b[0m');
+          term.writeln(
+            `\r\n\x1b[33m[${t('terminal.notice.reconnecting')}]\x1b[0m`,
+          );
           lostNoticeWritten = true;
         }
         reconnectTimer = setTimeout(connect, reconnectDelay);
@@ -219,7 +266,7 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
       };
     }
 
-    connect();
+    const connectFrame = requestAnimationFrame(() => connect());
 
     const release = () => {
       if (releaseRequested) return;
@@ -229,8 +276,8 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
         ws.close();
-      } else if (!ws || ws.readyState === WebSocket.CLOSED) {
-        connect();
+      } else if (!ws || ws.readyState !== WebSocket.CONNECTING) {
+        connect(true);
       }
     };
     releaseCallbacks.set(terminalId, release);
@@ -250,17 +297,7 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
       resizeTimeout = setTimeout(() => {
         try {
           fitRef.current?.fit();
-          const ws = wsRef.current;
-          const current = termRef.current;
-          if (!current || !ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(
-            CONTROL_FRAME_PREFIX +
-              JSON.stringify({
-                type: 'resize',
-                cols: current.cols,
-                rows: current.rows,
-              }),
-          );
+          sendCurrentResize();
         } catch {
           // Fit can throw if the terminal was disposed.
         }
@@ -276,6 +313,8 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
         releaseCallbacks.delete(terminalId);
       }
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (releaseRetryTimer) clearTimeout(releaseRetryTimer);
+      cancelAnimationFrame(connectFrame);
       clearTimeout(resizeTimeout);
       resizeObserver.disconnect();
       disposable.dispose();
@@ -292,6 +331,10 @@ export function TerminalPanel({ terminalId, cwd }: TerminalPanelProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (active) termRef.current?.focus();
+  }, [active]);
 
   return (
     <div
