@@ -11,7 +11,7 @@
  * `BridgeClient.requestPermission` plus the `respondToPermission` route
  * in `createHttpAcpBridge`.
  *
- * The four policies are ordered from cheapest to strongest:
+ * The four policy contracts are ordered from cheapest to strongest:
  *
  * - `first-responder` — first valid `POST /permission/:requestId`
  *   wins; later voters get `permission_already_resolved`. Today's

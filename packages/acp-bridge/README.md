@@ -74,10 +74,11 @@ Lift history (#4175 Mode B daemon roadmap):
   companion consume this directly instead of each reimplementing the
   child lifecycle.
 - `bridgeClient` (F1) — `BridgeClient` class implementing the ACP
-  `Client` surface: first-responder permission flow, session-update
-  fan-out into `EventBus`, child-side `extNotification` routing,
-  early-event buffer + tombstone bookkeeping, inline fs proxy for
-  `writeTextFile` / `readTextFile`. Exports the supporting
+  `Client` surface: permission requests delegated to
+  `PermissionMediator`, session-update fan-out into `EventBus`,
+  child-side `extNotification` routing, early-event buffer + tombstone
+  bookkeeping, inline fs proxy for `writeTextFile` / `readTextFile`.
+  Exports the supporting
   `PendingPermission` / `PermissionResolutionRecord` /
   `BridgeClientSessionEntry` types + `MAX_RESOLVED_PERMISSION_RECORDS`
   cap that the factory's bookkeeping maps consume.
