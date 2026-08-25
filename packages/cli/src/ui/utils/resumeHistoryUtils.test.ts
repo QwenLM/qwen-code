@@ -12,10 +12,12 @@ import {
   expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
   Config,
   ConversationRecord,
+  FindingsResultDisplay,
   GoalSnapshotV2,
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
@@ -1852,5 +1854,93 @@ describe('expandCollapsedHistory', () => {
     ] as HistoryItem[];
     const result = expandCollapsedHistory(items);
     expect(result).toEqual([]);
+  });
+
+  describe('report_findings replacement semantics', () => {
+    const reportFindingsTool = {
+      name: 'report_findings',
+      displayName: 'ReportFindings',
+      description: 'Report findings',
+      build: vi
+        .fn()
+        .mockReturnValue({ getDescription: () => 'Report 1 finding' }),
+    } as unknown as AnyDeclarativeTool;
+
+    const findingsDisplay = (outcome?: 'fixed') => ({
+      type: 'findings_list',
+      level: 'high',
+      findings: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          confidence: 'high',
+          file: 'src/foo.ts',
+          line: 42,
+          summary: 'wrong return value',
+          shortSummary: 'wrong return',
+          failureScenario: 'first call returns undefined',
+          ...(outcome ? { outcome } : {}),
+        },
+      ],
+    });
+
+    it('keeps only the latest delivered findings list in the restored transcript', () => {
+      // An initial report, fix work, then the outcome re-report: two distinct
+      // tool records. The restored transcript must render ONLY the latest
+      // list — the initial report collapses to the replacement marker.
+      const reportCall = (callId: string) => ({
+        type: 'assistant',
+        message: {
+          parts: [
+            {
+              functionCall: { id: callId, name: 'report_findings', args: {} },
+            } as unknown as Part,
+          ],
+        },
+      });
+      const reportResult = (callId: string, resultDisplay: unknown) => ({
+        type: 'tool_result',
+        toolCallResult: { callId, resultDisplay, status: 'success' },
+      });
+      const conversation = {
+        messages: [
+          reportCall('call-report-1'),
+          reportResult('call-report-1', findingsDisplay()),
+          {
+            type: 'assistant',
+            message: { parts: [{ text: 'applying fixes' }] },
+          },
+          reportCall('call-report-2'),
+          reportResult('call-report-2', findingsDisplay('fixed')),
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ report_findings: reportFindingsTool }),
+        500,
+      );
+
+      type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+      const toolGroups = items.filter(
+        (i): i is ToolGroupItem => i.type === 'tool_group',
+      );
+      expect(toolGroups).toHaveLength(2);
+
+      const everyTool = toolGroups.flatMap((group) => group.tools);
+      const deliveredLists = everyTool.filter(
+        (
+          tool,
+        ): tool is typeof tool & { resultDisplay: FindingsResultDisplay } =>
+          typeof tool.resultDisplay === 'object' &&
+          (tool.resultDisplay as FindingsResultDisplay | undefined)?.type ===
+            'findings_list',
+      );
+      expect(deliveredLists).toHaveLength(1);
+      expect(deliveredLists[0].resultDisplay.findings[0].outcome).toBe('fixed');
+      expect(toolGroups[0].tools[0].resultDisplay).toBe(
+        SUPERSEDED_FINDINGS_MESSAGE,
+      );
+    });
   });
 });

@@ -994,6 +994,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('已解析为 critical 发布下限');
   });
 
+  it('names a signal-engaged floor with the reason it engaged early', () => {
+    // The trigger engages ahead of the round-6 schedule (#9903); an
+    // "already at the floor" sentence that does not say WHY reads as an
+    // unexplained posture change — the exact defect this wording exists
+    // for. It must also hold back the floor rung, exactly as the
+    // round-6 kind does: recommending a posture the round is already
+    // running under.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'auto-signaled',
+    });
+    expect(r.en).toContain('already engage the critical posting floor');
+    expect(r.en).toContain('resolved early');
+    expect(r.en).not.toContain('--severity-floor critical');
+    expect(r.zh).toContain('提前生效');
+  });
+
   it('reports both readings when both signals fired', () => {
     // Discriminating on the clusters alone made the volume sentence — and
     // with it the whole floor recommendation — unreachable on the shape this
