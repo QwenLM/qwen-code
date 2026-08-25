@@ -18,11 +18,11 @@
  *   default; preserves the live-collaboration UX.
  * - `designated` — only the `originatorClientId` that started the
  *   prompt may answer; other clients see `permission_forbidden`.
- *   If the request has no originator, resolution falls back to
- *   first-responder. Use case: per-tenant SaaS where a UI surface
- *   must own its own approvals.
+ *   Prompts with no originator fall back to first-responder. Use case:
+ *   per-tenant SaaS where a UI surface must own its own approvals.
  * - `consensus` — N-of-M quorum across the session client IDs
- *   captured when the permission request is issued; intermediate
+ *   captured when the permission request is issued. Client identity is
+ *   self-declared until pair-token authentication lands; intermediate
  *   `permission_partial_vote` events let UIs render progress. Use case:
  *   enterprise change review where two operators must agree.
  * - `local-only` — refuses any HTTP voter; the prompt blocks until

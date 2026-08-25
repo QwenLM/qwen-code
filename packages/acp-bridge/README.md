@@ -10,7 +10,7 @@ Lift history (#4175 Mode B daemon roadmap):
 | **PR 22a** (#4295)   | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                                                       | ✅ merged      |
 | **PR 22b/1** (#4298) | Lift `status` + `workspacePaths` + `bridgeErrors` + `bridgeTypes`                                                                                                                          | ✅ merged      |
 | **PR 22b/2** (#4304) | Lift `BridgeOptions` + new `DaemonStatusProvider` injection seam                                                                                                                           | ✅ merged      |
-| **F1**               | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)                                            | ✅ implemented |
+| **F1** (#4490)       | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)                                            | ✅ merged      |
 | **F3 PR 24**         | Implement the four `PermissionMediator` policies (`first-responder`, `designated`, `consensus`, `local-only`) plus audit/emit fan-out; pair-token binding and revocation stay future scope | ✅ implemented |
 
 ## What's here today
@@ -79,14 +79,15 @@ Lift history (#4175 Mode B daemon roadmap):
   child-side `extNotification` routing, early-event buffer + tombstone
   bookkeeping, inline fs proxy for `writeTextFile` / `readTextFile`.
   Exports the supporting `BridgeClientSessionEntry` type consumed by
-  the factory's `resolveEntry` callback.
+  the session-entry lookup passed in by the factory.
 - `bridge` (F1) — `createHttpAcpBridge` factory closure (~3000 LOC)
   - `ChannelInfo` / `SessionEntry` interfaces + factory-only
     helpers (`withTimeout`, `canonicalizeExistingAncestor`,
     `verifyParentWithinWorkspace`, debug log helpers,
     `hasControlCharacter`) + factory constants. Owns session
-    bookkeeping, constructs the `PermissionMediator`, and wires an
-    inline `resolveEntry` callback into `BridgeClient`.
+    bookkeeping, constructs the `MultiClientPermissionMediator` that
+    owns permission state, and passes the session-entry lookup into
+    `BridgeClient`.
 - `bridgeFileSystem` (F1) — `BridgeFileSystem` interface for the
   ACP fs proxy. When wired through `BridgeOptions.fileSystem`,
   `BridgeClient.readTextFile` / `BridgeClient.writeTextFile`
