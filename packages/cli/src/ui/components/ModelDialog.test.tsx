@@ -814,6 +814,58 @@ describe('<ModelDialog />', () => {
     expect(container.textContent).toContain('project settings');
   });
 
+  it('persists Advisor selection in the scope that owns advisorModel', async () => {
+    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'advisor-model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorConfig,
+      } as unknown as Partial<Config>,
+      {
+        merged: { advisorModel: 'workspace-advisor' },
+        workspace: {
+          settings: { advisorModel: 'workspace-advisor' },
+        },
+      } as unknown as Partial<LoadedSettings>,
+    );
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        mockedSelect.mock.calls[0][0].items[1].value,
+      );
+    });
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'advisorModel',
+      'openai:advisor-model',
+    );
+  });
+
+  it('rejects project Advisor selection in an untrusted workspace', async () => {
+    const { container, mockSettings } = renderComponent(
+      { isAdvisorModelMode: true, persistScope: 'workspace' },
+      undefined,
+      { isTrusted: false } as unknown as Partial<LoadedSettings>,
+    );
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect('$advisor-off');
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Workspace is untrusted');
+  });
+
   it('highlights a session-only Advisor model override', () => {
     renderComponent({ isAdvisorModelMode: true }, {
       getAdvisorModel: vi.fn(() => 'openai:advisor-model'),

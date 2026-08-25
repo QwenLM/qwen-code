@@ -840,6 +840,12 @@ export function ModelDialog({
           setErrorMessage(t('Configuration not available.'));
           return;
         }
+        if (persistScope === 'workspace' && !settings.isTrusted) {
+          setErrorMessage(
+            t('Workspace is untrusted; run /trust first or use --global.'),
+          );
+          return;
+        }
 
         const { scope, shadowingScope } = resolveAdvisorPersistScope(
           settings,

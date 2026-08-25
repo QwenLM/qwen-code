@@ -54,6 +54,7 @@ import {
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
   getToolDescription,
+  getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
   isAdvisorToolName,
@@ -122,7 +123,7 @@ export function hasExpandableContent(tool: ACPToolCall): boolean {
   if (getMcpAppDisplay(tool.rawOutput)) return true;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
-  if (isAdvisorToolName(tool.toolName)) return !!extractText(tool);
+  if (isAdvisorToolName(tool.toolName)) return !!getAdvisorDisplayText(tool);
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
     return !!getWriteContent(tool) || hasEditContent(tool);
@@ -1548,7 +1549,9 @@ export const ToolLine = memo(function ToolLine({
                 <ExpandedAskUserQuestionOutput tool={tool} />
               )}
               {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
-              {isAdvisor && <Markdown content={extractText(tool) ?? ''} />}
+              {isAdvisor && (
+                <Markdown content={getAdvisorDisplayText(tool) ?? ''} />
+              )}
             </ToolExpandedCard>
           )}
         </div>

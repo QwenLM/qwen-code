@@ -124,7 +124,6 @@ async function setupRig(baseUrl: string): Promise<TestRig> {
 
 describe('advisor native tool', () => {
   it('returns a read-only Advisor review to the executor', async () => {
-    let mainRequestIndex = 0;
     let evidenceFile = '';
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
@@ -140,8 +139,17 @@ describe('advisor native tool', () => {
       if (body['stream'] !== true) {
         return { content: '{"selected_memories":[]}' };
       }
-      mainRequestIndex += 1;
-      if (mainRequestIndex === 1) {
+      const transcript = allMessageText(body);
+      if (transcript.includes('<advisor_feedback>')) {
+        return { content: 'Final answer after Advisor feedback.' };
+      }
+      if (transcript.includes('wire-level evidence')) {
+        return {
+          content: 'I found the evidence and will ask for a second opinion.',
+          toolCalls: [fakeToolCall('advisor', {}, 'advisor-call')],
+        };
+      }
+      if (transcript.includes('Review the task and finish.')) {
         return {
           content: 'I will inspect the evidence first.',
           toolCalls: [
@@ -149,19 +157,41 @@ describe('advisor native tool', () => {
           ],
         };
       }
-      if (mainRequestIndex === 2) {
-        return {
-          content: 'I found the evidence and will ask for a second opinion.',
-          toolCalls: [fakeToolCall('advisor', {}, 'advisor-call')],
-        };
-      }
-      return { content: 'Final answer after Advisor feedback.' };
+      return { content: 'Prior turn answer with unique context.' };
     }, fakeServerHostOptions());
 
     rig = await setupRig(server.baseUrl);
     evidenceFile = rig.createFile('evidence.txt', 'wire-level evidence');
+    const sessionId = crypto.randomUUID();
+    const streamInput = [
+      {
+        type: 'control_request',
+        request_id: 'initialize-advisor-test',
+        request: { subtype: 'initialize' },
+      },
+      {
+        type: 'user',
+        session_id: sessionId,
+        message: {
+          role: 'user',
+          content: 'Remember this unique prior-turn request.',
+        },
+        parent_tool_use_id: null,
+      },
+      {
+        type: 'user',
+        session_id: sessionId,
+        message: {
+          role: 'user',
+          content: 'Review the task and finish.',
+        },
+        parent_tool_use_id: null,
+      },
+    ]
+      .map((message) => JSON.stringify(message))
+      .join('\n');
     const output = await rig.run(
-      'Review the task and finish.',
+      { stdin: streamInput },
       '--auth-type',
       'openai',
       '--model',
@@ -172,8 +202,10 @@ describe('advisor native tool', () => {
       server.baseUrl,
       '--openai-api-key',
       'fake-key',
+      '--input-format',
+      'stream-json',
       '--output-format',
-      'json',
+      'stream-json',
     );
 
     expect(output).toContain('Final answer after Advisor feedback.');
@@ -186,9 +218,11 @@ describe('advisor native tool', () => {
       .map((request) => request.body)
       .filter((body) => body['model'] === 'advisor-model');
 
-    expect(mainRequests).toHaveLength(3);
+    expect(mainRequests.length).toBeGreaterThanOrEqual(4);
     expect(advisorRequests).toHaveLength(1);
-    expect(toolNames(mainRequests[0]!)).toContain('advisor');
+    expect(
+      mainRequests.some((request) => toolNames(request).includes('advisor')),
+    ).toBe(true);
     expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
     const advisorText = allMessageText(advisorRequests[0]!);
     const evidence = JSON.parse(
@@ -205,6 +239,12 @@ describe('advisor native tool', () => {
     );
     expect(JSON.stringify(evidence['transcript'])).toContain('read_file');
     expect(JSON.stringify(evidence['transcript'])).toContain(
+      'Remember this unique prior-turn request.',
+    );
+    expect(JSON.stringify(evidence['transcript'])).toContain(
+      'Prior turn answer with unique context.',
+    );
+    expect(JSON.stringify(evidence['transcript'])).toContain(
       'wire-level evidence',
     );
     expect(JSON.stringify(evidence['transcript'])).toContain(
@@ -213,10 +253,12 @@ describe('advisor native tool', () => {
     expect(JSON.stringify(evidence['transcript'])).toContain(
       'I found the evidence and will ask for a second opinion.',
     );
-    expect(allMessageText(mainRequests[2]!)).toContain('<advisor_feedback>');
-    expect(allMessageText(mainRequests[2]!)).toContain(
+    const feedbackRequest = mainRequests.find((request) =>
+      allMessageText(request).includes('<advisor_feedback>'),
+    );
+    expect(feedbackRequest).toBeDefined();
+    expect(allMessageText(feedbackRequest!)).toContain(
       'The approach is sound.',
     );
-    expect(await rig.waitForToolCall('advisor')).toBe(true);
   });
 });

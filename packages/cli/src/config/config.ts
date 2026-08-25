@@ -46,8 +46,6 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
-  buildModelIdContext,
-  resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -93,6 +91,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { resolveSkillSettings } from './skill-settings.js';
+import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1414,41 +1413,16 @@ function validateCliAdvisorModel(
   const modelName = rawModel.trim();
   if (!modelName || modelName.toLowerCase() === 'off') return;
 
-  const selector = (() => {
-    try {
-      const runtimeContext = buildModelIdContext(config);
-      return resolveModelId(modelName, {
-        ...runtimeContext,
-        fastModel: runtimeContext.fastModel ?? startupContext.fastModel,
-        currentModel:
-          runtimeContext.currentModel ?? startupContext.currentModel,
-        currentAuthType:
-          runtimeContext.currentAuthType ?? startupContext.currentAuthType,
-      });
-    } catch {
-      return undefined;
-    }
-  })();
-  const availableModels = config
-    .getAllConfiguredModels(
-      selector?.authType ? [selector.authType] : undefined,
-    )
-    .filter(
-      (model) =>
-        (modelName === 'fast' || !model.fastOnly) &&
-        !model.voiceOnly &&
-        !model.visionOnly &&
-        !model.imageOnly,
-    );
-
-  if (
-    !selector ||
-    !availableModels.some((model) => model.id === selector.modelId)
-  ) {
+  const availability = checkAdvisorModelAvailability(
+    config,
+    modelName,
+    startupContext,
+  );
+  if (!availability.available) {
     throw new FatalConfigError(
       formatUnavailableAdvisorModelMessage(
         modelName,
-        Array.from(new Set(availableModels.map((model) => model.id))),
+        availability.availableModelIds,
       ),
     );
   }

@@ -1377,6 +1377,28 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('should reject a vision-only --advisor model', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'vision-only'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig(
+        {
+          modelProviders: {
+            openai: [
+              {
+                id: 'vision-only',
+                apiKey: 'test-key',
+                visionOnly: true,
+              },
+            ],
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow("Advisor model 'vision-only' is not configured.");
+  });
+
   it('should validate the --advisor fast alias against fastModel', async () => {
     process.argv = ['node', 'script.js', '--advisor', 'fast'];
     const argv = await parseArguments();

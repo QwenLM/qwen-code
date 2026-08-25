@@ -785,6 +785,15 @@ describe('tool row rendering', () => {
       makeTool({
         toolName: 'advisor',
         status: 'completed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: '<advisor_feedback>\nLLM-facing instruction\n</advisor_feedback>',
+            },
+          },
+        ],
         rawOutput: {
           type: 'advisor_review',
           verdict: 'Sound approach.',
@@ -802,6 +811,7 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('Sound approach.');
     expect(container.textContent).toContain('Retry handling is unclear.');
     expect(container.textContent).toContain('Run the integration test.');
+    expect(container.textContent).not.toContain('LLM-facing instruction');
   });
 
   it('renders the aggregate summary for a multi-tool group', () => {

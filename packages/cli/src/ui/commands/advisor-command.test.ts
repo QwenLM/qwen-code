@@ -296,6 +296,18 @@ describe('advisorCommand', () => {
     expect(result).toMatchObject({ messageType: 'info' });
   });
 
+  it('rejects models that only support non-text capabilities', async () => {
+    const result = await advisorCommand.action!(mockContext, 'vision-only');
+
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content: expect.stringContaining(
+        "Advisor model 'vision-only' is not configured.",
+      ),
+    });
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('returns a message result for /advisor <selector> in ACP mode', async () => {
     const result = await advisorCommand.action!(
       { ...mockContext, executionMode: 'acp' },
@@ -453,6 +465,24 @@ describe('advisorCommand', () => {
       messageType: 'error',
       content: 'Cannot use both --project and --global. Choose one scope flag.',
     });
+  });
+
+  it.each([
+    ['--project review check project behavior', 'check project behavior'],
+    ['review --project check project behavior', 'check project behavior'],
+  ])('strips scope flags before parsing review: %s', async (args, focus) => {
+    mockRunForkedAgent.mockResolvedValue(advisorResult('resolved-model'));
+
+    await advisorCommand.action!(mockContext, args);
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userMessage: expect.stringContaining(focus),
+      }),
+    );
+    expect(mockRunForkedAgent.mock.calls[0][0].userMessage).not.toContain(
+      '--project',
+    );
   });
 
   it('runs the manual structured review under /advisor review', async () => {

@@ -298,10 +298,7 @@ export const DialogManager = ({
               return;
             }
             if (settingName === 'fastModel') {
-              uiActions.openModelDialog({
-                fastModelMode: true,
-                persistScope: modelPersistScope(selectedScope),
-              });
+              uiActions.openModelDialog({ fastModelMode: true });
               return;
             }
             if (settingName === 'advisorModel') {
@@ -312,10 +309,7 @@ export const DialogManager = ({
               return;
             }
             if (settingName === 'visionModel') {
-              uiActions.openModelDialog({
-                visionModelMode: true,
-                persistScope: modelPersistScope(selectedScope),
-              });
+              uiActions.openModelDialog({ visionModelMode: true });
               return;
             }
             uiActions.closeSettingsDialog();

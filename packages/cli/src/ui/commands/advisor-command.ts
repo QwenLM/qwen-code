@@ -14,16 +14,18 @@ import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
   BTW_MAX_INPUT_LENGTH,
-  buildModelIdContext,
   buildBtwCacheSafeParams,
   runForkedAgent,
-  resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import {
   getPersistScopeForModelSelection,
   resolvePersistScopeForKey,
 } from '../../config/modelProvidersScope.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  checkAdvisorModelAvailability,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 
 const ADVISOR_SCHEMA = {
   type: 'object',
@@ -272,37 +274,14 @@ async function setAdvisorModel(
     };
   }
 
-  const selector = (() => {
-    try {
-      return resolveModelId(modelName, buildModelIdContext(config));
-    } catch {
-      return undefined;
-    }
-  })();
-  if (!selector) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: formatUnavailableAdvisorModelMessage(modelName, []),
-    };
-  }
-
-  const availableModels = config
-    .getAllConfiguredModels(selector.authType ? [selector.authType] : undefined)
-    .filter(
-      (model) =>
-        (modelName === 'fast' || !model.fastOnly) &&
-        !model.voiceOnly &&
-        !model.visionOnly &&
-        !model.imageOnly,
-    );
-  if (!availableModels.some((model) => model.id === selector.modelId)) {
+  const availability = checkAdvisorModelAvailability(config, modelName);
+  if (!availability.available) {
     return {
       type: 'message',
       messageType: 'error',
       content: formatUnavailableAdvisorModelMessage(
         modelName,
-        Array.from(new Set(availableModels.map((model) => model.id))),
+        availability.availableModelIds,
       ),
     };
   }
@@ -364,13 +343,7 @@ export const advisorCommand: SlashCommand = {
     return context.services.config
       ? context.services.config
           .getAllConfiguredModels()
-          .filter(
-            (model) =>
-              !model.fastOnly &&
-              !model.voiceOnly &&
-              !model.visionOnly &&
-              !model.imageOnly,
-          )
+          .filter((model) => isAdvisorModelEligible(model))
           .map((model) => model.id)
           .filter((id) => id.startsWith(prefix))
       : null;
@@ -380,7 +353,17 @@ export const advisorCommand: SlashCommand = {
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const rawArgs = context.invocation?.args?.trim() || args.trim();
-    const [subcommand = '', ...rest] = rawArgs.split(/\s+/);
+    const parsedScope = parseScopeFlags(rawArgs);
+    if (parsedScope.hasProject && parsedScope.hasGlobal) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Cannot use both --project and --global. Choose one scope flag.',
+        ),
+      };
+    }
+    const [subcommand = '', ...rest] = parsedScope.remaining.split(/\s+/);
     const isReview = subcommand === 'review';
     const isStatus = subcommand === 'status';
     const focus = isReview ? rest.join(' ').trim() : '';
@@ -421,17 +404,7 @@ export const advisorCommand: SlashCommand = {
     }
 
     if (!isReview) {
-      const { scopeOverride, remaining, hasProject, hasGlobal } =
-        parseScopeFlags(rawArgs);
-      if (hasProject && hasGlobal) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'Cannot use both --project and --global. Choose one scope flag.',
-          ),
-        };
-      }
+      const { scopeOverride, remaining } = parsedScope;
       if (
         scopeOverride === SettingScope.Workspace &&
         context.services.settings &&
