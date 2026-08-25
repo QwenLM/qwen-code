@@ -21,6 +21,7 @@ import { Box, Text, render, type Instance } from 'ink';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ansiEscapes from 'ansi-escapes';
 import { installTerminalResizeReflow } from './terminal-resize-reflow.js';
+import { wrapForMultiplexer } from './osc8.js';
 
 const ESC = '\u001B[';
 const BSU = `${ESC}?2026h`;
@@ -443,7 +444,18 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       next[5] = 'POST-RESET-UPDATE';
       stdout.write(
         incrementalDiffFrame(reset, next, {
-          trailingNewline: false,
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      // The real second diff after a slotted reset keeps the slot
+      // (consumed >= lines.length): both updates must land.
+      const next2 = next.slice();
+      next2[7] = 'SECOND-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(next, next2, {
+          trailingNewline: true,
           prevTrailingNewline: true,
           returnPrefix: RETURN_PREFIX,
         }),
@@ -452,6 +464,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       repaint!();
       const replay = stdout.written[0]!;
       expect(replay).toContain('POST-RESET-UPDATE');
+      expect(replay).toContain('SECOND-UPDATE');
       expect(replay).toContain('line-0-');
       expect(replay).not.toContain('committed-');
     } finally {
@@ -477,7 +490,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       next[2] = 'COLLAPSED-UPDATE';
       stdout.write(
         incrementalDiffFrame(reset, next, {
-          trailingNewline: false,
+          trailingNewline: true,
           prevTrailingNewline: true,
           returnPrefix: RETURN_PREFIX,
         }),
@@ -565,7 +578,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       next[3] = 'AFTER-CURSOR-MOVE';
       stdout.write(
         incrementalDiffFrame(reset, next, {
-          trailingNewline: false,
+          trailingNewline: true,
           prevTrailingNewline: true,
           returnPrefix: RETURN_PREFIX,
         }),
@@ -662,6 +675,321 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const replay = stdout.written[0]!;
       expect(replay).toContain(next[1]!);
       expect(replay).toContain(next[2]!);
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not store a rejected erase-prefixed diff as the frame', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // A shrink/height-change frame against a stale model: the head parses,
+      // applyIncrementalDiff rejects (it expects headCount 9), and the raw
+      // control-op fragment must not become model.content.
+      stdout.write(
+        ansiEscapes.eraseLines(3) +
+          `${ESC}3A${CURSOR_NEXT_LINE}${CURSOR_TO_COL0}NEW-LINE${ERASE_END_LINE}`,
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toContain('NEW-LINE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the good frame when the armed handoff receives a rejected bare diff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Clear-only write arms the post-clear handoff.
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      // First printable bare write: a short static append.
+      stdout.write('static append');
+      // Second printable bare write: a bare diff whose head contradicts the
+      // model. It must not replace the good frame.
+      stdout.write(
+        `${ESC}5A${CURSOR_NEXT_LINE}${CURSOR_TO_COL0}BAD-FRAG${ERASE_END_LINE}`,
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toContain('BAD-FRAG');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('accepts the trailing-newline slot keep at the frame boundary', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n') + '\n');
+      // Ink grows the non-fullscreen frame by the previous frame's slot: one
+      // keep past the stored end.
+      stdout.write(`${ESC}10A` + CURSOR_NEXT_LINE.repeat(11));
+      const grown = [...prev, ''];
+      const next = grown.slice();
+      next[9] = 'LINE-9-CHANGED';
+      stdout.write(
+        incrementalDiffFrame(grown, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('LINE-9-CHANGED');
+    } finally {
+      restore();
+    }
+  });
+
+  it('applies a shrink diff that erases exactly one line', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Slotless frame loses exactly one line: eraseLines(1) is `ESC[2K ESC[G`,
+      // carrying no cursorUp pair.
+      const next = prev.slice(0, 9);
+      next[2] = 'SHRUNK-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(prev, next, { trailingNewline: false }),
+      );
+      const next2 = next.slice();
+      next2[4] = 'SHRUNK-FOLLOW-UP';
+      stdout.write(
+        incrementalDiffFrame(next, next2, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('SHRUNK-UPDATE');
+      expect(replay).toContain('SHRUNK-FOLLOW-UP');
+      expect(replay).not.toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('replays tmux-wrapped (DCS) OSC-8 hyperlink rewrites byte-intact', () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-1000/default');
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const tmuxLink = wrapForMultiplexer(
+        '\u001B]8;;https://example.com\u0007example\u001B]8;;\u0007',
+      );
+      const next = prev.slice();
+      next[1] = `link ${tmuxLink} line`;
+      stdout.write(
+        incrementalDiffFrame(prev, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain(next[1]!);
+    } finally {
+      restore();
+    }
+  });
+
+  it('handles the no-cursorUp cursor suffix at non-zero columns', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const next = prev.slice();
+      next[9] = 'BOTTOM-LINE-COL2';
+      // Cursor on the bottom row at a non-zero column: moveUp is 0 and Ink
+      // emits cursorTo(x+1) + show.
+      const suffix = `${ESC}2G${CURSOR_SHOW}`;
+      stdout.write(
+        incrementalDiffFrame(prev, next, {
+          trailingNewline: false,
+          cursorSuffix: suffix,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('BOTTOM-LINE-COL2');
+      expect(replay.endsWith(suffix)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a reset whose live frame ends in a blank row', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const transcript = ['committed-a', 'committed-b'];
+      const live = frameLines(20, 10).map((line) => `${line}-r6`);
+      // The bottom composited row is blank (e.g. a height-constrained dialog
+      // padding shorter content); a reset write carries no slot to pop it.
+      live[9] = '';
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n'),
+      );
+      const next = live.slice();
+      next[5] = 'POST-RESET-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('POST-RESET-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a pending reset through an erase-prefixed shrink diff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const transcript = ['committed-s'];
+      const live = frameLines(20, 10).map((line) => `${line}-rs`);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n'),
+      );
+      const next = live.slice(0, 7);
+      next[1] = 'SHRUNK-AFTER-RESET';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('SHRUNK-AFTER-RESET');
+      expect(replay).toContain(live[0]!);
+      expect(replay).not.toContain(live[8]!);
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('applies a diff whose return-to-bottom prefix carries no cursorDown', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const next = prev.slice();
+      next[6] = 'NO-DOWN-UPDATE';
+      // Cursor already on the bottom row: down = 0, so the prefix is
+      // hide + column-0 with no cursorDown.
+      stdout.write(
+        incrementalDiffFrame(prev, next, {
+          trailingNewline: false,
+          returnPrefix: `${CURSOR_HIDE}${CURSOR_TO_COL0}`,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('NO-DOWN-UPDATE');
+    } finally {
+      restore();
+    }
+  });
+
+  it('applies an erase-prefixed shrink diff to a slotted model', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n') + '\n');
+      const next = prev.slice(0, 7);
+      next[2] = 'SLOTTED-SHRINK';
+      stdout.write(
+        incrementalDiffFrame(prev, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('SLOTTED-SHRINK');
+      expect(replay).toContain('line-6-');
+      expect(replay).not.toContain('line-9-');
     } finally {
       restore();
     }

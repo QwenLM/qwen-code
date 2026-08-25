@@ -32,7 +32,6 @@ const CURSOR_DOWN_PATTERN = /\x1b\[(\d+)B/;
 const CURSOR_NEXT_LINE = `${ESC}E`;
 const CURSOR_TO_FIRST_COLUMN = `${ESC}1G`; // ansi-escapes cursorTo(0)
 const ERASE_END_LINE = `${ESC}K`;
-const CURSOR_SHOW = `${ESC}?25h`;
 const CURSOR_HIDE = `${ESC}?25l`;
 
 // eslint-disable-next-line no-control-regex
@@ -56,6 +55,11 @@ export const CLEAR_WINDOW_MS = 600;
 const HANDOFF_WINDOW_MS = 50;
 
 const ERASE_LINES_PATTERN = createEraseLinesPattern();
+
+// VP shrink diffs can erase exactly one line, and Ink's eraseLines(1) is
+// `ESC[2K ESC[G` with no cursorUp pair, which the shared (+) pattern misses.
+// eslint-disable-next-line no-control-regex
+const VP_ERASE_LINES_RE = /(?:\u001B\[2K\u001B\[1A)*\u001B\[2K\u001B\[G/;
 
 // Live frames are >= 8 rows; shorter printable bursts (console output, small
 // redraws) must not be mistaken for a frame and clobber the model.
@@ -225,10 +229,18 @@ function applyIncrementalDiff(
   let consumed = 0;
   let frameTrailingNewline = false;
   let suffix = '';
+  let slotKept = false;
 
   while (pos < chunk.length) {
     if (chunk.startsWith(CURSOR_NEXT_LINE, pos)) {
-      if (row >= next.length) return false;
+      if (row >= next.length) {
+        // Ink grows a non-fullscreen frame by the previous frame's
+        // trailing-newline slot: exactly one keep past the stored end
+        // appends the blank slot row.
+        if (row > next.length || !trailingNewline || slotKept) return false;
+        next.push('');
+        slotKept = true;
+      }
       pos += CURSOR_NEXT_LINE.length;
       row++;
       consumed++;
@@ -241,13 +253,14 @@ function applyIncrementalDiff(
       pos = chunk.length;
       break;
     }
+    if (CURSOR_SUFFIX_ONLY_RE.test(chunk.slice(pos))) {
+      // Cursor suffix without cursorUp (cursor already on the bottom row);
+      // Ink emits it at the composer's column, so match any G column.
+      suffix = chunk.slice(pos);
+      pos = chunk.length;
+      break;
+    }
     if (chunk.startsWith(CURSOR_TO_FIRST_COLUMN, pos)) {
-      if (chunk.slice(pos + CURSOR_TO_FIRST_COLUMN.length) === CURSOR_SHOW) {
-        // Cursor suffix with no cursorUp (cursor already on the bottom row).
-        suffix = chunk.slice(pos);
-        pos = chunk.length;
-        break;
-      }
       pos += CURSOR_TO_FIRST_COLUMN.length;
       let text = '';
       let terminated = false;
@@ -280,6 +293,15 @@ function applyIncrementalDiff(
             if (end === -1) return false;
             text += chunk.slice(pos, end);
             pos = end;
+            continue;
+          }
+          if (chunk[pos + 1] === 'P') {
+            // DCS payload (tmux/screen multiplexer-wrapped OSC 8): pass
+            // through opaquely to the terminating ST.
+            const st = chunk.indexOf('\u001B\\', pos + 2);
+            if (st === -1) return false;
+            text += chunk.slice(pos, st + 2);
+            pos = st + 2;
             continue;
           }
           return false;
@@ -463,8 +485,10 @@ export function installTerminalResizeReflow(
   ): boolean => {
     const width = stdout.columns ?? lastWidth;
     const rows = stdout.rows ?? 0;
+    // A reset write never carries Ink's synced trailing-newline slot; a
+    // trailing empty element is a genuinely blank bottom row of the live
+    // frame and must stay in the anchoring window.
     const pendingLines = pendingResetFrame.split('\n');
-    if (pendingLines[pendingLines.length - 1] === '') pendingLines.pop();
     const candidate = (trailing: boolean): string[] | null => {
       const height =
         (shrink ? shrink.eraseCount + headCount : headCount + 1) -
@@ -534,7 +558,9 @@ export function installTerminalResizeReflow(
   ) {
     if (typeof chunk === 'string') {
       const currentWidth = stdout.columns ?? lastWidth;
-      const match = ERASE_LINES_PATTERN.exec(chunk);
+      const match = (isVP ? VP_ERASE_LINES_RE : ERASE_LINES_PATTERN).exec(
+        chunk,
+      );
       if (match) {
         const content = chunk.slice(match.index + match[0].length);
         const eraseCount = countOccurrences(match[0], ERASE_LINE);
@@ -569,12 +595,14 @@ export function installTerminalResizeReflow(
           barePrintableCount = 0;
         } else {
           const printable = stripAnsi(content).trim() !== '';
-          if (printable) {
+          if (printable && head === null) {
             // Erase-prefixed printable writes are authoritative Ink renders of
             // the new live region (console interleaving arrives as clear-only +
             // bare), so they update the model even below MIN_FRAME_LINES —
             // rejecting them would freeze the amplification target on a stale
-            // larger frame after every turn commit.
+            // larger frame after every turn commit. A diff-shaped head means a
+            // rejected incremental diff, not a full frame; storing its
+            // control-op fragment would corrupt the model.
             modelFrame(content, true);
             expectFrame = false;
             expectFirstFrame = false;
@@ -667,13 +695,14 @@ export function installTerminalResizeReflow(
           // strays cannot clobber the model during idle. In VP the burst can
           // also settle into a bare incremental diff (a width shrink during
           // streaming redraws bare once, then diffs): that transforms the
-          // frame just captured — storing it as a frame corrupts the model.
+          // frame just captured — storing a diff-shaped write as a frame
+          // corrupts the model whether the diff applies or not.
           barePrintableCount++;
           if (isVP && applyIncrementalDiff(model, chunk, currentWidth)) {
             debugLogger.debug('diff', { applied: true, armed: true });
             expectFrame = false;
             barePrintableCount = 0;
-          } else {
+          } else if (parseDiffHead(chunk) === null) {
             modelFrame(chunk, barePrintableCount > 1);
             if (barePrintableCount > 1) expectFrame = false;
           }
