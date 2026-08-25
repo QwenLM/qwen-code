@@ -322,6 +322,60 @@ describe('SubAgentTracker', () => {
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
+
+    it('uses enriched message when tool description is available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => 'Reading file',
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-enriched',
+          args: { path: 'test.ts' },
+          description: 'Reading file',
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('ReadFile: Reading file');
+    });
+
+    it('falls back to Running tool: <name> when tool description throws', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => {
+          throw new Error('boom');
+        },
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-fallback',
+          args: { path: 'test.ts' },
+          description: undefined, // force fallback path
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('Running tool: ReadFile');
+    });
   });
 
   describe('tool result handling', () => {
@@ -614,10 +668,10 @@ describe('SubAgentTracker', () => {
         expect(sendUpdateSpy).toHaveBeenCalled();
       });
 
-      const progresCalls = sendUpdateSpy.mock.calls.filter(
+      const progressCalls = sendUpdateSpy.mock.calls.filter(
         (call) => call[0]?._meta?.subagentProgress === true,
       );
-      expect(progresCalls).toHaveLength(1);
+      expect(progressCalls).toHaveLength(1);
     });
 
     it('should respond to subagent with permission outcome', async () => {

@@ -103,4 +103,46 @@ describe('QwenAgent tool_call_update handling', () => {
     await iterator.return?.(undefined);
     expect(first.value?.type).toBe('tool_result');
   });
+  
+  it('drops subagent progress frame but keeps the terminal tool_result for the parent Agent call', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-agent-tool-updates-'));
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenToolUpdateInternals;
+
+    internals.handleToolCallUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'parent-call-1',
+      status: 'in_progress',
+      _meta: {
+        toolName: 'agent',
+        subagentType: 'Explore',
+        provenance: 'subagent',
+        subagentProgress: true,
+      },
+    });
+
+    internals.handleToolCallUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'parent-call-1',
+      status: 'completed',
+      kind: 'other',
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Agent finished' } },
+      ],
+      _meta: {
+        toolName: 'agent',
+        provenance: 'builtin',
+        subagentType: 'Explore',
+        subagentProgress: true,
+      },
+    });
+
+    const iterator = internals.eventQueue.drain();
+    const first = await iterator.next();
+    await iterator.return?.(undefined);
+
+    expect(first.value?.type).toBe('tool_result');
+    expect(first.value?.toolCallId).toBe('parent-call-1');
+    expect(first.value?.result).toBe('Agent finished');
+  });
 });

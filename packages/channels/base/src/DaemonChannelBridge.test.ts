@@ -193,6 +193,64 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('surfaces the parent Agent tool call when a compacted frame carries subagentProgress', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'parent-call-1',
+            status: 'completed',
+            kind: 'other',
+            title: 'Agent',
+            _meta: {
+              toolName: 'agent',
+              provenance: 'builtin',
+              subagentType: 'Explore',
+              subagentProgress: true,
+            },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const toolCalls: Array<{ toolCallId: string }> = [];
+    bridge.on('toolCall', (e) => toolCalls.push(e as { toolCallId: string }));
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.prompt('session-1', 'run')).resolves.toBe('Done.');
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].toolCallId).toBe('parent-call-1');
+
+    events.close();
+    bridge.stop();
+  });
+
   it('binds a daemon session and collects assistant chunks during prompt', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

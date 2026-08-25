@@ -785,7 +785,7 @@ describe('ToolCallEmitter', () => {
 
   describe('emitError', () => {
     it('should emit tool_call_update with failed status and error message', async () => {
-      const error = new Error('connection timeout');
+      const error = new Error('Connection timeout');
 
       await emitter.emitError('call-123', 'test_tool', error);
 
@@ -796,7 +796,7 @@ describe('ToolCallEmitter', () => {
         content: [
           {
             type: 'content',
-            content: { type: 'text', text: 'connection timeout' },
+            content: { type: 'text', text: 'Connection timeout' },
           },
         ],
         _meta: { toolName: 'test_tool', provenance: 'builtin' },
