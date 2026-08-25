@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-const desktopPrefixes = ['packages/desktop-shell'];
+const desktopPrefixes = ['packages/desktop-shell', 'packages/live-host'];
 const forbiddenRootPackages = [
   'electron',
   'electron-builder',
