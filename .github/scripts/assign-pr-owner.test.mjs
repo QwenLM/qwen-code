@@ -283,12 +283,39 @@ describe('assign-pr-owner: workflow invariants', () => {
     assert.match(assignJob.if, /github\.repository == 'QwenLM\/qwen-code'/);
   });
 
+  it('keeps the privileged pull_request_target trigger and never cancels in flight', () => {
+    // pull_request_target is the whole safety case: fork PRs get owners
+    // while the checkout stays on the trusted base. Flipping it to
+    // pull_request makes the token read-only on fork PRs, and the
+    // permission-tolerance catch then records a skip — routing silently
+    // disabled for every fork PR with green checks. Dropping
+    // ready_for_review leaves drafts ownerless after they are marked
+    // ready, and cancel-in-progress would kill an in-flight assignment
+    // mid-write on a synchronize burst.
+    assert.deepEqual(triggers.pull_request_target.types, [
+      'opened',
+      'synchronize',
+      'reopened',
+      'ready_for_review',
+    ]);
+    assert.equal(
+      doc.concurrency.group,
+      'assign-pr-owner-${{ github.event.pull_request.number || inputs.number }}',
+    );
+    assert.equal(doc.concurrency['cancel-in-progress'], false);
+  });
+
   it('scopes the write permission to the job and the token to the step', () => {
     assert.equal(doc.permissions['pull-requests'], undefined);
     assert.equal(assignJob.permissions['pull-requests'], 'write');
     const runStep = assignJob.steps.find((step) => step.run);
     assert.ok(runStep.env.GH_TOKEN);
     assert.equal(doc.env?.GH_TOKEN, undefined);
+    assert.equal(
+      assignJob.env,
+      undefined,
+      'job-level env exposes GH_TOKEN to every step',
+    );
     // Same pin as the issue script: a hardcoded or dropped DRY_RUN turns
     // event-triggered runs into permanent no-ops, and breaking the
     // inputs.number fallback breaks every manual dispatch.
