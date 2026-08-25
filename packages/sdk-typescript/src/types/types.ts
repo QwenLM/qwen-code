@@ -404,10 +404,11 @@ export interface QueryOptions {
    * If specified, only matching core tools are registered for the session
    * (non-core built-ins such as `send_message` are unaffected).
    * Separately, `permissions.allow` in settings.json (requires restart)
-   * activates a registry-level allowlist: when at least one allow rule is
-   * configured there, built-in tools not covered by any allow or ask rule
-   * are not registered either (MCP tools, the `--json-schema`
-   * `structured_output` contract, the plan-mode lifecycle tools, and the
+   * activates a registry-level allowlist: when at least one valid allow
+   * rule is configured there (malformed entries do not count), built-in
+   * tools not covered by any allow or ask rule are not registered either
+   * (MCP tools, the `--json-schema` `structured_output` contract, the
+   * plan-mode lifecycle tools, `task_stop`, `tool_search`, and the
    * `computer_use__*` family are exempt) (#9827). The SDK `allowedTools`
    * parameter cannot activate the allowlist on its own, but while the
    * allowlist is active its rules are merged into the effective allow set
