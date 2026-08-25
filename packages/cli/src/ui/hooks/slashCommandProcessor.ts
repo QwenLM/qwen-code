@@ -126,6 +126,13 @@ const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+// How long handleSlashCommand waits for the first registry load when a
+// command is submitted during the startup window (see the gate in the load
+// effect below). Bounded so a config initialization that hangs forever
+// degrades to the previous behavior — "Unknown command" — instead of a
+// permanently stuck prompt.
+const STARTUP_REGISTRY_WAIT_MS = 15_000;
+const STARTUP_REGISTRY_POLL_MS = 100;
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
@@ -262,6 +269,15 @@ export const useSlashCommandProcessor = (
   const extensionContentRefreshRunningRef = useRef(false);
   const extensionContentRefreshPendingRef = useRef(false);
   const mountedRef = useRef(true);
+  // Latest command list and "has the first (post-init) registry load landed"
+  // flag, both readable from handleSlashCommand's stale closures so a
+  // command typed during the startup window resolves against the fresh
+  // registry instead of an empty list.
+  const commandsRef = useRef(commands);
+  useLayoutEffect(() => {
+    commandsRef.current = commands;
+  }, [commands]);
+  const firstRegistryLoadDoneRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -748,6 +764,16 @@ export const useSlashCommandProcessor = (
   ]);
 
   useEffect(() => {
+    // The skill/MCP/project loaders need the fully-initialized config (the
+    // skill manager is created in initialize()). Loading before this gate
+    // settles captures an empty skill set, and until the registry reloads
+    // every skill command (e.g. /qc-helper) reports "Unknown command" —
+    // with no second reload when the first load raced initialize() and
+    // isConfigInitialized flipped after the loaders had already run. The
+    // dependency array re-runs this effect once isConfigInitialized flips.
+    if (!isConfigInitialized) {
+      return;
+    }
     const controller = new AbortController();
     const load = async () => {
       try {
@@ -844,6 +870,7 @@ export const useSlashCommandProcessor = (
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       } finally {
+        firstRegistryLoadDoneRef.current = true;
         if (!controller.signal.aborted) {
           resolveCommandReloads(reloadTrigger);
         }
@@ -882,11 +909,28 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      // Startup window: the first registry load is gated on config
+      // initialization (see the load effect), so a command submitted
+      // before that load lands would parse against an empty or partial
+      // list. Wait (bounded) for the first load instead of reporting
+      // "Unknown command" for a skill the user typed moments after the
+      // UI appeared.
+      let effectiveCommands = commands;
+      if (config && !firstRegistryLoadDoneRef.current) {
+        const deadline = Date.now() + STARTUP_REGISTRY_WAIT_MS;
+        while (!firstRegistryLoadDoneRef.current && Date.now() < deadline) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, STARTUP_REGISTRY_POLL_MS),
+          );
+        }
+        effectiveCommands = commandsRef.current;
+      }
+
       const {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
+      } = parseSlashCommand(trimmed, effectiveCommands);
 
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
@@ -965,7 +1009,10 @@ export const useSlashCommandProcessor = (
 
       try {
         // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
-        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        const stackedResult = parseStackedSlashCommands(
+          trimmed,
+          effectiveCommands,
+        );
         if (stackedResult.skills.length >= 2) {
           const combinedContent: PartListUnion[] = [];
           let firstModelOverride: string | undefined;

@@ -33,7 +33,15 @@ import {
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
 
-const logSlashCommandSpy = vi.fn();
+const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
+  logSlashCommandSpy: vi.fn(),
+  loadInteractiveCommandsMock: vi.fn(),
+}));
+
+vi.mock('./slash-dispatch.js', () => ({
+  loadInteractiveCommands: (...args: unknown[]) =>
+    loadInteractiveCommandsMock(...args),
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -368,6 +376,108 @@ describe('canRunDuringStreaming (ink AppContainer fast path)', () => {
     expect(dispatcher.canRunDuringStreaming('/help')).toBe(true);
     expect(dispatcher.canRunDuringStreaming('/clear')).toBe(false);
     expect(dispatcher.canRunDuringStreaming('not a command')).toBe(false);
+  });
+});
+
+describe('startup-window registry self-heal', () => {
+  beforeEach(() => {
+    loadInteractiveCommandsMock.mockReset();
+  });
+
+  const skillCommand = (): SlashCommand =>
+    stub({
+      name: 'qc-helper',
+      kind: CommandKind.SKILL,
+      action: () => ({
+        type: 'message',
+        messageType: 'info',
+        content: 'expanded',
+      }),
+    });
+
+  // The startup race attaches the first dispatcher before
+  // config.initialize() finishes: the registry has the builtin commands
+  // but no skills, so /qc-helper fails to resolve.
+  const servicesWithSkillManager = (getSkillManager: () => object | null) => ({
+    ...services,
+    config: {
+      getSkillManager,
+    } as unknown as Config,
+  });
+
+  it('reloads the registry when a command fails to resolve instead of reporting Unknown', async () => {
+    loadInteractiveCommandsMock.mockResolvedValue([skillCommand()]);
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      servicesWithSkillManager(() => ({})),
+      [stub({ name: 'help' })],
+    );
+
+    const outcome = await dispatcher.handle('/qc-helper fix the issue');
+
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(loadInteractiveCommandsMock).toHaveBeenCalledTimes(1);
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'info',
+      text: 'expanded',
+    });
+  });
+
+  it('waits for the skill manager to appear before reloading the registry', async () => {
+    loadInteractiveCommandsMock.mockResolvedValue([skillCommand()]);
+    const host = createFakeHost();
+    let skillManager: object | null = null;
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      servicesWithSkillManager(() => skillManager),
+      [],
+    );
+
+    vi.useFakeTimers();
+    try {
+      const pending = dispatcher.handle('/qc-helper wait');
+      // While config.initialize() is still in flight, the reload must
+      // not run against the incomplete state.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(loadInteractiveCommandsMock).not.toHaveBeenCalled();
+      skillManager = {};
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await pending).toEqual({ kind: 'handled' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(loadInteractiveCommandsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once per dispatcher and reuses the reloaded registry', async () => {
+    loadInteractiveCommandsMock.mockResolvedValue([skillCommand()]);
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      servicesWithSkillManager(() => ({})),
+      [],
+    );
+
+    expect(await dispatcher.handle('/qc-helper one')).toEqual({
+      kind: 'handled',
+    });
+    // The second dispatch resolves from the reloaded registry: the
+    // startup retry is one-shot, so no further loader call happens.
+    expect(await dispatcher.handle('/qc-helper two')).toEqual({
+      kind: 'handled',
+    });
+    expect(loadInteractiveCommandsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the Unknown message when there is no config to reload from', async () => {
+    const { outcome, host } = await dispatch('/nope', []);
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'error',
+      text: 'Unknown command: /nope',
+    });
+    expect(loadInteractiveCommandsMock).not.toHaveBeenCalled();
   });
 });
 

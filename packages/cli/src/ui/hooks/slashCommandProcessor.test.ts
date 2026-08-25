@@ -377,6 +377,58 @@ describe('useSlashCommandProcessor', () => {
       expect(fileAction).toHaveBeenCalledTimes(1);
       expect(builtinAction).not.toHaveBeenCalled();
     });
+
+    it('waits for the first registry load instead of reporting Unknown during startup', async () => {
+      const command = createTestCommand({
+        name: 'startupskill',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'ok',
+        }),
+      });
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([command]));
+      mockFileLoadCommands.mockResolvedValue([]);
+      mockMcpLoadCommands.mockResolvedValue([]);
+
+      const { result, rerender } = renderHook(
+        ({ isConfigInitialized }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            [], // mock history array
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(), // refreshStatic
+            vi.fn(), // toggleVimEnabled
+            false, // isProcessing
+            vi.fn(), // setIsProcessing
+            { current: true }, // isIdleRef
+            vi.fn(), // setGeminiMdFileCount
+            createMockActions(),
+            new Map(), // extensionsUpdateState
+            isConfigInitialized,
+            null, // logger
+            mockUpdateItem,
+          ),
+        { initialProps: { isConfigInitialized: false } },
+      );
+
+      // Submitted while config is still initializing: the registry load is
+      // gated and the command list is empty. The handler must wait for the
+      // first load (triggered by the flip below) instead of parsing against
+      // the empty list and reporting "Unknown command".
+      let handled: unknown;
+      act(() => {
+        handled = result.current.handleSlashCommand('/startupskill');
+      });
+
+      rerender({ isConfigInitialized: true });
+
+      await expect(handled).resolves.toEqual({ type: 'handled' });
+      expect(command.action).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('Command Execution Logic', () => {
@@ -1863,19 +1915,20 @@ describe('useSlashCommandProcessor', () => {
         useSlashCommandProcessor(
           mockConfig,
           mockSettings,
+          [], // mock history array
           mockAddItem,
           mockClearItems,
           mockLoadHistory,
-          vi.fn(),
-          vi.fn(),
-          false,
-          vi.fn(),
-          { current: true },
-          vi.fn(),
+          vi.fn(), // refreshStatic
+          vi.fn(), // toggleVimEnabled
+          false, // isProcessing
+          vi.fn(), // setIsProcessing
+          { current: true }, // isIdleRef
+          vi.fn(), // setGeminiMdFileCount
           createMockActions(),
-          new Map(),
-          true,
-          null,
+          new Map(), // extensionsUpdateState
+          true, // isConfigInitialized
+          null, // logger
           mockUpdateItem,
         ),
       );
@@ -2728,30 +2781,40 @@ describe('useSlashCommandProcessor', () => {
       mockMcpLoadCommands.mockResolvedValue([]);
 
       const { rerender } = renderHook(
-        ({ isConfigInitialized }) =>
+        ({ isConfigInitialized, settings }) =>
           useSlashCommandProcessor(
             mockConfig,
-            mockSettings,
+            settings,
             [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
-            vi.fn(),
-            vi.fn(),
-            false,
-            vi.fn(),
-            { current: true },
-            vi.fn(),
+            vi.fn(), // refreshStatic
+            vi.fn(), // toggleVimEnabled
+            false, // isProcessing
+            vi.fn(), // setIsProcessing
+            { current: true }, // isIdleRef
+            vi.fn(), // setGeminiMdFileCount
             createMockActions(),
-            new Map(),
+            new Map(), // extensionsUpdateState
             isConfigInitialized,
-            null,
+            null, // logger
             mockUpdateItem,
           ),
-        { initialProps: { isConfigInitialized: false } },
+        {
+          initialProps: {
+            isConfigInitialized: true,
+            settings: mockSettings,
+          },
+        },
       );
 
-      rerender({ isConfigInitialized: true });
+      // A settings change re-runs the loader effect, aborting the pending
+      // (stale) load and starting a fresh one.
+      rerender({
+        isConfigInitialized: true,
+        settings: { merged: {} } as LoadedSettings,
+      });
 
       await waitFor(() =>
         expect(

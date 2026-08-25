@@ -185,6 +185,12 @@ function hasUserPromptExpansionHooks(
 }
 
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+// How long the dispatch retry waits for the skill manager (created inside
+// config.initialize()) before reloading the registry. Bounded so a config
+// that never finishes initializing degrades to the "Unknown command"
+// message instead of a stuck prompt.
+const STARTUP_REGISTRY_WAIT_MS = 15_000;
+const STARTUP_REGISTRY_POLL_MS = 100;
 
 export class OpenTuiSlashDispatcher {
   private activeAbortController: AbortController | null = null;
@@ -195,6 +201,7 @@ export class OpenTuiSlashDispatcher {
     null;
   private extensionContentRefreshRunning = false;
   private extensionContentRefreshPending = false;
+  private startupRetryUsed = false;
 
   constructor(
     private readonly host: OpenTuiCommandHost,
@@ -331,6 +338,37 @@ export class OpenTuiSlashDispatcher {
     );
   }
 
+  /**
+   * Startup-window self-heal: the first dispatcher can attach a registry
+   * built while config.initialize() was still in flight — the second
+   * initialize() call throws "already initialized", the catch proceeds, and
+   * the skill loaders run before the skill manager exists, so builtin
+   * commands resolve but every skill (e.g. /qc-helper) reports "Unknown
+   * command" until the config-ready dispatcher replaces this one. One
+   * bounded retry per dispatcher lifetime: wait for the skill manager, then
+   * reload the registry so the re-parse sees the complete list.
+   */
+  private async ensureCommandsLoaded(): Promise<boolean> {
+    if (this.startupRetryUsed || !this.services.config) {
+      return false;
+    }
+    this.startupRetryUsed = true;
+    const config = this.services.config;
+    const deadline = Date.now() + STARTUP_REGISTRY_WAIT_MS;
+    while (!config.getSkillManager?.() && Date.now() < deadline) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, STARTUP_REGISTRY_POLL_MS),
+      );
+    }
+    try {
+      await this.loadCommands();
+    } catch {
+      // Keep the current registry; the caller re-parses and reports
+      // "Unknown command" if the command really doesn't exist.
+    }
+    return true;
+  }
+
   /** Parity of `recentSlashCommands` (hidden commands are not tracked). */
   get recentCommandList(): ReadonlyMap<string, RecentSlashCommand> {
     return this.recentCommands;
@@ -408,11 +446,18 @@ export class OpenTuiSlashDispatcher {
     const userMessageTimestamp = Date.now();
     let invocationItemId = options.existingInvocationItemId;
     let invocationSentToModel = false;
-    const {
+    let {
       commandToExecute,
       args,
       canonicalPath: resolvedCommandPath,
     } = parseSlashCommand(trimmed, this.commandList);
+    if (!commandToExecute && (await this.ensureCommandsLoaded())) {
+      ({
+        commandToExecute,
+        args,
+        canonicalPath: resolvedCommandPath,
+      } = parseSlashCommand(trimmed, this.commandList));
+    }
     let hideInvocation =
       isBtwCommand(trimmed) ||
       shouldHideSlashCommandInvocation(
