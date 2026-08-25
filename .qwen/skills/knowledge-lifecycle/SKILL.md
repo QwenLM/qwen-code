@@ -36,15 +36,15 @@ or assume that current implementation overrides an accepted contract.
 
 ## Route Knowledge
 
-| Knowledge | Canonical artifact | Update or retire when |
-| --- | --- | --- |
-| Recurring repository or path-specific working agreement | The nearest applicable `AGENTS.md` or path-scoped rule | The agreement changes or no longer recurs |
-| Current user or developer behavior | Current documentation | Shipped behavior changes; replace stale guidance |
-| Durable rationale or a hard-to-reverse decision | Design document, RFC, or ADR | A later decision supersedes it; retain a pointer to the replacement |
-| Active scope, ownership, progress, discussion, or blockers | GitHub issue, project, pull request, or active implementation plan | Work advances, closes, or is abandoned |
-| Behavior that must remain true | Test, schema, lint rule, hook, or CI check | The invariant changes or is intentionally removed |
-| Operational, migration, deprecation, or release knowledge | The relevant runbook or lifecycle document | The process or supported lifecycle changes |
-| Short-lived investigation or handoff | A temporary `.qwen/` work artifact | Its stated expiry condition is met |
+| Knowledge                                                  | Canonical artifact                                                 | Update or retire when                                               |
+| ---------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Recurring repository or path-specific working agreement    | The nearest applicable `AGENTS.md` or path-scoped rule             | The agreement changes or no longer recurs                           |
+| Current user or developer behavior                         | Current documentation                                              | Shipped behavior changes; replace stale guidance                    |
+| Durable rationale or a hard-to-reverse decision            | Design document, RFC, or ADR                                       | A later decision supersedes it; retain a pointer to the replacement |
+| Active scope, ownership, progress, discussion, or blockers | GitHub issue, project, pull request, or active implementation plan | Work advances, closes, or is abandoned                              |
+| Behavior that must remain true                             | Test, schema, lint rule, hook, or CI check                         | The invariant changes or is intentionally removed                   |
+| Operational, migration, deprecation, or release knowledge  | The relevant runbook or lifecycle document                         | The process or supported lifecycle changes                          |
+| Short-lived investigation or handoff                       | A temporary `.qwen/` work artifact                                 | Its stated expiry condition is met                                  |
 
 Do not create a new artifact when an existing canonical source should be
 updated. Do not add a manually maintained index merely to repeat the repository
