@@ -133,6 +133,109 @@ describe('compressCommand', () => {
     expect(context.ui.setPendingItem).toHaveBeenCalledWith(null);
   });
 
+  // Issue #9309: after /compress-fast the summarize banner is measured on a
+  // different scale (local history-only estimate vs the fast banner's
+  // API-reported baseline), so the compression item must carry per-side
+  // provenance for the renderer to mark estimated numbers.
+  it('should pass token-count provenance to the compression item (interactive)', async () => {
+    // Asymmetric flags so a swapped provenance assignment is detectable.
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    await compressCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          compressionKind: 'summarize',
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should mark estimated counts in the non-interactive message', async () => {
+    // Asymmetric flags mirror the real post-/compress-fast scenario and catch
+    // a swapped flag-argument mutation at the formatTokenCount call sites.
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChat: mockTryCompressChat,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Context compressed (~200 -> 100).',
+    });
+  });
+
+  it('should mark estimated counts in the ACP stream_messages branch', async () => {
+    // Asymmetric flags mirror the real post-/compress-fast scenario and catch
+    // a swapped flag-argument mutation at the ACP formatTokenCount site.
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChat: mockTryCompressChat,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+    expect(messages).toEqual([
+      { messageType: 'info', content: 'Compressing context...' },
+      { messageType: 'info', content: 'Context compressed (~200 -> 100).' },
+    ]);
+  });
+
   it('should add an error message if tryCompressChat throws', async () => {
     const error = new Error('Compression failed');
     mockTryCompressChat.mockRejectedValue(error);

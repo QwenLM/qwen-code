@@ -33,9 +33,9 @@ const messageItemTestState = vi.hoisted(() => ({
   toolArrays: [] as unknown[][],
 }));
 
-// Mock the App context and the heavy row children so this test exercises only
+// Mock the shared context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
-vi.mock('../App', async () => {
+vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return { CompactModeContext: createContext(false) };
 });
@@ -151,7 +151,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 }));
 
 const { MessageList } = await import('./MessageList');
-const { CompactModeContext } = await import('../App');
+const { CompactModeContext } = await import('../WebShellContexts');
 type MessageListHandle = import('./MessageList').MessageListHandle;
 
 (
