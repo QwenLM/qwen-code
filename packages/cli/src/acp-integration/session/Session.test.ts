@@ -11589,6 +11589,103 @@ describe('Session', () => {
           expect(loopState.totalToolCalls).toBe(21);
         });
 
+        it('still halts a frozen daemon poller when MIXED batches interleave a NON-stateful suppressed replay with an executable call (issue #9450)', async () => {
+          // Mixed-batch variant whose suppressed replay is NON-stateful
+          // (the provider re-emits an already-handled generic_tool call
+          // id): the replayed key itself carries no stateful mark, so the
+          // live frozen task_list streak survives the mixed boundaries
+          // only via the suppression carry — the daemon twin of core's
+          // carryStatefulStreakMarksAcrossSuppression, which re-adds the
+          // live streak keys on ANY replay suppression. Pre-fix the
+          // daemon's marks were gated on the replay itself being
+          // stateful, so once the previous poll's result mark was
+          // consumed the polled task_list key sat in NEITHER skip set
+          // (requestedStatefulKeys holds executable calls only) and
+          // decayAbandonedDaemonStreaks wiped the streak at the second
+          // mixed boundary of every cycle — statefulMaxResultRepeat
+          // oscillated 1,1,0,… below GLOBAL_DUPLICATE_THRESHOLD and the
+          // stuck signal never armed, while core carries the identical
+          // interleaving and halts just past the soft cap (issue #9450
+          // requirement #6).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          installTaskListAndGenericTools(() => 'frozen board');
+          // Each replay round replays a DISTINCT already-handled id with
+          // the same (name, args) fingerprint, so its batch is suppressed
+          // without tripping the repeated-duplicate breaker.
+          const fingerprint = core.getToolCallFingerprint('generic_tool', {
+            step: 0,
+          });
+          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+            new Map(
+              Array.from({ length: 40 }, (_, index) => [
+                `replayed_generic_${index}`,
+                fingerprint,
+              ]),
+            ),
+          );
+          const loopState = freshLoopState();
+
+          let replayOrdinal = 0;
+          const runMixedRound = (round: number) =>
+            (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-mixed-nonstateful-${round}`,
+              [
+                {
+                  id: `replayed_generic_${replayOrdinal++}`,
+                  name: 'generic_tool',
+                  args: { step: 0 },
+                },
+                {
+                  id: `generic_${round}`,
+                  name: 'generic_tool',
+                  args: { step: round },
+                },
+              ],
+              loopState,
+            );
+
+          let fired = false;
+          for (let round = 0; round < 60 && !fired; round++) {
+            if (round % 3 !== 0) {
+              // Two MIXED rounds per cycle (each one suppressed
+              // NON-stateful replay + one executable generic call): the
+              // first mixed boundary consumes the previous poll's result
+              // mark, so pre-fix the SECOND mixed boundary wiped the
+              // streak every cycle and the stuck signal never armed.
+              const mixedResult = await runMixedRound(round);
+              fired = mixedResult.loopDetected ?? false;
+              continue;
+            }
+            const result = await runTaskListPoll(loopState, round);
+            fired = result.loopDetected ?? false;
+          }
+
+          // The carry protects the polled task_list key through every
+          // mixed boundary, so the streak arms the stuck signal exactly
+          // as in the stateful-replay control: the halt lands at
+          // totalToolCalls 21 (soft cap 20 + 1).
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBe(21);
+        });
+
         it('still halts a frozen daemon poller when a MIXED replay batch is followed by a gap batch (issue #9450)', async () => {
           // Mixed replay batch, then a GAP batch (other work, no
           // task_list), then the next poll — the shape the consecutive

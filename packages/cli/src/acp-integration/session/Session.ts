@@ -889,6 +889,36 @@ function decayAbandonedDaemonStreaks(
   loopState.statefulMaxResultRepeat = peak;
 }
 
+/**
+ * Daemon twin of core's carryStatefulStreakMarksAcrossSuppression (see
+ * loopDetectionService.noteSuppressedToolCallByCallId); the two runtimes
+ * must not drift (issue #9450 requirement #6). Called on ANY replay
+ * suppression — not only a stateful one: the carry is needed most when
+ * the suppressed replay is a NON-stateful tool (the provider re-emitting
+ * an already-handled read_file call id, say). A MIXED batch of that
+ * replay plus an executable call skips the empty-batch decay skip, and
+ * requestedStatefulKeys holds executable calls only, so without the carry
+ * the polled task_list key sits in NEITHER skip set once the previous
+ * result's mark is consumed — decayAbandonedDaemonStreaks wipes the live
+ * frozen-board streak and recomputes statefulMaxResultRepeat toward zero,
+ * keeping the stuck signal below GLOBAL_DUPLICATE_THRESHOLD indefinitely
+ * while core carries the identical interleaving and halts just past the
+ * soft cap. Decayed streaks carry consecutiveIdenticalResults === 0, so
+ * the carry never resurrects an abandoned streak — it only postpones an
+ * imminent decay by one boundary, exactly as the core twin.
+ */
+function carryStatefulStreakMarksAcrossDaemonSuppression(
+  loopState: DaemonToolLoopState,
+): void {
+  const sinceLastBatch = (loopState.statefulResultKeysSinceLastBatch ??=
+    new Set<string>());
+  for (const [key, state] of loopState.statefulResultStreaks) {
+    if (state.consecutiveIdenticalResults > 0) {
+      sinceLastBatch.add(key);
+    }
+  }
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -9653,28 +9683,36 @@ export class Session implements SessionContext {
         this.duplicateProviderToolCallResponseIds,
       );
 
-      // A suppressed stateful replay keeps its key alive across the batch
-      // boundary: mirror core's suppression mark (core marks
-      // statefulResultKeysSinceLastFinished in noteSuppressedToolCallByCallId)
-      // so the abandonment decay skips it. Without this, a MIXED batch —
-      // the suppressed replay alongside at least one executable call —
-      // skipped the empty-batch early return, found the replayed key in
-      // neither skip set (requestedStatefulKeys is built from executable
-      // calls only), and decayAbandonedDaemonStreaks wiped the live
-      // frozen-board streak — keeping statefulMaxResultRepeat below the
-      // stuck threshold indefinitely and drifting from core (issue #9450
-      // requirement #6). This mark protects the replay batch's OWN
-      // boundary (recordDaemonToolCalls runs after batch construction and
-      // consumes it there); emitDuplicateBatch re-adds the key during the
-      // execution phase for the NEXT boundary, mirroring core's timing —
-      // core's mark lands when the fabricated response is submitted with
-      // the next round's ToolResult, after the replay stream's Finished
+      // A suppressed replay keeps the live stateful streaks alive across
+      // the batch boundary: mirror core's suppression handling (core marks
+      // statefulResultKeysSinceLastFinished in noteSuppressedToolCallByCallId).
+      // The carry re-adds EVERY key that still carries streak evidence on
+      // ANY replay suppression — needed most when the suppressed replay is
+      // a NON-stateful tool: a MIXED batch of that replay alongside an
+      // executable call would otherwise skip the empty-batch early return,
+      // find the polled task_list key in neither skip set
+      // (requestedStatefulKeys is built from executable calls only), and
+      // decayAbandonedDaemonStreaks would wipe the live frozen-board
+      // streak — keeping statefulMaxResultRepeat below the stuck threshold
+      // indefinitely and drifting from core (issue #9450 requirement #6).
+      // The replayed stateful key itself is marked unconditionally too,
+      // mirroring core's end-of-function mark: a suppression landing
+      // before the streak's first result must still protect its key. These
+      // marks protect the replay batch's OWN boundary
+      // (recordDaemonToolCalls runs after batch construction and consumes
+      // them there); emitDuplicateBatch re-adds during the execution
+      // phase for the NEXT boundary, mirroring core's timing — core's
+      // mark lands when the fabricated response is submitted with the
+      // next round's ToolResult, after the replay stream's Finished
       // boundary (issue #9450 requirement #6).
-      if (toolLoopState && isStatefulReadTool(request.name)) {
-        (toolLoopState.statefulResultKeysSinceLastBatch ??=
-          new Set<string>()).add(
-          getToolCallRepeatKey(request.name, request.args),
-        );
+      if (toolLoopState) {
+        carryStatefulStreakMarksAcrossDaemonSuppression(toolLoopState);
+        if (isStatefulReadTool(request.name)) {
+          (toolLoopState.statefulResultKeysSinceLastBatch ??=
+            new Set<string>()).add(
+            getToolCallRepeatKey(request.name, request.args),
+          );
+        }
       }
 
       const response = createDuplicateProviderToolCallResponse(request);
@@ -9687,21 +9725,27 @@ export class Session implements SessionContext {
 
     const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
       const { request, response } = batch;
-      // Next-boundary protection for the suppressed stateful replay: the
-      // mark pushDuplicateBatch added was consumed by THIS batch's own
+      // Next-boundary protection for the suppressed replay: the marks
+      // pushDuplicateBatch added were consumed by THIS batch's own
       // boundary decay (recordDaemonToolCalls ran after construction), so
-      // without a fresh mark a gap batch following a mixed replay batch
-      // would find the key in neither skip set and decay the live
-      // frozen-board streak — one boundary earlier than core's twin, whose
-      // suppression mark lands with the fabricated response AFTER the
-      // replay round's Finished boundary. Runs in the execution phase (the
-      // boundary has already run), so the mark survives to the next
-      // batch's decay (issue #9450 requirement #6).
-      if (toolLoopState && isStatefulReadTool(request.name)) {
-        (toolLoopState.statefulResultKeysSinceLastBatch ??=
-          new Set<string>()).add(
-          getToolCallRepeatKey(request.name, request.args),
-        );
+      // without fresh marks a gap batch following a mixed replay batch
+      // would find the live streak keys in neither skip set and decay the
+      // live frozen-board streak — one boundary earlier than core's twin,
+      // whose suppression mark lands with the fabricated response AFTER
+      // the replay round's Finished boundary. The carry mirrors core's on
+      // ANY replay suppression (a NON-stateful replay's own key marks
+      // nothing — its suppression must still protect the live streaks;
+      // see carryStatefulStreakMarksAcrossDaemonSuppression). Runs in the
+      // execution phase (the boundary has already run), so the marks
+      // survive to the next batch's decay (issue #9450 requirement #6).
+      if (toolLoopState) {
+        carryStatefulStreakMarksAcrossDaemonSuppression(toolLoopState);
+        if (isStatefulReadTool(request.name)) {
+          (toolLoopState.statefulResultKeysSinceLastBatch ??=
+            new Set<string>()).add(
+            getToolCallRepeatKey(request.name, request.args),
+          );
+        }
       }
       try {
         if (request.name === ToolNames.TODO_WRITE) {
