@@ -1018,6 +1018,17 @@ export class LoopDetectionService {
         // replay-retry resets.
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
+        // The failed model's streamed requests never execute and never
+        // receive results (Turn discards them without a suppression note),
+        // so the stateful reservations they made can never unwind on their
+        // own: release them here like the replay-retry branch above, or the
+        // stale in-flight counts collapse the alternating-pattern carve-out
+        // (expectedResults drops to zero, the exoneration check is skipped)
+        // and the guard halts the fallback model's productive poller on
+        // arguments alone (issue #9450).
+        this.statefulAlternationHistory.clear();
+        this.statefulRepeatKeys.clear();
+        this.statefulInFlight.clear();
         this.resetContentTracking();
         this.thoughtHistory = [];
         break;
@@ -1112,6 +1123,45 @@ export class LoopDetectionService {
       this.statefulAlternationHistory.clear();
       this.statefulRepeatKeys.clear();
       this.statefulInFlight.clear();
+      return false;
+    }
+
+    // A model fallback restarts the attempt from scratch exactly like a
+    // replay retry (Turn clears pendingToolCalls on the fallback event),
+    // except the failed model's streamed tool calls are DISCARDED, not
+    // re-streamed: they never execute, no results land for them, and no
+    // suppression note unwinds their request-side state. Mirror the Retry
+    // resets so the failed attempt's evidence cannot poison the fallback
+    // attempt: roll the per-turn cap back to the last committed round-trip
+    // (the failed attempt's calls counted there but never produce results),
+    // drop the consecutive-identical streak (its in-flight requests can
+    // never be exonerated, so keeping it would false-halt the fallback
+    // model's resumed polling at the threshold), clear the cap's repeat
+    // trackers and the stateful result evidence (the fresh attempt is
+    // judged on its own results), release the stateful reservations the
+    // discarded requests made (they can never unwind on their own), and
+    // drop the still-unanswered callId pairings — results recorded between
+    // round-trips already consumed the prior rounds' entries, so whatever
+    // remains belongs to the discarded attempt and would otherwise
+    // accumulate toward the FIFO eviction cap (issue #9450).
+    if (event.type === GeminiEventType.ModelFallback) {
+      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
+      this.resetToolCallCount();
+      this.capKeyCounts.clear();
+      this.capMaxKeyRepeat = 0;
+      this.statefulCapKeyRepeat = 0;
+      for (const state of this.statefulRepeatState.values()) {
+        state.resultsObserved = 0;
+        state.unchangedStreak = 0;
+        state.consecutiveIdenticalResults = 0;
+        state.suppressedRequests = 0;
+      }
+      this.statefulResultKeysSinceLastFinished.clear();
+      this.statefulRequestedKeysSinceLastFinished.clear();
+      this.statefulAlternationHistory.clear();
+      this.statefulRepeatKeys.clear();
+      this.statefulInFlight.clear();
+      this.requestByCallId.clear();
       return false;
     }
 

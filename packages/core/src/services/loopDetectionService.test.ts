@@ -4238,6 +4238,105 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('does not halt a fallback ABAB poller whose predecessor died mid-batch (issue #9450)', () => {
+      // A parallel poll batch streams two identical task_list requests from
+      // the primary model, then the attempt fails before any result lands:
+      // Turn.run clears pendingToolCalls on ModelFallback without a
+      // suppression note, so the in-flight reservations made when those
+      // requests streamed in can never unwind on their own. Pre-fix the
+      // ModelFallback branches never cleared the stateful trackers, so the
+      // stale reservations survived into the fallback attempt and the
+      // alternating-pattern carve-out computed expectedResults =
+      // occurrences - staleInFlight <= 0, skipping the exoneration check —
+      // the fallback model's changing-board poller halted
+      // ALTERNATING_TOOL_CALL_PATTERN on arguments alone.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('fallback-alternating-productive');
+
+      // The primary model's failed partial round: two identical task_list
+      // requests, no results.
+      expect(heuristicService.addAndCheck(taskListEvent('primary-0'))).toBe(
+        false,
+      );
+      expect(heuristicService.addAndCheck(taskListEvent('primary-1'))).toBe(
+        false,
+      );
+      const fallbackEvent: ServerGeminiModelFallbackEvent = {
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      };
+      expect(heuristicService.addAndCheck(fallbackEvent)).toBe(false);
+
+      // The fallback model restarts the poll from scratch and the board
+      // keeps changing: productive ABAB (task_list ↔ tool_b) well past the
+      // window fill.
+      let fired = false;
+      for (
+        let round = 0;
+        round < ALTERNATING_PATTERN_CYCLES + 2 && !fired;
+        round++
+      ) {
+        fired = heuristicService.addAndCheck(taskListEvent(`fb-${round}`));
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${round}`, `fb-${round}`),
+        );
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(heuristicService.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt a fallback poller resuming after the primary stream died (issue #9450)', () => {
+      // Always-on tier (CLI default skipLoopDetection=true). The primary
+      // model streams three identical task_list requests, then the attempt
+      // dies before results land. Pre-fix checkAlwaysOnSafeties had no
+      // ModelFallback branch: the consecutive streak (3) and its
+      // never-answerable in-flight reservations carried into the fallback
+      // attempt, and the fallback model's second EXECUTED poll — the 5th
+      // consecutive request — halted CONSECUTIVE_IDENTICAL_TOOL_CALLS
+      // despite every executed result having changed.
+      const fallbackService = new LoopDetectionService(makeConfig());
+      fallbackService.reset('fallback-consecutive-productive');
+      for (let i = 0; i < 3; i++) {
+        expect(
+          fallbackService.checkAlwaysOnSafeties(taskListEvent(`primary-${i}`)),
+        ).toBe(false);
+      }
+      const fallbackEvent: ServerGeminiModelFallbackEvent = {
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      };
+      expect(fallbackService.checkAlwaysOnSafeties(fallbackEvent)).toBe(false);
+
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      let fired = false;
+      for (let i = 0; i < 12 && !fired; i++) {
+        fired = fallbackService.checkAlwaysOnSafeties(taskListEvent(`fb-${i}`));
+        if (fired) break;
+        fallbackService.checkAlwaysOnSafeties(finishedEvent);
+        fired = fallbackService.recordToolResultByCallId(
+          `fb-${i}`,
+          taskListResult(`board state v${i}`, `fb-${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(fallbackService.getLastLoopType()).toBeNull();
+    });
+
     describe('persisted oversized results (issue #9450 follow-up)', () => {
       // Results over the response-finalizer budget are rewritten into
       // persistence stubs (utils/truncation.ts buildStub) whose envelope
