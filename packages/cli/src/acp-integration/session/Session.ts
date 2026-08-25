@@ -1082,6 +1082,42 @@ function extractTurnPromptText(content: ContentBlock[]): string {
   return hasImage ? '[image]' : '';
 }
 
+function textlessPromptMatchesHistoryEntry(
+  prompt: ContentBlock[],
+  entry: Content,
+): boolean {
+  if (prompt.some((block) => block.type === 'text' && block.text.trim())) {
+    return false;
+  }
+  const parts = entry.parts ?? [];
+  return (
+    prompt.length > 0 &&
+    prompt.every((block) => {
+      switch (block.type) {
+        case 'image':
+        case 'audio':
+          return parts.some(
+            (part) =>
+              part.inlineData?.mimeType === block.mimeType &&
+              part.inlineData.data === block.data,
+          );
+        case 'resource_link':
+          return parts.some(
+            (part) =>
+              part.fileData?.fileUri === block.uri.replace(/^file:\/\//, '') ||
+              part.text === `@${block.uri}`,
+          );
+        case 'resource':
+          return parts.some((part) => part.text?.includes(block.resource.uri));
+        case 'text':
+          return block.text.trim().length === 0;
+        default:
+          return false;
+      }
+    })
+  );
+}
+
 interface InFlightTurnRecording {
   promptId: string;
   originatorClientId?: string;
@@ -5275,11 +5311,15 @@ export class Session implements SessionContext {
                 const lastStrippedEntry =
                   strippedRetryEntries[strippedRetryEntries.length - 1]!;
                 const lastStrippedIsRetriedPrompt =
-                  retriedPromptText.length > 0 &&
-                  (lastStrippedEntry.parts ?? []).some(
-                    (part) =>
-                      typeof part.text === 'string' &&
-                      part.text.trim() === retriedPromptText,
+                  (retriedPromptText.length > 0 &&
+                    (lastStrippedEntry.parts ?? []).some(
+                      (part) =>
+                        typeof part.text === 'string' &&
+                        part.text.trim() === retriedPromptText,
+                    )) ||
+                  textlessPromptMatchesHistoryEntry(
+                    modelPromptBlocks,
+                    lastStrippedEntry,
                   );
                 if (lastStrippedIsRetriedPrompt) {
                   for (const entry of strippedRetryEntries.slice(0, -1)) {

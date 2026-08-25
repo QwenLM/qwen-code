@@ -2658,6 +2658,42 @@ describe('Session', () => {
     );
   });
 
+  it('adopts the matching textless media orphan instead of duplicating it', async () => {
+    const orphanA: Content = {
+      role: 'user',
+      parts: [{ text: 'first failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanA, 'original-a');
+    const orphanB: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'QUJD' } }],
+    };
+    core.markApiHistoryPrompt(orphanB, 'original-b');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphanA, orphanB]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    const readdedIds = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
+    expect(readdedIds).toEqual(['original-a']);
+    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'original-b' },
+    );
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()
