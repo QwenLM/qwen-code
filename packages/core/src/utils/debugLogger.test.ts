@@ -506,6 +506,51 @@ describe('debugLogger', () => {
       expect(fs.symlink).toHaveBeenCalledTimes(2);
     });
 
+    it('resets the failure streak on a successful alias update', async () => {
+      resetDebugLoggingState();
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink)
+        // A's first attempt fails, its retry verifies successfully.
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        // B's first attempt "succeeds" at the fs level but points at the
+        // wrong target — the mismatch branch must count as a failure.
+        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        .mockRejectedValue(new Error('ENOENT'));
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+
+      const logger = createDebugLogger();
+      logger.info('A retries');
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // A's success reset the streak, so B's two failures land at streak 1
+      // and 2 — below the cap — and B still gets a third attempt. Without
+      // the reset, A's initial failure would push B's second failure to the
+      // cap and the marker would go sticky one failure early.
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B first failure');
+      });
+      await vi.runAllTimersAsync();
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B second failure');
+      });
+      await vi.runAllTimersAsync();
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B third attempt');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(5);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
+    });
+
     it('stops retrying the alias after consecutive persistent failures', async () => {
       resetDebugLoggingState();
       vi.mocked(fs.symlink).mockRejectedValue(new Error('EPERM'));
