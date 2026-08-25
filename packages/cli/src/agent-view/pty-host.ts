@@ -5,13 +5,14 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
-import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { PTY_HOST_AUTH_TOKEN_ENV, PTY_HOST_ID_ENV } from './pty-host-env.js';
 import { AGENT_VIEW_WORKER_ENV_KEYS } from './worker-sideband.js';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
   'TMUX',
   'TMUX_PANE',
   'STY',
@@ -20,6 +21,9 @@ const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   'TERMCAP',
   'COLUMNS',
   'LINES',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
 ]);
 
 export interface AgentViewPtySpawnOptions {
@@ -76,12 +80,14 @@ export interface AgentViewPtyHostOptions {
   loadPty?: () => Promise<AgentViewPtyImplementation | null>;
 }
 
-export interface AgentViewPtyHostExit {
-  exitCode: number;
-  signal?: number;
-}
+export type AgentViewPtyHostExit =
+  | { kind: 'exited'; exitCode: number; signal?: number }
+  | { kind: 'confirmed-kill' }
+  | { kind: 'confirmed-shutdown' }
+  | { kind: 'unreachable' };
 
 export interface AgentViewPtyHostHandle {
+  hostId?: string;
   pid: number;
   workerPid: number;
   command: readonly string[];
@@ -284,6 +290,7 @@ export function validateAgentViewLaunchConfig(
   validateOptionalString(value, 'model', errors);
   validateOptionalString(value, 'approvalMode', errors);
   validateOptionalString(value, 'sandbox', errors);
+  validateOptionalString(value, 'initialPrompt', errors);
   validateOptionalString(value, 'settingsDigest', errors);
   validateOptionalString(value, 'mcpDigest', errors);
   validateTerminal(value['terminal'], errors);
@@ -326,17 +333,18 @@ export async function launchAgentViewPtyHost(
   for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
     delete inheritedEnv[key];
   }
+  const term = launch.env['TERM'] || 'xterm-256color';
   const workerEnv: Record<string, string> = {
     ...inheritedEnv,
     ...launch.env,
-    TERM: 'xterm-256color',
+    TERM: term,
   };
   for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
     delete workerEnv[key];
   }
   const ptyProcess = pty.module.spawn(command[0], command.slice(1), {
     cwd: launch.activeCwd,
-    name: 'xterm-256color',
+    name: term,
     cols: launch.terminal.columns,
     rows: launch.terminal.rows,
     env: workerEnv,
@@ -362,7 +370,7 @@ export async function launchAgentViewPtyHost(
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
     const exitDisposable = ptyProcess.onExit((event) => {
-      resolveExitOnce(event);
+      resolveExitOnce({ kind: 'exited', ...event });
     });
     if (exitDisposable) {
       disposables.push(exitDisposable);
@@ -405,7 +413,7 @@ export async function launchAgentViewPtyHost(
       // Match shutdown(): node-pty's signal-less kill falls back to SIGHUP on
       // POSIX, which nohup-style workers ignore.
       ptyProcess.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
-      resolveExitOnce({ exitCode: 1 });
+      resolveExitOnce({ kind: 'unreachable' });
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }
