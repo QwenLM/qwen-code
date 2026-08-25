@@ -432,6 +432,13 @@ describe('GetGoalTool', () => {
         preview: index % 2 === 0 ? LONG_PREVIEW_ASCII : LONG_PREVIEW_CJK,
         proofKind: 'external_fact' as const,
       })),
+      {
+        uuid: 'earlier-short',
+        provenance: 'tool_result' as const,
+        turnId: 'earlier-turn-0',
+        preview: '12 tests passed',
+        proofKind: 'external_fact' as const,
+      },
       ...Array.from({ length: 8 }, (_, index) => ({
         uuid: `current-${index}`,
         provenance: 'assistant_output' as const,
@@ -510,6 +517,11 @@ describe('GetGoalTool', () => {
     expect(entries.find((entry) => entry.uuid === 'earlier-1')?.preview).toBe(
       '证'.repeat(26),
     );
+    // An earlier-turn preview already within the cap passes through
+    // byte-identical and is not counted as shortened.
+    expect(
+      entries.find((entry) => entry.uuid === 'earlier-short')?.preview,
+    ).toBe('12 tests passed');
     expect(payload.evidenceCatalog.shortenedPreviews).toBe(60);
     expect(payload.evidenceCatalog.lineageTurnIds).toHaveLength(16);
   });

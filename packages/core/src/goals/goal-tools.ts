@@ -6,7 +6,10 @@
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import type { ToolInvocation, ToolResult } from '../tools/tools.js';
-import { GOAL_EVIDENCE_REFERENCE_LIMIT } from './goal-evidence.js';
+import {
+  capPreviewBytes,
+  GOAL_EVIDENCE_REFERENCE_LIMIT,
+} from './goal-evidence.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -136,7 +139,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to 80 bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, and lastReason when one was recorded) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
+      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, and lastReason when one was recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
@@ -144,8 +147,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
           view: {
             type: 'string',
             enum: ['summary', 'full'],
-            description:
-              'summary (default): checkpoint claims as a count, full previews only for this turn and checkpoint entries, 80-byte previews for earlier turns. full: the whole catalog and checkpoint verbatim. Uuids are identical in both.',
+            description: `summary (default): checkpoint claims as a count, full previews only for this turn and checkpoint entries, ${SUMMARY_PREVIEW_BYTE_LIMIT}-byte previews for earlier turns. full: the whole catalog and checkpoint verbatim. Uuids are identical in both.`,
           },
         },
         additionalProperties: false,
@@ -521,16 +523,19 @@ function projectWorkerView(
  * The summary keeps the checkpoint's identity and drops the duplicate text.
  */
 function summarizeSnapshot(snapshot: GoalSnapshotV2) {
-  const clone = structuredClone(snapshot);
-  if (!clone.goal?.evidenceCheckpoint) return clone;
-  const { claims, ...checkpoint } = clone.goal.evidenceCheckpoint;
-  return {
-    ...clone,
+  const goal = snapshot.goal;
+  const checkpoint = goal?.evidenceCheckpoint;
+  if (!goal || !checkpoint) return structuredClone(snapshot);
+  // Collapse the claims to their count before cloning, not after: the claims
+  // are the bulk of a checkpoint and none of them survives the summary.
+  const { claims, ...checkpointRest } = checkpoint;
+  return structuredClone({
+    ...snapshot,
     goal: {
-      ...clone.goal,
-      evidenceCheckpoint: { ...checkpoint, claimCount: claims.length },
+      ...goal,
+      evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
     },
-  };
+  });
 }
 
 function summarizeCatalog(
@@ -552,23 +557,12 @@ function summarizeCatalog(
     if (preview !== entry.preview) shortenedPreviews += 1;
     return { ...entry, preview };
   });
+  // Clone only what survives the summary; the entries above are rebuilt from
+  // the originals, so cloning them first would allocate and drop the copy.
+  const { entries: _entries, ...catalogRest } = catalog;
   return {
-    ...structuredClone(catalog),
+    ...structuredClone(catalogRest),
     entries,
     ...(shortenedPreviews > 0 ? { shortenedPreviews } : {}),
   };
-}
-
-/** Cut `value` to at most `limit` UTF-8 bytes without splitting a code point. */
-function capPreviewBytes(value: string, limit: number): string {
-  if (Buffer.byteLength(value, 'utf8') <= limit) return value;
-  let byteLength = 0;
-  let cutoff = 0;
-  for (const codePoint of value) {
-    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
-    if (byteLength + codePointBytes > limit) break;
-    byteLength += codePointBytes;
-    cutoff += codePoint.length;
-  }
-  return value.slice(0, cutoff);
 }
