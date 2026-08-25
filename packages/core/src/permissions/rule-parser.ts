@@ -778,8 +778,12 @@ function parseSimpleHeredocLine(
       typeof word === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word),
   );
   if (typeof receiver !== 'string') return null;
+  // A path-qualified receiver (./cat, /usr/bin/cat) bypasses name-based trust:
+  // an attacker-placed binary at that path receives the body, so only a bare
+  // name from the allowlist may strip.
+  if (receiver.includes('/')) return null;
   return {
-    receiver: receiver.split('/').pop()!,
+    receiver,
     delimiters,
   };
 }
@@ -838,6 +842,12 @@ function receiverRedefinedInCommand(
   );
 }
 
+// Tokens that can change how the receiver name resolves at runtime. With any
+// of them present (or a PATH assignment) this parser cannot prove which
+// binary receives the body, so nothing is strippable.
+const UNPROVABLE_RESOLUTION =
+  /\b(alias|function|eval|hash|enable|exec|source|builtin|command)\b|\bPATH\s*=/;
+
 function projectHeredocBodies(
   command: string,
   stripAllSimpleBodies: boolean,
@@ -851,6 +861,10 @@ function projectHeredocBodies(
   let keepPendingBody = false;
   let quoteOpen: "'" | '"' | undefined;
 
+  if (UNPROVABLE_RESOLUTION.test(command)) {
+    return { command, ambiguous: true, bodyPlaceholders: [] };
+  }
+
   for (const line of lines) {
     const comparableLine = line.endsWith('\r') ? line.slice(0, -1) : line;
     if (pending.length > 0) {
@@ -862,11 +876,14 @@ function projectHeredocBodies(
         pending = pending.slice(1);
       } else if (
         !current.quoted &&
-        (comparableLine.includes('$(') || comparableLine.includes('`'))
+        (comparableLine.includes('$(') ||
+          comparableLine.includes('`') ||
+          comparableLine.includes('\\'))
       ) {
-        // An unquoted heredoc body undergoes command substitution, so a line
-        // carrying one is executed code, not data; never strip it from what
-        // the rules evaluate.
+        // An unquoted heredoc body undergoes command substitution, and a
+        // trailing backslash splices the next physical line into this one
+        // (forming $( or the terminator across the boundary), so such a line
+        // is executed code, not data; never strip it from rule evaluation.
         return { command, ambiguous: true, bodyPlaceholders: [] };
       } else if (keepPendingBody) {
         const placeholder = `${placeholderPrefix}${bodyPlaceholders.length}__`;
@@ -1049,6 +1066,12 @@ function projectCompoundHeredocsForStateTracking(command: string): string {
   const kept: string[] = [];
   const pending: HeredocDelimiter[] = [];
   let quoteState = { inSingle: false, inDouble: false };
+
+  if (UNPROVABLE_RESOLUTION.test(command)) {
+    // Resolution-changing tokens or a PATH assignment mean the receiver
+    // identity is unprovable, so every line stays visible to the guard.
+    return command;
+  }
 
   for (const line of command.split('\n')) {
     const comparableLine = line.endsWith('\r') ? line.slice(0, -1) : line;
@@ -1233,9 +1256,21 @@ export function splitCompoundCommandSegments(
 ): CompoundCommandSegment[] {
   const projected = projectHeredocBodies(command, false);
   if (projected.ambiguous) {
-    return command
-      .split(/\r?\n/)
-      .flatMap((line) => splitCompoundCommandSegmentsRaw(line));
+    // Per-line fallback, but quote-aware: a line that starts inside an open
+    // quote belongs to the previous chunk, so a quoted tail can never glue
+    // into a fake command of its own.
+    const chunks: string[] = [];
+    let quoteOpen: "'" | '"' | undefined;
+    for (const line of command.split(/\r?\n/)) {
+      if (quoteOpen !== undefined) {
+        chunks[chunks.length - 1] += '\n' + line;
+        quoteOpen = quoteStateAtLineEnd(line, quoteOpen).end;
+        continue;
+      }
+      chunks.push(line);
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+    }
+    return chunks.flatMap((chunk) => splitCompoundCommandSegmentsRaw(chunk));
   }
   const bodies = new Map(
     projected.bodyPlaceholders.map(({ placeholder, line }) => [

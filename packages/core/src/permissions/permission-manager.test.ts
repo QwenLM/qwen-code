@@ -860,6 +860,39 @@ describe('heredoc fail-closed projections', () => {
       }),
     ).toBe('deny');
   });
+
+  it('keeps every line visible when receiver resolution can be redirected', () => {
+    // PATH=, hash, eval: the binary that receives the body is no longer
+    // provable, so nothing may be stripped.
+    expect(
+      splitCompoundCommand('PATH=/tmp/x cat <<EOF\nrm -rf /\nEOF'),
+    ).toContain('rm -rf /');
+    expect(
+      splitCompoundCommand('hash -p /tmp/evil cat\ncat <<EOF\nrm -rf /\nEOF'),
+    ).toContain('rm -rf /');
+    expect(
+      splitCompoundCommand("eval 'cat() { sh; }'\ncat <<EOF\nrm -rf /\nEOF"),
+    ).toContain('rm -rf /');
+  });
+
+  it('refuses to trust a path-qualified receiver', () => {
+    expect(splitCompoundCommand('./cat <<EOF\nrm -rf /\nEOF')).toContain(
+      'rm -rf /',
+    );
+  });
+
+  it('treats a backslash line in an unquoted body as executed code', () => {
+    // $\<newline>(id) splices into $(id) under bash, so the line stays visible.
+    expect(splitCompoundCommand('cat <<EOF\n$\\\n(id)\nEOF')).toContain('(id)');
+  });
+
+  it('keeps multi-line quotes intact in the ambiguous fallback', () => {
+    // b' && git reset must not glue into its own fake command; the quote
+    // closes mid-line and the operator tail splits out correctly.
+    expect(
+      splitCompoundCommand("cat <<<hi\necho 'a\nb' && git reset --hard"),
+    ).toContain('git reset --hard');
+  });
 });
 
 // Round-5 witnesses on the state-tracking projection (the daemon git-worktree
