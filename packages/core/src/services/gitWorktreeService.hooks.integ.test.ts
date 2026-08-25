@@ -16,7 +16,11 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { GitWorktreeService } from './gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  LEGACY_WORKTREES_GITIGNORE_BODY,
+  WORKTREES_GITIGNORE_BODY,
+} from './gitWorktreeService.js';
 
 // Real git invocations + user-global hooks (e.g. trustup) can take
 // 10–20s per setUp on slower runners; bump per-test and per-hook
@@ -96,5 +100,52 @@ describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
     const result = await svc.createUserWorktree('always-creates');
     expect(result.success).toBe(true);
     expect(result.worktree).toBeDefined();
+  });
+
+  // Provisioning writes `.qwen/.gitignore`. If that file does not ignore
+  // itself, writing it is what turns a clean parent dirty, and every caller
+  // that fail-closes on a dirty parent then refuses every provision after the
+  // first — blaming uncommitted changes the user never made. Serialised
+  // provisioning makes that ordering deterministic, so this is the witness
+  // for the whole class.
+  it('leaves the parent working tree clean, so a second provision is not refused', async () => {
+    const svc = new GitWorktreeService(repoRoot);
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+
+    const first = await svc.createUserWorktree('gitignore-first');
+    expect(first.success).toBe(true);
+    expect(
+      await fs.readFile(path.join(repoRoot, '.qwen', '.gitignore'), 'utf8'),
+    ).toContain('/.gitignore');
+
+    // The assertion that matters: still clean AFTER the tool wrote its own
+    // file, so the fail-closed dirty-parent gate lets the next one through.
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+    const second = await svc.createUserWorktree('gitignore-second');
+    expect(second.success).toBe(true);
+  });
+
+  // Existing checkouts carry the pre-fix body. Upgrade it in place on the
+  // next provision — but only when it is byte-identical to what this code
+  // wrote, so a file the user has touched is never rewritten.
+  it('upgrades its own legacy gitignore but leaves a user-edited one alone', async () => {
+    const qwenDir = path.join(repoRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    const gitignorePath = path.join(qwenDir, '.gitignore');
+    await fs.writeFile(gitignorePath, LEGACY_WORKTREES_GITIGNORE_BODY);
+
+    const svc = new GitWorktreeService(repoRoot);
+    expect((await svc.createUserWorktree('legacy-upgrade')).success).toBe(true);
+    expect(await fs.readFile(gitignorePath, 'utf8')).toBe(
+      WORKTREES_GITIGNORE_BODY,
+    );
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+
+    const curated = `${LEGACY_WORKTREES_GITIGNORE_BODY}# mine\nnotes.md\n`;
+    await fs.writeFile(gitignorePath, curated);
+    expect((await svc.createUserWorktree('curated-untouched')).success).toBe(
+      true,
+    );
+    expect(await fs.readFile(gitignorePath, 'utf8')).toBe(curated);
   });
 });
