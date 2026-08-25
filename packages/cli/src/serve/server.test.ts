@@ -782,6 +782,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'web_terminal',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -2789,6 +2790,12 @@ describe('createServeApp', () => {
           voiceWsAvailable: true,
         }),
       ).toContain('voice_transcribe');
+    });
+
+    it('advertises `web_terminal` for frontend version compatibility', () => {
+      expect(getAdvertisedServeFeatures(undefined, {})).toContain(
+        'web_terminal',
+      );
     });
 
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {

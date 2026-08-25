@@ -231,6 +231,17 @@
   padding: 0;
 }
 
+.terminalPane {
+  height: 100%;
+}
+
+.terminalPaneHidden {
+  position: absolute;
+  inset: 12px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .attachmentPreviewButton {
   position: sticky;
   float: right;

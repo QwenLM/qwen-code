@@ -185,6 +185,7 @@ const {
   qualifiedWorkspaceProviders,
   qualifiedSetWorkspaceSetting,
   sessionCatalogController,
+  mockReleaseWebTerminal,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -485,6 +486,7 @@ const {
       renamed: vi.fn(),
       turnCompleted: vi.fn(),
     },
+    mockReleaseWebTerminal: vi.fn(),
   };
 });
 
@@ -1692,6 +1694,17 @@ vi.doMock('./components/messages/BtwMessage', async () => {
       testState.latestBtwMessageProps = props;
       return React.createElement('div');
     },
+  };
+});
+vi.doMock('./components/terminal/TerminalPanel', async () => {
+  const React = await import('react');
+  return {
+    releaseWebTerminal: mockReleaseWebTerminal,
+    TerminalPanel: (props: { terminalId: string }) =>
+      React.createElement('div', {
+        'data-testid': 'terminal-panel',
+        'data-terminal-id': props.terminalId,
+      }),
   };
 });
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
@@ -4713,6 +4726,7 @@ beforeEach(() => {
   // auto-restore into the next test's App mount.
   sessionStorage.clear();
   localStorage.removeItem('qwen-code-web-shell-chat-width');
+  mockReleaseWebTerminal.mockReset();
   Object.defineProperty(document, 'hidden', {
     configurable: true,
     get: () => false,
@@ -8053,6 +8067,86 @@ describe('App session callbacks', () => {
       header?.parentElement?.parentElement?.parentElement,
     );
     expect(header?.parentElement?.contains(artifactDock ?? null)).toBe(false);
+  });
+
+  it('shows the manual terminal action when configured and advertised', () => {
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    const actions = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    );
+    expect(
+      actions.find((button) => button.textContent?.includes('Terminal')),
+    ).toBeDefined();
+
+    act(() =>
+      actions
+        .find((button) => button.textContent?.includes('Terminal'))
+        ?.click(),
+    );
+    const terminalId = container
+      .querySelector('[data-testid="terminal-panel"]')
+      ?.getAttribute('data-terminal-id');
+    expect(terminalId).toBeTruthy();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Close Terminal"]')
+        ?.click(),
+    );
+    expect(mockReleaseWebTerminal).toHaveBeenCalledWith(terminalId);
+  });
+
+  it('hides the manual terminal action without the capability', () => {
+    const { container } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).some((button) => button.textContent?.includes('Terminal')),
+    ).toBe(false);
+  });
+
+  it('hides the manual terminal action when it is not configured', () => {
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).some((button) => button.textContent?.includes('Terminal')),
+    ).toBe(false);
   });
 
   it('opens the latest reviewable turn from the empty right panel', () => {

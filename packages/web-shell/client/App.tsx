@@ -136,6 +136,7 @@ import {
   type ArtifactPanelTab,
   type SideTaskListItem,
 } from './components/artifacts/ArtifactPanel';
+import { releaseWebTerminal } from './components/terminal/TerminalPanel';
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
@@ -2937,6 +2938,9 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const webTerminalAvailable =
+    rightPanelItems.includes('terminal') &&
+    connection.capabilities?.features.includes('web_terminal') === true;
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -2980,6 +2984,23 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
+  const nextTerminalTabIdRef = useRef(0);
+  const openTerminalTab = useCallback(() => {
+    const id = `terminal:${Date.now()}:${++nextTerminalTabIdRef.current}`;
+    const count = artifactPanelTabsRef.current.filter(
+      (tab) => tab.kind === 'terminal',
+    ).length;
+    const base = t('terminal.title');
+    const tab: ArtifactPanelTab = {
+      id,
+      kind: 'terminal',
+      title: count === 0 ? base : `${base} (${count + 1})`,
+      workspaceCwd: connection.workspaceCwd,
+    };
+    setArtifactPanelTabs((tabs) => [...tabs, tab]);
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelOpen(true);
+  }, [connection.workspaceCwd, t]);
   const createSideTaskSession = useCallback(
     async (_tabId: string, parentSessionId: string, title: string) => {
       const ownerCwd = connection.workspaceCwd;
@@ -3791,6 +3812,12 @@ export function App({
     };
   }, [artifactPanelOpen, artifactPanelFullscreen]);
   const closeArtifactPanelTab = useCallback((tabId: string) => {
+    if (
+      artifactPanelTabsRef.current.find((tab) => tab.id === tabId)?.kind ===
+      'terminal'
+    ) {
+      releaseWebTerminal(tabId);
+    }
     setArtifactPanelTabs((tabs) => {
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
@@ -13119,6 +13146,9 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                     <ArtifactPanel
                       {...artifactPanelSharedProps}
+                      onOpenTerminal={
+                        webTerminalAvailable ? openTerminalTab : undefined
+                      }
                       variant="drawer"
                     />
                   </WebShellCustomizationProvider>
@@ -13188,6 +13218,9 @@ export function App({
                     <div className={styles.artifactPanelClip}>
                       <ArtifactPanel
                         {...artifactPanelSharedProps}
+                        onOpenTerminal={
+                          webTerminalAvailable ? openTerminalTab : undefined
+                        }
                         panelWidth={artifactPanelWidth}
                       />
                     </div>
