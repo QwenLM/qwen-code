@@ -511,9 +511,10 @@ export interface GitPullResult {
   output: string;
   /**
    * The pull succeeded but restoring the auto-stashed changes failed —
-   * conflict markers in the working tree, or an untracked-file collision
-   * that restored nothing. Git keeps the stash entry, so nothing is lost,
-   * but the user must restore it manually.
+   * conflict markers in the working tree, an untracked-file collision
+   * that restored nothing, or a concurrent actor's entry displacing the
+   * restore so it was skipped. Git keeps the stash entry, so nothing is
+   * lost, but the user must restore it manually.
    */
   stashRestoreConflict?: boolean;
 }
@@ -601,6 +602,37 @@ async function stashTopIs(
   if (recorded === '') return false;
   const top = await currentStashSha(cwd, env).catch(() => '');
   return top === recorded;
+}
+
+// refs/stash is shared with actors the pull lock does not serialize
+// (the user's terminal), and no check-then-pop on it is atomic. Bracket
+// the pop with identity checks on both sides: the pre-check refuses a
+// foreign entry that replaced ours before the pop, and the post-check
+// catches one pushed inside the check-then-pop window that the pop then
+// consumes in ours's place. Either failure reports the restore as
+// failed; our entry is kept either way.
+async function popRecordedStash(
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  recorded: string,
+): Promise<{ popped: boolean; output: string }> {
+  if (!(await stashTopIs(cwd, env, recorded))) {
+    return { popped: false, output: '' };
+  }
+  try {
+    const output = await runGit(cwd, ['stash', 'pop'], env);
+    if (await stashTopIs(cwd, env, recorded)) {
+      // Ours is still on top: the pop consumed the foreign entry.
+      return { popped: false, output: '' };
+    }
+    return { popped: true, output };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    return {
+      popped: false,
+      output: `${e.stdout ?? ''}\n${e.stderr ?? ''}`,
+    };
+  }
 }
 
 async function hasMergeHead(
@@ -706,13 +738,16 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
 // neither the auto-stash (--include-untracked skips ignored files) nor
 // the force reset/clean (clean -fd keeps ignored entries) protects them.
 //
-// Both sides are enumerated structurally. The incoming side comes from
-// `diff --no-renames --diff-filter=d -z` starting at the merge base:
-// every path the update writes — additions AND modifications, since the
-// modify/delete conflict on a locally untracked path still checks the
-// incoming content out over the ignored file — excluding deletions,
-// which write nothing (so unpushed local deletions are not counted;
-// rename destinations count as additions). On an unborn HEAD the merge
+// Both sides are enumerated structurally. For a merge the incoming side
+// comes from `diff --no-renames --diff-filter=d -z` starting at the merge
+// base: every path the update writes — additions AND modifications, since
+// the modify/delete conflict on a locally untracked path still checks the
+// incoming content out over the ignored file — excluding deletions, which
+// write nothing (so unpushed local deletions are not counted; rename
+// destinations count as additions). A rebase's initial detach-checkout
+// writes the ENTIRE fetched tip's tree before the replay starts, so the
+// rebase shape enumerates that tree instead — paths unchanged upstream
+// but deleted locally are written by it too. On an unborn HEAD the merge
 // base is the empty tree, since HEAD does not resolve yet and every
 // incoming path is new to the branch. The local side enumerates the
 // ignored files present in the worktree with `ls-files --others
@@ -754,22 +789,32 @@ async function incomingIgnoredPaths(
     ? (await runGit(toplevel, ['merge-base', 'HEAD', fetchedTip], env)).trim()
     : EMPTY_TREE_SHA;
   const foldCase = await repoFoldsCase(toplevel, env);
-  const additions = splitBuffer(
-    await runGitBuffer(
-      toplevel,
-      [
-        'diff',
-        '--no-renames',
-        '--diff-filter=d',
-        '--name-only',
-        '-z',
-        base,
-        fetchedTip,
-      ],
-      env,
-    ),
-    0,
-  );
+  const additions =
+    includeReplayedAdditions && headExists
+      ? splitBuffer(
+          await runGitBuffer(
+            toplevel,
+            ['ls-tree', '-r', '--name-only', '-z', fetchedTip],
+            env,
+          ),
+          0,
+        )
+      : splitBuffer(
+          await runGitBuffer(
+            toplevel,
+            [
+              'diff',
+              '--no-renames',
+              '--diff-filter=d',
+              '--name-only',
+              '-z',
+              base,
+              fetchedTip,
+            ],
+            env,
+          ),
+          0,
+        );
   // An unborn branch has no local commits to replay.
   if (includeReplayedAdditions && headExists) {
     additions.push(
@@ -844,7 +889,10 @@ function findIgnoredCollisions(
 }
 
 // Fail closed: an unreadable ignorecase setting assumes a folding
-// filesystem, which only widens the refusal set.
+// filesystem, which only widens the refusal set. --bool makes git parse
+// its own boolean grammar (True/TRUE/1/yes/on are all true) instead of
+// comparing the raw text, and an unparseable value rejects into the same
+// fail-closed catch.
 async function repoFoldsCase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -852,7 +900,7 @@ async function repoFoldsCase(
   const value = (
     await runGit(
       cwd,
-      ['config', '--default=false', 'core.ignorecase'],
+      ['config', '--default=false', '--bool', 'core.ignorecase'],
       env,
     ).catch(() => 'true')
   ).trim();
@@ -1138,6 +1186,14 @@ async function gitPullInner(
   // below compares any in-progress state against it to tell state this
   // pull started from a concurrent actor's.
   const fetchedTip = (await runGit(cwd, ['rev-parse', '@{u}'], env)).trim();
+  // The rebase recovery compares the state directory's `onto` file —
+  // always a peeled commit — against the fetched tip; peel once so an
+  // upstream that resolves to an annotated tag object matches too. The
+  // merge arm compares MERGE_HEAD, which holds the SHA the merge was
+  // given, so it keeps the unpeeled tip.
+  const fetchedTipCommit = (
+    await runGit(cwd, ['rev-parse', `${fetchedTip}^{commit}`], env)
+  ).trim();
   if (opts?.force) {
     // Without a catch: a missing upstream must surface here, before
     // anything is discarded. A diverged branch is refused because the
@@ -1169,14 +1225,16 @@ async function gitPullInner(
   // reads clean and would silently check the incoming file out over the
   // local one. Probe failures must refuse the pull, not read as "no
   // collision" (see incomingIgnoredPaths).
+  //
+  // An unborn HEAD has no local commits to replay, so the rebase shape
+  // degenerates to the merge one: `git rebase` fatals on the missing HEAD
+  // ("Could not resolve HEAD to a commit") — on the force path only after
+  // the discard already ran.
+  const headExists = await hasForeignHead(cwd, 'HEAD', env);
+  const useRebase = opts?.rebase === true && headExists;
   let ignored: Buffer[];
   try {
-    ignored = await incomingIgnoredPaths(
-      cwd,
-      fetchedTip,
-      opts?.rebase === true,
-      env,
-    );
+    ignored = await incomingIgnoredPaths(cwd, fetchedTip, useRebase, env);
   } catch (err) {
     throw await classifyPullFailure(cwd, env, err, opts?.stash === true);
   }
@@ -1195,7 +1253,7 @@ async function gitPullInner(
     // has no tracked changes to protect: the merge refuses to
     // overwrite an untracked file on its own, so pull through
     // without a stash.
-    if (await hasForeignHead(cwd, 'HEAD', env)) {
+    if (headExists) {
       // Compare refs/stash before/after instead of parsing the push output,
       // which differs between git versions and locales.
       const before = await currentStashSha(cwd, env);
@@ -1228,14 +1286,8 @@ async function gitPullInner(
         });
         let popBackFailed = false;
         if (afterPush !== '' && afterPush !== before) {
-          await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
-            popBackFailed = true;
-            // eslint-disable-next-line no-console
-            console.error(
-              'git pull: failed to pop back a partially created auto-stash:',
-              popErr,
-            );
-          });
+          const { popped } = await popRecordedStash(cwd, env, afterPush);
+          popBackFailed = !popped;
         }
         const failure = await classifyPullFailure(cwd, env, err, true);
         // A failed pop-back leaves the changes in the kept entry; name it,
@@ -1272,7 +1324,7 @@ async function gitPullInner(
     await refuseForeignMergeOrRebase(cwd, env);
     output = await runGit(
       cwd,
-      opts?.rebase
+      useRebase
         ? ['rebase', '--no-autostash', fetchedTip]
         : ['merge', '--no-edit', '--no-autostash', fetchedTip],
       env,
@@ -1292,7 +1344,7 @@ async function gitPullInner(
         // Identify ours first: a merge this pull started wrote the
         // fetched tip to MERGE_HEAD, and a rebase it started wrote it to
         // the state directory's `onto` file.
-        if (!opts?.rebase) {
+        if (!useRebase) {
           const mergeHead = (
             await runGit(
               cwd,
@@ -1321,7 +1373,7 @@ async function gitPullInner(
               // A state directory without an `onto` file is not one this
               // update created.
             }
-            if (onto === fetchedTip) {
+            if (onto === fetchedTipCommit) {
               await runGit(cwd, ['rebase', '--abort'], env).catch(
                 (abortErr) => {
                   // eslint-disable-next-line no-console
@@ -1337,17 +1389,9 @@ async function gitPullInner(
       }
       if (stashed) {
         // Bring the stashed changes back. A failed restore leaves the
-        // stash entry in place, so nothing is lost either way. Pop only
-        // the entry this pull created: the lock does not cover the user's
-        // terminal, so a concurrent `git stash` in the merge window
-        // would otherwise be applied and dropped in its place.
-        if (await stashTopIs(cwd, env, stashedSha)) {
-          await runGit(cwd, ['stash', 'pop'], env).catch(() => {
-            restoreFailed = true;
-          });
-        } else {
-          restoreFailed = true;
-        }
+        // stash entry in place, so nothing is lost either way.
+        const { popped } = await popRecordedStash(cwd, env, stashedSha);
+        restoreFailed = !popped;
       }
     }
     const failure = await classifyPullFailure(
@@ -1359,28 +1403,19 @@ async function gitPullInner(
     throw restoreFailed ? withStashRestoreNote(failure) : failure;
   }
   if (stashed) {
-    let stashRestoreConflict = false;
-    let popOutput: string;
-    // Pop only the entry this pull created (see the failure-recovery
-    // pop): on a mismatch the edits stay in the kept entry and the note
-    // names them, instead of a foreign stash being applied and dropped.
-    if (await stashTopIs(cwd, env, stashedSha)) {
-      popOutput = await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
-        // A failed pop always keeps the stash entry and leaves the changes
-        // unrestored — conflict markers, or an untracked-file collision — so
-        // flag it instead of failing an otherwise successful pull.
-        stashRestoreConflict = true;
-        const e = popErr as { stdout?: string; stderr?: string };
-        return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
-      });
-    } else {
-      stashRestoreConflict = true;
-      popOutput = STASH_RESTORE_NOTE;
-    }
+    // On a mismatch or a failed pop the edits stay in the kept entry and
+    // the note names them, instead of a foreign stash being applied and
+    // dropped.
+    const { popped, output: popOutputRaw } = await popRecordedStash(
+      cwd,
+      env,
+      stashedSha,
+    );
+    const popOutput = popOutputRaw.trim() || STASH_RESTORE_NOTE;
     return {
       success: true,
-      output: `${output.trim()}\n${popOutput.trim()}`.trim(),
-      ...(stashRestoreConflict ? { stashRestoreConflict: true } : {}),
+      output: `${output.trim()}\n${popOutput}`.trim(),
+      ...(!popped ? { stashRestoreConflict: true } : {}),
     };
   }
   return { success: true, output: output.trim() };

@@ -861,6 +861,53 @@ describe('gitPull', () => {
     expect(fs.existsSync(path.join(dir, '.git', 'rebase-apply'))).toBe(false);
   });
 
+  it('aborts the rebase a conflicting tag-upstream pull started', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    // Upstream publishes a conflicting commit as an ANNOTATED tag and only
+    // the tag is fetched: @{u} resolves to the tag object while the rebase
+    // state's `onto` file holds the peeled commit, so the recovery's
+    // identity comparison must peel the fetched tip.
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'tag', '-a', 'v1', '-m', 'release v1');
+    git(clone, 'push', '-q', 'origin', 'v1');
+
+    git(
+      dir,
+      'config',
+      '--add',
+      'remote.origin.fetch',
+      '+refs/tags/v1:refs/remotes/origin/v1',
+    );
+    git(dir, 'config', 'branch.master.merge', 'refs/tags/v1');
+    git(dir, 'fetch', '-q', 'origin');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir, { stash: true, rebase: true })).rejects.toThrow();
+
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local version\n',
+    );
+    expect(headSha(dir)).toBe(headBefore);
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-apply'))).toBe(false);
+  });
+
   it('force pull refuses a diverged branch before discarding anything', async () => {
     const dir = makeRepo();
     const remote = makeBareRemote();
@@ -939,6 +986,36 @@ describe('gitPull', () => {
     );
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
       'root local edit\n',
+    );
+  });
+
+  it('keeps a plain pull on a diverged dirty tree panel-recoverable', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // Divergent local commit plus a dirty edit: the branch has diverged,
+    // but the stash option can still save this shape when the local
+    // commits do not conflict, so a plain pull stays panel-recoverable
+    // instead of the terminal diverged code.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir)).rejects.toMatchObject({
+      code: 'dirty_working_tree',
+    });
+
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'dirty edit\n',
     );
   });
 
@@ -1678,6 +1755,74 @@ describe('gitPull state guards', () => {
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
+  // The merge arm runs a real divergent three-way merge; a host system
+  // config such as [merge] ff = only fatals it before the pinned behavior
+  // applies.
+  it.runIf(!hostHasSystemGitConfig())(
+    'refuses a rebase pull whose initial checkout would overwrite a locally deleted-and-ignored file',
+    async () => {
+      // Base carries F; upstream never touches it while the local branch
+      // deletes it and ignores the path, keeping user content in the
+      // worktree. The rebase's initial checkout of the tip still writes F
+      // over the ignored file before the replayed delete removes it, so
+      // the collision probe must count the tip's whole tree, not only the
+      // upstream diff. A merge writes only what changed since the base,
+      // so the merge shape is safe on the identical setup.
+      const makeFixture = () => {
+        const dir = makeRepo();
+        fs.writeFileSync(path.join(dir, 'F.txt'), 'base content\n');
+        git(dir, 'add', '.');
+        git(dir, 'commit', '-q', '-m', 'add F');
+        const remote = makeBareRemote();
+        git(dir, 'remote', 'add', 'origin', remote);
+        git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+        const clone = makeClone(remote);
+        fs.writeFileSync(path.join(clone, 'g.txt'), 'incoming\n');
+        git(clone, 'add', '.');
+        git(clone, 'commit', '-q', '-m', 'add g.txt');
+        git(clone, 'push', '-q', 'origin', 'HEAD');
+
+        git(dir, 'rm', '-q', 'F.txt');
+        git(dir, 'commit', '-q', '-m', 'delete F');
+        fs.writeFileSync(path.join(dir, '.gitignore'), 'F.txt\n');
+        git(dir, 'add', '.');
+        git(dir, 'commit', '-q', '-m', 'ignore F');
+        fs.writeFileSync(path.join(dir, 'F.txt'), 'user content\n');
+        return dir;
+      };
+
+      const rebaseDir = makeFixture();
+      fs.writeFileSync(path.join(rebaseDir, 'a.txt'), 'local edit\n');
+
+      await expect(
+        gitPull(rebaseDir, { stash: true, rebase: true }),
+      ).rejects.toMatchObject({ code: 'ignored_collision' });
+
+      expect(fs.readFileSync(path.join(rebaseDir, 'F.txt'), 'utf8')).toBe(
+        'user content\n',
+      );
+      expect(fs.readFileSync(path.join(rebaseDir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(rebaseDir, 'stash', 'list').trim()).toBe('');
+
+      const mergeDir = makeFixture();
+      fs.writeFileSync(path.join(mergeDir, 'a.txt'), 'local edit\n');
+
+      const result = await gitPull(mergeDir, { stash: true });
+
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(mergeDir, 'F.txt'), 'utf8')).toBe(
+        'user content\n',
+      );
+      expect(fs.readFileSync(path.join(mergeDir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(mergeDir, 'stash', 'list').trim()).toBe('');
+    },
+  );
+
   it('refuses every pull shape while a resolved cherry-pick is staged', async () => {
     const dir = makeRepo();
     // A conflicting cherry-pick, resolved and staged: no MERGE_HEAD, no
@@ -1949,7 +2094,7 @@ describe('gitPull incoming-tip guards', () => {
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
-  it('does not fold case when the repository says the filesystem does not', async () => {
+  it('refuses a case-variant collision when core.ignorecase spells true in another casing', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, '.gitignore'), 'Notes.md\n');
     git(dir, 'add', '.');
@@ -1964,16 +2109,16 @@ describe('gitPull incoming-tip guards', () => {
     git(clone, 'commit', '-q', '-m', 'add notes.md');
     git(clone, 'push', '-q', 'origin', 'HEAD');
 
-    git(dir, 'config', 'core.ignorecase', 'false');
+    // git's boolean grammar accepts True/TRUE/1/yes/on as true; the probe
+    // must fold case under every truthy spelling, not only lowercase.
+    git(dir, 'config', 'core.ignorecase', 'True');
     fs.writeFileSync(path.join(dir, 'Notes.md'), 'local secret\n');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
 
-    const result = await gitPull(dir, { stash: true });
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
 
-    expect(result.success).toBe(true);
-    expect(fs.readFileSync(path.join(dir, 'notes.md'), 'utf8')).toBe(
-      'incoming\n',
-    );
     expect(fs.readFileSync(path.join(dir, 'Notes.md'), 'utf8')).toBe(
       'local secret\n',
     );
@@ -1982,6 +2127,46 @@ describe('gitPull incoming-tip guards', () => {
     );
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
+
+  // The assertion pair needs the two casings to be distinct directory
+  // entries — unsatisfiable on the folding filesystems (APFS/NTFS) of the
+  // macOS and Windows CI runners.
+  it.runIf(process.platform !== 'win32' && process.platform !== 'darwin')(
+    'does not fold case when the repository says the filesystem does not',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'Notes.md\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'ignore Notes.md');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'notes.md'), 'incoming\n');
+      git(clone, 'add', '-f', 'notes.md');
+      git(clone, 'commit', '-q', '-m', 'add notes.md');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      git(dir, 'config', 'core.ignorecase', 'false');
+      fs.writeFileSync(path.join(dir, 'Notes.md'), 'local secret\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const result = await gitPull(dir, { stash: true });
+
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'notes.md'), 'utf8')).toBe(
+        'incoming\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'Notes.md'), 'utf8')).toBe(
+        'local secret\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
 
   it('pulls every shape on an unborn-HEAD repository with a configured upstream', async () => {
     // Cloning a still-empty remote leaves HEAD unborn while wiring
@@ -2036,6 +2221,33 @@ describe('gitPull incoming-tip guards', () => {
     {
       const dir = makeUnbornFixture();
       const result = await gitPull(dir, { force: true });
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
+        'upstream\n',
+      );
+    }
+
+    // The rebase shape has no local commits to replay on an unborn HEAD,
+    // so it completes the update like the merge shape instead of fataling
+    // on the missing HEAD ("Could not resolve HEAD to a commit").
+    {
+      const dir = makeUnbornFixture();
+      fs.writeFileSync(path.join(dir, 'local-untracked.txt'), 'local\n');
+      const result = await gitPull(dir, { rebase: true });
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
+        'upstream\n',
+      );
+      expect(
+        fs.readFileSync(path.join(dir, 'local-untracked.txt'), 'utf8'),
+      ).toBe('local\n');
+    }
+
+    // With force the discard runs before the update; the update must then
+    // still complete instead of fataling with the changes already gone.
+    {
+      const dir = makeUnbornFixture();
+      const result = await gitPull(dir, { force: true, rebase: true });
       expect(result.success).toBe(true);
       expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
         'upstream\n',
@@ -2471,6 +2683,64 @@ describe('gitPull incoming-tip guards', () => {
       );
       expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
       expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
+
+  // The POSIX shim below stands in for a concurrent actor pushing into
+  // the restore's identity-check->pop window; it has no Windows
+  // equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'flags the restore when a foreign stash lands between the identity check and the pop',
+    async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'racer-marker');
+      const target = path.join(dir, 'remote-only.txt');
+      // The user's terminal stashes its own edit inside the window between
+      // the restore's identity check and the pop: the pop must not consume
+      // and drop the foreign entry while the pull's own stays behind.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "pop" ] && [ ! -e "${marker}" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `  printf 'concurrent edit\\n' >> "${target}"\n` +
+          `  "${realGit}" -C "${dir}" stash push -q -m 'concurrent actor'\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      const result = await withPathPrefix(shimDir, () =>
+        gitPull(dir, { stash: true }),
+      );
+
+      expect(result.success).toBe(true);
+      // The restore is reported as failed — the pull's own entry was never
+      // applied — instead of a silent success behind the consumed foreign
+      // entry.
+      expect(result.stashRestoreConflict).toBe(true);
+      const list = git(dir, 'stash', 'list');
+      expect(list).toContain('qwen-code: auto-stash before pull');
+      expect(list).not.toContain('concurrent actor');
+      // The local edit waits in the kept entry; the concurrent edit landed
+      // in the worktree with its stash entry dropped.
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
+      expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
+        'remote\nconcurrent edit\n',
+      );
     },
   );
 
