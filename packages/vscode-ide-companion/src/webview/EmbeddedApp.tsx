@@ -19,13 +19,7 @@ import {
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import {
-  ChevronDown,
-  FileText,
-  LoaderCircle,
-  Plus,
-  X,
-} from 'lucide-react';
+import { ChevronDown, FileText, LoaderCircle, Plus, X } from 'lucide-react';
 import { useVSCode } from './hooks/useVSCode.js';
 import { QwenOnboarding } from './components/QwenOnboarding.js';
 import { SessionHistoryDropdown } from './components/SessionHistoryDropdown.js';
@@ -75,7 +69,7 @@ const VSCODE_SLASH_COMMANDS = [
     completionPriority: -90,
     subcommands: ['html', 'md', 'json', 'jsonl'],
   },
-] as const;
+];
 
 const VSCODE_HIDDEN_SLASH_COMMANDS = [
   'theme',
@@ -140,8 +134,7 @@ const VSCODE_THEME_STYLE = {
   '--chat-editor-text-secondary': 'var(--vscode-descriptionForeground)',
   '--chat-editor-text-dimmed': 'var(--vscode-input-placeholderForeground)',
   '--chat-editor-accent-color': 'var(--vscode-focusBorder)',
-  '--agent-gray-200':
-    'var(--vscode-input-border, var(--vscode-widget-border))',
+  '--agent-gray-200': 'var(--vscode-input-border, var(--vscode-widget-border))',
   '--agent-gray-500': 'var(--vscode-descriptionForeground)',
   '--success-color': 'var(--vscode-testing-iconPassed, #89d185)',
   '--warning-color': 'var(--vscode-editorWarning-foreground, #cca700)',
@@ -397,17 +390,19 @@ export function EmbeddedApp() {
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
-  const currentModelIdRef = useRef<string>();
+  const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
-  const focusedPermissionRequestIdRef = useRef<string>();
+  const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
+  const daemonBaseUrl = runtime?.baseUrl;
+  const daemonToken = runtime?.token;
   const daemonClient = useMemo(
     () =>
-      runtime
-        ? new DaemonClient({ baseUrl: runtime.baseUrl, token: runtime.token })
+      daemonBaseUrl
+        ? new DaemonClient({ baseUrl: daemonBaseUrl, token: daemonToken })
         : null,
-    [runtime?.baseUrl, runtime?.token],
+    [daemonBaseUrl, daemonToken],
   );
 
   const clearInsight = useCallback(() => {
@@ -434,9 +429,7 @@ export function EmbeddedApp() {
             cursor,
             archiveState: 'active',
           });
-        const pageSessions = Array.isArray(page.sessions)
-          ? page.sessions
-          : [];
+        const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),
@@ -690,9 +683,10 @@ export function EmbeddedApp() {
         message.type === 'authError' ||
         message.type === 'agentConnectionError'
       ) {
-        const data = message.data as
-          | { message?: unknown; error?: unknown }
-          | null;
+        const data = message.data as {
+          message?: unknown;
+          error?: unknown;
+        } | null;
         const text =
           typeof data?.message === 'string'
             ? data.message
@@ -717,8 +711,7 @@ export function EmbeddedApp() {
           setInsightProgress({
             stage: data.stage,
             progress: data.progress,
-            detail:
-              typeof data.detail === 'string' ? data.detail : undefined,
+            detail: typeof data.detail === 'string' ? data.detail : undefined,
           });
         }
       } else if (message.type === 'insightProgressCleared') {
@@ -771,10 +764,14 @@ export function EmbeddedApp() {
         } else {
           setActiveFile(undefined);
         }
-      } else if (message.type === 'modeChanged' || message.type === 'modeInfo') {
-        const modeData = message.data as
-          | { modeId?: unknown; currentModeId?: unknown }
-          | null;
+      } else if (
+        message.type === 'modeChanged' ||
+        message.type === 'modeInfo'
+      ) {
+        const modeData = message.data as {
+          modeId?: unknown;
+          currentModeId?: unknown;
+        } | null;
         const modeId = modeData?.modeId ?? modeData?.currentModeId;
         if (isAutomaticApprovalMode(modeId)) {
           closeOpenPermissionDiffs();
@@ -787,10 +784,7 @@ export function EmbeddedApp() {
           name?: unknown;
           value?: unknown;
         };
-        if (
-          typeof data.name === 'string' &&
-          typeof data.value === 'string'
-        ) {
+        if (typeof data.name === 'string' && typeof data.value === 'string') {
           composerRef.current?.addTags([
             {
               id:
@@ -912,7 +906,14 @@ export function EmbeddedApp() {
             }
           }}
           onDelete={async (session) => {
-            if (!daemonClient || session.sessionId === runtime.sessionId) return;
+            if (
+              !daemonClient ||
+              !runtime.workspaceCwd ||
+              !session.sessionId ||
+              session.sessionId === runtime.sessionId
+            ) {
+              return;
+            }
             setSessionListError(undefined);
             try {
               await daemonClient
@@ -956,7 +957,9 @@ export function EmbeddedApp() {
             style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
           />
           <span>
-            {creatingSession ? 'Starting new session…' : 'Loading conversation…'}
+            {creatingSession
+              ? 'Starting new session…'
+              : 'Loading conversation…'}
           </span>
         </div>
       )}
@@ -981,7 +984,9 @@ export function EmbeddedApp() {
           aria-label="Past conversations"
           aria-haspopup="dialog"
           aria-expanded={sessionHistoryOpen}
-          aria-controls={sessionHistoryOpen ? 'qwen-session-history' : undefined}
+          aria-controls={
+            sessionHistoryOpen ? 'qwen-session-history' : undefined
+          }
           disabled={Boolean(switchingSessionId || creatingSession)}
           onClick={() => {
             if (sessionHistoryOpen) closeSessionHistory();
@@ -1001,8 +1006,7 @@ export function EmbeddedApp() {
             color: 'inherit',
             font: 'inherit',
             fontWeight: 600,
-            cursor:
-              switchingSessionId || creatingSession ? 'wait' : 'pointer',
+            cursor: switchingSessionId || creatingSession ? 'wait' : 'pointer',
             opacity: switchingSessionId || creatingSession ? 0.55 : 1,
           }}
         >
@@ -1086,9 +1090,7 @@ export function EmbeddedApp() {
                   ? 'not-allowed'
                   : 'pointer',
             opacity:
-              switchingSessionId ||
-              creatingSession ||
-              authenticated === false
+              switchingSessionId || creatingSession || authenticated === false
                 ? 0.55
                 : 1,
           }}
@@ -1213,8 +1215,14 @@ export function EmbeddedApp() {
                   {insightProgress.detail ?? 'Processing your chat history…'}
                 </div>
               </div>
-              <span style={{ flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' }}>
-                {Math.max(0, Math.min(100, Math.round(insightProgress.progress)))}%
+              <span
+                style={{ flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' }}
+              >
+                {Math.max(
+                  0,
+                  Math.min(100, Math.round(insightProgress.progress)),
+                )}
+                %
               </span>
             </>
           ) : (
@@ -1268,303 +1276,309 @@ export function EmbeddedApp() {
         />
       ) : (
         <WebShellWithProviders
-        baseUrl={runtime.baseUrl}
-        token={runtime.token}
-        clientId={runtime.clientId}
-        lockWorkspaceCwd={runtime.workspaceCwd}
-        sessionId={runtime.sessionId}
-        className="qwen-code-vscode-web-shell"
-        style={SHELL_STYLE}
-        theme={theme}
-        language={readLanguage()}
-        shellRef={shellRef}
-        header={{ items: [] }}
-        onSessionIdChange={(sessionId) => {
-          if (switchingSessionId && sessionId !== switchingSessionId) return;
-          clearInsight();
-          setEditingMessage(undefined);
-          vscode.postMessage({
-            type: 'webShellSessionChanged',
-            data: { sessionId, workspaceCwd: runtime.workspaceCwd },
-          });
-          setRuntime((current) =>
-            current && current.sessionId !== sessionId
-              ? { ...current, sessionId }
-              : current,
-          );
-          if (sessionId === switchingSessionId) {
+          baseUrl={runtime.baseUrl}
+          token={runtime.token}
+          clientId={runtime.clientId}
+          lockWorkspaceCwd={runtime.workspaceCwd}
+          sessionId={runtime.sessionId}
+          className="qwen-code-vscode-web-shell"
+          style={SHELL_STYLE}
+          theme={theme}
+          language={readLanguage()}
+          shellRef={shellRef}
+          header={{ items: [] }}
+          onSessionIdChange={(sessionId) => {
+            if (switchingSessionId && sessionId !== switchingSessionId) return;
+            clearInsight();
+            setEditingMessage(undefined);
+            vscode.postMessage({
+              type: 'webShellSessionChanged',
+              data: { sessionId, workspaceCwd: runtime.workspaceCwd },
+            });
+            setRuntime((current) =>
+              current && current.sessionId !== sessionId
+                ? { ...current, sessionId }
+                : current,
+            );
+            if (sessionId === switchingSessionId) {
+              setSwitchingSessionId(undefined);
+            }
+          }}
+          onSessionInfoChange={({ sessionId, sessionName }) => {
+            if (!switchingSessionId || sessionId === switchingSessionId) {
+              const title = sessionName || 'New Session';
+              setSessionTitle(title);
+              if (runtime.hostKind === 'panel') {
+                vscode.postMessage({
+                  type: 'updatePanelTitle',
+                  data: { title },
+                });
+              }
+            }
+          }}
+          onError={(error) => {
+            clearInsight();
+            setEditingMessage(undefined);
             setSwitchingSessionId(undefined);
-          }
-        }}
-        onSessionInfoChange={({ sessionId, sessionName }) => {
-          if (!switchingSessionId || sessionId === switchingSessionId) {
-            const title = sessionName || 'New Session';
-            setSessionTitle(title);
-            if (runtime.hostKind === 'panel') {
+            setCreatingSession(false);
+            setHostNotice({
+              tone: 'error',
+              text: error.message || 'Failed to load the Qwen Code session.',
+            });
+          }}
+          sidebar={false}
+          compactThinking
+          collapseCompletedTurns
+          composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
+          compactComposerOverlays
+          autoSubmitSlashCommands
+          additionalSlashCommands={VSCODE_SLASH_COMMANDS}
+          hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
+          onSlashCommand={({ command, input }) => {
+            if (command === 'auth' || command === 'login') {
+              vscode.postMessage({ type: 'auth', data: {} });
+              return true;
+            }
+            if (command === 'account') {
+              vscode.postMessage({ type: 'getAccountInfo', data: {} });
+              return true;
+            }
+            if (command === 'export') {
               vscode.postMessage({
-                type: 'updatePanelTitle',
-                data: { title },
+                type: 'exportSession',
+                data: { text: input, sessionId: runtime.sessionId },
+              });
+              return true;
+            }
+            return false;
+          }}
+          contextUsageAlwaysVisible
+          userMessageEditing
+          cycleModeOnTab
+          onUserMessageEditRequest={(turnIndex, content) => {
+            composerRef.current?.clear({ text: true, tags: true });
+            composerRef.current?.setText(content);
+            composerRef.current?.focus?.();
+            setEditingMessage({ turnIndex });
+            return true;
+          }}
+          messageTurnOutputs={['file']}
+          onFileReviewOpen={openReviewDiff}
+          onInsightReportOpen={(path) =>
+            vscode.postMessage({
+              type: 'openInsightReport',
+              data: { path },
+            })
+          }
+          onTranscriptChange={updateTranscript}
+          composerPlaceholders={{
+            idle: 'Ask Qwen Code or @ a file',
+          }}
+          composerRef={composerRef}
+          prepareSubmit={async (submission) => {
+            if (editingMessage) {
+              const sessionId = submission.sessionId ?? runtime.sessionId;
+              if (!daemonClient || !sessionId) {
+                throw new Error(
+                  'The message cannot be edited before the session is ready.',
+                );
+              }
+              const { snapshots } =
+                await daemonClient.getRewindSnapshots(sessionId);
+              const snapshot = snapshots.find(
+                (entry) => entry.turnIndex === editingMessage.turnIndex,
+              );
+              if (!snapshot) {
+                throw new Error(
+                  'The original message can no longer be edited.',
+                );
+              }
+              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                clientId: runtime.clientId,
+                rewindFiles: false,
+              });
+              setEditingMessage(undefined);
+              clearInsight();
+            }
+
+            if (!activeFile || !includeActiveFile) return undefined;
+            const normalizedWorkspace = runtime.workspaceCwd?.replace(
+              /\\/g,
+              '/',
+            );
+            const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
+            const relativePath =
+              normalizedWorkspace &&
+              normalizedFile.startsWith(`${normalizedWorkspace}/`)
+                ? normalizedFile.slice(normalizedWorkspace.length + 1)
+                : activeFile.fileName;
+            const reference = `@${relativePath}`;
+            const selectedLines = activeFile.selection
+              ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`
+              : '';
+            const alreadyIncluded = submission.inputAnnotations.some(
+              (annotation) =>
+                annotation.reference.value === activeFile.filePath,
+            );
+            const prefix =
+              alreadyIncluded || submission.prompt.startsWith(reference)
+                ? ''
+                : `${reference}${selectedLines} `;
+            const prompt = `${prefix}${submission.prompt}`;
+            const inputAnnotations = submission.inputAnnotations.map(
+              (annotation) =>
+                prefix
+                  ? {
+                      ...annotation,
+                      start: annotation.start + prefix.length,
+                      end: annotation.end + prefix.length,
+                    }
+                  : annotation,
+            );
+            if (!alreadyIncluded) {
+              inputAnnotations.unshift({
+                type: 'reference',
+                start: 0,
+                end: reference.length,
+                text: reference,
+                reference: {
+                  id: `vscode-active-file:${activeFile.filePath}`,
+                  kind: 'file',
+                  label: activeFile.fileName,
+                  value: activeFile.filePath,
+                  metadata: {
+                    path: activeFile.filePath,
+                    selection: activeFile.selection,
+                  },
+                  serialized: reference,
+                },
               });
             }
-          }
-        }}
-        onError={(error) => {
-          clearInsight();
-          setEditingMessage(undefined);
-          setSwitchingSessionId(undefined);
-          setCreatingSession(false);
-          setHostNotice({
-            tone: 'error',
-            text: error.message || 'Failed to load the Qwen Code session.',
-          });
-        }}
-        sidebar={false}
-        compactThinking
-        collapseCompletedTurns
-        composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
-        compactComposerOverlays
-        autoSubmitSlashCommands
-        additionalSlashCommands={VSCODE_SLASH_COMMANDS}
-        hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
-        onSlashCommand={({ command, input }) => {
-          if (command === 'auth' || command === 'login') {
-            vscode.postMessage({ type: 'auth', data: {} });
-            return true;
-          }
-          if (command === 'account') {
-            vscode.postMessage({ type: 'getAccountInfo', data: {} });
-            return true;
-          }
-          if (command === 'export') {
-            vscode.postMessage({
-              type: 'exportSession',
-              data: { text: input, sessionId: runtime.sessionId },
-            });
-            return true;
-          }
-          return false;
-        }}
-        contextUsageAlwaysVisible
-        userMessageEditing
-        cycleModeOnTab
-        onUserMessageEditRequest={(turnIndex, content) => {
-          composerRef.current?.clear({ text: true, tags: true });
-          composerRef.current?.setText(content);
-          composerRef.current?.focus?.();
-          setEditingMessage({ turnIndex });
-          return true;
-        }}
-        messageTurnOutputs={['file']}
-        onFileReviewOpen={openReviewDiff}
-        onInsightReportOpen={(path) =>
-          vscode.postMessage({
-            type: 'openInsightReport',
-            data: { path },
-          })
-        }
-        onTranscriptChange={updateTranscript}
-        composerPlaceholders={{
-          idle: 'Ask Qwen Code or @ a file',
-        }}
-        composerRef={composerRef}
-        prepareSubmit={async (submission) => {
-          if (editingMessage) {
-            const sessionId = submission.sessionId ?? runtime.sessionId;
-            if (!daemonClient || !sessionId) {
-              throw new Error('The message cannot be edited before the session is ready.');
-            }
-            const { snapshots } = await daemonClient.getRewindSnapshots(
-              sessionId,
-            );
-            const snapshot = snapshots.find(
-              (entry) => entry.turnIndex === editingMessage.turnIndex,
-            );
-            if (!snapshot) {
-              throw new Error('The original message can no longer be edited.');
-            }
-            await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-              clientId: runtime.clientId,
-              rewindFiles: false,
-            });
-            setEditingMessage(undefined);
-            clearInsight();
-          }
-
-          if (!activeFile || !includeActiveFile) return undefined;
-          const normalizedWorkspace = runtime.workspaceCwd?.replace(/\\/g, '/');
-          const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
-          const relativePath =
-            normalizedWorkspace &&
-            normalizedFile.startsWith(`${normalizedWorkspace}/`)
-              ? normalizedFile.slice(normalizedWorkspace.length + 1)
-              : activeFile.fileName;
-          const reference = `@${relativePath}`;
-          const selectedLines = activeFile.selection
-            ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`
-            : '';
-          const alreadyIncluded = submission.inputAnnotations.some(
-            (annotation) =>
-              annotation.reference.value === activeFile.filePath,
-          );
-          const prefix =
-            alreadyIncluded || submission.prompt.startsWith(reference)
-              ? ''
-              : `${reference}${selectedLines} `;
-          const prompt = `${prefix}${submission.prompt}`;
-          const inputAnnotations = submission.inputAnnotations.map(
-            (annotation) =>
-              prefix
-                ? {
-                    ...annotation,
-                    start: annotation.start + prefix.length,
-                    end: annotation.end + prefix.length,
-                  }
-                : annotation,
-          );
-          if (!alreadyIncluded) {
-            inputAnnotations.unshift({
-              type: 'reference',
-              start: 0,
-              end: reference.length,
-              text: reference,
-              reference: {
-                id: `vscode-active-file:${activeFile.filePath}`,
-                kind: 'file',
-                label: activeFile.fileName,
-                value: activeFile.filePath,
-                metadata: {
-                  path: activeFile.filePath,
-                  selection: activeFile.selection,
-                },
-                serialized: reference,
-              },
-            });
-          }
-          return {
-            prompt,
-            inputAnnotations,
-          };
-        }}
-        renderComposerHeader={() =>
-          editingMessage ? (
-            <div
-              style={{
-                display: 'flex',
-                minWidth: 0,
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-                color: 'var(--vscode-descriptionForeground)',
-                fontSize: 12,
-              }}
-            >
-              <span
+            return {
+              prompt,
+              inputAnnotations,
+            };
+          }}
+          renderComposerHeader={() =>
+            editingMessage ? (
+              <div
                 style={{
+                  display: 'flex',
                   minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                Editing message
-              </span>
-              <button
-                type="button"
-                className="qwen-vscode-toolbar-button"
-                title="Cancel editing"
-                aria-label="Cancel editing"
-                onClick={cancelMessageEditing}
-                style={{
-                  display: 'inline-flex',
-                  width: 22,
-                  height: 22,
-                  flex: '0 0 22px',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: 0,
-                  border: 0,
-                  borderRadius: 4,
-                  background: 'transparent',
-                  color: 'inherit',
-                  cursor: 'pointer',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                  color: 'var(--vscode-descriptionForeground)',
+                  fontSize: 12,
                 }}
               >
-                <X size={13} aria-hidden="true" />
-              </button>
-            </div>
-          ) : null
-        }
-        renderComposerToolbarStart={({ disabled, currentModel }) => {
-          currentModelIdRef.current = currentModel || undefined;
-          return (
-            <span className="qwen-vscode-toolbar-start">
-            <button
-              type="button"
-              className="qwen-vscode-toolbar-button"
-              title="Add context"
-              aria-label="Add context"
-              disabled={disabled}
-              onClick={() =>
-                vscode.postMessage({ type: 'attachFile', data: {} })
-              }
-              style={{
-                display: 'inline-flex',
-                width: 28,
-                height: 28,
-                flex: '0 0 28px',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-                border: 0,
-                borderRadius: 6,
-                color: 'var(--agent-gray-500)',
-                background: 'transparent',
-                opacity: disabled ? 0.45 : 1,
-                cursor: disabled ? 'default' : 'pointer',
-              }}
-            >
-              <Plus size={16} strokeWidth={1.75} aria-hidden="true" />
-            </button>
-            {activeFile && (
-              <button
-                type="button"
-                className="qwen-vscode-toolbar-button qwen-vscode-active-file"
-                title={`${includeActiveFile ? 'Included' : 'Excluded'}: ${activeFile.filePath}`}
-                aria-label={`${includeActiveFile ? 'Exclude' : 'Include'} active file context`}
-                onClick={() => setIncludeActiveFile((current) => !current)}
-                style={{
-                  display: 'inline-flex',
-                  minWidth: 28,
-                  maxWidth: 'min(150px, 38vw)',
-                  height: 28,
-                  alignItems: 'center',
-                  gap: 4,
-                  overflow: 'hidden',
-                  padding: '0 7px',
-                  border: 0,
-                  borderRadius: 6,
-                  color: 'var(--agent-gray-500)',
-                  background: 'transparent',
-                  opacity: includeActiveFile ? 1 : 0.5,
-                  cursor: 'pointer',
-                }}
-              >
-                <FileText
-                  size={15}
-                  strokeWidth={1.75}
-                  aria-hidden="true"
-                  style={{ flex: '0 0 auto' }}
-                />
-                <span className="qwen-vscode-active-file-label">
-                  {activeFile.selection
-                    ? `${activeFile.selection.endLine - activeFile.selection.startLine + 1} lines selected`
-                    : activeFile.fileName}
+                <span
+                  style={{
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Editing message
                 </span>
-              </button>
-            )}
-            </span>
-          );
-        }}
+                <button
+                  type="button"
+                  className="qwen-vscode-toolbar-button"
+                  title="Cancel editing"
+                  aria-label="Cancel editing"
+                  onClick={cancelMessageEditing}
+                  style={{
+                    display: 'inline-flex',
+                    width: 22,
+                    height: 22,
+                    flex: '0 0 22px',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 0,
+                    border: 0,
+                    borderRadius: 4,
+                    background: 'transparent',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              </div>
+            ) : null
+          }
+          renderComposerToolbarStart={({ disabled, currentModel }) => {
+            currentModelIdRef.current = currentModel || undefined;
+            return (
+              <span className="qwen-vscode-toolbar-start">
+                <button
+                  type="button"
+                  className="qwen-vscode-toolbar-button"
+                  title="Add context"
+                  aria-label="Add context"
+                  disabled={disabled}
+                  onClick={() =>
+                    vscode.postMessage({ type: 'attachFile', data: {} })
+                  }
+                  style={{
+                    display: 'inline-flex',
+                    width: 28,
+                    height: 28,
+                    flex: '0 0 28px',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 0,
+                    border: 0,
+                    borderRadius: 6,
+                    color: 'var(--agent-gray-500)',
+                    background: 'transparent',
+                    opacity: disabled ? 0.45 : 1,
+                    cursor: disabled ? 'default' : 'pointer',
+                  }}
+                >
+                  <Plus size={16} strokeWidth={1.75} aria-hidden="true" />
+                </button>
+                {activeFile && (
+                  <button
+                    type="button"
+                    className="qwen-vscode-toolbar-button qwen-vscode-active-file"
+                    title={`${includeActiveFile ? 'Included' : 'Excluded'}: ${activeFile.filePath}`}
+                    aria-label={`${includeActiveFile ? 'Exclude' : 'Include'} active file context`}
+                    onClick={() => setIncludeActiveFile((current) => !current)}
+                    style={{
+                      display: 'inline-flex',
+                      minWidth: 28,
+                      maxWidth: 'min(150px, 38vw)',
+                      height: 28,
+                      alignItems: 'center',
+                      gap: 4,
+                      overflow: 'hidden',
+                      padding: '0 7px',
+                      border: 0,
+                      borderRadius: 6,
+                      color: 'var(--agent-gray-500)',
+                      background: 'transparent',
+                      opacity: includeActiveFile ? 1 : 0.5,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <FileText
+                      size={15}
+                      strokeWidth={1.75}
+                      aria-hidden="true"
+                      style={{ flex: '0 0 auto' }}
+                    />
+                    <span className="qwen-vscode-active-file-label">
+                      {activeFile.selection
+                        ? `${activeFile.selection.endLine - activeFile.selection.startLine + 1} lines selected`
+                        : activeFile.fileName}
+                    </span>
+                  </button>
+                )}
+              </span>
+            );
+          }}
         />
       )}
       {accountInfo && (
@@ -1646,7 +1660,9 @@ export function EmbeddedApp() {
             >
               {accountInfo.error ? (
                 <>
-                  <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                  <span
+                    style={{ color: 'var(--vscode-descriptionForeground)' }}
+                  >
                     Error
                   </span>
                   <span style={{ color: 'var(--vscode-errorForeground)' }}>
@@ -1655,7 +1671,9 @@ export function EmbeddedApp() {
                 </>
               ) : (
                 <>
-                  <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                  <span
+                    style={{ color: 'var(--vscode-descriptionForeground)' }}
+                  >
                     Auth Method
                   </span>
                   <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
@@ -1663,7 +1681,9 @@ export function EmbeddedApp() {
                   </span>
                   {accountInfo.envKey && (
                     <>
-                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                      <span
+                        style={{ color: 'var(--vscode-descriptionForeground)' }}
+                      >
                         API Key Env
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
@@ -1673,7 +1693,9 @@ export function EmbeddedApp() {
                   )}
                   {accountInfo.baseUrl && (
                     <>
-                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                      <span
+                        style={{ color: 'var(--vscode-descriptionForeground)' }}
+                      >
                         Base URL
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
@@ -1683,7 +1705,9 @@ export function EmbeddedApp() {
                   )}
                   {accountInfo.modelId && (
                     <>
-                      <span style={{ color: 'var(--vscode-descriptionForeground)' }}>
+                      <span
+                        style={{ color: 'var(--vscode-descriptionForeground)' }}
+                      >
                         Current Model
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>

@@ -28,7 +28,7 @@ import {
   CompactModeContext,
   TodoDetailContext,
   TodoTimelineContext,
-} from '../App';
+} from '../WebShellContexts';
 import type { CommandInfo, PermissionRequest } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { SkillInfo } from '../completions/slashCompletion';

@@ -372,7 +372,12 @@ const {
       streamingState: 'idle' as StreamingState,
       sessionHasActivePrompt: false,
       blocks: [] as unknown[],
+      liveBlocks: undefined as unknown[] | undefined,
+      snapshotCallOptions: [] as Array<
+        { structuralOnly?: boolean } | undefined
+      >,
       messages: [] as unknown[],
+      streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
       queuedPromptStreamingState: 'idle',
       queuedPromptSessionHasActivePrompt: false,
@@ -401,6 +406,7 @@ const {
         isResponding?: boolean;
         transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
+        transcriptBlockCount?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
       latestBtwMessageProps: null as {
@@ -586,12 +592,23 @@ vi.mock('@qwen-code/sdk/daemon', () => {
 });
 
 vi.mock('./hooks/useMessages', () => ({
+  projectStreamingTailMessages: () => testState.streamingTailMessages,
   useMessages: () => testState.messages,
   useMessagesFromBlocks: () => testState.messages,
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: testState.blocks }),
+  useAnimationFrameTranscriptSnapshot: (options?: {
+    structuralOnly?: boolean;
+  }) => {
+    testState.snapshotCallOptions.push(options);
+    return {
+      blocks:
+        options?.structuralOnly === true
+          ? testState.blocks
+          : (testState.liveBlocks ?? testState.blocks),
+    };
+  },
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -5018,7 +5035,10 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.sessionHasActivePrompt = false;
   testState.blocks = [];
+  testState.liveBlocks = undefined;
+  testState.snapshotCallOptions = [];
   testState.messages = [];
+  testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
@@ -5208,6 +5228,39 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('App live transcript boundary', () => {
+  it('renders and copies the projected live tail over the structural baseline', async () => {
+    const writeText = vi
+      .spyOn(navigator.clipboard, 'writeText')
+      .mockResolvedValue();
+    testState.prompt = '/copy';
+    testState.blocks = [{ id: 'assistant', text: 'a' }];
+    testState.liveBlocks = [
+      { id: 'assistant', text: 'ab' },
+      { id: 'tool', kind: 'tool' },
+    ];
+    testState.messages = [{ id: 'assistant', role: 'assistant', content: 'a' }];
+    testState.streamingTailMessages = [
+      { id: 'assistant', role: 'assistant', content: 'ab' },
+    ];
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestMessageListProps?.messages).toMatchObject([
+      { id: 'assistant', role: 'assistant', content: 'ab' },
+    ]);
+    expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
+    expect(testState.snapshotCallOptions).toContainEqual({
+      structuralOnly: true,
+    });
+    expect(testState.snapshotCallOptions).toContainEqual(undefined);
+
+    await clickSubmit(document.body);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('ab'));
+  });
 });
 
 describe('App compact mode', () => {

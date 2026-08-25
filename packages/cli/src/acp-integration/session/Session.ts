@@ -6762,11 +6762,20 @@ export class Session implements SessionContext {
           const warningSuffix = compressed.warning
             ? `\n⚠️ ${compressed.warning}`
             : '';
+          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
+          // read as an API-reported figure on a different scale than a later
+          // banner.
+          const formatCount = (count?: number, isEstimated?: boolean) =>
+            count === undefined
+              ? 'unknown'
+              : isEstimated
+                ? `~${count}`
+                : String(count);
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
             warningSuffix;
         }
       } catch (compressionError) {
@@ -12415,8 +12424,9 @@ export class Session implements SessionContext {
 
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.messageEmitter.emitVisionBridgeNotice(
           formatVisionBridgeNotice(bridgeResult),
+          bridgeResult,
         );
       } catch (error) {
         debugLogger.debug(

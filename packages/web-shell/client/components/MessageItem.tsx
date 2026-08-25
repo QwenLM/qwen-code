@@ -5,7 +5,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '../WebShellContexts';
 import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';

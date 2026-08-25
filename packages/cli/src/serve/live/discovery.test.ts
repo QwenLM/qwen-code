@@ -56,7 +56,11 @@ describe('Live discovery file', () => {
     expect(JSON.parse(await fs.readFile(writtenPath, 'utf8'))).toEqual(
       expected,
     );
-    expect((await fs.stat(writtenPath)).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits; the read side already skips
+    // the mode check there (see discovery.ts).
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(writtenPath)).mode & 0o777).toBe(0o600);
+    }
     expect(
       (await fs.readdir(path.dirname(writtenPath))).filter((name) =>
         name.endsWith('.tmp'),
@@ -219,7 +223,9 @@ describe('Live discovery file', () => {
     expect(JSON.parse(await fs.readFile(discoveryPath, 'utf8'))).toEqual(
       previous,
     );
-    expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   it.each([
