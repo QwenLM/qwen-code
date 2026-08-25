@@ -367,8 +367,6 @@ export function GoalsDialog({
           // pause/resume are gated.
           const canEdit = goal.status !== 'complete';
           const canPause = goal.status === 'active';
-          // An evidence-limited stop is terminal for resume: the reducer rejects it
-          // with an invalid-transition 409, so the control must not be offered.
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
           return (

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as tls from 'node:tls';
 import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
@@ -62,91 +66,53 @@ v6SP3sMzDfFDdKbveQk7uRIdMfMMkyDuApZHDuW1YRlQBISLn3G66YOo
 -----END CERTIFICATE-----
 `;
 
-// Fixtures for the loader-parity shapes measured on Node v22.23.2 /
-// OpenSSL 3.0.20: every arm below was written to disk exactly as committed
-// here, pointed at through NODE_EXTRA_CA_CERTS in a child process, and a
-// real `tls.connect` to a server holding `LOADER_LEAF_PEM` (signed by
-// `LOADER_CA_PEM`) recorded whether the loader took the certificates.
-const LOADER_CA_PEM = `-----BEGIN CERTIFICATE-----
-MIIDFTCCAf2gAwIBAgIUG+Rzw+YrfN2SJQcFaxnJ5Wi+hd4wDQYJKoZIhvcNAQEL
-BQAwGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMB4XDTI2MDgyNDIyMjk0NFoX
-DTM2MDgyMTIyMjk0NFowGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMIIBIjAN
-BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvphb9G9a+LJt0jSybd7bCP/ENBIb
-qItKC8voeueokD0yIJk9crDYEW5glaJYkwrFj7czvcjOFsJz9nzkW1OA6waSTvdC
-go0t3uttoB7b7n9eLVANuJvDrZXoS/eQKQyy00Vp03e0EqgLaIs1Is5/xitMqTUx
-mC3KPpe0bibFpEgQUANGrZ9+r0DFEja14a1h5NmCH7wiCH0I5xkVK6/DTbWrtqL3
-MISBKM/Dx5V8gKlSCkWzsW1FXnG5hzG7tMjfAWhInEgszBI2f62WXBKnFgVKdYvp
-/CgFTvnTFCi4r7LMHxsfSOSdn4/G6degXHiiEbkwU32eGX8w7AilPkEx3QIDAQAB
-o1MwUTAdBgNVHQ4EFgQUduNFQxuTU9W3Egy5J86z6GKaW5QwHwYDVR0jBBgwFoAU
-duNFQxuTU9W3Egy5J86z6GKaW5QwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B
-AQsFAAOCAQEAgsvjWvK1WMPI+3/kI9AhUPpuxptPfXCEn/ejvTG2oQztT0KYIp1R
-2o4W43LMCv78WyezYJqynEz7zahoS63dA/0xMfckywzrItXIdC4lLmRpeMGUaIdw
-Lh5NxelfS1kz0tOALT2b0iJMyfMzFnrrhx1zXApnts+DYGz6u9EY5de7if+iduAI
-1jaea6X5+1UKqeZOYfhnGvyeMDptcGYbjkP26oCRnq5msETpQix+9NXwcPRNVTWH
-+inYhmmvmVQwMqOhKbbXhiQibp01oSkTuTE0B0H1mtIFa8W8sbK6uJOukgp0IYD4
-hLthx7zmM4aiR4B4vbFkEEYXw2MLmigqGQ==
------END CERTIFICATE-----
-`;
-
-const LOADER_LEAF_PEM = `-----BEGIN CERTIFICATE-----
-MIIDGjCCAgKgAwIBAgIUHKfyEuWgffm/W0GoYcP/7NZ+7UUwDQYJKoZIhvcNAQEL
-BQAwGjEYMBYGA1UEAwwPUHJvYmUgTG9hZGVyIENBMB4XDTI2MDgyNDIyMjk0NVoX
-DTI4MTEyNjIyMjk0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG
-9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvHGvGsspbi1qcfmC7eSWtspNkJYLAQdlCf0j
-A0J/YB2Acog5V5lP5yJuXQmXxusAALn6KkyhPFly6RxoUwo2Cr2QBKe+g26kh7s/
-sJcKwwdMbdpTGDtPWmJALqRrC7lZ8NoIs6m8QVPG8aPvufve7hGP9J7ZCayIm3rR
-JuH1kIP5LR1a9F4sjLUZEXevAVAJv0FUYC0YGAMsVMgV3LXYLwWrQT+KE9J/0ufw
-1aSduHIiQ+uOPMISWFskft2/xW0CyVINDeKDWBWL/RrsPr8Jod/laEffUotOeMJC
-geEwkS/MH+EBMXtvem2KLGU5uXPDKFJ8qoGfjOIYTuf2GKdZPQIDAQABo14wXDAa
-BgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFNsVxLYLW+4/g5Uk
-JOSKp+1jfiItMB8GA1UdIwQYMBaAFHbjRUMbk1PVtxIMuSfOs+himluUMA0GCSqG
-SIb3DQEBCwUAA4IBAQBQCJ+l7rKkxCGT9I5iONMfjS5TTkgzyfYJgHkZFj3UxOz5
-uQxqWlBJelpeuI9rLxAjF1gk1HEvPG782RztTYXuivnsjB97ROS1xg1IV+WamsrS
-5uWEU5GlGc9kOWrhX6psesiA/SsAUN8mu2i/kAHCEbUEh45nGSrOEFUwZF5rXCDi
-WIIgKvrURna4Lkl4DOe9RdbZRX3ivgvxyNw5IaNuxtFGy6pqc9NsD7Mzz6pTouQe
-BN9/FHONLnCWphzl3RDWNUyebnAfKzF7C9YKpxcRQn5otS2TtY3LfkmyIVsoVQ5n
-crPxrwQkQPtzqlbJUOqJQ7nfCGdb8taT0FOWWLEB
------END CERTIFICATE-----
-`;
-
-/** A real `openssl genrsa -traditional -aes256` block with RFC 1421 headers. */
-const RFC1421_ENCRYPTED_KEY = `-----BEGIN RSA PRIVATE KEY-----
-Proc-Type: 4,ENCRYPTED
-DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878
-
-J9BRN2hq4P9LNZpVMCxspGvrWTkF6WV5nkryy59GZiNz95FVQ6ZR5kL49HrCqc0u
-6DTGQfiO4C94kfG/9PKtd3BWVTqvQzcuGNeo0qe6ETwAIrzw4mNldFXJnH2h5hLS
-j4g5dflGETMUt+4DI1d9f2Odxe30fsDxd7Wnm0scAIIX+OPTG6XGtDOYT5Jv4zjX
-VuxajyMgjxPjy1l9+9DbcGe6E/yhOAGoOqc0/bpirWDw7cJYXGk5V6+BRBvWWbNo
-0D2V7A+63u/WD6yr6EtK6iMtwYrqy4lklCJ9GgzVv3lMDTC5qXUFw2j74Lhd5Y22
-D95o7uCQwCiVEPmelSe2G13MDtoRCSM/lSnz3sQSw65hQPuDh2KwNBEa3JMO5jXl
-EiL1fJnCEiM7VYx4Q4BNu6iaflGayLcdmcQr9+ncTW7XjaFiuXII+fHZ0G4CMEnV
-rG4MiMLalg18FKwu2xXS3uRgPIsOk06M/knJvwQ+rUZZKFzi/DEyBk6XCBeCGfNd
-RFVmTT0bB2V6VRchDUuWDwXmlWx175mAhck0S74eiJSzFInqzyq6kstAIHmNxb0+
-5yrxgugKX2XWhnhTMND36lJC6Qxv+GhJVreDudUmCgThxTGElPjuNE0SaGy2nwXn
-NyiiSZRxBB3/s9ksSzCSoCcl78yV1dzyuJz9rg8UnQZGLTtYYwGPo5ViqQaqV8pC
-CBZwPqWgBmVwEcBEDZTI0yM6UdI0MkxP8RxEktAaWzfZmvqUoNthnWKC4mFThg8A
-/LcP8mePil9aQFLPM01WZ2U+rVTMgUdS/MN7h49nJlLh3+biw8yhK9lKSmInZSYu
-n4/lu0XL0tDxarvlmPUnJxjBCnIOKuWHEdODwYWuqNQHKUdp1zo/UiEmpuUG644c
-hsk6rwbDrRsD2h6PVOHon9J4uJsHj+vPEfiSbS9zfkRRPsTZatnbxJTApjwbVtqm
-r6lHtT2fXZr5jPMoGh5kl2+zn4xbLoSRIQo5TVvNoxUPP+2nNpqtyS0XjUzzQ0i2
-rmJCpF0hX6eLlCNVbBX3LHAlTxd15vCKvCMg9AZWlXJxS1rB/Rr7XctdLWV7+XEg
-ro7j9o6K9rD0ShqCF5YaE6nQEIS1IkeVLTAjG3F8sbPUB3hau75HUl2SQKuCveLD
-NRaeoq8tL0bHc3Xr6BdD2vnehNzAODgTcBuqd8XLdEbuvFtmGpVDPNiNYwf5G2ya
-f4jp1/vE+BqKz5FLr0GppYiEIPNy0kMJ5T9AzqJpNT1HPvmstL+HjCe6Hw5ehPZg
-Ea4gkXjjyGpkFJjUnfiBxTEqa1uAw+suYpkUwiPhYr2lwOjUCjncsTP1BSQZh4wf
-Sf3c25iJ3dmH1Y4zECcinHpXx45kQ0Bpxdy8OzQ9TvXdC64eIVI12DCQULO3b5xe
-AJzY6XIGvucsNMLj9hKumiee0hYDsd3YOc7SM0UBrl0DbO6bxAZAeE/RvoBbcKxA
-dhlTdZjtCFXzz3qCT7+a90scjzLgT5oLxtqBtI4G85LZknD1lN8ppMpEfui98ppy
-Xhr535X9y0Bj7DHfjvNGMplAS4PZ5qtnix1hVebr4LLRwVFqJJslhTUIgLdcgJ0f
------END RSA PRIVATE KEY-----
-`;
-
 /** The certificate body lines of `pem`, markers stripped. */
 const bodyLines = (pem: string): string[] =>
   pem.trim().split('\n').slice(1, -1);
 
-describe('extractCertificateBlocks', () => {
+/** `der` as a canonical `CERTIFICATE` block, whatever it decodes to. */
+const renderBlock = (der: Buffer): string => {
+  const body = der.toString('base64');
+  const wrapped: string[] = [];
+  for (let at = 0; at < body.length; at += 64) {
+    wrapped.push(body.slice(at, at + 64));
+  }
+  return `-----BEGIN CERTIFICATE-----\n${wrapped.join('\n')}\n-----END CERTIFICATE-----\n`;
+};
+
+// `tls.getCACertificates` arrives in Node 22.15, while engines still allow
+// 22.0: there the loader oracle answers `legacy` and the inspection throws,
+// so suites that drive the real oracle skip instead of failing.
+const loaderOracleAvailable = typeof tls.getCACertificates === 'function';
+
+describe.skipIf(!loaderOracleAvailable)('extractCertificateBlocks', () => {
+  it('ignores NODE_OPTIONS that only affect eval-based oracle children', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-preload-'));
+    const preload = path.join(dir, 'stdout-preload.cjs');
+    fs.writeFileSync(preload, "process.stdout.write('preload noise');\n");
+    const previous = process.env['NODE_OPTIONS'];
+    try {
+      for (const value of ['--input-type=module', `--require=${preload}`]) {
+        process.env['NODE_OPTIONS'] = value;
+        expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
+        expect(process.env['NODE_OPTIONS']).toBe(value);
+      }
+    } finally {
+      if (previous === undefined) delete process.env['NODE_OPTIONS'];
+      else process.env['NODE_OPTIONS'] = previous;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the loader oracle cannot inspect its source file', () => {
+    expect(
+      extractCertificateBlocks(
+        ROOT_PEM,
+        path.join(os.tmpdir(), 'qwen-ca-source-does-not-exist.pem'),
+      ),
+    ).toBeUndefined();
+  });
+
   it('takes a canonical single-certificate file verbatim', () => {
     expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
   });
@@ -172,61 +138,15 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(spaced)).toEqual([ROOT_PEM.trim()]);
   });
 
-  it('takes a BOM-prefixed block that opens a fresh loader scan', () => {
-    // Oracle: authorized=true. The loader strips a BOM from the FIRST line
-    // each of its scans reads — the file start and the line immediately
-    // after a consumed block's END marker (both measured on Node v22.23.2).
-    // `LEAF_PEM` ends with a newline, so the BOM below is exactly that line.
+  it('takes a block behind a BOM that is not at the start of the file', () => {
+    // Oracle: authorized=true. Concatenating operator files puts a BOM in the
+    // MIDDLE of the result, and a file-start-anchored strip left
+    // a BOM-prefixed `-----BEGIN` line unmatched, so the second cert vanished.
     const concatenated = `${LEAF_PEM}\uFEFF${ROOT_PEM}`;
     expect(extractCertificateBlocks(concatenated)).toEqual([
       LEAF_PEM.trim(),
       ROOT_PEM.trim(),
     ]);
-  });
-
-  it('takes a file whose first line carries the BOM', () => {
-    // Oracle: authorized=true — the BOM on the first scan's first line is
-    // stripped (measured on Node v22.23.2).
-    expect(extractCertificateBlocks(`\uFEFF${ROOT_PEM}`)).toEqual([
-      ROOT_PEM.trim(),
-    ]);
-  });
-
-  // R2-21 round-15 entrance B1: the strip above used to run on ANY line. A
-  // BOM is stripped only from a scan's first line; anywhere else it hides
-  // the marker and the loader walks past the block. Oracle: authorized=false
-  // — the blank line means the BOM'd BEGIN is NOT the first line of the next
-  // scan, so the loader takes the leaf prefix ALONE with no warning
-  // (measured on Node v22.23.2), while this module counted the rescued block
-  // as an anchor, the boot diagnostic reported zero gaps, and every worker
-  // restart-looped UNABLE_TO_VERIFY_LEAF_SIGNATURE.
-  it('drops a mid-scan BOM-prefixed block, keeping the loaded prefix', () => {
-    expect(extractCertificateBlocks(`${LEAF_PEM}\n\uFEFF${ROOT_PEM}`)).toEqual([
-      LEAF_PEM.trim(),
-    ]);
-  });
-
-  it('takes a BOM-prefixed block immediately after a consumed key block', () => {
-    // Oracle: authorized=true — the line after the key block's END marker is
-    // the first line of the next scan, so its BOM is stripped like a file
-    // start's (measured on Node v22.23.2).
-    expect(
-      extractCertificateBlocks(
-        `${RFC1421_ENCRYPTED_KEY}\uFEFF${LOADER_CA_PEM}`,
-      ),
-    ).toEqual([LOADER_CA_PEM.trim()]);
-  });
-
-  it('stops at a block whose body line carries a BOM, keeping the prefix', () => {
-    // Oracle: authorized=false with `Ignoring extra certs … bad base64
-    // decode` (measured on Node v22.23.2): inside a block the BOM is not a
-    // base64 character, the decode fails, and the loader keeps only what it
-    // already read.
-    const lines = ROOT_PEM.trim().split('\n');
-    lines[1] = `\uFEFF${lines[1]}`;
-    expect(
-      extractCertificateBlocks(`${LEAF_PEM}${lines.join('\n')}\n`),
-    ).toEqual([LEAF_PEM.trim()]);
   });
 
   it('rejects a file whose only block has a fused end line', () => {
@@ -264,6 +184,170 @@ describe('extractCertificateBlocks', () => {
     ).toBeUndefined();
   });
 
+  it('takes and canonicalizes a certificate followed by extra bytes', () => {
+    // R4-2. Oracle: authorized=true with no `Ignoring extra certs` warning —
+    // the loader parses the DECODED BYTES and tolerates trailing content past
+    // a complete DER certificate, while `new X509Certificate(<this PEM>)`
+    // throws `wrong tag`. Judging the re-rendered PEM instead made this gate
+    // stricter than the loader, so the block and everything behind it were
+    // dropped and the operator was told the file holds nothing loadable.
+    const padded = renderBlock(
+      Buffer.concat([
+        new X509Certificate(ROOT_PEM).raw,
+        Buffer.from([0, 0, 0]),
+      ]),
+    );
+    expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
+    expect(() => new X509Certificate(padded)).toThrow();
+  });
+
+  it('takes the truncated body a BEGIN marker closes', () => {
+    // R4-2. Oracle: authorized=true, no warning. A BEGIN marker inside a body
+    // ends that block, and what was collected so far IS the block the loader
+    // takes — folding the marker into the body failed the base64 judgment on
+    // its `-` characters and dropped the whole file.
+    const file = `${ROOT_PEM.replace('-----END CERTIFICATE-----\n', '')}${LEAF_PEM}`;
+    expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('does not treat a BOM-prefixed BEGIN inside a body as a closer', () => {
+    const file = ROOT_PEM.replace(
+      '-----END CERTIFICATE-----',
+      '\uFEFF-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----',
+    );
+    expect(extractCertificateBlocks(file)).toBeUndefined();
+  });
+
+  it('lets a bare BEGIN prefix close an open body before trimming it', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    for (const marker of ['-----BEGIN ', '-----BEGIN  ']) {
+      expect(
+        extractCertificateBlocks(`${withoutEnd}${marker}\n${LEAF_PEM}`),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('lets any column-zero BEGIN prefix close an open body', () => {
+    for (const marker of [
+      '-----BEGIN BOGUS-LABEL-----',
+      '-----BEGIN -----',
+      '-----BEGIN BOGUS',
+    ]) {
+      const file = ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        `${marker}\n-----END CERTIFICATE-----`,
+      );
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops at a malformed top-level BEGIN attempt, keeping the prefix', () => {
+    for (const marker of ['-----BEGIN BOGUS-LABEL-----', '-----BEGIN -----']) {
+      expect(
+        extractCertificateBlocks(`${marker}\n${ROOT_PEM}`),
+      ).toBeUndefined();
+      expect(
+        extractCertificateBlocks(`${ROOT_PEM}${marker}\n${ROOT_PEM}`),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('walks past a paired non-certificate block with an unusual label', () => {
+    for (const label of ['BOGUS-LABEL', '']) {
+      const block = `-----BEGIN ${label}-----\nQUJD\n-----END ${label}-----\n`;
+      expect(extractCertificateBlocks(`${block}${ROOT_PEM}`)).toEqual([
+        ROOT_PEM.trim(),
+      ]);
+    }
+  });
+
+  it('walks past a BEGIN prefix without a marker suffix', () => {
+    expect(extractCertificateBlocks(`-----BEGIN BOGUS\n${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('stops at markers that fill the loader line buffer', () => {
+    const marker = (length: number) =>
+      `-----BEGIN ${'A'.repeat(length - 16)}-----`;
+    expect(
+      extractCertificateBlocks(`${marker(253)}\n${ROOT_PEM}`),
+    ).toBeUndefined();
+    expect(
+      extractCertificateBlocks(`${marker(254)}\n${ROOT_PEM}`),
+    ).toBeUndefined();
+  });
+
+  it('does not turn a BEGIN marker at EOF into a body closer', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    for (const suffix of [
+      '-----BEGIN CERTIFICATE-----',
+      '-----BEGIN CERTIFICATE-----\n',
+    ]) {
+      expect(
+        extractCertificateBlocks(`${withoutEnd}${suffix}`),
+      ).toBeUndefined();
+    }
+  });
+
+  it('does not close an open certificate on a mismatched BEGIN label', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    const key =
+      '-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n';
+    expect(extractCertificateBlocks(`${withoutEnd}${key}`)).toBeUndefined();
+  });
+
+  it('follows the loader NUL boundary on marker and body lines', () => {
+    const firstBodyLine = bodyLines(ROOT_PEM)[0]!;
+    for (const file of [
+      ROOT_PEM.replace(
+        '-----BEGIN CERTIFICATE-----',
+        '-----BEGIN CERTIFICATE-----\0junk',
+      ),
+      ROOT_PEM.replace(firstBodyLine, `${firstBodyLine}\0junk`),
+      ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        '-----END CERTIFICATE-----\0junk',
+      ),
+    ]) {
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('follows the loader BOM boundary on separators and end markers', () => {
+    const body = bodyLines(ROOT_PEM).join('\n');
+    for (const file of [
+      `-----BEGIN CERTIFICATE-----\n\uFEFF\uFEFF\n${body}\n-----END CERTIFICATE-----\n`,
+      `-----BEGIN CERTIFICATE-----\n \uFEFF\n${body}\n-----END CERTIFICATE-----\n`,
+      ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        '-----END CERTIFICATE-----\uFEFF',
+      ),
+    ]) {
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops when an END label introduces an unterminated header', () => {
+    const block = '-----BEGIN FOO:BAR-----\nQUJD\n-----END FOO:BAR-----\n';
+    expect(extractCertificateBlocks(`${block}${ROOT_PEM}`)).toBeUndefined();
+  });
+
+  it('takes nothing behind the block a BEGIN marker closed', () => {
+    // R4-2. The half that says the loader STOPS there rather than resuming at
+    // the inner marker. Oracle for `[leaf without its END line][root]`:
+    // authorized=FALSE (UNABLE_TO_VERIFY_LEAF_SIGNATURE) with no warning —
+    // the leaf is taken, the root behind it is not. Resuming at the marker
+    // would report an anchor the workers never receive.
+    const file = `${LEAF_PEM.replace('-----END CERTIFICATE-----\n', '')}${ROOT_PEM}`;
+    expect(extractCertificateBlocks(file)).toEqual([LEAF_PEM.trim()]);
+    const behind = `${LEAF_PEM}${LEAF_PEM.replace('-----END CERTIFICATE-----\n', '')}${ROOT_PEM}`;
+    expect(extractCertificateBlocks(behind)).toEqual([
+      LEAF_PEM.trim(),
+      LEAF_PEM.trim(),
+    ]);
+  });
+
   it('returns undefined for a file with no block at all', () => {
     expect(extractCertificateBlocks('')).toBeUndefined();
     expect(extractCertificateBlocks('not a certificate\n')).toBeUndefined();
@@ -277,27 +361,285 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(combined)).toEqual([ROOT_PEM.trim()]);
   });
 
-  // The key block above is LAST in every fixture that carries one — here and
-  // in the supervisor's combined-PEM test — so replacing the scan's `continue`
-  // with a `break` shipped green while silently dropping every certificate
-  // behind the key. Node's loader keeps them: measured, `rootA + PRIVATE KEY
-  // + rootB` as NODE_EXTRA_CA_CERTS authorizes where `rootA` alone fails
-  // UNABLE_TO_VERIFY_LEAF_SIGNATURE. cert+key+chain is an ordinary operator
-  // file shape, so the dropped certs would be the ones anchoring the workers.
-  it('keeps certificates that follow a non-certificate block', () => {
-    expect(
-      extractCertificateBlocks(
-        `${ROOT_PEM}-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n${LEAF_PEM}`,
-      ),
-    ).toEqual([ROOT_PEM.trim(), LEAF_PEM.trim()]);
+  it('walks past a block whose BEGIN marker is indented', () => {
+    // Oracle: authorized=false, with no `Ignoring extra certs` warning, and
+    // `openssl storeutl -certs` reports 0 — the loader anchors its marker
+    // match at column 0, so an indented BEGIN is prose it never opens a block
+    // on. Counting it as an anchor reported zero trust gaps at boot while
+    // every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+    for (const pad of [' ', '  ', '\t']) {
+      expect(extractCertificateBlocks(`${pad}${ROOT_PEM}`)).toBeUndefined();
+    }
   });
 
-  it('stops when a non-certificate block does not decode', () => {
+  it('keeps the prefix when a later block has an indented BEGIN marker', () => {
+    // Same column-0 rule, reached through the prefix-loading path: the good
+    // root still anchors, the indented block does not.
+    expect(extractCertificateBlocks(`${ROOT_PEM}  ${LEAF_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('rejects a block whose END marker is indented', () => {
+    // An indented END is not an end line, so the loader reads to EOF looking
+    // for one and stops on `bad end line`, the same as a block that never
+    // closes.
+    const indentedEnd = ROOT_PEM.replace(
+      '-----END CERTIFICATE-----',
+      '  -----END CERTIFICATE-----',
+    );
+    expect(extractCertificateBlocks(indentedEnd)).toBeUndefined();
+  });
+
+  it('stops at a NON-certificate block whose body does not decode', () => {
+    // Oracle: authorized=false for `bad key block + good root` while the same
+    // file without the key block is authorized=true. The loader decodes every
+    // block's body whatever its label, so a corrupt key block ahead of the
+    // chain takes the whole file down — skipping non-certificate blocks
+    // unvalidated counted an anchor the workers never received.
+    const file = `-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n${ROOT_PEM}`;
+    expect(extractCertificateBlocks(file)).toBeUndefined();
+  });
+
+  it('stops at an empty block body under any label', () => {
+    // Oracle: authorized=false for both shapes — an empty body is a decode
+    // failure, not an empty-but-fine block.
     expect(
       extractCertificateBlocks(
-        `-----BEGIN PRIVATE KEY-----\nnot%base64\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+        `-----BEGIN FOO-----\n-----END FOO-----\n${ROOT_PEM}`,
       ),
     ).toBeUndefined();
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n${ROOT_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('takes the certificate from a key-BEFORE-cert file', () => {
+    // Oracle: authorized=true, identical to the cert-only control — `cat
+    // key.pem chain.pem` is a real secret-manager export shape. The
+    // skip-and-continue path was only ever pinned cert-first, where a
+    // stop-at-first-non-certificate mutant still ships green.
+    const keyFirst = `-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n${ROOT_PEM}`;
+    expect(extractCertificateBlocks(keyFirst)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('takes a block under the legacy X509 CERTIFICATE label', () => {
+    // Oracle: authorized=true. `X509 CERTIFICATE` is OpenSSL's legacy alias
+    // and the loader reads a certificate from it; recognising only the modern
+    // spelling returned `undefined` for the whole file, so
+    // `resolveWorkerCaCertPath` took the no-operator-blocks fallback and handed
+    // workers the daemon cert alone.
+    const aliased = ROOT_PEM.replace(
+      /(BEGIN|END) CERTIFICATE/g,
+      '$1 X509 CERTIFICATE',
+    );
+    expect(extractCertificateBlocks(aliased)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('stops at a body that is alphabet-valid but does not decode', () => {
+    // Oracle: authorized=false, `bad base64 decode`, for both shapes — the
+    // loader takes NOTHING, including the root behind them. The alphabet test
+    // this replaces passed both and read straight on, counting an anchor the
+    // workers never received.
+    for (const body of ['====', 'AAAAA']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('rejects a BOM in front of an END marker', () => {
+    // Oracle: authorized=false — the BOM's tolerance is positional. Stripping
+    // it from every line made this an ordinary end line and returned the block
+    // as an anchor, while the loader takes nothing from the file.
+    expect(
+      extractCertificateBlocks(
+        ROOT_PEM.replace(
+          '-----END CERTIFICATE-----',
+          '\uFEFF-----END CERTIFICATE-----',
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('rejects a BOM inside a base64 body line', () => {
+    // Oracle: authorized=false, `bad base64 decode`. A BOM is not whitespace
+    // to the decoder, so a `\s`-based strip silently repaired a file the
+    // loader refuses.
+    const lines = bodyLines(ROOT_PEM);
+    const withBom = [...lines];
+    withBom[0] = `${withBom[0]!.slice(0, 10)}\uFEFF${withBom[0]!.slice(10)}`;
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n${withBom.join('\n')}\n-----END CERTIFICATE-----\n`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('takes a block whose header section is empty', () => {
+    // Oracle: authorized=true for both an empty line and a BOM-only line
+    // directly after BEGIN — the loader splits the block there and reads the
+    // rest as data. The BOM-only line is the loader's own separator, not a
+    // body line, which is why it must not be judged as base64.
+    for (const separator of ['', '\uFEFF']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN CERTIFICATE-----\n${separator}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`,
+        ),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops when a second blank line appears in the data region', () => {
+    const lines = bodyLines(ROOT_PEM);
+    for (const malformed of [
+      `-----BEGIN CERTIFICATE-----\n\n\n${lines.join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      `-----BEGIN CERTIFICATE-----\n\n${lines.join('\n')}\n\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      `-----BEGIN PRIVATE KEY-----\nComment: key\n\nQUJD\n\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+    ]) {
+      expect(extractCertificateBlocks(malformed)).toBeUndefined();
+    }
+  });
+
+  it('stops at a blank line that splits a body into a header section', () => {
+    // Oracle: authorized=false, `not proc type` — the loader reads everything
+    // before the first blank line as RFC 1421 headers, and headers without
+    // `Proc-Type` fail the whole load. A hand-edited body picks this up. The
+    // trailing leaf makes the stop observable: a mutant that merely SKIPS the
+    // block the way it skips a well-formed encrypted key would return it.
+    const lines = bodyLines(ROOT_PEM);
+    for (const separator of ['', '\uFEFF']) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN CERTIFICATE-----\n${lines[0]}\n${separator}\n${lines.slice(1).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('stops at a header section that carries no Proc-Type', () => {
+    // Oracle: authorized=false, `not proc type`. The trailing leaf separates
+    // stopping from skipping.
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\nComment: exported by hand\n\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('stops at a header line the block never terminates', () => {
+    // Oracle: authorized=false. A header with no blank line after it leaves
+    // the loader's header state unresolved and it takes nothing — not even the
+    // leaf behind it.
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\nComment: exported by hand\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n${LEAF_PEM}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('reads past a legacy encrypted key block to the certificates behind it', () => {
+    // Oracle: authorized=true. `Proc-Type:` / `DEK-Info:` are headers the
+    // loader consumes as headers — it skips the key and loads every
+    // certificate after it. Folding those lines into the base64 judgment
+    // aborted the scan and lost the operator's CA.
+    const encryptedKey =
+      '-----BEGIN RSA PRIVATE KEY-----\n' +
+      'Proc-Type: 4,ENCRYPTED\n' +
+      'DEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n' +
+      '\n' +
+      'AAAA\n' +
+      '-----END RSA PRIVATE KEY-----\n';
+    expect(extractCertificateBlocks(`${encryptedKey}${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('reads past a headed NON-certificate block to the certificates behind it', () => {
+    // Oracle: authorized=true for every label below, measured through real
+    // NODE_EXTRA_CA_CERTS handshakes on Node v22.23.0 / OpenSSL 3.0.13. The
+    // loader inspects a header section only on a block it tries to consume,
+    // and it consumes certificate labels alone — so RFC 1421's
+    // `Proc-Type`-first rule binds there and NOWHERE else. Applying it to
+    // every label made this module return `undefined` for an operator file the
+    // workers' own loader reads, and the merge then discarded the operator CA
+    // and blamed marker defects the file does not have.
+    //
+    // `TRUSTED CERTIFICATE` belongs in this list, not with the certificate
+    // labels: the loader takes no certificate from it either.
+    for (const label of [
+      'PRIVATE KEY',
+      'RSA PRIVATE KEY',
+      'ENCRYPTED PRIVATE KEY',
+      'TRUSTED CERTIFICATE',
+      'X509 CRL',
+      'CERTIFICATE REQUEST',
+      'PUBLIC KEY',
+    ]) {
+      expect(
+        extractCertificateBlocks(
+          `-----BEGIN ${label}-----\nComment: exported by hand\n\nQUJD\n-----END ${label}-----\n${ROOT_PEM}`,
+        ),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('stops at a Proc-Type header section under a certificate label', () => {
+    // Oracle: authorized=false. A `Proc-Type` header does not spare a
+    // certificate block — the loader goes on to DECRYPT it and aborts the file
+    // `bad decrypt` with a `DEK-Info` line and `not dek info` without one.
+    // Skipping such a block the way a well-formed encrypted KEY is skipped
+    // read straight past a stop; the trailing leaf makes that visible.
+    for (const headers of [
+      'Proc-Type: 4,ENCRYPTED\nDEK-Info: DES-EDE3-CBC,0123456789ABCDEF',
+      'Proc-Type: 4,ENCRYPTED',
+    ]) {
+      for (const label of ['CERTIFICATE', 'X509 CERTIFICATE']) {
+        expect(
+          extractCertificateBlocks(
+            `-----BEGIN ${label}-----\n${headers}\n\n${bodyLines(ROOT_PEM).join('\n')}\n-----END ${label}-----\n${LEAF_PEM}`,
+          ),
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  it('stops at a headed block whose body below the headers cannot decode', () => {
+    // Oracle: authorized=false, `bad base64 decode`. The loader decodes the
+    // body BELOW a header section too, so skipping a headed block without
+    // judging its base64 read past a stop and reported the trailing root as an
+    // anchor the workers never got. `AAAAA` is alphabet-valid and still fails,
+    // and a header section with no body at all takes nothing either.
+    for (const body of ['!!!!', 'AAAAA', '']) {
+      expect(
+        extractCertificateBlocks(
+          '-----BEGIN RSA PRIVATE KEY-----\n' +
+            'Proc-Type: 4,ENCRYPTED\n' +
+            'DEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n' +
+            `\n${body === '' ? '' : `${body}\n`}` +
+            `-----END RSA PRIVATE KEY-----\n${ROOT_PEM}`,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('takes a body wrapped at a non-canonical column', () => {
+    // Oracle: authorized=true. The decoder judges the joined body, not each
+    // line, so a 63-column rewrap (some exporters do this) still loads.
+    const encoded = bodyLines(ROOT_PEM).join('');
+    const rewrapped: string[] = [];
+    for (let at = 0; at < encoded.length; at += 63) {
+      rewrapped.push(encoded.slice(at, at + 63));
+    }
+    expect(
+      extractCertificateBlocks(
+        `-----BEGIN CERTIFICATE-----\n${rewrapped.join('\n')}\n-----END CERTIFICATE-----\n`,
+      ),
+    ).toEqual([ROOT_PEM.trim()]);
   });
 
   it('normalizes CRLF and marker/body padding to canonical PEM', () => {
@@ -313,112 +655,26 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
   });
 
-  it.each(['\f', '\v', '\x01', '\x1f'])(
-    'takes marker lines with trailing control byte %j',
-    (control) => {
-      const padded = ROOT_PEM.trim()
-        .split('\n')
-        .map((line) => (line.startsWith('-----') ? `${line}${control}` : line))
-        .join('\n');
-      expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
-    },
-  );
-
-  it.each([
-    ['a space', ' '],
-    ['a tab', '\t'],
-  ])('takes nothing from a file whose markers carry %s', (_label, indent) => {
-    // R2-21 entrance P1. Oracle: authorized=FALSE — the one shape in the
-    // padding family the loader does not tolerate. Measured on Node v22.23.0 /
-    // OpenSSL 3.0.13: with this file as NODE_EXTRA_CA_CERTS the handshake
-    // fails DEPTH_ZERO_SELF_SIGNED_CERT with no `Ignoring extra certs`
-    // warning and `openssl storeutl -certs` reports `Total found: 0`, while
-    // the same file un-indented authorizes. `normalizePemLine` stripped
-    // leading whitespace before the marker match, so this module counted the
-    // block as an anchor the workers never received.
-    const indented = ROOT_PEM.trim()
-      .split('\n')
-      .map((line) => (line.startsWith('-----') ? `${indent}${line}` : line))
-      .join('\n');
-    expect(extractCertificateBlocks(indented)).toBeUndefined();
-    // The un-indented control, so this pins the indent and not the fixture.
-    expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
-  });
-
-  // RFC 1421 header lines — the `Proc-Type:`/`DEK-Info:` pair between the
-  // BEGIN marker and the first blank line of a legacy encrypted key. The
-  // loader parses them, skips the block and CONTINUES: measured on Node
-  // v22.23.2 as NODE_EXTRA_CA_CERTS in both orderings, authorized=true.
-  // Feeding the header text to the base64 judgement used to break the scan
-  // here and drop every certificate after such a block.
-  it('keeps certificates that follow an RFC-1421 headered key block', () => {
-    expect(
-      extractCertificateBlocks(`${RFC1421_ENCRYPTED_KEY}\n${LOADER_CA_PEM}`),
-    ).toEqual([LOADER_CA_PEM.trim()]);
-    expect(
-      extractCertificateBlocks(
-        `${LOADER_CA_PEM}\n${RFC1421_ENCRYPTED_KEY}\n${LOADER_LEAF_PEM}`,
-      ),
-    ).toEqual([LOADER_CA_PEM.trim(), LOADER_LEAF_PEM.trim()]);
-  });
-
-  // R2-21 round-15 entrance B2: the blank separator line between RFC 1421
-  // headers and the body is load-bearing. Without it the block fails to load
-  // and the loader keeps NOTHING more from the rest of the file — measured
-  // on Node v22.23.2: leaf + no-blank key block + root hands the workers the
-  // leaf prefix alone while the blank-line twin above authorizes. The scan
-  // therefore stops where the loader stops instead of counting the blocks
-  // behind it and reporting zero gaps.
-  const rfc1421WithoutBlankSeparator = RFC1421_ENCRYPTED_KEY.replace(
-    'DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878\n\n',
-    'DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878\n',
-  );
-
-  it('stops at a headered block missing its blank separator, keeping the prefix', () => {
-    expect(
-      extractCertificateBlocks(
-        `${LEAF_PEM}${rfc1421WithoutBlankSeparator}${ROOT_PEM}`,
-      ),
-    ).toEqual([LEAF_PEM.trim()]);
-  });
-
-  it('takes nothing from a file starting with a separator-less headered block', () => {
-    expect(
-      extractCertificateBlocks(`${rfc1421WithoutBlankSeparator}${ROOT_PEM}`),
-    ).toBeUndefined();
-  });
-
-  it('takes a legacy X509 CERTIFICATE-labelled block, rendered canonically', () => {
-    // Oracle: authorized=true — OpenSSL's `PEM_STRING_X509_OLD` alias is a
-    // certificate label the loader reads. Rejecting it dropped an operator
-    // CA the workers would have trusted while warning, falsely, that the
-    // file held no PEM certificate block Node can load. The merged bundle
-    // this feeds is byte-stable, so the block comes back re-rendered under
-    // the canonical label.
-    const legacy = LOADER_CA_PEM.replace(
-      '-----BEGIN CERTIFICATE-----',
-      '-----BEGIN X509 CERTIFICATE-----',
-    ).replace('-----END CERTIFICATE-----', '-----END X509 CERTIFICATE-----');
-    expect(extractCertificateBlocks(legacy)).toEqual([LOADER_CA_PEM.trim()]);
-  });
-
-  it('takes a body whose final group carries non-zero unused pad bits', () => {
-    // Oracle: authorized=true — the decoder ignores non-zero "unused" bits
-    // in the final group, and the decoded bytes are byte-identical to the
-    // canonical encoding (verified). The straight round-trip check rejected
-    // this body and, breaking the scan, dropped every block after it.
-    // `GQ==` -> `GR==` differs only in the four bits the decoder ignores.
-    expect(LOADER_CA_PEM).toContain('GQ==');
-    const mutated = LOADER_CA_PEM.replace('GQ==', 'GR==');
-    const blocks = extractCertificateBlocks(mutated);
-    expect(blocks).toHaveLength(1);
-    expect(new X509Certificate(blocks![0]!).fingerprint256).toBe(
-      new X509Certificate(LOADER_CA_PEM).fingerprint256,
-    );
+  it('normalizes every loader-trimmed marker and separator byte', () => {
+    for (const whitespace of ['\v', '\f']) {
+      for (const marker of [
+        ROOT_PEM.replace(
+          '-----BEGIN CERTIFICATE-----',
+          `-----BEGIN CERTIFICATE-----${whitespace}`,
+        ),
+        ROOT_PEM.replace(
+          '-----END CERTIFICATE-----',
+          `-----END CERTIFICATE-----${whitespace}`,
+        ),
+        `-----BEGIN CERTIFICATE-----\n${whitespace}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`,
+      ]) {
+        expect(extractCertificateBlocks(marker)).toEqual([ROOT_PEM.trim()]);
+      }
+    }
   });
 });
 
-describe('loadableCertificates', () => {
+describe.skipIf(!loaderOracleAvailable)('loadableCertificates', () => {
   it('parses every block it returns', () => {
     const certs = loadableCertificates(`${LEAF_PEM}${ROOT_PEM}`);
     expect(certs?.map((cert) => cert.subject)).toEqual([
@@ -429,5 +685,22 @@ describe('loadableCertificates', () => {
 
   it('returns undefined when the loader would take nothing', () => {
     expect(loadableCertificates('not a certificate\n')).toBeUndefined();
+  });
+
+  it('parses a block whose body carries extra bytes past the certificate', () => {
+    // R4-2. The scan's gate reads the decoded bytes, so this function must
+    // carry the certificate the scan already parsed rather than re-parsing
+    // the rendered PEM — which throws `wrong tag` for exactly this shape and
+    // would have turned a block the loader takes into an unhandled throw at
+    // boot.
+    const padded = renderBlock(
+      Buffer.concat([
+        new X509Certificate(ROOT_PEM).raw,
+        Buffer.from([0, 0, 0]),
+      ]),
+    );
+    expect(loadableCertificates(padded)?.map((cert) => cert.subject)).toEqual([
+      'CN=Probe Root CA',
+    ]);
   });
 });
