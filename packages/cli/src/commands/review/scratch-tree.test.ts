@@ -26,6 +26,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -44,6 +45,13 @@ import {
 } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+
+// Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
+// refuses every absolute Windows path (a drive letter is a colon), so
+// containment is unavailable there by design and this gate never speaks. The
+// assertion would fail for that reason and nothing else — first inside the
+// merge queue, where that lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('runScratchTree', () => {
   let repo: string;
@@ -83,29 +91,103 @@ describe('runScratchTree', () => {
     gitIsolation.dispose();
   });
 
-  it('refuses to stand one up through a rewritten review-worktree gitfile', () => {
-    // The sibling screen below catches a repo-local `filter.*.smudge|clean` in
-    // the REAL config. It cannot catch a pointer that names a different
-    // repository entirely — nor `filter.<x>.process`, which its regex does not
-    // match and which also executes — so the pointer itself has to be checked.
-    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    const real = readFileSync(join(worktree, '.git'), 'utf8')
-      .trim()
-      .replace('gitdir: ', '');
-    cpSync(real, planted, { recursive: true });
-    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-    writeFileSync(
-      join(planted, 'gitdir'),
-      `gitdir: ${join(worktree, '.git')}\n`,
-    );
-    writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
+  itWhereContainmentExists(
+    'runs nothing on the host when BOTH trees point at a planted repository',
+    () => {
+      // What this pins is the OUTCOME — no host execution, and a refusal —
+      // for the hardest shape reviewed code can build: both the scratch tree
+      // and the review worktree rewritten to admin entries under the mount
+      // that name one planted common dir, carrying `filter.*.process` (the
+      // shape the repo-local filter screen's `smudge|clean` regex misses).
+      //
+      // HONEST LIMIT: it does not isolate the reuse-path gate. Removing that
+      // gate leaves this green, because the reset declines this tree for its
+      // own reasons before reaching a checkout — so the gate is defence in
+      // depth here, not a demonstrated load-bearing check. Said out loud
+      // rather than left to look proven.
+      const first = run();
+      expect(first.available).toBe(true);
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      const planted = join(repo, '.qwen', 'tmp', '.evil-scratch');
+      const real = readFileSync(join(tree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      // A COHERENT planted repository carrying a real smudge filter, so the
+      // oracle is the property itself: if the reset's `checkout --force` runs
+      // through this pointer, the filter executes on the host and writes the
+      // canary. No file-based marker can serve here — the reset's
+      // `clean -ffdx` removes untracked files, so reuse and rebuild leave the
+      // tree looking the same.
+      const fakeCommon = join(repo, '.qwen', 'tmp', '.evil-common');
+      const canary = join(repo, 'PWNED-SCRATCH');
+      cpSync(join(repo, '.git'), fakeCommon, { recursive: true });
+      rmSync(join(fakeCommon, 'worktrees'), { recursive: true, force: true });
+      // `process`, not `smudge`: the existing screen's regex matches
+      // `smudge|clean`, so a smudge here is caught by THAT and says nothing
+      // about this gate. `process` is the shape the screen misses and git
+      // still executes.
+      appendFileSync(
+        join(fakeCommon, 'config'),
+        `\n[filter "evil"]\n\tprocess = sh -c "echo PWNED > ${canary}"\n`,
+      );
+      mkdirSync(join(fakeCommon, 'info'), { recursive: true });
+      writeFileSync(join(fakeCommon, 'info', 'attributes'), '* filter=evil\n');
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+      // BOTH trees, pointing at ONE planted common dir. The reset's own gate
+      // compares the two trees' common dirs, so poisoning the scratch tree
+      // alone makes it refuse for a reason unrelated to this one — the shape
+      // that actually reaches its checkout is the pair.
+      const plantedWt = join(repo, '.qwen', 'tmp', '.evil-wt');
+      const realWt = readFileSync(join(worktree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      cpSync(realWt, plantedWt, { recursive: true });
+      writeFileSync(join(plantedWt, 'commondir'), `${fakeCommon}\n`);
+      writeFileSync(
+        join(plantedWt, 'gitdir'),
+        `gitdir: ${join(worktree, '.git')}\n`,
+      );
+      writeFileSync(join(worktree, '.git'), `gitdir: ${plantedWt}\n`);
 
-    const r = run();
-    expect(JSON.stringify(r)).toContain('review temp dir');
-    expect(
-      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
-    ).toBe(false);
-  });
+      const second = run();
+      // Nothing checked out through the planted pointer — the property. The
+      // command's own verdict may be a refusal (the rebuild gate refuses the
+      // poisoned review worktree next), but what must never happen is the
+      // reset running first and executing the filter.
+      expect(existsSync(canary)).toBe(false);
+      expect(JSON.stringify(second)).toContain('review temp dir');
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses to stand one up through a rewritten review-worktree gitfile',
+    () => {
+      // The sibling screen below catches a repo-local `filter.*.smudge|clean` in
+      // the REAL config. It cannot catch a pointer that names a different
+      // repository entirely — nor `filter.<x>.process`, which its regex does not
+      // match and which also executes — so the pointer itself has to be checked.
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      const real = readFileSync(join(worktree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(
+        join(planted, 'gitdir'),
+        `gitdir: ${join(worktree, '.git')}\n`,
+      );
+      writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
+
+      const r = run();
+      expect(JSON.stringify(r)).toContain('review temp dir');
+      expect(
+        existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+      ).toBe(false);
+    },
+  );
 
   it('stands up a sibling tree at the commit under review', () => {
     const r = run();

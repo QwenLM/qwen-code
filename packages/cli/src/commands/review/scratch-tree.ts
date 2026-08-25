@@ -547,7 +547,21 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+  // The REUSE path reaches a `checkout --force` of its own, through the SCRATCH
+  // tree's gitfile — inside the mount just like the review worktree's — so
+  // gating only the rebuild below left the cheaper route open.
+  //
+  // Not a refusal, though: an unusable leftover is exactly what the rebuild
+  // exists for, and refusing here turned "rebuild over it" into "fail the
+  // command". A pointer that cannot be trusted simply is not reusable — the
+  // rebuild below discards the tree (removing the plant with it) and creates a
+  // fresh one through the review worktree's pointer, which the gate after this
+  // one checks.
+  if (
+    existsSync(tree) &&
+    untrustedGitfile(tree, mountRootFor) === null &&
+    resetScratchTree(tree, headSha, worktree)
+  ) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
     // `node_modules` is where a probe is told it may install, and anything a

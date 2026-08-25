@@ -228,8 +228,16 @@ export function adminEntryInsideReviewTmp(
   let real: string;
   let realRoot: string;
   try {
-    real = realpathSync(resolve(gitDir));
-    realRoot = realpathSync(root);
+    // `.native`, because the comparison below is a string comparison and this
+    // is what decides which strings it gets. Node's JS `realpathSync` resolves
+    // links in userspace and hands back the spelling it was ASKED for whenever
+    // the lookup succeeded — on a case-insensitive filesystem (default macOS
+    // APFS, a host this pipeline supports) a planted entry spelled with
+    // different case resolves INSIDE the mount and compares OUTSIDE it. The
+    // native call asks the operating system for the stored name, so both sides
+    // arrive spelled the way the filesystem actually holds them.
+    real = realpathSync.native(resolve(gitDir));
+    realRoot = realpathSync.native(root);
   } catch {
     // Unresolvable is not a licence to proceed: the caller's other gates
     // report it, and answering "not inside" here would be a guess.

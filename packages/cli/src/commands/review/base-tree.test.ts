@@ -45,6 +45,13 @@ const failedBuild = {
   build: [{ command: 'npm run build', exitCode: 2 }],
 } as unknown as BuildTestReport;
 
+// Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
+// refuses every absolute Windows path (a drive letter is a colon), so
+// containment is unavailable there by design and this gate never speaks. The
+// assertion would fail for that reason and nothing else — first inside the
+// merge queue, where that lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
 describe('runBaseTree', () => {
   let repo: string;
   let worktree: string;
@@ -98,30 +105,33 @@ describe('runBaseTree', () => {
 
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
-  it('refuses to build through a rewritten review-worktree gitfile', () => {
-    // `worktree add` resolves the repository through the REVIEW worktree's own
-    // gitfile, which lives in the directory the sandbox mounts read-write and
-    // which the build/test phase already ran the PR's code against. It checks
-    // files out, so it runs whatever that pointer leads to, on the host.
-    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    const real = readFileSync(join(worktree, '.git'), 'utf8')
-      .trim()
-      .replace('gitdir: ', '');
-    cpSync(real, planted, { recursive: true });
-    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-    writeFileSync(
-      join(planted, 'gitdir'),
-      `gitdir: ${join(worktree, '.git')}\n`,
-    );
-    writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
+  itWhereContainmentExists(
+    'refuses to build through a rewritten review-worktree gitfile',
+    () => {
+      // `worktree add` resolves the repository through the REVIEW worktree's own
+      // gitfile, which lives in the directory the sandbox mounts read-write and
+      // which the build/test phase already ran the PR's code against. It checks
+      // files out, so it runs whatever that pointer leads to, on the host.
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      const real = readFileSync(join(worktree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(
+        join(planted, 'gitdir'),
+        `gitdir: ${join(worktree, '.git')}\n`,
+      );
+      writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
 
-    const r = run();
-    expect(r.available).toBe(false);
-    expect(JSON.stringify(r)).toContain('review temp dir');
-    // The tree was never created, which is what says the spawn never ran —
-    // the note alone reads the same whichever side of it the gate fires on.
-    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
-  });
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(JSON.stringify(r)).toContain('review temp dir');
+      // The tree was never created, which is what says the spawn never ran —
+      // the note alone reads the same whichever side of it the gate fires on.
+      expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+    },
+  );
 
   it('creates a sibling worktree holding the BASE commit, not the head', () => {
     const r = run();

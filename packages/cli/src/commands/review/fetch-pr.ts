@@ -690,9 +690,19 @@ function tryResume(
   // `status` REFRESHES THE INDEX, so a planted `core.fsmonitor` runs on the
   // host inside the very command that collects the ruling's evidence — the
   // attack does not need the resume to succeed. See `untrustedGitfile`.
-  const resumeUntrusted = untrustedGitfile(wt, mountRootFor);
-  if (resumeUntrusted !== null) {
-    throw new Error(`refusing to resume: ${resumeUntrusted}`);
+  // REFUSE TO FRESH, not refuse to crash. Throwing here propagates out of
+  // `runFetchPr`, the enclosing catch rolls the lease back and re-throws, and
+  // `cleanStale` — the thing that would REMOVE the planted tree — is never
+  // reached. That contradicts what this file, the `--resume` describe and the
+  // docs all promise: the flag never fails a run that could start over. So
+  // this returns a refusal like every other one, the fresh path runs, and the
+  // planted tree is swept on the way.
+  if (untrustedGitfile(wt, mountRootFor) !== null) {
+    return {
+      resumed: false,
+      reason: 'worktree-untrusted',
+      priorFetchedSha: null,
+    };
   }
   // `--porcelain` prints nothing on a clean tree; a null (the command could
   // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
@@ -988,6 +998,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // 4. Create the ephemeral worktree.
     try {
       mkdirSync(dirname(wt), { recursive: true });
+      // The fresh path checks files out too, and resolves through the same
+      // pointer the resume path was gated on. A tree left planted by a
+      // previous run is removed by `cleanStale` above, but a pointer rewritten
+      // in THIS run's build phase is still here.
+      const freshUntrusted = untrustedGitfile(wt, mountRootFor);
+      if (freshUntrusted !== null) {
+        throw new Error(
+          `refusing to create a review worktree: ${freshUntrusted}`,
+        );
+      }
       git('worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
