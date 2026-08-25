@@ -1905,6 +1905,25 @@ describe('adminEntryInsideReviewTmp', () => {
     ).toBe(true);
   });
 
+  it('counts the mount root itself, and a child that looks like an escape', () => {
+    // The two shapes a hand-rolled prefix test gets wrong, and both are places
+    // a planted entry can actually sit. The mount ROOT is as writable as
+    // anything under it, and `..evil-git` is a legal filename whose relative
+    // path starts with the characters an escape would.
+    const repo = tmp();
+    const mount = join(repo, '.qwen', 'tmp');
+    const tree = join(mount, 'review-pr-1-probe');
+    const oddly = join(mount, '..evil-git');
+    mkdirSync(tree, { recursive: true });
+    mkdirSync(oddly, { recursive: true });
+    expect(adminEntryInsideReviewTmp(mount, () => mount, tree)).toBe(true);
+    expect(adminEntryInsideReviewTmp(oddly, () => mount, tree)).toBe(true);
+    // ...while a genuine sibling of the mount is still outside.
+    const outside = join(repo, '.qwen', 'review-leases');
+    mkdirSync(outside, { recursive: true });
+    expect(adminEntryInsideReviewTmp(outside, () => mount, tree)).toBe(false);
+  });
+
   it('admits the real admin entry, which lives under the repository git dir', () => {
     const repo = tmp();
     const tree = join(repo, '.qwen', 'tmp', 'review-pr-1-probe');

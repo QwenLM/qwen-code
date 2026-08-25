@@ -36,6 +36,7 @@ import {
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   mkdtempSync,
+  realpathSync,
   mkdirSync,
   writeFileSync,
   symlinkSync,
@@ -533,6 +534,38 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a probe tree whose admin entry sits inside the mounted dir', () => {
+    // THROUGH the production call site, not at predicate level. Every other
+    // fixture here builds its tree under a bare `tmpdir()`, which contains no
+    // `.qwen/tmp` segment, so `mountRootFor` answers null and the gate
+    // short-circuits before its logic runs — the wiring could be deleted, or
+    // handed the wrong arguments, and the whole suite would stay green.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-mounted-')));
+    const probeTree = join(root, '.qwen', 'tmp', 'review-pr-1-probe');
+    try {
+      mkdirSync(probeTree, { recursive: true });
+      writeFileSync(join(probeTree, 'a.ts'), 'gone.clear();\n');
+      asCheckout(probeTree);
+      // The shape the round-trip gate cannot see: `.git` replaced by a
+      // pointer into the mount. `asCheckout` leaves a `.git` DIRECTORY, which
+      // is itself one of the two refused shapes — so this covers the branch
+      // the identity gates all sit behind.
+      const r = runOneMutant(
+        probeTree,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('review temp dir');
+      expect(readFileSync(join(probeTree, 'a.ts'), 'utf8')).toBe(
+        'gone.clear();\n',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

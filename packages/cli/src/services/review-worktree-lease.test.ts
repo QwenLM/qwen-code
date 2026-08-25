@@ -382,6 +382,41 @@ describe('review worktree leases', () => {
   });
 });
 
+describe('the move out of the mounted directory', () => {
+  it('removes only the superseded legacy lease, directory or not', () => {
+    const root = createRepository();
+    const legacy = (t: string) =>
+      join(root, '.qwen', 'tmp', `qwen-review-lease-${t}.json`);
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(legacy('pr-1'), '{}');
+    writeFileSync(legacy('pr-2'), '{}');
+    // The wedge shape: a DIRECTORY where the old lease file was. `force` alone
+    // only swallows ENOENT, so a non-recursive remove throws EISDIR out of
+    // acquisition and every later review of that PR fails on this machine.
+    rmSync(legacy('pr-1'), { force: true });
+    mkdirSync(legacy('pr-1'), { recursive: true });
+
+    createReviewWorktreeLease({
+      sessionId: 's',
+      promptId: 'p',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      branch: 'qwen-review/pr-1',
+    });
+
+    expect(existsSync(legacy('pr-1'))).toBe(false);
+    // Scoped: another target's legacy lease is not this call's to remove.
+    expect(existsSync(legacy('pr-2'))).toBe(true);
+    // ...and the new one is written where nothing mounts.
+    expect(
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('readReviewWorktreeLease', () => {
   it('returns the lease createReviewWorktreeLease wrote', () => {
     const root = createRepository();

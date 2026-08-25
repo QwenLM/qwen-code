@@ -33,15 +33,8 @@ import {
   type Stats,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { isSubpath } from '@qwen-code/qwen-code-core';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -118,6 +111,62 @@ const GIT_ENV_EXEC = [
 ];
 
 /**
+ * Why a tree's own gitfile cannot be trusted to resolve a host-side git write.
+ *
+ * Returns a refusal, or null when there is nothing to police. Every host-side
+ * git command that WRITES resolves the repository through the `.git` of the
+ * tree it runs in, and for every tree this pipeline builds that `.git` sits
+ * inside the directory the sandbox mounts read-write. Two shapes reach a
+ * planted repository from there, and both end in a `filter.<x>.smudge`
+ * running on the host:
+ *
+ * - the gitfile rewritten to an admin entry planted under the same mount, and
+ * - the gitfile REPLACED by a `.git` directory, which is a repository of the
+ *   writer's own and skips every identity gate written for the gitfile shape.
+ *
+ * Neither is a shape the pipeline creates under the mount — its trees come
+ * from `git worktree add`, which writes a gitfile pointing at
+ * `<repo>/.git/worktrees/` — so refusing both costs nothing. Outside a mount
+ * this says nothing at all: a plain checkout's `.git` IS a directory, and
+ * refusing that would refuse every ordinary repository.
+ */
+export function untrustedGitfile(
+  tree: string,
+  // Required, not defaulted to `mountRootFor`: importing it here would close
+  // an ESM cycle — `sandboxed-exec` already imports `redirectedAncestor` from
+  // this module — and a cycle whose only symptom appears at module-init time
+  // is not worth a saved argument.
+  mountRoot: (cwd: string) => string | null,
+): string | null {
+  const root = mountRoot(tree);
+  if (root === null) return null;
+  const dotGit = join(tree, '.git');
+  let stat;
+  try {
+    stat = lstatSync(dotGit);
+  } catch {
+    return `${tree} has no .git to resolve`;
+  }
+  if (!stat.isFile()) {
+    return `${tree}'s .git is not the gitfile the pipeline created, and the tree is inside the review temp dir`;
+  }
+  let target: string;
+  try {
+    const raw = readFileSync(dotGit, 'utf8').trim();
+    if (!raw.startsWith('gitdir:')) {
+      return `${tree}'s .git does not name an admin entry`;
+    }
+    target = resolve(tree, raw.slice('gitdir:'.length).trim());
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  if (adminEntryInsideReviewTmp(target, mountRoot, tree)) {
+    return `${tree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
+  }
+  return null;
+}
+
+/**
  * Whether a linked worktree's admin entry sits where reviewed code can write it.
  *
  * The gitfile inside a pipeline tree cannot move — git requires `<tree>/.git` —
@@ -159,8 +208,15 @@ export function adminEntryInsideReviewTmp(
     // report it, and answering "not inside" here would be a guess.
     return true;
   }
-  const rel = relative(realRoot, real);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  // `isSubpath`, not a hand-rolled prefix test. The first cut was hand-rolled
+  // and failed open at both boundaries of the question it was asking: an entry
+  // whose realpath IS the mount root produced an empty relative path and was
+  // read as "outside" — while the root is exactly as writable as anything
+  // under it — and a direct child legitimately named `..evil-git` produced a
+  // relative path starting with `..`, which the prefix test read as an escape.
+  // Both are places a planted entry can sit, and both are why path containment
+  // belongs in one tested helper rather than in each caller's arithmetic.
+  return isSubpath(realRoot, real);
 }
 
 /**

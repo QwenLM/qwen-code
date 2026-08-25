@@ -82,11 +82,11 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
-  adminEntryInsideReviewTmp,
   discardWorktree,
   exposeDependencies,
   redirectedAncestor,
   sanitizedGitEnv,
+  untrustedGitfile,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -1614,6 +1614,13 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // and carries its `.git` as a gitfile; a plain checkout has a `.git`
     // DIRECTORY and no admin entry to round-trip, and demanding one there
     // would refuse every ordinary repository.
+    // Both mount-relative questions in one place — the shape of the `.git` and
+    // the location of what it names — so the probe tree and the review
+    // worktree that creates it are held to the same rule. Before the
+    // `isFile()` branch below, because every gate inside that branch is
+    // skipped by the very shape this refuses.
+    const untrusted = untrustedGitfile(probeTree, mountRootFor);
+    if (untrusted !== null) return untrusted;
     if (lstatSync(join(probeTree, '.git')).isFile()) {
       const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
       if (
@@ -1621,16 +1628,6 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
         realpathSync(probeTree)
       ) {
         return `${probeTree}'s admin entry does not point back at it`;
-      }
-      // ...and the entry itself must not live where the reviewed code can
-      // write it. The round-trip above proves the two agree, not that either
-      // is the pipeline's: a gitfile rewritten to a directory planted under
-      // the same mount, carrying its own backpointer, agrees with itself all
-      // the way — and the `checkout --force` below then runs whatever
-      // `filter.<x>.smudge` that directory declares, on the HOST. See
-      // `adminEntryInsideReviewTmp`.
-      if (adminEntryInsideReviewTmp(gitDir, mountRootFor, probeTree)) {
-        return `${probeTree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
       }
       // And every ancestor between the tree and the repository it belongs to:
       // a link above the tree redirects the checkout and the clean together,
@@ -2665,6 +2662,16 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
+      // The FIRST host-side git write of this phase, and it resolves the
+      // repository through the REVIEW worktree's own gitfile — a second
+      // rewritable pointer inside the same read-write mount, written by the
+      // build/test phase that already ran the PR's code. `worktree add` checks
+      // files out, so it runs whatever `filter.<x>.smudge` that pointer leads
+      // to, on the host, before any gate inside the restore below could fire.
+      const untrusted = untrustedGitfile(worktree, mountRootFor);
+      if (untrusted !== null) {
+        throw new Error(`refusing to create a probe tree: ${untrusted}`);
+      }
       git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
       created = true;
     } catch (e) {

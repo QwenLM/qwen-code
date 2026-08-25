@@ -35,7 +35,7 @@ function validTarget(target: string): boolean {
 }
 
 /**
- * Whether a filename under `REVIEW_TMP_DIR` is a review-worktree lease.
+ * Whether a filename under `REVIEW_LEASE_DIR` is a review-worktree lease.
  * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
  * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
  * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
@@ -144,7 +144,18 @@ export function createReviewWorktreeLease(params: {
   // reads that location any more — but it would sit in the mounted directory
   // forever, because the sweep still skips the lease shape. Remove the one
   // this call supersedes, and only that one.
-  rmSync(legacyLeasePath(repositoryRoot, params.target), { force: true });
+  //
+  // `recursive`, because `force` only swallows ENOENT. That path is in the
+  // one directory reviewed code can still write, and a DIRECTORY at the
+  // lease's name would otherwise throw EISDIR out of here on every future
+  // acquisition — `mkdir .qwen/tmp/qwen-review-lease-pr-<n>.json` is a
+  // one-command permanent wedge on that PR, and nothing else removes it: the
+  // rollback rethrows, the sweep skips the lease shape, and `rm -f` cannot
+  // remove a directory.
+  rmSync(legacyLeasePath(repositoryRoot, params.target), {
+    force: true,
+    recursive: true,
+  });
   try {
     // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
     // fetch-prs can both pass the gate's read, and a plain write would let
