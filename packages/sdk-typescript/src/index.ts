@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {
@@ -101,12 +102,20 @@ export {
   type DaemonMcpServerRestartRefusedEvent,
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
+  type DaemonSettingsChangedData,
+  type DaemonSettingsChangedEvent,
   type DaemonToolToggleResult,
   type DaemonSkillBatchToggleError,
   type DaemonSkillBatchToggleErrorCode,
   type DaemonSkillBatchToggleItem,
   type DaemonSkillBatchToggleResult,
+  type ExtensionMutationResponse,
+  type ExtensionWorkspaceBatchActivationState,
+  type ExtensionDefaultActivationBatchItem,
+  type ExtensionWorkspaceActivationBatchItem,
   type DaemonSkillToggleActivation,
+  type DaemonSkillToggleMutation,
+  type DaemonSkillToggleMutationSkill,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,
   type DaemonSkillInstallSource,
@@ -223,6 +232,9 @@ export {
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
+  type DaemonSessionCatalogVersion,
+  type DaemonSessionLiveState,
+  type DaemonWorkspaceSessionLiveState,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,
   type DaemonSessionSubscribeOptions,

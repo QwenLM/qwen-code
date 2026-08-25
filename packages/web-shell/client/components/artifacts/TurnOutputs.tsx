@@ -66,6 +66,15 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
+export const TURN_OUTPUT_VISIBLE_LIMIT = 3;
+
+export function visibleTurnOutputs<T>(
+  items: readonly T[],
+  expanded: boolean,
+): readonly T[] {
+  return expanded ? items : items.slice(0, TURN_OUTPUT_VISIBLE_LIMIT);
+}
+
 export type TurnOutputOpenRequest = (
   | {
       id: 'review';
@@ -84,6 +93,17 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       src: string;
       alt?: string;
+    }
+  | {
+      id: string;
+      kind: 'attachment';
+      title: string;
+      turnId: string;
+      mimeType?: string;
+      data?: Blob;
+      text?: string;
+      workspacePath?: string;
+      workspaceCwd?: string;
     }
   | {
       id: string;
@@ -152,6 +172,7 @@ function TurnOutputsComponent({
   const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
   if (
     changes.length === 0 &&
     artifacts.length === 0 &&
@@ -159,8 +180,10 @@ function TurnOutputsComponent({
   ) {
     return null;
   }
-  const visibleChanges = showAllChanges ? changes : changes.slice(0, 3);
-  const remainingChanges = changes.length - 3;
+  const visibleChanges = visibleTurnOutputs(changes, showAllChanges);
+  const remainingChanges = changes.length - TURN_OUTPUT_VISIBLE_LIMIT;
+  const visibleArtifacts = visibleTurnOutputs(artifacts, showAllArtifacts);
+  const remainingArtifacts = artifacts.length - TURN_OUTPUT_VISIBLE_LIMIT;
   const totals = sumLineStats(changes);
   const openReview = (selectedPath?: string) => {
     if (onOpenRequest) {
@@ -340,11 +363,15 @@ function TurnOutputsComponent({
         </div>
       )}
 
-      {artifacts.map((artifact) => (
+      {visibleArtifacts.map((artifact) => (
         <ArtifactCard
           key={artifact.id}
           artifact={artifact}
-          onOpen={() => openArtifact(artifact)}
+          onOpen={
+            canOpenWorkspaceArtifact(artifact)
+              ? () => openArtifact(artifact)
+              : undefined
+          }
           onError={onError}
           onDownload={
             canDownloadArtifact(artifact) && workspaceActions
@@ -359,6 +386,22 @@ function TurnOutputsComponent({
           }
         />
       ))}
+      {remainingArtifacts > 0 && (
+        <button
+          type="button"
+          className={styles.showMoreButton}
+          onClick={() => setShowAllArtifacts((value) => !value)}
+        >
+          <span>
+            {showAllArtifacts
+              ? t('turnOutputs.collapseArtifacts')
+              : t('turnOutputs.showMoreArtifacts', {
+                  count: remainingArtifacts,
+                })}
+          </span>
+          <ChevronIcon open={showAllArtifacts} />
+        </button>
+      )}
 
       {scheduledTasks.map((task) => (
         <ScheduledTaskCard
@@ -379,7 +422,7 @@ function ArtifactCard({
   onError,
 }: {
   artifact: DaemonSessionArtifact;
-  onOpen: () => void;
+  onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
   onError?: (error: unknown, fallback: string) => void;
 }) {
@@ -396,6 +439,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
   const downloadName =
     (artifact.workspacePath &&
       normalizePath(artifact.workspacePath).split('/').at(-1)) ||
@@ -429,7 +473,9 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
+            {[getArtifactTypeLabel(artifact), size, blockedReason]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>
@@ -449,7 +495,8 @@ function ArtifactCard({
             type="button"
             className={styles.reviewButton}
             onClick={onOpen}
-            title={artifact.title}
+            title={blockedReason ?? artifact.title}
+            disabled={!onOpen}
           >
             {t('common.open')}
           </button>
@@ -468,6 +515,7 @@ const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
   audio: FileAudioIcon,
   pdf: FileTextIcon,
   notebook: NotebookTabsIcon,
+  document: FileTextIcon,
 };
 
 export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
@@ -656,6 +704,27 @@ function canDownloadArtifact(
     artifact.status === 'available' &&
     Boolean(artifact.workspacePath)
   );
+}
+
+export function canOpenWorkspaceArtifact(
+  artifact: DaemonSessionArtifact,
+): boolean {
+  if (artifact.storage !== 'workspace') {
+    return true;
+  }
+  return artifact.status === 'available' || artifact.status === 'changed';
+}
+
+export function getWorkspaceArtifactOpenBlockReason(
+  artifact: DaemonSessionArtifact,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | undefined {
+  if (canOpenWorkspaceArtifact(artifact)) {
+    return undefined;
+  }
+  return artifact.workspacePath
+    ? t('turnOutputs.artifactUnavailable', { path: artifact.workspacePath })
+    : t('turnOutputs.artifactMissing');
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {

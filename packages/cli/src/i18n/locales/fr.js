@@ -520,6 +520,7 @@ export default {
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
+  Unset: 'Non défini',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
   'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
@@ -1600,6 +1601,7 @@ export default {
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
+  'from nested agent': "de l'agent imbriqué",
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',
@@ -2001,6 +2003,19 @@ export default {
   'Manage extension settings': 'Gérer les paramètres de l’extension',
   'Ask a quick side question without affecting the main conversation':
     'Poser rapidement une question annexe sans affecter la conversation principale',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtenir un deuxième avis sur la conversation actuelle auprès d'un modèle examinateur",
+  'Consulting advisor...': "Consultation de l'advisor...",
+  'Advisor review failed: {{error}}':
+    "Échec de la revue de l'advisor : {{error}}",
+  'No conversation context available for /advisor':
+    'Aucun contexte de conversation disponible pour /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Focus trop long (max {{max}} caractères)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Une autre opération est en cours, attendez qu'elle se termine avant d'exécuter /advisor",
+  'No response received.': 'Aucune réponse reçue.',
+  'No model configured.': 'Aucun modèle configuré.',
   'Manage Arena sessions': 'Gérer les sessions Arena',
   'Start an Arena session with multiple models competing on the same task':
     "Démarrer une session Arena où plusieurs modèles s'affrontent sur la même tâche",

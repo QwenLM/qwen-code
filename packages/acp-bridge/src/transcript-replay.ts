@@ -51,6 +51,12 @@ export interface PendingTranscriptToolCall {
   readonly toolName: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
+  /**
+   * The transcript's own id when dedup renamed `callId` (`<id>:2`). Skip
+   * sets derived from chat history hold RAW ids, so finalize must match
+   * against both.
+   */
+  readonly rawCallId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -83,6 +89,7 @@ export interface TranscriptReplayMachineOptions {
   readonly gaps?: readonly TranscriptReplayGapInput[];
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
+  readonly skipFinalizeCallIds?: ReadonlySet<string>;
 }
 
 export interface TranscriptReplayMachine {
@@ -199,6 +206,31 @@ function replaceTextPartsForDisplay(
   return projected;
 }
 
+function stripGeneratedAttachmentTokens(
+  displayText: string,
+  payload: Record<string, unknown> | undefined,
+): string {
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
+}
+
 export function toTranscriptEpochMs(
   timestamp?: string | number,
 ): number | undefined {
@@ -257,6 +289,31 @@ export function createTranscriptImageUpdate(
     content: { type: 'image', data: options.data, mimeType: options.mimeType },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+function createTranscriptAttachmentReferenceUpdate(
+  reference: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  if (
+    (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+    typeof reference['attachmentId'] !== 'string' ||
+    typeof reference['mimeType'] !== 'string' ||
+    typeof reference['size'] !== 'number'
+  ) {
+    return undefined;
+  }
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: reference['type'],
+      attachmentId: reference['attachmentId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
 }
 
 export function createTranscriptUsageUpdate(
@@ -504,8 +561,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (
+        skip &&
+        (skip.has(pending.callId) ||
+          (pending.rawCallId !== undefined && skip.has(pending.rawCallId)))
+      )
+        continue;
       this.pendingToolCalls.delete(pending.callId);
       this.report(
         'missing_tool_result',
@@ -550,6 +614,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    const replayMeta: UpdateMetaOptions =
+      record.subtype === 'mid_turn_user_message'
+        ? {
+            ...meta,
+            extra: {
+              ...meta.extra,
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : meta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -558,8 +633,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     ) {
       const displayText =
         payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
+          ? stripGeneratedAttachmentTokens(payload['displayText'], payload)
           : undefined;
+      if (record.subtype === 'mid_turn_user_message' && displayText === '') {
+        const media = [
+          ...this.projectUserAttachmentReferences(payload, emit, replayMeta),
+        ];
+        if (media.length > 0) {
+          yield* media;
+          return;
+        }
+      }
       if (displayText) {
         const isNotification = record.subtype === 'notification';
         const backgroundTask =
@@ -570,7 +654,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
-            ...meta,
+            ...replayMeta,
             ...(isNotification
               ? {
                   extra: {
@@ -584,6 +668,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
+        yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
@@ -591,17 +676,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const projection = projectUserTranscriptForDisplay(record);
     if (projection.displayText !== undefined) {
+      const displayText = stripGeneratedAttachmentTokens(
+        projection.displayText,
+        payload,
+      );
       yield* this.projectMessageParts(
         record,
         'user',
         emit,
-        meta,
+        replayMeta,
         undefined,
-        replaceTextPartsForDisplay(
-          record.message?.parts,
-          projection.displayText,
-        ),
+        replaceTextPartsForDisplay(record.message?.parts, displayText),
       );
+      yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
       return;
     }
 
@@ -609,10 +696,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       record,
       'user',
       emit,
-      meta,
+      replayMeta,
       undefined,
       projection.parts,
     );
+    yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
+  }
+
+  private *projectUserAttachmentReferences(
+    payload: Record<string, unknown> | undefined,
+    emit: (update: SessionUpdate) => TranscriptReplayEmission,
+    meta: UpdateMetaOptions,
+  ): Iterable<TranscriptReplayEmission> {
+    const references = payload?.['attachmentReferences'];
+    if (!Array.isArray(references)) return;
+    for (const reference of references) {
+      if (!isObjectRecord(reference)) continue;
+      const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
+      if (update) yield emit(update);
+    }
   }
 
   private *projectAssistantRecord(
@@ -742,6 +844,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             toolName,
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+            ...(explicitId !== undefined && explicitId !== callId
+              ? { rawCallId: explicitId }
+              : {}),
           });
         }
       }
@@ -851,9 +956,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload,
         this.goalState?.goal ?? null,
       );
+      const goalControlCommand = projectGoalControlCommand(
+        payload.cause,
+        payload.snapshot,
+      );
       this.goalState = payload.snapshot;
       this.goalCause = payload.cause;
       if (bookkeepingOnly) return;
+      if (goalControlCommand) {
+        yield emit(
+          createTranscriptMessageUpdate({
+            role: 'user',
+            text: goalControlCommand,
+            ...meta,
+            extra: {
+              source: 'goal_control',
+              'qwen.session.recordId': record.uuid,
+            },
+          }),
+        );
+      }
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1031,6 +1153,40 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ...(path ? { path } : {}),
     });
   }
+}
+
+function projectGoalControlCommand(
+  cause: GoalStateCause,
+  snapshot: GoalSnapshotV2,
+): string | undefined {
+  switch (cause) {
+    case 'create':
+    case 'replace':
+      return snapshot.goal ? `/goal ${snapshot.goal.objective}` : undefined;
+    case 'edit':
+      return snapshot.goal
+        ? `/goal edit ${snapshot.goal.objective}`
+        : undefined;
+    case 'pause':
+    case 'resume':
+    case 'clear':
+      return `/goal ${cause}`;
+    case 'turn_finished':
+    case 'checkpoint':
+    case 'verifier_accept':
+    case 'verifier_reject':
+    case 'complete':
+    case 'blocked':
+    case 'usage_limited':
+    case 'migrated':
+      return undefined;
+    default:
+      return assertNever(cause);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported Goal state cause: ${String(value)}`);
 }
 
 function parseTranscriptGoalStatus(
