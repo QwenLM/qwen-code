@@ -116,12 +116,6 @@ function assertSameIdentity(
   }
 }
 
-function resolveBaseFlags(flags: number | undefined): number {
-  // Optional chain so strict vitest mocks of node:fs that omit `constants`
-  // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  return flags ?? fs.constants?.O_RDONLY ?? 0;
-}
-
 /**
  * The platform's O_NOFOLLOW flag, or `undefined` when the runtime does not
  * expose it (Windows) — the caller then takes the compensating path.
@@ -134,22 +128,20 @@ function getNoFollowFlag(): number | undefined {
  * Synchronous variant of {@link openNoFollow}. Returns a raw fd; the caller
  * owns closing it.
  */
-export function openSyncNoFollow(
-  filePath: string,
-  flags?: number,
-  mode?: number,
-): number {
-  const baseFlags = resolveBaseFlags(flags);
+export function openSyncNoFollow(filePath: string): number {
+  // Optional chain so strict vitest mocks of node:fs that omit `constants`
+  // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
+  const baseFlags = fs.constants?.O_RDONLY ?? 0;
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
-    return fs.openSync(filePath, baseFlags | noFollowFlag, mode);
+    return fs.openSync(filePath, baseFlags | noFollowFlag);
   }
 
   const before = fs.lstatSync(filePath);
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
-  const fd = fs.openSync(filePath, baseFlags, mode);
+  const fd = fs.openSync(filePath, baseFlags);
   try {
     assertSameIdentity(filePath, before, fs.fstatSync(fd));
   } catch (error) {
@@ -164,29 +156,35 @@ export function openSyncNoFollow(
 }
 
 /**
- * Open `filePath` without following a symlink in the final path component.
+ * Open `filePath` for reading without following a symlink in the final path
+ * component.
  *
  * On platforms with `O_NOFOLLOW` the guarantee is enforced by the kernel at
  * open time. Elsewhere an lstat → open → fstat identity check compensates
- * (see the module docs). Rejections carry `code: 'ELOOP'`. The caller owns
- * closing the returned handle.
+ * (see the module docs). Symlink refusals and identity races carry
+ * `code: 'ELOOP'`; an unverifiable identity carries
+ * {@link UNVERIFIABLE_IDENTITY_CODE}. The caller owns closing the returned
+ * handle.
+ *
+ * Deliberately read-only with no `flags`/`mode` parameters: no caller needs
+ * them, and an `fs.open`-shaped signature would invite write/create flags
+ * through a helper whose semantics and tests cover only the read-only case.
+ * Re-add them (with a caller and tests) in the PR that first needs them.
  */
-export async function openNoFollow(
-  filePath: string,
-  flags?: number,
-  mode?: number,
-): Promise<FileHandle> {
-  const baseFlags = resolveBaseFlags(flags);
+export async function openNoFollow(filePath: string): Promise<FileHandle> {
+  // Optional chain so strict vitest mocks of node:fs that omit `constants`
+  // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
+  const baseFlags = fs.constants?.O_RDONLY ?? 0;
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
-    return fs.promises.open(filePath, baseFlags | noFollowFlag, mode);
+    return fs.promises.open(filePath, baseFlags | noFollowFlag);
   }
 
   const before = await fs.promises.lstat(filePath);
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
-  const handle = await fs.promises.open(filePath, baseFlags, mode);
+  const handle = await fs.promises.open(filePath, baseFlags);
   try {
     assertSameIdentity(filePath, before, await handle.stat());
   } catch (error) {
