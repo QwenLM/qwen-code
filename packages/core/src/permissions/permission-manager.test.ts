@@ -2965,6 +2965,39 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('task_stop')).toBe(false);
     });
 
+    it('tool_search is exempt from the allowlist (#9827)', async () => {
+      // When ToolSearch is missing from the registry, client.ts
+      // (`resolveDeferredToolsForReminder`) eagerly force-reveals every
+      // registered deferred tool (all mcp__* and the deferred
+      // computer_use__* family) into the eager model request, and
+      // `preloadDeferredToolsWithinBudget` early-returns without it. Under
+      // the canonical narrow allowlist this would invert the schema-shrink
+      // goal into maximal schema bloat for exactly the deferred families
+      // the other exemptions preserve for ToolSearch discoverability.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(npm test)'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('tool_search')).toBe(true);
+      // Unrelated unlisted built-ins stay gated.
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
+    });
+
+    it('a whole-tool deny rule still wins over the tool_search exemption', async () => {
+      // Explicit denial (e.g. the deepseek prefix-cache path pushes
+      // 'tool_search' into mergedDeny) must still remove it.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['tool_search'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('tool_search')).toBe(false);
+    });
+
     it('session-granted allow rules extend membership but never activate the allowlist', async () => {
       // No configured allow rules → allowlist must stay inactive even after
       // a mid-session "Always allow" / skill allowedTools grant, or one

@@ -768,11 +768,25 @@ export class PermissionManager {
     //   goal and only strips capability, including ToolSearch
     //   discoverability. The legacy `tools.core` gate never dropped them
     //   either (non-core tools bypassed it) (#9827).
+    // - `tool_search`: the deferred-tool discovery surface itself. When
+    //   ToolSearch is absent from the registry, client.ts
+    //   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
+    //   registered deferred tool — all `mcp__*` tools and the deferred
+    //   `computer_use__*` family — into the eager model request, and
+    //   `preloadDeferredToolsWithinBudget` early-returns without it, so
+    //   gating tool_search under a narrow allowlist inverts the
+    //   schema-shrink goal into maximal schema bloat for exactly the
+    //   deferred families the exemptions above preserve for ToolSearch
+    //   discoverability. tool_search itself is never `shouldDefer`
+    //   (tool-search.ts), so its own schema cost is unchanged by keeping
+    //   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
+    //   as a non-core tool (#9827).
     if (
       this.permissionsAllowListActive &&
       canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
       !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
       canonicalName !== ToolNames.TASK_STOP &&
+      canonicalName !== ToolNames.TOOL_SEARCH &&
       !canonicalName.startsWith('mcp__') &&
       !canonicalName.startsWith('computer_use__') &&
       !this.isCoveredByAllowOrAskRule(canonicalName)
