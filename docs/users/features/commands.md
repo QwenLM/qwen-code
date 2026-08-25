@@ -238,7 +238,7 @@ Advisor gives the main model access to an independent, read-only reviewer. The r
 - Reviews use a forked agent with no tools and return four structured sections: **Verdict**, **Risks**, **Missing evidence**, and **Recommendation**.
 - Evidence can include the executor system instruction, tool declarations, prior conversation turns, and tool results. Sensitive fields and hidden reasoning are removed, and oversized evidence is truncated to the reviewer model's budget.
 - Selecting a model from another provider sends this evidence to that provider. The UI identifies the resolved reviewer model and provider route.
-- An empty value or `off` disables Advisor. It does not silently fall back to the main model.
+- An empty value or `off` disables the native Advisor tool. `/advisor review` remains available and uses the main model unless an Advisor model is configured.
 - Advisor requests do not use configured model fallbacks.
 
 **Example:**

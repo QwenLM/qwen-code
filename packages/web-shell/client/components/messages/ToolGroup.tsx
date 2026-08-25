@@ -56,6 +56,7 @@ import {
   getToolDescription,
   getToolSummaryDescription,
   getToolResultSummary,
+  isAdvisorToolName,
   isAskUserQuestionToolName,
   isActiveToolStatus,
   isSkillToolName,
@@ -121,6 +122,7 @@ export function hasExpandableContent(tool: ACPToolCall): boolean {
   if (getMcpAppDisplay(tool.rawOutput)) return true;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
+  if (isAdvisorToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
     return !!getWriteContent(tool) || hasEditContent(tool);
@@ -161,6 +163,7 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read_file' ||
     name === 'readfile' ||
     isSkillToolName(name) ||
+    isAdvisorToolName(name) ||
     isAskUserQuestionToolName(tool.toolName)
   );
 }
@@ -1329,6 +1332,7 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
+  const isAdvisor = isAdvisorToolName(name);
   // A row expands when it has a todo list to reveal, detail output
   // (bash/diff/read content), or a description long enough to be ellipsised.
   // When a long description is expanded we move it out of the header into a
@@ -1358,7 +1362,7 @@ export const ToolLine = memo(function ToolLine({
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
   const showDescriptionInDetail = expanded && descExpandable;
-  const useMarkdownDetail = isRead;
+  const useMarkdownDetail = isRead || isAdvisor;
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
@@ -1544,6 +1548,7 @@ export const ToolLine = memo(function ToolLine({
                 <ExpandedAskUserQuestionOutput tool={tool} />
               )}
               {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
+              {isAdvisor && <Markdown content={extractText(tool) ?? ''} />}
             </ToolExpandedCard>
           )}
         </div>

@@ -10,6 +10,7 @@ import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
+  buildModelIdContext,
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
@@ -30,8 +31,8 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import {
-  getOwnKeyScope,
   getPersistScopeForModelSelection,
+  resolvePersistScopeForKey,
 } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import {
@@ -171,10 +172,18 @@ function resolvePersistScope(
 function resolveAdvisorPersistScope(
   settings: ReturnType<typeof useSettings>,
   persistScope: 'workspace' | 'user' | undefined,
-): SettingScope {
-  return (
-    getOwnKeyScope(settings, 'advisorModel') ??
-    resolvePersistScope(settings, persistScope)
+): { scope: SettingScope; shadowingScope?: SettingScope } {
+  const requestedScope =
+    persistScope === 'workspace'
+      ? SettingScope.Workspace
+      : persistScope === 'user'
+        ? SettingScope.User
+        : undefined;
+  return resolvePersistScopeForKey(
+    settings,
+    'advisorModel',
+    requestedScope,
+    resolvePersistScope(settings, undefined),
   );
 }
 
@@ -512,9 +521,10 @@ export function ModelDialog({
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
-  const advisorModelSetting = settings?.merged?.advisorModel as
-    | string
-    | undefined;
+  const persistedAdvisorModelSetting = settings?.merged?.advisorModel;
+  const advisorModelSetting = config?.hasAdvisorModelOverride?.()
+    ? config.getAdvisorModel()
+    : persistedAdvisorModelSetting;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
     | string
@@ -531,15 +541,18 @@ export function ModelDialog({
     }
   }, [fastModelSetting, isFastModelMode]);
   const parsedAdvisorModelSetting = useMemo(() => {
-    if (!isAdvisorModelMode) return undefined;
-    const raw = advisorModelSetting?.trim();
+    if (!isAdvisorModelMode || !config) return undefined;
+    const raw =
+      typeof advisorModelSetting === 'string'
+        ? advisorModelSetting.trim()
+        : undefined;
     if (!raw || raw.toLowerCase() === 'off') return undefined;
     try {
-      return resolveModelId(raw);
+      return resolveModelId(raw, buildModelIdContext(config));
     } catch {
       return undefined;
     }
-  }, [advisorModelSetting, isAdvisorModelMode]);
+  }, [advisorModelSetting, config, isAdvisorModelMode]);
   const parsedVisionModelSetting = useMemo(() => {
     if (!isVisionModelMode) return undefined;
     try {
@@ -828,7 +841,18 @@ export function ModelDialog({
           return;
         }
 
-        const scope = resolveAdvisorPersistScope(settings, persistScope);
+        const { scope, shadowingScope } = resolveAdvisorPersistScope(
+          settings,
+          persistScope,
+        );
+        if (shadowingScope !== undefined) {
+          setErrorMessage(
+            t(
+              'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.',
+            ),
+          );
+          return;
+        }
         const scopeSuffix =
           persistScope === undefined
             ? ''

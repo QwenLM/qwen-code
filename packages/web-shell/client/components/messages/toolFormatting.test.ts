@@ -356,22 +356,20 @@ describe('toolFormatting', () => {
   });
 
   it('formats structured Advisor reviews as readable markdown', () => {
-    expect(
-      extractText(
-        tool({
-          toolName: 'advisor',
-          rawOutput: {
-            type: 'advisor_review',
-            verdict: 'Sound approach.',
-            risks: 'Retry handling is unclear.',
-            missingEvidence: 'No integration result.',
-            recommendation: 'Run the integration test.',
-          },
-        }),
-      ),
-    ).toBe(
+    const advisorTool = tool({
+      toolName: 'advisor',
+      rawOutput: {
+        type: 'advisor_review',
+        verdict: 'Sound approach.',
+        risks: 'Retry handling is unclear.',
+        missingEvidence: 'No integration result.',
+        recommendation: 'Run the integration test.',
+      },
+    });
+    expect(extractText(advisorTool)).toBe(
       '## Verdict\nSound approach.\n\n## Risks\nRetry handling is unclear.\n\n## Missing evidence\nNo integration result.\n\n## Recommendation\nRun the integration test.',
     );
+    expect(getToolResultSummary(advisorTool)).toBe('Sound approach.');
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {

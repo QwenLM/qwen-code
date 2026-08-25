@@ -20,8 +20,8 @@ import {
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import {
-  getOwnKeyScope,
   getPersistScopeForModelSelection,
+  resolvePersistScopeForKey,
 } from '../../config/modelProvidersScope.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
@@ -127,11 +127,18 @@ function parseScopeFlags(args: string): {
 function resolveScope(
   settings: LoadedSettings,
   scopeOverride: SettingScope | undefined,
-): SettingScope {
-  return (
-    scopeOverride ??
-    getOwnKeyScope(settings, 'advisorModel') ??
-    getPersistScopeForModelSelection(settings)
+): { scope: SettingScope; shadowingScope?: SettingScope } {
+  return resolvePersistScopeForKey(
+    settings,
+    'advisorModel',
+    scopeOverride,
+    getPersistScopeForModelSelection(settings),
+  );
+}
+
+function formatShadowedScopeError(): string {
+  return t(
+    'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.',
   );
 }
 
@@ -243,7 +250,14 @@ async function setAdvisorModel(
     };
   }
 
-  const scope = resolveScope(settings, scopeOverride);
+  const { scope, shadowingScope } = resolveScope(settings, scopeOverride);
+  if (shadowingScope !== undefined) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: formatShadowedScopeError(),
+    };
+  }
   if (modelName === undefined) {
     settings.setValue(scope, 'advisorModel', '');
     await config.setAdvisorConfig({
@@ -273,17 +287,15 @@ async function setAdvisorModel(
     };
   }
 
-  const availableModels = (
-    selector.authType
-      ? config.getAvailableModelsForAuthType(selector.authType)
-      : config.getAllConfiguredModels()
-  ).filter(
-    (model) =>
-      (modelName === 'fast' || !model.fastOnly) &&
-      !model.voiceOnly &&
-      !model.visionOnly &&
-      !model.imageOnly,
-  );
+  const availableModels = config
+    .getAllConfiguredModels(selector.authType ? [selector.authType] : undefined)
+    .filter(
+      (model) =>
+        (modelName === 'fast' || !model.fastOnly) &&
+        !model.voiceOnly &&
+        !model.visionOnly &&
+        !model.imageOnly,
+    );
   if (!availableModels.some((model) => model.id === selector.modelId)) {
     return {
       type: 'message',

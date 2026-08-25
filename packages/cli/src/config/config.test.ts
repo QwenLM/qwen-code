@@ -1321,6 +1321,17 @@ describe('loadCliConfig', () => {
     expect(config.getAdvisorMaxUses()).toBe(2);
   });
 
+  it('should ignore a non-string advisorModel setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 123 as unknown as string },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
   it('should prefer --advisor over advisorModel settings for the session', async () => {
     process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
     const argv = await parseArguments();

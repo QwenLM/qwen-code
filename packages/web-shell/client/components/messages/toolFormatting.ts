@@ -142,6 +142,10 @@ export function isAskUserQuestionToolName(toolName: string): boolean {
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
+export function isAdvisorToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'advisor';
+}
+
 export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
@@ -215,6 +219,11 @@ export function getToolResultSummary(tool: ACPToolCall): string {
 
   const text = extractText(tool);
   if (!text) return '';
+
+  if (isAdvisorToolName(name)) {
+    const verdict = text.match(/^## Verdict\s*\n([\s\S]*?)(?:\n\n## |$)/)?.[1];
+    return verdict ? truncateText(verdict.trim().replace(/\s+/g, ' '), 80) : '';
+  }
 
   const lines = text.split('\n');
   const lineCount = lines.length;

@@ -360,6 +360,52 @@ describe('advisorCommand', () => {
     );
   });
 
+  it('rejects a global write shadowed by project settings', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig(),
+        settings: createSettings(
+          { advisorModel: 'workspace-advisor' },
+          {},
+          { advisorModel: 'workspace-advisor' },
+        ),
+      },
+    });
+
+    const result = await advisorCommand.action!(mockContext, '--global off');
+
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content: expect.stringContaining('project settings'),
+    });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorConfig).not.toHaveBeenCalled();
+  });
+
+  it('accepts an active runtime model for the current auth type', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getAllConfiguredModels: (authTypes?: string[]) =>
+            !authTypes || authTypes.includes('openai')
+              ? [{ id: 'runtime-advisor', authType: 'openai' }]
+              : [],
+          getAvailableModelsForAuthType: () => [],
+        }),
+        settings: createSettings(),
+      },
+    });
+
+    const result = await advisorCommand.action!(mockContext, 'runtime-advisor');
+
+    expect(result).toMatchObject({ messageType: 'info' });
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      'runtime-advisor',
+    );
+  });
+
   it('returns a message result for /advisor off in ACP mode', async () => {
     const result = await advisorCommand.action!(
       { ...mockContext, executionMode: 'acp' },

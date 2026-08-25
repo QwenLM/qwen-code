@@ -74,3 +74,26 @@ export function getOwnKeyScope(
   }
   return undefined;
 }
+
+export function resolvePersistScopeForKey(
+  settings: LoadedSettings,
+  key: string,
+  requestedScope: SettingScope | undefined,
+  fallbackScope: SettingScope,
+): { scope: SettingScope; shadowingScope?: SettingScope } {
+  if (requestedScope === undefined) {
+    return { scope: getOwnKeyScope(settings, key) ?? fallbackScope };
+  }
+
+  const writableScopes = getWritableScopes(settings);
+  const requestedIndex = writableScopes.indexOf(requestedScope);
+  if (requestedIndex === -1) return { scope: fallbackScope };
+  const shadowingScope = writableScopes
+    .slice(0, requestedIndex)
+    .find((scope) => {
+      const obj = settings.forScope(scope).settings as Record<string, unknown>;
+      return Object.prototype.hasOwnProperty.call(obj, key);
+    });
+
+  return { scope: requestedScope, shadowingScope };
+}

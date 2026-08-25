@@ -208,9 +208,15 @@ describe('advisor native tool', () => {
       'wire-level evidence',
     );
     expect(JSON.stringify(evidence['transcript'])).toContain(
+      'I will inspect the evidence first.',
+    );
+    expect(JSON.stringify(evidence['transcript'])).toContain(
       'I found the evidence and will ask for a second opinion.',
     );
     expect(allMessageText(mainRequests[2]!)).toContain('<advisor_feedback>');
+    expect(allMessageText(mainRequests[2]!)).toContain(
+      'The approach is sound.',
+    );
     expect(await rig.waitForToolCall('advisor')).toBe(true);
   });
 });

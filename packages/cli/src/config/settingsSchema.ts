@@ -1466,7 +1466,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '' as string,
     description:
-      'Model selector for the native Advisor tool. Leave empty or set "off" to disable Advisor; it never falls back to the main model. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.',
+      'Model selector for the native Advisor tool. Leave empty or set "off" to disable the native tool; manual /advisor review remains available and uses the main model unless an Advisor model is configured. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.',
     showInDialog: true,
   },
 
@@ -1478,7 +1478,7 @@ const SETTINGS_SCHEMA = {
     default: undefined as number | undefined,
     description:
       'Optional maximum Advisor consultations per user prompt. Leave unset for unlimited; when set, the value must be a positive integer.',
-    showInDialog: true,
+    showInDialog: false,
     minimum: 1,
   },
 

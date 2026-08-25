@@ -1382,7 +1382,7 @@ function resolveAdvisorModel(
   settings: Settings,
 ): string | undefined {
   const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
-  const trimmed = raw?.trim();
+  const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
   if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
   return trimmed;
 }
@@ -1429,17 +1429,17 @@ function validateCliAdvisorModel(
       return undefined;
     }
   })();
-  const availableModels = (
-    selector?.authType
-      ? config.getAvailableModelsForAuthType(selector.authType)
-      : config.getAllConfiguredModels()
-  ).filter(
-    (model) =>
-      (modelName === 'fast' || !model.fastOnly) &&
-      !model.voiceOnly &&
-      !model.visionOnly &&
-      !model.imageOnly,
-  );
+  const availableModels = config
+    .getAllConfiguredModels(
+      selector?.authType ? [selector.authType] : undefined,
+    )
+    .filter(
+      (model) =>
+        (modelName === 'fast' || !model.fastOnly) &&
+        !model.voiceOnly &&
+        !model.visionOnly &&
+        !model.imageOnly,
+    );
 
   if (
     !selector ||

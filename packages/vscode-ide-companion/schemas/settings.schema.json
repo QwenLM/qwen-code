@@ -644,7 +644,7 @@
       "default": ""
     },
     "advisorModel": {
-      "description": "Model selector for the native Advisor tool. Leave empty or set \"off\" to disable Advisor; it never falls back to the main model. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.",
+      "description": "Model selector for the native Advisor tool. Leave empty or set \"off\" to disable the native tool; manual /advisor review remains available and uses the main model unless an Advisor model is configured. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.",
       "type": "string",
       "default": ""
     },

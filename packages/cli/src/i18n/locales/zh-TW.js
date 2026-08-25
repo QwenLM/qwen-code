@@ -2068,6 +2068,8 @@ export default {
     '讓審查模型對目前對話給出第二意見',
   'Configure the native Advisor model, or run /advisor review for a manual second opinion':
     '設定原生 Advisor 模型，或執行 /advisor review 取得手動觸發的第二意見',
+  'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.':
+    'Advisor 已在專案設定中設定，該設定會覆蓋要求的全域設定。請使用 --project，或先移除專案設定。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':

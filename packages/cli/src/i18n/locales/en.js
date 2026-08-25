@@ -2533,6 +2533,8 @@ export default {
     'Get a second opinion on the current conversation from a reviewer model',
   'Configure the native Advisor model, or run /advisor review for a manual second opinion':
     'Configure the native Advisor model, or run /advisor review for a manual second opinion',
+  'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.':
+    'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
