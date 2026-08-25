@@ -172,11 +172,14 @@ The telemetry path never calls `SkillManager.listSkills()`. It uses
 `getLoadedSkillNames()` from the in-memory Skill tool to narrow candidates and
 `getCachedSkills()` so span creation cannot trigger filesystem discovery. With
 a warm cache, one pass over cached skills indexes only loaded candidates by the
-exact output of `buildSkillLlmContent`, and one pass over request parts matches
-exact Skill function-response outputs against that index. A matched output is
-counted once in `skills_tokens` and excluded from `messages_tokens`. This avoids
-substring matches and per-skill scans of the full request. On a cold cache, an
-unrecognized body that is still present remains in `messages_tokens`. When
+exact output of `buildSkillLlmContent`. One pass over request parts then matches
+only parts whose `functionResponse.name === "skill"`, comparing
+`functionResponse.response.output` exactly against that index. It does not
+stringify the whole part or match `parts[].text`. A matched output is counted
+once in `skills_tokens` and excluded from `messages_tokens`. This avoids
+substring matches and per-skill scans of the full request. Subsequent
+already-loaded confirmations, microcompacted outputs, and cold-cache bodies do
+not match the indexed first-load body and remain in `messages_tokens`. When
 compaction has removed the exact body, no body tokens are added to
 `skills_tokens`; any remaining summary stays in `messages_tokens`. The
 attribute remains complete and non-blocking, while `estimated: true`
@@ -193,10 +196,11 @@ a valid `gen_ai.usage.input_tokens`, finalization applies the following rules:
 2. If their estimated sum exceeds the provider total, scale them down
    proportionally using largest-remainder allocation: multiply each category
    by the common scale, floor all five results, then distribute the remaining
-   tokens by descending fractional remainder. Ties use the schema field order
-   above. This makes the integer allocation deterministic and keeps its sum at
-   the provider total.
-3. Set `messages_tokens` to the remaining provider total.
+   `provider_total - sum(floors)` tokens by descending fractional remainder.
+   Ties use the schema field order above. In this branch, the five fixed
+   categories sum to the provider total and `messages_tokens` is zero.
+3. Otherwise, leave the five fixed estimates unchanged and set
+   `messages_tokens` to `provider_total - fixed_category_sum`.
 4. Set `available_before_compaction_tokens` from the window, reserve, and the
    same provider total.
 
