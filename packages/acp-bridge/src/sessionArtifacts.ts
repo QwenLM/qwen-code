@@ -14,11 +14,9 @@ import {
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
   isReservedWorkspaceMetadataKey,
-  isUnverifiableIdentityError,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
-  openNoFollow,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
@@ -34,6 +32,10 @@ import type {
   SessionArtifactRetention,
   SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export type DaemonSessionArtifactKind =
