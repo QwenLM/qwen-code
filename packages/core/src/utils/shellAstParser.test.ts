@@ -1432,3 +1432,69 @@ describe('plantsStateForLaterCommands', () => {
     }
   });
 });
+
+describe('statements nested inside a heredoc redirect', () => {
+  // tree-sitter parses whatever follows the heredoc opener on the same line
+  // *inside* the redirect node, beside the body. The `redirected_statement`
+  // arm filtered every redirect child out before evaluation, so an entire
+  // write segment vanished from the analysis.
+  it.each([
+    'cat <<EOF && rm -rf build\nhello\nEOF',
+    'cat <<EOF; rm -rf build\nhello\nEOF',
+    'cat <<EOF | rm -rf build\nhello\nEOF',
+    'cat <<EOF || rm -rf build\nhello\nEOF',
+    'cat <<EOF & rm -rf build\nhello\nEOF',
+    'cat <<EOF && mkdir -p build\nhello\nEOF',
+    'cat <<EOF && tee out.txt\nhello\nEOF',
+    'cat <<-EOF && rm -rf build\n\thello\n\tEOF',
+  ])('does not lose the segment after the opener in %j', async (command) => {
+    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+  });
+
+  it.each([
+    'cat <<EOF && for ((i=0;i<1;i++)); do rm -rf build; done\nhello\nEOF',
+    'cat <<EOF && if true; then rm -rf build; fi\nhello\nEOF',
+    'cat <<EOF && while true; do rm -rf build; done\nhello\nEOF',
+    'cat <<EOF && { rm -rf build; }\nhello\nEOF',
+    'cat <<EOF && ! rm -rf build\nhello\nEOF',
+    'cat <<EOF && (rm -rf build)\nhello\nEOF',
+    'cat <<EOF && case x in x) rm -rf build;; esac\nhello\nEOF',
+  ])('sees compound statements after the opener in %j', async (command) => {
+    // The first fix enumerated the shapes it had witnesses for; these are the
+    // ones that were still dropped. The skip-list is inverted now, so an
+    // unrecognised shape is evaluated rather than filtered away.
+    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+  });
+
+  it.each([
+    'cat <<EOF >out.txt\nhello\nEOF',
+    'cat <<EOF >>out.txt\nhello\nEOF',
+    'cat <<EOF 2>out.txt\nhello\nEOF',
+    'cat <<EOF >&out.txt\nhello\nEOF',
+  ])(
+    'sees a write redirect nested in the heredoc node in %j',
+    async (command) => {
+      // Same root cause from the other side: a redirect written after the
+      // opener is parsed *inside* the heredoc node, where the redirection walk
+      // never reached it — it only iterates the direct children of the
+      // `redirected_statement`. So the write was invisible.
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    },
+  );
+
+  it('still reads an ordinary heredoc as read-only', async () => {
+    // The inert leaves — the delimiters, the body — must not start
+    // classifying as statements, and a nested descriptor duplication is not a
+    // write: `2>&1` names a descriptor, not a file.
+    for (const command of [
+      'cat <<EOF\nhello\nEOF',
+      'cat <<-EOF\n\thello\n\tEOF',
+      "cat <<'EOF'\n`rm -rf build`\nEOF",
+      'cat <<EOF 2>&1\nhello\nEOF',
+      'cat <<EOF 2>&-\nhello\nEOF',
+      'grep x <<EOF\nhello\nEOF',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+    }
+  });
+});
