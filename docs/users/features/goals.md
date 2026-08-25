@@ -40,7 +40,7 @@ Put these into the objective, in this order:
 | `On block:`  | What to report when stuck, and which decision a human must make.                                                                      |
 | `Context:`   | Only facts the agent cannot find in the workspace: branch, environment, earlier decisions.                                            |
 
-Keep it to one objective and roughly under 1,200 characters. Newlines in the objective are collapsed to spaces, so number the items rather than relying on line breaks.
+Keep it to one objective and roughly under 1,200 characters. `/goal set` and `/goal edit` collapse newlines to spaces, so number the items rather than relying on line breaks.
 
 | Weak                       | Why it fails                                                | Stronger                                                                                                                                                                                                                                |
 | -------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -55,4 +55,4 @@ Keep it to one objective and roughly under 1,200 characters. Newlines in the obj
 
 Pass an existing objective to tighten it: `/goal-draft all tests pass and the lint is clean`.
 
-The skill is read-only (`get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`). Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.
+The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`). Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.

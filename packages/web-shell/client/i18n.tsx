@@ -1608,6 +1608,8 @@ const EN: Messages = {
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
     'Create, test, and customize Qwen Code extensions',
+  'skilldesc.goalDraft':
+    'Turn a fuzzy intention into a verifiable /goal objective',
   'skilldesc.loop': 'Run a prompt on a schedule or self-paced wakeups',
   'skilldesc.newApp': 'Workflow for building a new app from scratch',
   'skilldesc.qcHelper': 'Answer questions about using Qwen Code',
@@ -4591,6 +4593,7 @@ const ZH: Messages = {
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
+  'skilldesc.goalDraft': '将模糊意图改写为可验证的 /goal 目标',
   'skilldesc.loop': '按计划或自定节奏循环运行提示词',
   'skilldesc.newApp': '从零构建新应用的工作流',
   'skilldesc.qcHelper': '解答 Qwen Code 使用相关问题',

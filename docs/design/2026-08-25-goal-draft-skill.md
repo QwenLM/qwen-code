@@ -12,7 +12,7 @@ What differs for an autonomous loop versus a PRD: the stop condition must be mac
 
 ## Design
 
-A bundled skill at `packages/core/src/skills/bundled/goal-draft/SKILL.md`, registered like every bundled skill as `/goal-draft` (model-invocable too). It is read-only: `get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`. It never runs the checks, never edits, and cannot call `/goal` (built-in commands are not model-invocable by design).
+A bundled skill at `packages/core/src/skills/bundled/goal-draft/SKILL.md`, registered like every bundled skill as `/goal-draft` (model-invocable too). It is instructed to be read-only and auto-approves only the non-mutating tools (`get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`); `allowedTools` is an additive grant, so the read-only discipline is enforced by the skill's prose. It never runs the checks, never edits, and cannot call `/goal` (built-in commands are not model-invocable by design).
 
 Steps:
 

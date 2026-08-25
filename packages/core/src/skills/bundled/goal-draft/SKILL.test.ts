@@ -21,7 +21,7 @@ function loadGoalDraftSkill() {
 }
 
 describe('bundled goal-draft skill', () => {
-  it('is a read-only skill: it may inspect the workspace and the Goal, but not change either', () => {
+  it('auto-approves only the non-mutating tools: Goal read, workspace reads, and questions', () => {
     const { config } = loadGoalDraftSkill();
 
     expect(config.name).toBe('goal-draft');
@@ -32,8 +32,11 @@ describe('bundled goal-draft skill', () => {
       'glob',
       'grep_search',
     ]);
-    // Drafting an objective must never turn into doing the work or
-    // proposing a terminal Goal status on the user's behalf.
+    // allowedTools is an additive auto-approval grant, not a sandbox
+    // (skills/types.ts) — read-only behavior is enforced by the SKILL.md
+    // prose. These assertions pin what the grant deliberately excludes:
+    // drafting must never turn into doing the work or proposing a
+    // terminal Goal status on the user's behalf.
     expect(config.allowedTools).not.toContain('run_shell_command');
     expect(config.allowedTools).not.toContain('write_file');
     expect(config.allowedTools).not.toContain('edit');
