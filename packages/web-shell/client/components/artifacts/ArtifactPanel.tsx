@@ -843,6 +843,7 @@ export function ArtifactPanel({
           <TokenUsagePanel
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
           />
         ) : (
           <ScheduledTaskDetail

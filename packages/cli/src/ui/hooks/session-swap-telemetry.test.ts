@@ -191,7 +191,6 @@ function makeFakeEnv() {
       sessionServiceMocks.sessions.delete(id);
       return true;
     }),
-    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
   };
@@ -206,12 +205,7 @@ function makeFakeEnv() {
       sessionData = data;
       return currentSessionId;
     },
-    getChatRecordingService: () => ({
-      getCurrentCustomTitle: vi.fn().mockReturnValue(undefined),
-      finalize: vi.fn(),
-      flush: vi.fn().mockResolvedValue(undefined),
-      rebuildTurnBoundaries: vi.fn(),
-    }),
+    getChatRecordingService: () => undefined,
     getSessionService: () => sessionService,
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
     loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
@@ -327,7 +321,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch();
+      await result.current.handleBranch('Telemetry branch');
     });
 
     // Guard: the scenario must fail at the injected point (after the fork's
@@ -442,7 +436,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch();
+      await result.current.handleBranch('Telemetry branch');
     });
 
     // Committed swap: the fork's replayed history legitimately stays in the
@@ -482,7 +476,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch();
+      await result.current.handleBranch('Telemetry branch');
     });
 
     expect(loadHistory).toHaveBeenCalledOnce();
@@ -728,7 +722,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     const addItemBranch = vi.fn();
     const resultBranch = renderBranch(addItemBranch);
     await act(async () => {
-      await resultBranch.current.handleBranch();
+      await resultBranch.current.handleBranch('Telemetry branch');
     });
 
     // Rejected at the latch before any fork work: error item, no fork

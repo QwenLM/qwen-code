@@ -16,6 +16,7 @@ const POLL_INTERVAL_MS = 2_000;
 
 interface TokenUsagePanelProps {
   sessionActions?: DaemonSessionActions;
+  sessionId?: string;
 }
 
 type SegmentKey = 'input' | 'cached' | 'output' | 'thoughts';
@@ -55,10 +56,10 @@ function outputTokens(
 // resolves to undefined. Input/cache stay in one green family; output and
 // thoughts get their own soft hues.
 const SEGMENT_COLORS: Record<SegmentKey, string> = {
-  input: 'oklch(0.74 0.09 155)',
-  cached: 'oklch(0.55 0.09 155)',
-  output: 'oklch(0.7 0.08 250)',
-  thoughts: 'oklch(0.76 0.1 75)',
+  input: 'var(--success-color)',
+  cached: 'color-mix(in srgb, var(--success-color) 70%, var(--foreground))',
+  output: 'var(--primary)',
+  thoughts: 'var(--warning-color)',
 };
 
 function flattenModels(
@@ -66,13 +67,7 @@ function flattenModels(
 ): ModelEntry[] {
   return Object.entries(models)
     .filter(([, m]) => m.api.totalRequests > 0)
-    .map(([key, metrics]) => {
-      const parts = key.split('::');
-      const modelName = parts[0]!;
-      const source = parts[1];
-      const label = source ? `${modelName} (${source})` : modelName;
-      return { key, label, metrics };
-    })
+    .map(([key, metrics]) => ({ key, label: key, metrics }))
     .sort(
       (a, b) => totalTokens(b.metrics.tokens) - totalTokens(a.metrics.tokens),
     );
@@ -97,9 +92,8 @@ function formatCount(n: number): string {
 
 /** Compact token counts: 1,390,000 → "1.39M", 199,076 → "199.1K". */
 function formatCompact(n: number): string {
-  if (n >= 1_000_000_000)
-    return trimZeros((n / 1_000_000_000).toFixed(2)) + 'B';
-  if (n >= 1_000_000) return trimZeros((n / 1_000_000).toFixed(2)) + 'M';
+  if (n >= 999_995_000) return trimZeros((n / 1_000_000_000).toFixed(2)) + 'B';
+  if (n >= 999_950) return trimZeros((n / 1_000_000).toFixed(2)) + 'M';
   if (n >= 1_000) return trimZeros((n / 1_000).toFixed(1)) + 'K';
   return String(n);
 }
@@ -108,10 +102,14 @@ function trimZeros(value: string): string {
   return value.replace(/\.?0+$/, '');
 }
 
-export function TokenUsagePanel({ sessionActions }: TokenUsagePanelProps) {
+export function TokenUsagePanel({
+  sessionActions,
+  sessionId,
+}: TokenUsagePanelProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonSessionStatsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sessionMismatch, setSessionMismatch] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<number>(0);
   const refreshInFlightRef = useRef(false);
   const pollingPausedRef = useRef(false);
@@ -131,6 +129,12 @@ export function TokenUsagePanel({ sessionActions }: TokenUsagePanelProps) {
         .getStats()
         .then((snapshot) => {
           if (!mountedRef.current) return;
+          if (sessionId && snapshot.sessionId !== sessionId) {
+            setStatus(null);
+            setSessionMismatch(true);
+            return;
+          }
+          setSessionMismatch(false);
           setStatus(snapshot);
           setLastUpdated(Date.now());
           setError(null);
@@ -152,7 +156,7 @@ export function TokenUsagePanel({ sessionActions }: TokenUsagePanelProps) {
           refreshInFlightRef.current = false;
         });
     },
-    [sessionActions, t],
+    [sessionActions, sessionId, t],
   );
 
   useEffect(() => {
@@ -163,6 +167,7 @@ export function TokenUsagePanel({ sessionActions }: TokenUsagePanelProps) {
       };
     }
     pollingPausedRef.current = false;
+    setSessionMismatch(false);
     refresh();
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') refresh();
@@ -188,7 +193,7 @@ export function TokenUsagePanel({ sessionActions }: TokenUsagePanelProps) {
             {t('tokenUsage.retry')}
           </button>
         </div>
-      ) : !sessionActions ? (
+      ) : !sessionActions || sessionMismatch ? (
         <div className={styles.empty}>{t('tokenUsage.unavailable')}</div>
       ) : status === null ? (
         <div className={styles.empty}>{t('common.loading')}</div>

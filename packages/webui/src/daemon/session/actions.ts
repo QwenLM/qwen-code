@@ -35,6 +35,7 @@ import type {
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonTransportClosedError,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
@@ -77,6 +78,16 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+function isDaemonSessionDisconnectedError(error: unknown): boolean {
+  return (
+    error instanceof DaemonTransportClosedError ||
+    (error instanceof TypeError &&
+      /(?:fetch failed|failed to fetch)/i.test(error.message)) ||
+    (error instanceof Error &&
+      error.message.endsWith('Daemon session is not connected'))
+  );
 }
 
 function normalizePromptFiles(
@@ -2093,10 +2104,7 @@ export function createDaemonSessionActions({
       try {
         return await withActionTimeout(session.stats(), 'Load stats timed out');
       } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message === 'Daemon session is not connected'
-        ) {
+        if (isDaemonSessionDisconnectedError(error)) {
           throw error;
         }
         throw dispatchActionError(

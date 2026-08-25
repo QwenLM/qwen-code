@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonTransportClosedError,
   type DaemonCapabilities,
   type DaemonSessionClient,
   type GoalSnapshotV2,
@@ -269,15 +270,35 @@ describe('createDaemonSessionActions', () => {
   it('does not report a stats error when the session disconnects in flight', async () => {
     const addNotice = vi.fn();
     const session = createMockSession('session-a');
-    session.stats.mockRejectedValueOnce(
-      new Error('Daemon session is not connected'),
-    );
+    session.stats.mockRejectedValueOnce(new DaemonTransportClosedError());
     const { actions } = createActionsHarness({ addNotice, session });
 
     await expect(actions.getStats()).rejects.toThrow(
-      'Daemon session is not connected',
+      'Transport connection closed',
     );
     expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('does not report a stats error when fetch disconnects in flight', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.stats.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getStats()).rejects.toThrow('fetch failed');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports non-disconnect stats errors', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.stats.mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getStats()).rejects.toThrow('bad response');
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_stats' }),
+    );
   });
 
   it('clears the previous Goal before starting a fresh session', async () => {

@@ -7260,7 +7260,9 @@ class QwenAgent implements Agent {
         tokens: { ...source.tokens },
       });
     }
-    sources.sort((a, b) => b.tokens.total - a.tokens.total);
+    sources.sort(
+      (a, b) => b.tokens.total - a.tokens.total || a.id.localeCompare(b.id),
+    );
 
     const byName: ServeSessionStatsStatus['tools']['byName'] = {};
     for (const [name, t] of Object.entries(metrics.tools.byName)) {

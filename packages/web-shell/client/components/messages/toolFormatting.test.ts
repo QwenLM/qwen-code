@@ -380,6 +380,7 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
       expect(localizeToolDisplayName('run_shell_command', t)).toBe('运行命令');
       expect(localizeToolDisplayName('read_file', t)).toBe('读取文件');
+      expect(localizeToolDisplayName('agent', t)).toBe('智能体');
     });
 
     it('keeps acronyms in English', () => {

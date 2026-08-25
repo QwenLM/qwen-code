@@ -109,6 +109,7 @@ function statsFixture(): DaemonSessionStatsStatus {
 function renderPanel(
   getStats?: ReturnType<typeof vi.fn>,
   language: 'en' | 'zh-CN' = 'en',
+  sessionId?: string,
 ): HTMLElement {
   const sessionActions = getStats
     ? ({ getStats } as unknown as DaemonSessionActions)
@@ -120,7 +121,10 @@ function renderPanel(
   act(() => {
     root.render(
       <I18nProvider language={language}>
-        <TokenUsagePanel sessionActions={sessionActions} />
+        <TokenUsagePanel
+          sessionActions={sessionActions}
+          sessionId={sessionId}
+        />
       </I18nProvider>,
     );
   });
@@ -137,8 +141,8 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('1.35M');
     expect(container.textContent).not.toContain('3 prompts');
     // Model cards sorted by total tokens desc.
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
-    expect(container.textContent).toContain('qwen-max (auto)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
+    expect(container.textContent).toContain('qwen-max::auto');
     // Legend rows each on their own line: total input with a green dot,
     // cached input with a deeper-green dot and the cache-hit rate
     // (cached / prompt = 300,000 / 1,000,000).
@@ -150,13 +154,35 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('Total output350K');
   });
 
+  it('promotes compact values that round into the next unit', async () => {
+    const stats = statsFixture();
+    stats.models = {
+      qwen: {
+        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 1 },
+        tokens: {
+          prompt: 1,
+          candidates: 999_999_998,
+          total: 999_999_999,
+          cached: 0,
+          thoughts: 0,
+        },
+      },
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+
+    await act(async () => {});
+
+    expect(container.textContent).toContain('1B');
+    expect(container.textContent).not.toContain('1000M');
+  });
+
   it('shows models, subagents, and tools together', async () => {
     const getStats = vi.fn().mockResolvedValue(statsFixture());
     const container = renderPanel(getStats);
     await act(async () => {});
 
     expect(container.textContent).toContain('1.35M');
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
     expect(container.textContent).toContain('echoer');
     expect(container.textContent).toContain('general-purpose');
     expect(container.textContent).toContain('review the diff');
@@ -220,10 +246,12 @@ describe('TokenUsagePanel', () => {
     // Inline dot colors (CSS Modules class names are lowercased in some
     // environments). All four categories get a dot; cache-hit carries the
     // green tag.
-    expect(html).toContain('oklch(0.74 0.09 155)');
-    expect(html).toContain('oklch(0.55 0.09 155)');
-    expect(html).toContain('oklch(0.7 0.08 250)');
-    expect(html).toContain('oklch(0.76 0.1 75)');
+    expect(html).toContain('var(--success-color)');
+    expect(html).toContain(
+      'color-mix(in srgb, var(--success-color) 70%, var(--foreground))',
+    );
+    expect(html).toContain('var(--primary)');
+    expect(html).toContain('var(--warning-color)');
   });
 
   it.each([
@@ -344,6 +372,18 @@ describe('TokenUsagePanel', () => {
     );
   });
 
+  it('does not render stats returned for another session', async () => {
+    const getStats = vi.fn().mockResolvedValue(statsFixture());
+    const container = renderPanel(getStats, 'en', 's-2');
+
+    await act(async () => {});
+
+    expect(container.textContent).toContain(
+      'Token usage is unavailable for this session.',
+    );
+    expect(container.textContent).not.toContain('qwen-plus::hybrid');
+  });
+
   it('shows unavailable when session actions are missing', () => {
     const container = renderPanel();
 
@@ -369,7 +409,7 @@ describe('TokenUsagePanel', () => {
     act(() => retry!.click());
     await act(async () => {});
     expect(getStats).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
   });
 
   it('polls while open and stops after unmount', async () => {
@@ -482,7 +522,7 @@ describe('TokenUsagePanel', () => {
     await act(async () => {});
 
     expect(getStats).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
   });
 
   it('clears an existing error when the session is reconnecting', async () => {
@@ -530,7 +570,7 @@ describe('TokenUsagePanel', () => {
         .click();
     });
     await act(async () => {});
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
   });
 
   it('keeps repeated subagent invocations distinct by id', async () => {

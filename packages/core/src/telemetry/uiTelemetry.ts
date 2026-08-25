@@ -186,6 +186,18 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       model.bySource,
     );
   }
+  if (clone.sourceMeta) {
+    clone.sourceMeta = Object.assign(
+      Object.create(null) as NonNullable<SessionMetrics['sourceMeta']>,
+      clone.sourceMeta,
+    );
+  }
+  if (clone.sourceMetrics) {
+    clone.sourceMetrics = Object.assign(
+      Object.create(null) as NonNullable<SessionMetrics['sourceMetrics']>,
+      clone.sourceMetrics,
+    );
+  }
   return clone;
 };
 
@@ -559,12 +571,19 @@ export class UiTelemetryService extends EventEmitter {
     const totalTokens = sessionId
       ? getEventTotalTokenCount(event)
       : event.total_token_count;
+    // Normalize provider omissions only for the new session stats surface;
+    // process-wide metrics retain their existing CLI/persistence semantics.
+    const promptTokens = sessionId
+      ? event.input_token_count > 0
+        ? event.input_token_count
+        : event.cached_content_token_count
+      : event.input_token_count;
 
     for (const bucket of buckets) {
       bucket.api.totalRequests++;
       bucket.api.totalLatencyMs += event.duration_ms;
 
-      bucket.tokens.prompt += event.input_token_count;
+      bucket.tokens.prompt += promptTokens;
       bucket.tokens.candidates += event.output_token_count;
       bucket.tokens.total += totalTokens;
       bucket.tokens.cached += event.cached_content_token_count;
@@ -654,8 +673,8 @@ export class UiTelemetryService extends EventEmitter {
       type:
         event.subagent_type ??
         existingMeta?.type ??
-        legacyType ??
         event.subagent_name ??
+        legacyType ??
         '',
     };
     const sourceMetrics = (metrics.sourceMetrics ??= Object.create(

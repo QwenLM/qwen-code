@@ -88,8 +88,8 @@
 .legendPercent {
   padding: 1px 7px;
   border-radius: 999px;
-  background: color-mix(in srgb, oklch(0.55 0.09 155) 14%, transparent);
-  color: oklch(0.55 0.09 155);
+  background: color-mix(in srgb, var(--success-color) 14%, transparent);
+  color: var(--success-color);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -304,4 +304,11 @@ details.section {
   text-align: center;
   font-size: 13px;
   color: var(--muted-foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collapsibleSummary,
+  .collapseIcon {
+    transition: none;
+  }
 }

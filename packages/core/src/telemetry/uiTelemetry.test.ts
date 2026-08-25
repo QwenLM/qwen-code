@@ -176,6 +176,34 @@ describe('UiTelemetryService', () => {
   });
 
   describe('API Response Event Processing', () => {
+    it('applies cached-input fallback per session event without changing global metrics', () => {
+      const sessionId = 'session-mixed-cache';
+      const addResponse = (input: number, cached: number, total: number) =>
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'qwen',
+            duration_ms: 1,
+            input_token_count: input,
+            output_token_count: 20,
+            total_token_count: total,
+            cached_content_token_count: cached,
+            thoughts_token_count: 0,
+          } as ApiResponseEvent & {
+            'event.name': typeof EVENT_API_RESPONSE;
+          },
+          sessionId,
+        );
+
+      addResponse(100, 80, 120);
+      addResponse(0, 200, 220);
+
+      expect(
+        service.getMetricsForSession(sessionId).models['qwen'].tokens.prompt,
+      ).toBe(300);
+      expect(service.getMetrics().models['qwen'].tokens.prompt).toBe(100);
+    });
+
     it('should process a single ApiResponseEvent', () => {
       const event = {
         'event.name': EVENT_API_RESPONSE,
@@ -617,6 +645,35 @@ describe('UiTelemetryService', () => {
       });
     });
 
+    it('keeps invocation maps prototype-free after snapshot restore', () => {
+      const sessionId = 'session-snapshot';
+      const event = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'qwen',
+        duration_ms: 1,
+        input_token_count: 1,
+        output_token_count: 0,
+        total_token_count: 1,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_id: 'constructor',
+        subagent_type: 'Explore',
+        subagent_task_name: 'inspect',
+      } as ApiResponseEvent & {
+        'event.name': typeof EVENT_API_RESPONSE;
+      };
+
+      service.addEvent(event, sessionId);
+      const snapshot = service.snapshotForReplay(sessionId);
+      service.restoreFromReplaySnapshot(snapshot);
+      service.addEvent(event, sessionId);
+
+      const metrics = service.getMetricsForSession(sessionId);
+      expect(metrics.sourceMetrics?.['constructor'].tokens.prompt).toBe(2);
+      expect(Object.getPrototypeOf(metrics.sourceMetrics)).toBeNull();
+      expect(Object.getPrototypeOf(metrics.sourceMeta)).toBeNull();
+    });
+
     it('restores legacy invocation ids from session-scoped prompt ids', () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const addResponse = (
@@ -674,7 +731,10 @@ describe('UiTelemetryService', () => {
           name: 'general-purpose',
           type: 'general-purpose',
         },
-        'Explore-8384d783': { name: 'query weather', type: 'Explore' },
+        'Explore-8384d783': {
+          name: 'query weather',
+          type: 'query weather',
+        },
       });
       expect(service.getMetrics().sourceMetrics).toBeUndefined();
     });
@@ -1716,9 +1776,7 @@ describe('UiTelemetryService', () => {
       service.addEvent(makeApiEvent('model-a', 77), SESSION_B);
       expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
       // ...but the aggregate still counts it.
-      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(
-        2,
-      );
+      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(2);
     });
 
     it('keeps the bySource null prototype across restore', () => {

@@ -4518,6 +4518,48 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('remaps persisted telemetry prompt ids into the fork', async () => {
+      const oldId = '51515151-5151-5151-5151-515151515151';
+      const newId = '61616161-6161-6161-6161-616161616161';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'telemetry-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'ui_telemetry',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'api_response',
+                prompt_id: `${oldId}#Explore#0`,
+              },
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const telemetry = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((record) => record.subtype === 'ui_telemetry');
+
+      expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
+        `${newId}#Explore#0`,
+      );
+    });
+
     it('does not copy source turn_result identities into a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
