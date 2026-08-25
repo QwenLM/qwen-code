@@ -191,6 +191,7 @@ function makeFakeEnv() {
       sessionServiceMocks.sessions.delete(id);
       return true;
     }),
+    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
   };
@@ -206,6 +207,7 @@ function makeFakeEnv() {
       return currentSessionId;
     },
     getChatRecordingService: () => ({
+      getCurrentCustomTitle: vi.fn().mockReturnValue(undefined),
       finalize: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
       rebuildTurnBoundaries: vi.fn(),
