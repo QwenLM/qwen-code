@@ -63,6 +63,8 @@ import {
   WorkflowScriptNotLaunchedError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
+import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
@@ -301,11 +303,23 @@ class WorkflowToolInvocation extends BaseToolInvocation<
    *     pre-approved — but scoped to that path. The rule is built with the
    *     same helpers the matcher uses so a tool rename moves both sides.
    */
-  override getConfirmationDetails(
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const meta = this.resolveMeta();
-    const body = buildConfirmationPrompt(this.params, meta, this.config);
+    // The consent surface classifies canonically (the loader's own
+    // normalization) so the label matches the content that actually loads.
+    const isGeneratedScriptPath =
+      this.params.scriptPath !== undefined &&
+      (await isGeneratedWorkflowScriptPathCanonical(
+        this.config,
+        this.params.scriptPath,
+      ));
+    const body = buildConfirmationPrompt(
+      this.params,
+      meta,
+      isGeneratedScriptPath,
+    );
 
     // The cost warning belongs before the spend, not after it. The registry
     // latch flips on read, so surfacing it here means the post-hoc copy on
@@ -337,7 +351,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules.
       },
     };
-    return Promise.resolve(details);
+    return details;
   }
 
   override async execute(
@@ -647,11 +661,13 @@ function readMetaForConfirmation(script: string): WorkflowMeta | null {
 /**
  * True when a `scriptPath` points inside the generated-scripts root. Such a
  * script is a throwaway artifact a tool emitted for this run, not a workflow
- * the user saved — the approval surface labels it accordingly so a grant is
- * given under the right identity. Both sides are resolved before comparing,
- * so a `..`-laced path is classified where it canonically points — the same
- * location the loader decides to load. This only picks a label; the security
- * check is the realpath boundary in the loader.
+ * the user saved — the transcript surface labels it accordingly. Normalizes
+ * `..` lexically only (no disk I/O, so it can back the synchronous
+ * `getDescription()`); where a spelling diverges from its realpath (a
+ * symlinked file, or a symlinked ancestor) it can disagree with the content
+ * the loader reads — the confirmation dialog therefore classifies with
+ * {@link isGeneratedWorkflowScriptPathCanonical} instead. This only picks a
+ * label; the security check is the realpath boundary in the loader.
  */
 function isGeneratedWorkflowScriptPath(
   config: Config,
@@ -661,16 +677,48 @@ function isGeneratedWorkflowScriptPath(
 }
 
 /**
+ * Canonical provenance classification for the confirmation dialog: the same
+ * normalization the loader applies, so the label matches the content that
+ * actually loads. Both sides go through `fs.realpath` (resolving `..` AND
+ * symlinks), with a lexical fallback where a side does not exist yet — and a
+ * symlinked generated root counts as not-generated because the loader
+ * refuses it outright.
+ */
+async function isGeneratedWorkflowScriptPathCanonical(
+  config: Config,
+  scriptPath: string,
+): Promise<boolean> {
+  const root = config.storage.getGeneratedWorkflowsDir();
+  if (await isSymlinkedRoot(root)) return false;
+  let realScriptPath: string;
+  try {
+    realScriptPath = await fs.realpath(scriptPath);
+  } catch {
+    // Nothing loads under a spelling that is not on disk, so classify the
+    // raw string the same way the synchronous surface does.
+    return isWithinRoot(scriptPath, root);
+  }
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(root);
+  } catch {
+    realRoot = path.resolve(root);
+  }
+  return isWithinRoot(realScriptPath, realRoot);
+}
+
+/**
  * The body of the approval dialog: what this workflow says it will do.
  *
  * Everything here comes from `meta`, the call's own parameters, and the
- * configured script roots — never from executing the script. When `meta` is
- * absent or unreadable the dialog still renders, just with less to say.
+ * caller's provenance classification — never from executing the script.
+ * When `meta` is absent or unreadable the dialog still renders, just with
+ * less to say.
  */
 function buildConfirmationPrompt(
   params: WorkflowParams,
   meta: WorkflowMeta | null,
-  config: Config,
+  isGeneratedScriptPath: boolean,
 ): string {
   const lines: string[] = [];
 
@@ -678,7 +726,7 @@ function buildConfirmationPrompt(
     lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
     lines.push(sanitizeLine(meta.description));
   } else if (params.scriptPath) {
-    const label = isGeneratedWorkflowScriptPath(config, params.scriptPath)
+    const label = isGeneratedScriptPath
       ? 'Generated workflow script'
       : 'Saved workflow';
     lines.push(`${label}: ${sanitizeLine(params.scriptPath)}`);

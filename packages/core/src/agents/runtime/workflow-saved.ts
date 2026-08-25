@@ -107,7 +107,7 @@ export function getWorkflowScriptRoots(config: Config): string[] {
 }
 
 /**
- * True when a saved-workflow root dir is itself a symlink. `readWorkflowFileSecurely`
+ * True when a workflow script root dir is itself a symlink. `readWorkflowFileSecurely`
  * realpaths the root so it can tolerate symlinked *ancestors* (e.g. a project under
  * macOS `/tmp -> /private/tmp`); but that same laundering turns a checked-in
  * `.qwen/workflows -> /outside` link into the allowed boundary — letting discovery
@@ -117,7 +117,7 @@ export function getWorkflowScriptRoots(config: Config): string[] {
  * all three operations. A missing dir (the common case) is not a symlink, so this
  * is transparent until someone actually links the dir.
  */
-async function isSymlinkedRoot(dir: string): Promise<boolean> {
+export async function isSymlinkedRoot(dir: string): Promise<boolean> {
   return fs
     .lstat(dir)
     .then((st) => st.isSymbolicLink())
