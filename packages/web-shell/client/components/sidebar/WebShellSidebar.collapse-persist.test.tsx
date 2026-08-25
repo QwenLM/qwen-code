@@ -222,6 +222,10 @@ function renderSidebar(
   collapsed = false,
   props: {
     onSelectCurrentSession?: () => void;
+    onCollapsedChange?: (collapsed: boolean) => void;
+    mobileOpen?: boolean;
+    onMobileClose?: () => void;
+    footer?: false;
     sessionActions?: WebShellSidebarSessionActionsOptions;
     strict?: boolean;
   } = {},
@@ -229,7 +233,7 @@ function renderSidebar(
   const sidebar = (
     <WebShellSidebar
       collapsed={collapsed}
-      onCollapsedChange={() => {}}
+      onCollapsedChange={props.onCollapsedChange ?? (() => {})}
       onOpenSettings={() => {}}
       onOpenDaemonStatus={() => {}}
       onOpenScheduledTasks={() => {}}
@@ -239,6 +243,9 @@ function renderSidebar(
       onNewSession={() => false}
       onLoadSession={loadSession}
       onSelectCurrentSession={props.onSelectCurrentSession}
+      mobileOpen={props.mobileOpen}
+      onMobileClose={props.onMobileClose}
+      footer={props.footer}
       onError={() => {}}
       sessionActions={props.sessionActions}
     />
@@ -318,6 +325,39 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar collapsed session group persistence', () => {
+  it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
+    const onCollapsedChange = vi.fn();
+    const onMobileClose = vi.fn();
+    renderSidebar(false, {
+      mobileOpen: true,
+      onMobileClose,
+      onCollapsedChange,
+      footer: false,
+    });
+    await flushSidebar();
+
+    const sidebar = container.querySelector<HTMLElement>('aside');
+    expect(sidebar?.className).toContain(sidebarStyles.mobileOpen);
+    expect(
+      sidebar?.style.getPropertyValue('--web-shell-sidebar-min-width'),
+    ).toBe('220px');
+    expect(
+      sidebar?.style.getPropertyValue('--web-shell-sidebar-max-width'),
+    ).toBe('512px');
+
+    const close = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Collapse"]',
+    );
+    expect(close).not.toBeNull();
+    click(close!);
+
+    expect(onMobileClose).toHaveBeenCalledOnce();
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+    ).toBeNull();
+  });
+
   it('includes secondary workspace attention without querying the primary workspace', async () => {
     const multiWorkspaceCapabilities = {
       ...organizationCapabilities,
