@@ -9572,6 +9572,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .send({ kind: 'workflow' });
+      const tasksRes = await request(app)
+        .get('/session/s-1/tasks?includeWorkflows=true')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
 
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toMatchObject({
@@ -9585,6 +9589,10 @@ describe('createServeApp', () => {
       expect(runSavedRes.body).toEqual({ changed: false });
       expect(cancelRes.status).toBe(200);
       expect(cancelRes.body).toEqual({ cancelled: false, reason: 'disabled' });
+      expect(tasksRes.status).toBe(200);
+      // The untrusted-workspace gate fail-closes the read path too: the
+      // includeWorkflows opt-in must not reach the child.
+      expect(bridge.sessionTasksOptions).toEqual([{ includeWorkflows: false }]);
       expect(bridge.controlSessionWorkflowTaskCalls).toEqual([]);
       expect(bridge.cancelSessionTaskCalls).toEqual([]);
     });

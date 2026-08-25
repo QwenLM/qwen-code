@@ -289,6 +289,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).toolResultPartDiagnosticValues,
   preloadContentGenerator: mockPreloadContentGenerator,
+  isTerminalWorkflowStatus: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isTerminalWorkflowStatus,
   listSavedWorkflows: mockListSavedWorkflows,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
   createDebugLogger: () => mockDebugLogger,
@@ -10935,6 +10938,91 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock!.deleteWorkflowHistory).toHaveBeenCalledWith(
       'wf_abcd',
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('wires history-deletion liveness across every sibling session registry', async () => {
+    const sessionIdA = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const sessionIdB = 'bbbbbbbb-2222-2222-2222-222222222222';
+    const innerConfigA = await setupSessionMocks(sessionIdA);
+    const registryA = {
+      get: vi.fn().mockReturnValue({ runId: 'wf_shared', status: 'running' }),
+      getHandle: vi.fn().mockReturnValue(undefined),
+      removeTerminal: vi.fn().mockReturnValue(true),
+    };
+    Object.assign(innerConfigA, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registryA),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Every session in this child shares the workflow store but keeps a
+    // private registry; the second session must see the first's runs.
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue(sessionIdB),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(undefined),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        removeTerminal: vi.fn().mockReturnValue(false),
+      }),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfigB as unknown as Config,
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const sessionCalls = vi.mocked(Session).mock.calls;
+    expect(sessionCalls).toHaveLength(2);
+    const predicateA = sessionCalls[0][7] as (runId: string) => boolean;
+    const predicateB = sessionCalls[1][7] as (runId: string) => boolean;
+
+    // Session A still runs wf_shared: B's deletion view must refuse it.
+    expect(predicateB('wf_shared')).toBe(true);
+    expect(registryA.get).toHaveBeenCalledWith('wf_shared');
+    // A's own registry is consulted by Session itself, never by its
+    // sibling predicate.
+    expect(predicateA('wf_shared')).toBe(false);
+    // Once A's run settles terminal, B may delete.
+    registryA.get.mockReturnValue({ runId: 'wf_shared', status: 'failed' });
+    expect(predicateB('wf_shared')).toBe(false);
+    // A handle that outlives the terminal transition (snapshot write in
+    // flight) still blocks the sibling deletion.
+    registryA.getHandle.mockReturnValue({ completion: Promise.resolve() });
+    expect(predicateB('wf_shared')).toBe(true);
+
+    // Once session B's deletion succeeds, the sibling registries lose the
+    // terminal entry too — or a retry from the sibling would resurrect
+    // the deleted run.
+    registryA.getHandle.mockReturnValue(undefined);
+    registryA.get.mockReturnValue({ runId: 'wf_shared', status: 'failed' });
+    lastSessionMock!.deleteWorkflowHistory.mockResolvedValueOnce(true);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId: sessionIdB,
+        taskId: 'wf_shared',
+        action: 'delete-history',
+      }),
+    ).resolves.toEqual({ changed: true });
+    expect(lastSessionMock!.deleteWorkflowHistory).toHaveBeenCalledWith(
+      'wf_shared',
+    );
+    expect(registryA.removeTerminal).toHaveBeenCalledWith('wf_shared');
 
     mockConnectionState.resolve();
     await agentPromise;

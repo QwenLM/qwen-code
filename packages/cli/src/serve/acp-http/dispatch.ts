@@ -3616,7 +3616,11 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionTasksStatus(sessionId, {
-            includeWorkflows: params['includeWorkflows'] === true,
+            // Same fail-closed shape as the workflow control surfaces:
+            // opting in here leaks strictly more than the redacted
+            // supported-commands surface on an untrusted workspace.
+            includeWorkflows:
+              this.isWorkspaceTrusted() && params['includeWorkflows'] === true,
           });
           this.replyConn(conn, id, result as unknown);
           return;

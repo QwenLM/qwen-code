@@ -552,7 +552,12 @@ class FakeBridge {
   async getSessionContextUsageStatus(sessionId: string) {
     return { sessionId, used: 100, total: 1000 };
   }
-  async getSessionTasksStatus(sessionId: string) {
+  lastSessionTasksOptions: { includeWorkflows?: boolean } | undefined;
+  async getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ) {
+    this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
   lastCancelledTask:
@@ -8428,11 +8433,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 57,
         method: '_qwen/session/tasks',
-        params: { sessionId: 'sess-1' },
+        params: { sessionId: 'sess-1', includeWorkflows: true },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
+      });
+      expect(bridge.lastSessionTasksOptions).toEqual({
+        includeWorkflows: true,
       });
     });
 
@@ -8550,7 +8558,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           action: 'run-saved',
         },
       });
-      const frames = await takeFrames(await streamRes, 6);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/session/tasks',
+        params: { sessionId: 'sess-1', includeWorkflows: true },
+      });
+      const frames = await takeFrames(await streamRes, 7);
       const byId = new Map(
         frames
           .filter(
@@ -8573,6 +8587,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         result: { cancelled: false, reason: 'disabled' },
       });
       expect(byId.get(62)).toMatchObject({ result: { changed: false } });
+      expect(byId.get(63)).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+      // The untrusted-workspace gate fail-closes the read path too: the
+      // includeWorkflows opt-in must not reach the child.
+      expect(bridge.lastSessionTasksOptions).toEqual({
+        includeWorkflows: false,
+      });
       expect(bridge.lastCancelledTask).toBeUndefined();
       expect(bridge.lastWorkflowAction).toBeUndefined();
     });

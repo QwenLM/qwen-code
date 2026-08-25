@@ -114,14 +114,15 @@ function safeResult(result: unknown): unknown {
  * Write a run snapshot to `<projectDir>/workflows/<runId>.json`, then prune
  * the oldest snapshots beyond `MAX_RETAINED_SNAPSHOTS`. Best-effort: a write
  * failure is logged, not thrown (persistence is a convenience, not a
- * correctness requirement).
+ * correctness requirement). Returns true when the snapshot file was written,
+ * so the caller can tell persistence apart from a swallowed failure.
  */
 export async function writeWorkflowSnapshot(
   config: Config,
   task: WorkflowTask,
-): Promise<void> {
+): Promise<boolean> {
   const storage = config.storage;
-  if (!storage) return;
+  if (!storage) return false;
   try {
     // Project BEFORE the first await: the caller captures this at
     // settlement, but in-flight dispatches keep mutating the live
@@ -136,8 +137,10 @@ export async function writeWorkflowSnapshot(
       'utf8',
     );
     await pruneSnapshots(dir);
+    return true;
   } catch (e) {
     debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    return false;
   }
 }
 

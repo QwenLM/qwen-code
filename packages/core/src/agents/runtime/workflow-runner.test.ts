@@ -278,6 +278,41 @@ describe('WorkflowRunner', () => {
     expect(observed.abortCount()).toBe(1);
   });
 
+  it('notifies the registry when the terminal snapshot is persisted', async () => {
+    const { config, registry } = configWithRegistry();
+    writeWorkflowSnapshotMock.mockResolvedValue(true);
+    const notify = vi.spyOn(registry, 'notifySnapshotPersisted');
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: async () => 'done',
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(handle.runId);
+  });
+
+  it('does not notify when the snapshot write fails', async () => {
+    const { config, registry } = configWithRegistry();
+    writeWorkflowSnapshotMock.mockResolvedValue(false);
+    const notify = vi.spyOn(registry, 'notifySnapshotPersisted');
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: async () => 'done',
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it('settles failure and caller cancellation through the same owner', async () => {
     const failed = configWithRegistry();
     const failedObserved = observeSettlement(failed.registry);

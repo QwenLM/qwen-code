@@ -347,7 +347,16 @@ export class WorkflowRunner {
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
             });
-            await writeWorkflowSnapshot(config, entry);
+            const snapshotPersisted = await writeWorkflowSnapshot(
+              config,
+              entry,
+            );
+            if (snapshotPersisted) {
+              // Lets the owning session retire its unpersisted history
+              // cache entry: once the run is safely on disk, a sibling's
+              // deletion must win over the stale in-memory copy.
+              registry?.notifySnapshotPersisted(entry.runId);
+            }
             await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);

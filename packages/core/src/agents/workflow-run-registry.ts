@@ -363,6 +363,14 @@ export type WorkflowApprovalRequestCallback = (
   signal: AbortSignal,
 ) => void | Promise<void>;
 
+/**
+ * Fires when the runner has safely persisted a terminal run's snapshot to
+ * the shared store. The owning session uses this to retire its
+ * unpersisted history cache: once the run exists on disk, absence from
+ * the store means a deletion happened, not "not written yet".
+ */
+export type WorkflowSnapshotPersistedCallback = (runId: string) => void;
+
 interface WorkflowApprovalRuntime {
   respond: AgentApprovalRequestEvent['respond'];
   requestController?: AbortController;
@@ -379,6 +387,9 @@ export class WorkflowRunRegistry {
   private completionCallback: WorkflowRunCompletionCallback | undefined;
   private approvalChangeCallback: WorkflowApprovalChangeCallback | undefined;
   private approvalRequestCallback: WorkflowApprovalRequestCallback | undefined;
+  private snapshotPersistedCallback:
+    | WorkflowSnapshotPersistedCallback
+    | undefined;
   private readonly approvalRuntimes = new Map<
     string,
     WorkflowApprovalRuntime
@@ -446,6 +457,22 @@ export class WorkflowRunRegistry {
     cb: WorkflowApprovalRequestCallback | undefined,
   ): void {
     this.approvalRequestCallback = cb;
+  }
+
+  setSnapshotPersistedCallback(
+    cb: WorkflowSnapshotPersistedCallback | undefined,
+  ): void {
+    this.snapshotPersistedCallback = cb;
+  }
+
+  /** Called by the runner once a terminal run's snapshot is persisted. */
+  notifySnapshotPersisted(runId: string): void {
+    if (!this.snapshotPersistedCallback) return;
+    try {
+      this.snapshotPersistedCallback(runId);
+    } catch (error) {
+      debugLogger.error('Failed to notify snapshot persistence:', error);
+    }
   }
 
   /** Fire the terminal-completion notification (best-effort). */

@@ -4366,7 +4366,11 @@ export function registerSessionRoutes(
       async (req, res, sessionId, runtime) => {
         res.status(200).json(
           await runtime.bridge.getSessionTasksStatus(sessionId, {
-            includeWorkflows: req.query['includeWorkflows'] === 'true',
+            // Same fail-closed shape as the workflow control surfaces:
+            // opting in here leaks strictly more than the redacted
+            // supported-commands surface on an untrusted workspace.
+            includeWorkflows:
+              runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
       },

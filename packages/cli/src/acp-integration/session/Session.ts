@@ -1995,6 +1995,15 @@ export class Session implements SessionContext {
      */
     private readonly onActiveWorkChanged?: () => void,
     workflowHistory: readonly WorkflowSnapshot[] = [],
+    /**
+     * Reports whether another session in this process owns a live or
+     * still-settling registry entry for the run. Every session here shares
+     * one on-disk workflow store but keeps a private registry, so history
+     * deletion must consult all of them, not just this session's.
+     */
+    private readonly isWorkflowRunLiveInSiblingSession: (
+      runId: string,
+    ) => boolean = () => false,
   ) {
     this.sessionId = id;
     this.workflowHistory = [...workflowHistory];
@@ -3224,13 +3233,17 @@ export class Session implements SessionContext {
     );
     for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
       const stored = byRunId.get(runId);
-      if (
-        stored?.startTime === snapshot.startTime &&
-        stored.endTime === snapshot.endTime
-      ) {
-        this.unpersistedWorkflowHistory.delete(runId);
-      } else {
+      if (stored === undefined) {
+        // Never persisted (write pending or failed): keep the cached
+        // projection visible. Once persistence is observed the entry is
+        // retired via the snapshot-persisted callback, so absence here
+        // afterwards means the run was deleted and must stay gone.
         byRunId.set(runId, snapshot);
+      } else {
+        // A persisted copy is the newer authoritative projection: the
+        // runId settled (possibly re-run in another session), so a stale
+        // cache must not shadow it.
+        this.unpersistedWorkflowHistory.delete(runId);
       }
     }
     this.workflowHistory = [...byRunId.values()]
@@ -3243,6 +3256,7 @@ export class Session implements SessionContext {
   async deleteWorkflowHistory(runId: string): Promise<boolean> {
     const registry = this.config.getWorkflowRunRegistry();
     const isDeletable = (): boolean => {
+      if (this.isWorkflowRunLiveInSiblingSession(runId)) return false;
       const current = registry.get(runId);
       return !current || isTerminalWorkflowStatus(current.status);
     };
@@ -3394,7 +3408,10 @@ export class Session implements SessionContext {
       holds.push({ category: 'shell', id: 'background-shells' });
     }
     for (const task of this.config.getWorkflowRunRegistry().list()) {
-      if (!isTerminalWorkflowStatus(task.status)) {
+      // Mirror the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session the way executing work does.
+      if (task.status === 'running' || task.status === 'pausing') {
         holds.push({ category: 'workflow', id: task.runId });
       }
     }
@@ -3582,6 +3599,9 @@ export class Session implements SessionContext {
       this.#shellStatusChangeCallback = undefined;
     }
     this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
+    this.config
+      .getWorkflowRunRegistry()
+      .setSnapshotPersistedCallback(undefined);
     if (this.#workflowStatusChangeCallback) {
       this.config
         .getWorkflowRunRegistry()
@@ -8344,6 +8364,11 @@ export class Session implements SessionContext {
     workflowRegistry.setStatusChangeCallback(
       this.#workflowStatusChangeCallback,
     );
+    workflowRegistry.setSnapshotPersistedCallback((runId) => {
+      // The run is safely on disk now; drop the unpersisted copy so a
+      // deletion by another session cannot resurrect it on refresh.
+      this.unpersistedWorkflowHistory.delete(runId);
+    });
     workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
       this.#enqueueBackgroundNotification({
         displayText,

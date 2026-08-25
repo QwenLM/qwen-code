@@ -494,6 +494,7 @@ describe('Session', () => {
   let mockWorkflowRunRegistry: {
     setCompletionCallback: ReturnType<typeof vi.fn>;
     setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    setSnapshotPersistedCallback: ReturnType<typeof vi.fn>;
     clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
@@ -721,6 +722,7 @@ describe('Session', () => {
     mockWorkflowRunRegistry = {
       setCompletionCallback: vi.fn(),
       setStatusChangeCallback: vi.fn(),
+      setSnapshotPersistedCallback: vi.fn(),
       clearStatusChangeCallback: vi.fn(),
       setApprovalRequestCallback: vi.fn(),
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
@@ -1118,18 +1120,24 @@ describe('Session', () => {
       session.dispose();
     });
 
-    it('holds each non-terminal workflow run', () => {
+    it('holds executing workflow runs but never paused ones', () => {
       mockWorkflowRunRegistry.list.mockReturnValue([
         { runId: 'wf-running', status: 'running' },
+        { runId: 'wf-pausing', status: 'pausing' },
         { runId: 'wf-paused', status: 'paused' },
         { runId: 'wf-complete', status: 'completed' },
       ]);
       createReportingSession();
 
-      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-paused']);
+      // Mirrors the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session forever.
+      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-pausing']);
       expect(session.isIdle()).toBe(false);
 
-      mockWorkflowRunRegistry.list.mockReturnValue([]);
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
       session.dispose();
@@ -2441,6 +2449,223 @@ describe('Session', () => {
     await session.refreshWorkflowHistory();
 
     expect(session.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('lets a newer persisted snapshot win over a stale cached one', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_reused',
+      kind: 'workflow',
+      runId: 'wf_reused',
+      description: 'Stale cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      error: 'old error',
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([
+      {
+        runId: 'wf_reused',
+        meta: null,
+        status: 'completed' as const,
+        script: 'return 1;',
+        phases: [],
+        agentsDispatched: 0,
+        agentsCompleted: 0,
+        tokensSpent: 0,
+        tokenBudgetTotal: null,
+        perPhaseTokens: [],
+        recentLogs: [],
+        startTime: 3_000,
+        endTime: 4_000,
+      },
+    ]);
+
+    await session.refreshWorkflowHistory();
+
+    // The persisted copy is the newer authoritative projection of the
+    // reused runId; the stale callback cache must not shadow it.
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_reused',
+        status: 'completed',
+        startTime: 3_000,
+        endTime: 4_000,
+      }),
+    ]);
+  });
+
+  it('does not resurrect a sibling-deleted run cached through the status callback', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    // The observing session caches the terminal run through the
+    // status-change callback, exactly as it lands before the runner's
+    // snapshot write.
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_abcd',
+      kind: 'workflow',
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_abcd' }),
+    ]);
+    // The runner then persists the snapshot; the registry notification
+    // retires the observing session's unpersisted cache entry.
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+    snapshotPersisted?.('wf_abcd');
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('rejects history deletion while a sibling session still owns the run', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_deadbeef',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const siblingRegistry = {
+      get: vi.fn().mockReturnValue({ runId: 'wf_deadbeef', status: 'running' }),
+      getHandle: vi.fn().mockReturnValue(undefined),
+    };
+    const isWorkflowRunLiveInSiblingSession = (runId: string): boolean => {
+      const entry = siblingRegistry.get(runId) as
+        | { status: core.WorkflowStatus }
+        | undefined;
+      if (entry && !core.isTerminalWorkflowStatus(entry.status)) return true;
+      return siblingRegistry.getHandle(runId) !== undefined;
+    };
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+      isWorkflowRunLiveInSiblingSession,
+    );
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    // Once the sibling run settles terminal, deletion proceeds.
+    siblingRegistry.get.mockReturnValue({
+      runId: 'wf_deadbeef',
+      status: 'failed',
+    });
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
   });
 
   it('keeps cached history on disk failure and removes it after deletion', async () => {

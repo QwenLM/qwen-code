@@ -187,6 +187,7 @@ describe('Session.pendingWorktreeNotice', () => {
         setStatusChangeCallback: vi.fn(),
         clearStatusChangeCallback: vi.fn(),
         setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
         setApprovalRequestCallback: vi.fn(),
       }),
       setSubSessionSpawner: vi.fn(),

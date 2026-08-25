@@ -136,6 +136,7 @@ import {
   type ToolInvocationGuard,
   type WorkflowParams,
   type WorkflowToolResult,
+  isTerminalWorkflowStatus,
   listSavedWorkflows,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
@@ -10463,7 +10464,20 @@ class QwenAgent implements Agent {
           }
           this.mutatingWorkflowTaskIds.add(mutationClaim);
           try {
-            return { changed: await session.deleteWorkflowHistory(taskId) };
+            const changed = await session.deleteWorkflowHistory(taskId);
+            if (changed) {
+              // Every session shares the one store: drop the sibling
+              // registries' terminal entries too, or a retry from a
+              // sibling re-persists the just-deleted run.
+              for (const [siblingId, sibling] of this.sessions) {
+                if (siblingId === sessionId) continue;
+                sibling
+                  .getConfig()
+                  .getWorkflowRunRegistry()
+                  .removeTerminal(taskId);
+              }
+            }
+            return { changed };
           } finally {
             this.mutatingWorkflowTaskIds.delete(mutationClaim);
           }
@@ -12430,6 +12444,27 @@ class QwenAgent implements Agent {
     config.setFileSystemService(acpFileSystemService);
   }
 
+  /**
+   * All sessions in this child share one workflow snapshot store but each
+   * keeps a private run registry, so one session's history deletion must
+   * see every sibling registry — or it can delete a run another session
+   * is still executing or settling. A handle outlives the terminal
+   * transition until the snapshot write lands, so it blocks too.
+   */
+  private isWorkflowRunLiveOutsideSession(
+    excludeSessionId: string,
+    runId: string,
+  ): boolean {
+    for (const [sessionId, session] of this.sessions) {
+      if (sessionId === excludeSessionId) continue;
+      const registry = session.getConfig().getWorkflowRunRegistry();
+      const entry = registry.get(runId);
+      if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
+      if (registry.getHandle(runId)) return true;
+    }
+    return false;
+  }
+
   private async createAndStoreSession(
     config: Config,
     settings: LoadedSettings,
@@ -12480,6 +12515,7 @@ class QwenAgent implements Agent {
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
       workflowHistory,
+      (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
     );
     let published = false;
     try {
