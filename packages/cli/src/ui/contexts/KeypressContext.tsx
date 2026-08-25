@@ -64,6 +64,19 @@ const OPTION_COMPOSED_GLYPHS: Record<string, string> = {
 };
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
+// Built lazily: FOCUS_IN/FOCUS_OUT come from useFocus.ts, which is part of a
+// circular import chain (useFocus -> useKeypress -> KeypressContext -> useFocus).
+// Evaluating the pattern at module load crashes when the cycle is entered at
+// useFocus.ts because the bindings are not initialized yet.
+let focusEventPattern: RegExp | undefined;
+function getFocusEventPattern(): RegExp {
+  if (!focusEventPattern) {
+    focusEventPattern = new RegExp(
+      `^(?:${escapeRegExp(FOCUS_IN)}|${escapeRegExp(FOCUS_OUT)})+$`,
+    );
+  }
+  return focusEventPattern;
+}
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
 // Kitty sequence timeout: 200ms balances between:
 // - Too short: prematurely clear valid sequences during slow input
@@ -79,6 +92,10 @@ export const KITTY_SEQUENCE_TIMEOUT_MS = 200;
 // chunked pastes on cold terminals yet short enough that users don't
 // perceive the recovery as a hang.
 export const PASTE_IDLE_TIMEOUT_MS = 1000;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
@@ -786,7 +803,7 @@ export function KeypressProvider({
       if (TERMINAL_RESPONSE_RE.test(key.sequence)) {
         return;
       }
-      if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
+      if (getFocusEventPattern().test(key.sequence)) {
         return;
       }
 

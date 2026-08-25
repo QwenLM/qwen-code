@@ -252,6 +252,23 @@ export async function readAgentViewSessionState(
   return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
+export async function readAgentViewSessionStateStrict(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewSessionStateFile | undefined> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecordForConditionalWrite(paths.statePath);
+  if (!raw) return undefined;
+  if (!isAgentViewProcessState(raw['processState'])) {
+    throw new Error(`Agent View state at ${paths.statePath} is invalid.`);
+  }
+  const state = normalizeSessionState(raw, path.basename(paths.sessionDir));
+  if (!state) {
+    throw new Error(`Agent View state at ${paths.statePath} is invalid.`);
+  }
+  return state;
+}
+
 export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},
@@ -951,14 +968,20 @@ function sessionStateValue(
 function processStateValue(
   value: unknown,
 ): AgentViewSessionStateFile['processState'] {
-  return value === 'starting' ||
+  return isAgentViewProcessState(value) ? value : 'exited';
+}
+
+function isAgentViewProcessState(
+  value: unknown,
+): value is AgentViewSessionStateFile['processState'] {
+  return (
+    value === 'starting' ||
     value === 'alive' ||
     value === 'hibernating' ||
     value === 'hibernated' ||
     value === 'restarting' ||
     value === 'exited'
-    ? value
-    : 'exited';
+  );
 }
 
 function attachStateValue(

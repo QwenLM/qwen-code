@@ -43,6 +43,24 @@ function pressKey(key: Partial<Key>) {
   });
 }
 
+function pressKeys(keys: Array<Partial<Key>>) {
+  const handler = keypressState.handlers.at(-1);
+  expect(handler).toBeDefined();
+  act(() => {
+    for (const key of keys) {
+      handler?.({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...key,
+      });
+    }
+  });
+}
+
 const sessions = [
   {
     sessionId: 's1',
@@ -226,7 +244,7 @@ describe('useSessionPicker multi-select state', () => {
 
     pressKey({ name: 'return', sequence: '\r' });
 
-    expect(onSelect).toHaveBeenCalledWith('s1');
+    expect(onSelect).toHaveBeenCalledWith('s1', sessions[0]);
     expect(onConfirmMulti).not.toHaveBeenCalled();
   });
 
@@ -274,5 +292,125 @@ describe('useSessionPicker multi-select state', () => {
 
     expect(onConfirmMulti).toHaveBeenCalledWith(['s2']);
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe('useSessionPicker filtering', () => {
+  it('composes same-tick navigation before selecting', () => {
+    const onSelect = vi.fn();
+    renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect,
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: [
+            ...sessions,
+            { ...sessions[0], sessionId: 's3', prompt: 'three' },
+          ],
+        }),
+      { wrapper },
+    );
+
+    pressKeys([
+      { name: 'down', sequence: '\x1b[B' },
+      { name: 'down', sequence: '\x1b[B' },
+      { name: 'return', sequence: '\r' },
+    ]);
+
+    expect(onSelect).toHaveBeenCalledWith(
+      's3',
+      expect.objectContaining({ sessionId: 's3' }),
+    );
+  });
+
+  it('keeps selection on the same session after an async re-sort', () => {
+    const onSelect = vi.fn();
+    const { rerender } = renderHook(
+      ({ extraSessions }) =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect,
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: sessions,
+          extraSessions,
+        }),
+      {
+        wrapper,
+        initialProps: { extraSessions: [] as typeof sessions },
+      },
+    );
+
+    pressKey({ name: 'down', sequence: '\x1b[B' });
+    rerender({
+      extraSessions: [
+        {
+          ...sessions[0],
+          sessionId: 'newer',
+          prompt: 'newer',
+          filePath: '/tmp/newer.json',
+          mtime: 10,
+        },
+      ],
+    });
+    pressKey({ name: 'return', sequence: '\r' });
+
+    expect(onSelect).toHaveBeenCalledWith('s2', sessions[1]);
+  });
+
+  it('prefers a managed session manual title over its transcript title', () => {
+    const { result } = renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect: vi.fn(),
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: [
+            {
+              ...sessions[0],
+              customTitle: 'Generated title',
+              titleSource: 'auto',
+            },
+          ],
+          extraSessions: [
+            {
+              ...sessions[0],
+              customTitle: 'Launchpad',
+              titleSource: 'manual',
+            },
+          ],
+        }),
+      { wrapper },
+    );
+
+    expect(result.current.filteredSessions[0]).toMatchObject({
+      customTitle: 'Launchpad',
+      titleSource: 'manual',
+    });
+  });
+
+  it('excludes sessions by id before search and selection', () => {
+    const { result } = renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect: vi.fn(),
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: sessions,
+          excludeSessionIds: ['s1'],
+        }),
+      { wrapper },
+    );
+
+    expect(
+      result.current.filteredSessions.map((session) => session.sessionId),
+    ).toEqual(['s2']);
+    expect(
+      result.current.visibleSessions.map((session) => session.sessionId),
+    ).toEqual(['s2']);
   });
 });

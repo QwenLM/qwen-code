@@ -77,6 +77,10 @@ export function cpSlice(str: string, start: number, end?: number): string {
   return arr.join('');
 }
 
+// Unicode bidirectional override / isolate characters (the "Trojan Source"
+// attack class, CVE-2021-42572) that can visually reorder rendered text.
+const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
 /**
  * Strip characters that can break terminal rendering.
  *
@@ -88,9 +92,10 @@ export function cpSlice(str: string, start: number, end?: number): string {
  * - VT control sequences (via Node.js util.stripVTControlCharacters)
  * - C0 control chars (0x00-0x1F) except TAB/CR/LF which are handled elsewhere
  * - C1 control chars (0x80-0x9F) that can cause display issues
+ * - Unicode bidirectional override and isolate characters
  *
  * Characters preserved:
- * - All printable Unicode including emojis
+ * - Printable Unicode including emojis, except bidirectional controls
  * - DEL (0x7F) - handled functionally by applyOperations, not a display issue
  * - TAB (0x09) - needed for pasted tab-separated data (e.g. from spreadsheets)
  * - CR/LF (0x0D/0x0A) - needed for line breaks
@@ -120,7 +125,12 @@ export function stripUnsafeCharacters(str: string): string {
       // Preserve all other characters including Unicode/emojis
       return true;
     })
-    .join('');
+    .join('')
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
+
+export function cleanSingleLineText(str: string): string {
+  return stripUnsafeCharacters(str).replace(/\s+/g, ' ').trim();
 }
 
 // String width caching for performance optimization
@@ -290,10 +300,6 @@ const regex = ansiRegex();
 // are intentionally preserved: they legitimately structure multi-line output.
 // eslint-disable-next-line no-control-regex
 const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
-
-// Unicode bidirectional override / isolate characters (the "Trojan Source"
-// attack class, CVE-2021-42572) that can visually reorder rendered text.
-const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * Full sanitization for raw, untrusted text about to be rendered into a

@@ -6,14 +6,19 @@
 
 import type { AgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 
-const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
-  vi.hoisted(() => ({
-    writeTerminalTitleSpy: vi.fn(),
-    useWakeRepaintMock: vi.fn(),
-    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
-      vi.fn(() => deps),
-    ),
-  }));
+const {
+  writeTerminalTitleSpy,
+  useWakeRepaintMock,
+  buildWakeRepaintSpy,
+  buildCurrentCliArgvMock,
+} = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+  useWakeRepaintMock: vi.fn(),
+  buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+    vi.fn(() => deps),
+  ),
+  buildCurrentCliArgvMock: vi.fn(),
+}));
 
 const agentViewHandoffMocks = vi.hoisted(() => ({
   detachCurrentSession: vi.fn(async () => ({ sessionId: 'session-1' })),
@@ -49,6 +54,17 @@ vi.mock('../agent-view/worker-sideband.js', async (importOriginal) => {
     readAgentViewWorkerSidebandEnv: agentViewHandoffMocks.readWorkerSideband,
     sendAgentViewWorkerEvent: agentViewHandoffMocks.sendWorkerEvent,
     reportAgentViewWorkerState: agentViewHandoffMocks.reportWorkerState,
+  };
+});
+
+vi.mock('../agent-view/current-cli-argv.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agent-view/current-cli-argv.js')>();
+  return {
+    ...actual,
+    buildCurrentQwenCliArgv: buildCurrentCliArgvMock.mockImplementation(
+      actual.buildCurrentQwenCliArgv,
+    ),
   };
 });
 
@@ -94,6 +110,7 @@ import {
   isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  runAgentViewRosterCommand,
   shouldAutoOpenSkillReview,
   shouldDrainMessageQueue,
   useQueuedSubmissionDrain,
@@ -248,6 +265,8 @@ import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+
+type SpawnSync = typeof import('node:child_process').spawnSync;
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -747,6 +766,81 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  it('runs Agent View roster through the current CLI entrypoint', () => {
+    const spawnSyncSpy = vi.fn(() => ({ status: 0 }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(0);
+    } finally {
+      process.argv[1] = originalArgv1;
+    }
+
+    expect(spawnSyncSpy).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        '/workspace/qwen-code/packages/cli/dist/src/cli.js',
+        'agents',
+        '--cwd',
+        '/workspace/qwen-code',
+      ],
+      expect.objectContaining({
+        stdio: 'inherit',
+        env: expect.objectContaining({
+          QWEN_CODE_NO_RELAUNCH: '1',
+        }),
+      }),
+    );
+  });
+
+  it('treats signal-killed Agent View roster process as failed', () => {
+    const spawnSyncSpy = vi.fn(() => ({ status: null, signal: 'SIGTERM' }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(1);
+    } finally {
+      process.argv[1] = originalArgv1;
+    }
+  });
+
+  it('reports spawn failures from the Agent View roster relaunch', () => {
+    const spawnError = new Error('spawn ENOENT');
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const spawnSyncSpy = vi.fn(() => ({
+      status: null,
+      signal: null,
+      error: spawnError,
+    }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(1);
+      expect(spawnSyncSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(spawnError);
+    } finally {
+      process.argv[1] = originalArgv1;
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
   describe('Basic Rendering', () => {
     it('reports working after an Agent View worker starts responding', async () => {
       agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
@@ -831,6 +925,11 @@ describe('AppContainer State Management', () => {
     });
 
     it('exits the foreground runtime after handing it to Agent View', async () => {
+      buildCurrentCliArgvMock.mockReturnValueOnce([
+        process.execPath,
+        '-e',
+        'process.exit(0)',
+      ]);
       const requestShutdown = vi.fn();
       const flush = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
@@ -862,6 +961,7 @@ describe('AppContainer State Management', () => {
 
         expect(agentViewHandoffMocks.detachCurrentSession).toHaveBeenCalledWith(
           mockConfig,
+          { terminal: { columns: 80, rows: 24 } },
         );
         expect(requestShutdown).toHaveBeenCalledOnce();
         expect(runExitCleanup).toHaveBeenCalledOnce();
@@ -917,6 +1017,33 @@ describe('AppContainer State Management', () => {
       expect(agentViewHandoffMocks.detachCurrentSession).not.toHaveBeenCalled();
       expect(requestShutdown).not.toHaveBeenCalled();
       expect(runExitCleanup).not.toHaveBeenCalled();
+    });
+
+    it('surfaces worker detach failures to the command processor', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+      agentViewHandoffMocks.sendWorkerEvent.mockRejectedValue(
+        new Error('supervisor unavailable'),
+      );
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[12] as
+        | { detachAgentViewSession: () => Promise<void> }
+        | undefined;
+
+      await expect(actions?.detachAgentViewSession()).rejects.toThrow(
+        'supervisor unavailable',
+      );
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
@@ -2827,6 +2954,51 @@ describe('AppContainer State Management', () => {
       },
     );
 
+    it.each(['exit', 'quit'])(
+      'delivers roster control prompt "%s" as message content',
+      (prompt) => {
+        const mockHandleSlashCommand = vi.fn();
+        const mockQueueMessage = vi.fn();
+
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand: mockHandleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const controlPromptOptions = {
+          deferUntilIdle: false,
+          bypassAgentTabRouting: true,
+        };
+        capturedUIActions.handleFinalSubmit(prompt, controlPromptOptions);
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(prompt, false, undefined);
+        expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(['/quit', '/exit'])(
       'routes "%s" immediately while responding',
       (command) => {
@@ -4421,6 +4593,133 @@ describe('AppContainer State Management', () => {
         ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
       expect(() => handleKeypress!(optionMKey)).not.toThrow();
+    });
+
+    it('does not route empty left arrow to Agent View background handoff outside Agent View workers', async () => {
+      const mockHandleSlashCommand = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: mockHandleSlashCommand,
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const keypressHandlers = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        );
+      expect(keypressHandlers.length).toBeGreaterThan(0);
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of keypressHandlers) {
+        handleKeypress(leftKey);
+      }
+
+      expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/background');
+    });
+
+    it('does not use left arrow as an Agent View detach shortcut', () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/repo',
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        )) {
+        handleKeypress(leftKey);
+      }
+
+      expect(agentViewHandoffMocks.sendWorkerEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not route non-empty left arrow to Agent View background handoff', async () => {
+      const mockHandleSlashCommand = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: mockHandleSlashCommand,
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: 'draft prompt',
+        setText: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const keypressHandlers = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        );
+      expect(keypressHandlers.length).toBeGreaterThan(0);
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of keypressHandlers) {
+        handleKeypress(leftKey);
+      }
+
+      expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/background');
     });
   });
 
@@ -6479,6 +6778,10 @@ describe('AppContainer State Management', () => {
           {
             status: 'awaiting_approval',
             confirmationDetails: { type: 'ask_user_question' },
+          },
+          {
+            status: 'awaiting_approval',
+            confirmationDetails: { type: 'edit' },
           },
         ],
         streamingState: 'idle',

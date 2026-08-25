@@ -6,6 +6,7 @@
 
 import {
   readAgentViewSessionState,
+  readAgentViewSessionStateStrict,
   sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
 import { requireValidWorkerToken } from '../agent-view/supervisor-process.js';
@@ -20,6 +21,9 @@ export const AGENT_VIEW_WORKER_RESUME_MESSAGE =
 
 export const MANAGED_AGENT_VIEW_ONE_SHOT_RESUME_MESSAGE =
   'Cannot use one-shot input (-p/--prompt, -i, --input-file, --fork-session, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
+
+export const MANAGED_AGENT_VIEW_DELETE_MESSAGE =
+  'That session is still running as a background agent. Stop or remove it from `qwen agents` before deleting it here.';
 
 async function isSessionWorker(
   sessionId: string,
@@ -76,6 +80,28 @@ export async function isManagedAgentViewContinueBlocked(
     state?.ownership === 'adopting' ||
     state?.ownership === 'removing'
   );
+}
+
+/**
+ * `/delete` removes transcripts, archives and file-history backups, so a
+ * managed session that is still alive must not be deletable mid-run. Ownership
+ * transitions are blocked because their host liveness is not yet settled.
+ */
+export async function isManagedAgentViewDeleteBlocked(
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  if (await isSessionWorker(sessionId, env)) return false;
+  try {
+    const state = await readAgentViewSessionStateStrict(sessionId);
+    return (
+      (state?.ownership === 'managed' && state.processState !== 'exited') ||
+      state?.ownership === 'adopting' ||
+      state?.ownership === 'removing'
+    );
+  } catch {
+    return true;
+  }
 }
 
 /**

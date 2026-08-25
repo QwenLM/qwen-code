@@ -17,6 +17,7 @@ import {
   patchAgentViewSessionStateIf,
   readAgentViewRoster,
   readAgentViewSessionState,
+  readAgentViewSessionStateStrict,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   writeAgentViewRoster,
@@ -264,6 +265,40 @@ describe('agent view supervisor store', () => {
       ),
     ).toBe(true);
   });
+
+  it('surfaces state read errors for destructive safety checks', async () => {
+    const paths = getAgentViewSessionPaths('unreadable', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.statePath, { recursive: true });
+
+    await expect(
+      readAgentViewSessionStateStrict('unreadable', { globalDir: tempDir }),
+    ).rejects.toThrow();
+  });
+
+  it.each([undefined, 'unknown'])(
+    'rejects processState %s in destructive safety checks',
+    async (processState) => {
+      const paths = getAgentViewSessionPaths('invalid-state', {
+        globalDir: tempDir,
+      });
+      fs.mkdirSync(paths.sessionDir, { recursive: true });
+      fs.writeFileSync(
+        paths.statePath,
+        JSON.stringify({
+          ...sessionState('invalid-state'),
+          processState,
+        }),
+      );
+
+      await expect(
+        readAgentViewSessionStateStrict('invalid-state', {
+          globalDir: tempDir,
+        }),
+      ).rejects.toThrow('is invalid');
+    },
+  );
 
   it('patches only the specified session state fields', async () => {
     await writeAgentViewSessionState(

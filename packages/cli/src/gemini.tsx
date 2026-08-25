@@ -422,6 +422,9 @@ export async function main() {
         './agent-view/pty-host-process.js'
       );
       const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
+      if (exit.kind !== 'exited') {
+        process.exit(exit.kind === 'confirmed-shutdown' ? 0 : 1);
+      }
       // node-pty reports signal-kills as {exitCode: 0, signal}; surface them
       // as failures (shell convention) so the supervisor does not record a
       // killed worker as successfully completed.

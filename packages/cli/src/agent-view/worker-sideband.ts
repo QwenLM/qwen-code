@@ -172,8 +172,7 @@ export async function reportAgentViewWorkerState(
   }
   const promptId =
     activePrompt &&
-    (activePrompt.phase === 'accepted' ||
-      (activePrompt.phase === 'ready' && report.sessionState === 'working'))
+    (activePrompt.phase === 'accepted' || activePrompt.phase === 'ready')
       ? activePrompt.promptId
       : undefined;
   if (promptId && activePrompt?.phase === 'ready') {

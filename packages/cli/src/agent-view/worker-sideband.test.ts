@@ -277,7 +277,7 @@ describe('worker sideband env', () => {
     }
   });
 
-  it('correlates state reports with the accepted prompt', async () => {
+  it('acknowledges a prompt when the UI is ready to submit it', async () => {
     const env = createAgentViewWorkerSidebandEnv({
       sessionId: 'session-1',
       sidebandEndpoint: '/tmp/qwen-agent-view.sock',
@@ -299,8 +299,6 @@ describe('worker sideband env', () => {
     await readAgentViewWorkerControlEvents(env);
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
     await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
-    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
-    await reportAgentViewWorkerState({ sessionState: 'completed' }, env);
 
     expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
       2,
@@ -309,26 +307,17 @@ describe('worker sideband env', () => {
       expect.not.objectContaining({ promptId: expect.any(String) }),
     );
     expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
-      4,
+      3,
       '/tmp/qwen-agent-view.sock',
       'workerEvent',
       expect.objectContaining({
-        sessionState: 'working',
-        promptId: 'prompt-1',
-      }),
-    );
-    expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
-      5,
-      '/tmp/qwen-agent-view.sock',
-      'workerEvent',
-      expect.objectContaining({
-        sessionState: 'completed',
+        sessionState: 'idle',
         promptId: 'prompt-1',
       }),
     );
   });
 
-  it('correlates working even when the pre-submit idle report is deduplicated', async () => {
+  it('does not deduplicate a prompt acknowledgement against an earlier idle report', async () => {
     const env = createAgentViewWorkerSidebandEnv({
       sessionId: 'session-1',
       sidebandEndpoint: '/tmp/qwen-agent-view.sock',
@@ -350,14 +339,13 @@ describe('worker sideband env', () => {
     });
     await readAgentViewWorkerControlEvents(env);
     await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
-    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
 
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(3);
     expect(mockCallAgentViewSupervisor).toHaveBeenLastCalledWith(
       '/tmp/qwen-agent-view.sock',
       'workerEvent',
       expect.objectContaining({
-        sessionState: 'working',
+        sessionState: 'idle',
         promptId: 'prompt-1',
       }),
     );
@@ -382,29 +370,20 @@ describe('worker sideband env', () => {
       ],
     });
     await readAgentViewWorkerControlEvents(env);
-    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
     mockCallAgentViewSupervisor.mockRejectedValueOnce(
       new Error('response lost'),
     );
-    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
-    mockCallAgentViewSupervisor.mockRejectedValueOnce(
-      new Error('supervisor unavailable'),
-    );
-    await reportAgentViewWorkerState({ sessionState: 'completed' }, env);
-    mockCallAgentViewSupervisor.mockResolvedValueOnce({ events: [] });
-    await readAgentViewWorkerControlEvents(env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
 
-    for (const call of [4, 5]) {
-      expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
-        call,
-        '/tmp/qwen-agent-view.sock',
-        'workerEvent',
-        expect.objectContaining({
-          sessionState: 'completed',
-          promptId: 'prompt-1',
-        }),
-      );
-    }
+    expect(mockCallAgentViewSupervisor).toHaveBeenLastCalledWith(
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.objectContaining({
+        sessionState: 'idle',
+        promptId: 'prompt-1',
+      }),
+    );
   });
 
   it('reports worker state through the configured sideband endpoint', async () => {

@@ -11,6 +11,7 @@ import type {
 } from '../agent-view/protocol.js';
 import {
   isManagedAgentViewContinueBlocked,
+  isManagedAgentViewDeleteBlocked,
   isManagedAgentViewResumeBlocked,
   releaseExitedManagedSessionForContinue,
 } from './agent-view-resume-guard.js';
@@ -25,6 +26,7 @@ const mockRelease = vi.hoisted(() =>
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
   readAgentViewSessionState: mockReadAgentViewSessionState,
+  readAgentViewSessionStateStrict: mockReadAgentViewSessionState,
   sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
 }));
 
@@ -182,6 +184,17 @@ describe('managed Agent View resume guards', () => {
     await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
       true,
     );
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
+      true,
+    );
+  });
+
+  it('fails closed when the delete guard cannot read session state', async () => {
+    mockReadAgentViewSessionState.mockRejectedValue(new Error('EIO'));
+
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
+      true,
+    );
   });
 
   it('blocks ordinary resume/continue while allowing an explicit release retry', async () => {
@@ -193,6 +206,9 @@ describe('managed Agent View resume guards', () => {
       true,
     );
     await expect(isManagedAgentViewContinueBlocked('session-1')).resolves.toBe(
+      true,
+    );
+    await expect(isManagedAgentViewDeleteBlocked('session-1')).resolves.toBe(
       true,
     );
     await expect(
