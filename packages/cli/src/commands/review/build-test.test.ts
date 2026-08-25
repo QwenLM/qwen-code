@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -17,7 +18,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyHandOffPolicy,
   run,
+  resumeWouldDestroyReport,
   runBuildTest,
   type BuildTestReport,
   trimOutput,
@@ -38,11 +41,19 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...mock, default: mock };
 });
 
+let reviewSettingsIsolation: ReturnType<typeof isolateOperatorReviewSettings>;
+
 beforeEach(() => {
   // Plenty of disk by default, so this suite behaves the same on a nearly-full
   // machine as on an empty one — the low-disk cases below opt in explicitly.
   statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+  // ...and the same for the operator's review policy: with `required` set in
+  // their own settings the phase gate refuses every run here, correctly, and
+  // 82 of this file's tests report that instead of what they measure.
+  reviewSettingsIsolation = isolateOperatorReviewSettings();
 });
+
+afterEach(() => reviewSettingsIsolation?.dispose());
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
@@ -4481,5 +4492,69 @@ describe('runBuildTest', () => {
       expect(calls).toEqual([]);
       expect(rep.note).toContain('Nothing to resume');
     });
+  });
+});
+
+describe('applyHandOffPolicy', () => {
+  const handOff = {
+    toolchain: 'unsupported' as const,
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    ok: true,
+    note: 'build-test could not scope this repo',
+  };
+
+  it('converts a hand-off to a refusal under `required`', () => {
+    // The hand-off tells the agent to install and build with its own shell,
+    // which nothing here contains. This conversion has been wrong twice — once
+    // as a precondition that was never true, once as a wrapper on two of the
+    // three routes that produce it — so what it produces is pinned here rather
+    // than left to the call site.
+    const got = applyHandOffPolicy(handOff, 'required');
+    expect(got.toolchain).toBe('refused');
+    // NOT `ok`, or a reader treats it as a clean hand-off and does by hand
+    // exactly what the policy refused.
+    expect(got.ok).toBe(false);
+    expect(got.note).toContain('do not run the commands by hand');
+    expect(got.build).toEqual([]);
+    expect(got.test).toEqual([]);
+  });
+
+  it('leaves a hand-off alone under the other policies', () => {
+    for (const policy of ['off', 'auto'] as const) {
+      expect(applyHandOffPolicy(handOff, policy)).toBe(handOff);
+    }
+  });
+
+  it('refuses to convert on a --resume, which would destroy the report', () => {
+    // The invariant the other two continuation exits enforce with a throw:
+    // "a continuation must never answer with a FRESH report". This conversion
+    // was added after both and returns one — which the handler writes over the
+    // report the call was asked to continue, and that refusal carries no run
+    // identity, so every later resume fails the identity check. A policy
+    // tightened between the first call and the resume is enough to trigger it,
+    // on the unscopeable repo shapes that reach a hand-off in the first place.
+    expect(resumeWouldDestroyReport(handOff, true, 'required')).toBe(true);
+    // A fresh call converts normally — that is the whole point of the
+    // conversion.
+    expect(resumeWouldDestroyReport(handOff, false, 'required')).toBe(false);
+    // And a resume of a real run is never touched.
+    expect(
+      resumeWouldDestroyReport(
+        { ...handOff, toolchain: 'npm' },
+        true,
+        'required',
+      ),
+    ).toBe(false);
+  });
+
+  it('never converts a real run', () => {
+    const real = { ...handOff, toolchain: 'npm' as const };
+    expect(applyHandOffPolicy(real, 'required')).toBe(real);
   });
 });

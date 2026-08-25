@@ -2506,14 +2506,10 @@ const CHAT_RECORD_UUID_RE =
  * operator-controlled), just typo defense.
  */
 const MAX_EVENT_RING_SIZE = 1_000_000;
-// Bd1yh: per-permission-request wall clock. Without this, an agent
-// calling `requestPermission` while no SSE subscriber is connected
-// would hang the per-session FIFO promptQueue forever (the prompt
-// can't complete, every subsequent prompt is blocked behind it).
-// 5 minutes is generous for "human reads UI, decides, clicks
-// approve" while still bounded enough to recover from a wedged
-// state. Configurable via `BridgeOptions.permissionResponseTimeoutMs`.
-const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+// Human permissions wait indefinitely by default and still resolve through
+// voter cancellation, session cancellation, and shutdown. Operators can set
+// `BridgeOptions.permissionResponseTimeoutMs` when they need a wall-clock cap.
+const DEFAULT_PERMISSION_TIMEOUT_MS = 0;
 // Bd1z5: per-session cap on pending permissions in flight. A chatty
 // agent making rapid `requestPermission` calls would otherwise grow
 // `pendingPermissions` unboundedly — each entry is a UUID + closure
@@ -6578,7 +6574,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       restoreAskUserQuestionHint !== true ||
       // Nobody can answer the re-hung question without an attached client;
       // internal restores (boot rehydrate, keepalive, sub-session resume)
-      // pass no clientId and must not fabricate a 5-minute permission wait.
+      // pass no clientId and must not fabricate an unbounded permission wait.
       requestedClientId === undefined ||
       options.suppressRestorePrompt === true ||
       // Admission-time busy check: pendingPromptCount flips synchronously
@@ -11166,11 +11162,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return await entry.attachments.remove(attachmentId);
     },
 
-    async deleteSessionAttachments(sessionId) {
+    async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
         new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
-      await store.delete();
+      await store.delete(options);
     },
 
     removePendingPrompt(sessionId, promptId, context) {
