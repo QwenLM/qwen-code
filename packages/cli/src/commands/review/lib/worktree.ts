@@ -140,6 +140,11 @@ export function untrustedGitfile(
 ): string | null {
   const root = mountRoot(tree);
   if (root === null) return null;
+  // No tree, no pointer, nothing to resolve through — and callers reach this
+  // with a path that may not exist yet (`--resume` asks about a worktree
+  // before deciding whether to build one). Absence is their question, not
+  // this one's; answering it here refused every ordinary resume.
+  if (!existsSync(tree)) return null;
   const dotGit = join(tree, '.git');
   let stat;
   try {
@@ -150,16 +155,38 @@ export function untrustedGitfile(
   if (!stat.isFile()) {
     return `${tree}'s .git is not the gitfile the pipeline created, and the tree is inside the review temp dir`;
   }
-  let target: string;
-  try {
-    const raw = readFileSync(dotGit, 'utf8').trim();
-    if (!raw.startsWith('gitdir:')) {
-      return `${tree}'s .git does not name an admin entry`;
-    }
-    target = resolve(tree, raw.slice('gitdir:'.length).trim());
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
+  // ASK GIT, rather than parsing the pointer here. The first cut read the
+  // gitfile and resolved it in Node, and the two resolvers disagree in ways
+  // that are individually small and collectively unbounded: JS `trim()` strips
+  // U+00A0 (and U+FEFF, the U+2000 block, …) while git's `read_gitfile` trims
+  // only C-locale space, so `gitdir: <NBSP><real entry>` resolves to the real
+  // entry here — outside the mount, admitted — and to a planted one inside it
+  // there; and `resolve()` is lexical while a spawned git resolves a relative
+  // target against the tree's PHYSICAL path after chdir. Every such divergence
+  // admits a pointer whose real referent only git sees, and the list of them
+  // has no last entry.
+  //
+  // So the resolver that decides is the resolver that acts. This asks git for
+  // the same answer the write below will use, and then makes the only judgment
+  // that is ours to make: WHERE that answer lives. Reading is safe — no
+  // checkout, no index refresh — and hooks and fsmonitor are inert arguments
+  // anyway, so a planted config cannot turn the question into an execution.
+  const resolved = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+      'rev-parse',
+      '--absolute-git-dir',
+    ],
+    { cwd: tree, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
+  );
+  if (resolved.error || resolved.status !== 0 || !resolved.stdout) {
+    return `${tree}: git could not resolve its own git dir`;
   }
+  const target = resolved.stdout.trim();
   if (adminEntryInsideReviewTmp(target, mountRoot, tree)) {
     return `${tree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
   }

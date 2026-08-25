@@ -24,6 +24,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -80,6 +81,30 @@ describe('runScratchTree', () => {
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
     gitIsolation.dispose();
+  });
+
+  it('refuses to stand one up through a rewritten review-worktree gitfile', () => {
+    // The sibling screen below catches a repo-local `filter.*.smudge|clean` in
+    // the REAL config. It cannot catch a pointer that names a different
+    // repository entirely — nor `filter.<x>.process`, which its regex does not
+    // match and which also executes — so the pointer itself has to be checked.
+    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+    const real = readFileSync(join(worktree, '.git'), 'utf8')
+      .trim()
+      .replace('gitdir: ', '');
+    cpSync(real, planted, { recursive: true });
+    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+    writeFileSync(
+      join(planted, 'gitdir'),
+      `gitdir: ${join(worktree, '.git')}\n`,
+    );
+    writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
+
+    const r = run();
+    expect(JSON.stringify(r)).toContain('review temp dir');
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
   });
 
   it('stands up a sibling tree at the commit under review', () => {

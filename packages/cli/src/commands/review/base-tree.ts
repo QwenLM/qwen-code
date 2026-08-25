@@ -55,11 +55,13 @@ import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
+  untrustedGitfile,
   discardWorktree,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
+import { mountRootFor } from './lib/sandboxed-exec.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
 
 export interface BaseTreeReport {
@@ -265,6 +267,16 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
       sweep = discardWorktree(worktree, tree);
+      // The same question the probe phase asks before its own `worktree add`:
+      // this resolves the repository through the REVIEW worktree's gitfile,
+      // which lives inside the directory the sandbox mounts read-write and
+      // which the build/test phase already gave the reviewed code a chance to
+      // rewrite. `worktree add` checks files out, so it runs whatever that
+      // pointer leads to, on the host. See `untrustedGitfile`.
+      const untrusted = untrustedGitfile(worktree, mountRootFor);
+      if (untrusted !== null) {
+        throw new Error(`refusing to create a base tree: ${untrusted}`);
+      }
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
     } catch (e) {
       return unavailable(

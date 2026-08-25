@@ -16,6 +16,7 @@ import {
   appendFileSync,
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -29,7 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   adminEntryInsideReviewTmp,
@@ -1887,56 +1888,102 @@ describe('untrustedGitfile', () => {
       rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The pipeline's own shape: a gitfile naming an entry under `.git/worktrees`. */
-  const pipelineTree = (repo: string) => {
+  /**
+   * A REAL repository with a real linked worktree under `.qwen/tmp` — the
+   * pipeline's own geometry. Real, because the gate asks git to resolve the
+   * pointer rather than parsing it, so a fixture git cannot read proves
+   * nothing about either answer.
+   */
+  const pipelineTree = () => {
+    const repo = tmp();
+    const g = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    g(repo, 'init', '-q', '-b', 'main');
+    g(repo, 'config', 'user.email', 't@t.t');
+    g(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.txt'), 'a\n');
+    g(repo, 'add', 'a.txt');
+    g(repo, 'commit', '-q', '-m', 'init');
     const tree = join(repo, '.qwen', 'tmp', 'review-pr-1');
-    const entry = join(repo, '.git', 'worktrees', 'review-pr-1');
-    mkdirSync(tree, { recursive: true });
-    mkdirSync(entry, { recursive: true });
-    writeFileSync(join(tree, '.git'), `gitdir: ${entry}\n`);
-    return { tree, entry, mount: () => join(repo, '.qwen', 'tmp') };
+    mkdirSync(dirname(tree), { recursive: true });
+    g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
+    return { repo, tree, mount: () => join(repo, '.qwen', 'tmp') };
   };
 
-  it('ADMITS an intact pipeline gitfile, relative spelling included', () => {
-    // The admit path, which nothing exercised: every refusal case here would
-    // also refuse under a mutation that mangles the parsed target — realpath
-    // fails, the location check fails closed, and the expected refusal still
-    // happens — while in production the same mangling refuses every healthy
-    // tree. Only asserting the ADMIT distinguishes the two.
-    const repo = tmp();
-    const { tree, entry, mount } = pipelineTree(repo);
-    expect(untrustedGitfile(tree, mount)).toBeNull();
-
-    // Git writes this pointer relative when it can, so the parse has to
-    // resolve against the TREE, not the process cwd.
-    writeFileSync(
-      join(tree, '.git'),
-      `gitdir: ${relative(tree, entry)}\n`.split(sep).join('/'),
-    );
+  it('ADMITS an intact pipeline gitfile', () => {
+    // The admit path, which nothing exercised: every refusal case would also
+    // refuse under a mutation that breaks the resolution, so only asserting
+    // the admit tells a working gate from one that refuses everything.
+    const { tree, mount } = pipelineTree();
     expect(untrustedGitfile(tree, mount)).toBeNull();
   });
 
-  it('refuses the two shapes reviewed code can write', () => {
-    const repo = tmp();
-    const { tree, mount } = pipelineTree(repo);
-    // A pointer into the mount...
+  it('refuses a pointer git resolves INTO the mount, however it is spelled', () => {
+    // Spelled with a non-breaking space, which JS `trim()` strips and git's
+    // `read_gitfile` does not — the divergence that let the first cut resolve
+    // the REAL entry, outside the mount, and admit a tree git resolves to a
+    // planted one inside it. The gate asks git now, so the spelling stops
+    // mattering: whatever git answers is what gets located.
+    const { repo, tree, mount } = pipelineTree();
     const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    mkdirSync(planted, { recursive: true });
+    const real = readFileSync(join(tree, '.git'), 'utf8')
+      .trim()
+      .replace('gitdir: ', '');
+    cpSync(real, planted, { recursive: true });
+    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+    writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
     writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
     expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+  });
 
-    // ...and `.git` replaced by a directory, which skips every gate written
-    // for the gitfile shape.
+  it('refuses a `.git` that is not the pipeline gitfile at all', () => {
+    // `rm .git && git init .` inside the mount: a repository of the writer's
+    // own, which skips every gate written for the gitfile shape.
+    const { tree, mount } = pipelineTree();
     rmSync(join(tree, '.git'), { force: true });
-    mkdirSync(join(tree, '.git'));
+    execFileSync('git', ['init', '-q'], { cwd: tree });
     expect(untrustedGitfile(tree, mount)).toContain('not the gitfile');
+  });
+
+  it('follows GIT through a spelling only git and JS read differently', () => {
+    // The divergence that made parsing here unsafe: JS `trim()` strips U+00A0,
+    // git's `read_gitfile` trims only C-locale space. Spelled with a leading
+    // NBSP, the pointer resolves — in Node — to the REAL entry outside the
+    // mount and would be admitted, while git reads the NBSP as part of a
+    // RELATIVE path and lands on the planted entry inside the mount, which is
+    // what the checkout would then run through.
+    const { repo, tree, mount } = pipelineTree();
+    const real = readFileSync(join(tree, '.git'), 'utf8')
+      .trim()
+      .replace('gitdir: ', '');
+    // The planted entry sits where git will look: under the tree, at a name
+    // beginning with the NBSP.
+    const planted = join(tree, `\u00a0${real}`);
+    mkdirSync(dirname(planted), { recursive: true });
+    cpSync(real, planted, { recursive: true });
+    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+    writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+    writeFileSync(join(tree, '.git'), `gitdir: \u00a0${real}\n`);
+
+    // Node would resolve the real entry here; git resolves the planted one.
+    expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+  });
+
+  it('says nothing about a tree that does not exist yet', () => {
+    // `--resume` asks about a worktree before deciding whether to build one.
+    // Absence is that caller's question; answering it here refused every
+    // ordinary resume — 26 of them, measured.
+    const { repo, mount } = pipelineTree();
+    expect(
+      untrustedGitfile(join(repo, '.qwen', 'tmp', 'review-pr-999'), mount),
+    ).toBeNull();
   });
 
   it('says nothing at all outside a mount', () => {
     // A plain checkout's `.git` IS a directory; refusing that would refuse
     // every ordinary repository.
     const repo = tmp();
-    mkdirSync(join(repo, '.git'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
     expect(untrustedGitfile(repo, () => null)).toBeNull();
   });
 });

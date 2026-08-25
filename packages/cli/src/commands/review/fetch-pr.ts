@@ -38,7 +38,8 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { sanitizedGitEnv, untrustedGitfile } from './lib/worktree.js';
+import { mountRootFor } from './lib/sandboxed-exec.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -683,11 +684,25 @@ function tryResume(
   const markerResumes = marker.resumes.filter(
     (r) => r.sessionId.toLowerCase() !== currentKey,
   ).length;
+  // Before reading anything through this tree's own pointer: `--resume`
+  // coexists with the sandbox on the very lane it polices, and the tree it
+  // reads is the one the previous run's containerized commands could write.
+  // `status` REFRESHES THE INDEX, so a planted `core.fsmonitor` runs on the
+  // host inside the very command that collects the ruling's evidence — the
+  // attack does not need the resume to succeed. See `untrustedGitfile`.
+  const resumeUntrusted = untrustedGitfile(wt, mountRootFor);
+  if (resumeUntrusted !== null) {
+    throw new Error(`refusing to resume: ${resumeUntrusted}`);
+  }
   // `--porcelain` prints nothing on a clean tree; a null (the command could
   // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
   // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
-  // in the PR.
+  // in the PR. `core.fsmonitor` inert here too: the gate above proves the
+  // pointer, this proves the command cannot be turned into an execution even
+  // if some future path reaches it ungated.
   const status = gitOpt(
+    '-c',
+    'core.fsmonitor=',
     '-C',
     wt,
     'status',

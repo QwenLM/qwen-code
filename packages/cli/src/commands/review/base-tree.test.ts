@@ -23,7 +23,9 @@ import {
   mkdirSync,
   rmSync,
   writeFileSync,
+  cpSync,
   existsSync,
+  readFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,6 +97,31 @@ describe('runBaseTree', () => {
   });
 
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('refuses to build through a rewritten review-worktree gitfile', () => {
+    // `worktree add` resolves the repository through the REVIEW worktree's own
+    // gitfile, which lives in the directory the sandbox mounts read-write and
+    // which the build/test phase already ran the PR's code against. It checks
+    // files out, so it runs whatever that pointer leads to, on the host.
+    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+    const real = readFileSync(join(worktree, '.git'), 'utf8')
+      .trim()
+      .replace('gitdir: ', '');
+    cpSync(real, planted, { recursive: true });
+    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+    writeFileSync(
+      join(planted, 'gitdir'),
+      `gitdir: ${join(worktree, '.git')}\n`,
+    );
+    writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(JSON.stringify(r)).toContain('review temp dir');
+    // The tree was never created, which is what says the spawn never ran —
+    // the note alone reads the same whichever side of it the gate fires on.
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
 
   it('creates a sibling worktree holding the BASE commit, not the head', () => {
     const r = run();

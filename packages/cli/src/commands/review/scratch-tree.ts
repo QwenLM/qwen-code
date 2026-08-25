@@ -56,6 +56,7 @@ import {
 } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  untrustedGitfile,
   RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
@@ -66,6 +67,7 @@ import {
   type DependencyFarm,
   type SweepResult,
 } from './lib/worktree.js';
+import { mountRootFor } from './lib/sandboxed-exec.js';
 
 export interface ScratchTreeReport {
   /** True when a tree stands at `path`, checked out at the commit under review. */
@@ -584,6 +586,16 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
     sweep = discardWorktree(worktree, tree);
+    // The same question the probe phase asks before its own `worktree add`:
+    // this resolves the repository through the REVIEW worktree's gitfile,
+    // which lives inside the directory the sandbox mounts read-write and
+    // which the build/test phase already gave the reviewed code a chance to
+    // rewrite. `worktree add` checks files out, so it runs whatever that
+    // pointer leads to, on the host. See `untrustedGitfile`.
+    const untrusted = untrustedGitfile(worktree, mountRootFor);
+    if (untrusted !== null) {
+      throw new Error(`refusing to create a scratch tree: ${untrusted}`);
+    }
     git(worktree, 'worktree', 'add', '--detach', tree, headSha);
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose
