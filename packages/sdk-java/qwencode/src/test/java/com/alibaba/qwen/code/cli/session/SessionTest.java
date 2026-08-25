@@ -49,6 +49,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionTest {
@@ -292,7 +293,7 @@ class SessionTest {
         assertEquals(3, transport.getProcessedPromptLineCount());
         assertEquals(1, controlResponses.get());
         assertEquals(1, results.get());
-        assertTrue(hasControlResponseErrorWarning(logAppender));
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
     }
 
     @Test
@@ -312,7 +313,28 @@ class SessionTest {
         }
 
         assertEquals(2, transport.getProcessedPromptLineCount());
-        assertTrue(hasControlResponseErrorWarning(logAppender));
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
+    }
+
+    @Test
+    void sendPromptUsesTopLevelSubtypeWhenResponseObjectIsMissing()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"subtype\":\"error\",\"request_id\":\"set-model\","
+                        + "\"error\":\"set model failed\"}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertTrue(hasControlResponseErrorWarning(logAppender, "set model failed"));
     }
 
     @Test
@@ -323,17 +345,52 @@ class SessionTest {
                 "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
 
         Session session = new Session(transport);
+        AtomicInteger controlResponses = new AtomicInteger();
         AtomicInteger results = new AtomicInteger();
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
 
-        session.sendPrompt("hello", new SessionEventSimpleConsumers() {
-            @Override
-            public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
-                results.incrementAndGet();
-            }
-        });
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers() {
+                @Override
+                public void onControlResponse(Session session, CLIControlResponse<?> cliControlResponse) {
+                    controlResponses.incrementAndGet();
+                }
+
+                @Override
+                public void onResultMessage(Session session, SDKResultMessage sdkResultMessage) {
+                    results.incrementAndGet();
+                }
+            });
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
 
         assertEquals(2, transport.getProcessedPromptLineCount());
+        assertEquals(1, controlResponses.get());
         assertEquals(1, results.get());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "ok"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsNotExactError()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error_extra\","
+                        + "\"error\":\"not an exact error subtype\"}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(
+                hasControlResponseErrorWarning(logAppender, "not an exact error subtype"));
     }
 
     private static ListAppender<ILoggingEvent> attachSessionLogAppender() {
@@ -352,10 +409,12 @@ class SessionTest {
         appender.stop();
     }
 
-    private static boolean hasControlResponseErrorWarning(ListAppender<ILoggingEvent> appender) {
+    private static boolean hasControlResponseErrorWarning(
+            ListAppender<ILoggingEvent> appender, String expectedPayload) {
         return appender.list.stream()
                 .anyMatch(event -> event.getLevel().equals(Level.WARN)
-                        && event.getFormattedMessage().contains("control_response error"));
+                        && event.getFormattedMessage().contains("control_response error")
+                        && event.getFormattedMessage().contains(expectedPayload));
     }
 
     @Test
