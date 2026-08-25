@@ -361,6 +361,13 @@ describe('mcp reconnect command', () => {
         'Failed to reconnect 1 of 2 configured server(s).',
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
+      // The process-scope note must print on the failure path too — that is
+      // exactly when the user's running session still has broken tools.
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot refresh the MCP tools of an already-running Qwen Code session',
+        ),
+      );
     });
   });
 
@@ -489,6 +496,11 @@ describe('mcp reconnect command', () => {
         '✗ server-two: Failed - connection attempt finished without a live connection (status: disconnected)',
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot refresh the MCP tools of an already-running Qwen Code session',
+        ),
+      );
     });
   });
 
