@@ -746,7 +746,19 @@ export const useGeminiStream = (
   // orphan entry before re-pushing the stored payload, so a payload still
   // missing its envelopes would silently lose them while the delivery
   // journal claims delivered. Evaluated and cleared on every retry.
-  const boundaryEnvelopeRetryDebtRef = useRef<Part[][]>([]);
+  //
+  // Each record also carries `pushedEntryParts` — the parts of the pushed
+  // history entry as captured at accept time — as an identity fingerprint
+  // for the retry-time match. Envelope texts alone are not an identity:
+  // teammate envelopes are deterministic machine text (e.g. repeated
+  // `<team_error>` notices), so a byte-identical resend can orphan a
+  // YOUNGER entry while this debt's own entry sits safely mid-history —
+  // a text-only match would then re-attach the debt and deliver the
+  // report twice. The fingerprint carries the entry's tool-response
+  // parts (unique callIds), which a colliding younger entry cannot share.
+  const boundaryEnvelopeRetryDebtRef = useRef<
+    Array<{ envelopeParts: Part[]; pushedEntryParts: Part[] }>
+  >([]);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -4237,20 +4249,71 @@ export const useGeminiStream = (
    * Mirror the pop's walk (`GeminiChat.stripOrphanedUserEntriesFromHistory`):
    * trailing user entries, stopping at the first model entry or a *pure*
    * system-reminder entry (which the pop preserves). A debt batch is
-   * re-appended only when every one of its parts appears in that region —
-   * exactly the case where the pop is about to drop it. If the accepted
-   * round produced content instead, the entry is not a trailing orphan,
-   * nothing matches, and the payload stays stripped so the leader does not
-   * see the same report twice.
+   * re-appended only when its pushed entry is one of those trailing
+   * orphans — exactly the case where the pop is about to drop it. If the
+   * accepted round produced content instead, the entry is not a trailing
+   * orphan, nothing matches, and the payload stays stripped so the leader
+   * does not see the same report twice.
+   *
+   * The match keys on the debt record's `pushedEntryParts` fingerprint
+   * (the pushed entry captured at accept time), not on envelope text
+   * alone: teammate envelopes are deterministic machine text, and a
+   * byte-identical resend can orphan a YOUNGER entry while the debt's own
+   * entry sits mid-history. The fingerprint's tool-response parts (unique
+   * callIds) keep a colliding younger entry from claiming the debt.
+   *
+   * String payloads are retried too (Idle Teammate/Notification drains and
+   * plain user prompts store strings in `lastPromptRef`), so debt is
+   * evaluated for ANY payload shape; a string query is wrapped into its
+   * single text part only when something is actually re-attached.
    */
   const reattachOrphanedRetryEnvelopes = useCallback(
     (query: PartListUnion): PartListUnion => {
       const debt = boundaryEnvelopeRetryDebtRef.current;
       boundaryEnvelopeRetryDebtRef.current = [];
-      if (debt.length === 0 || !Array.isArray(query)) {
+      if (debt.length === 0) {
         return query;
       }
-      const orphanedTexts = new Set<string>();
+      const samePart = (a: Part, b: Part): boolean => {
+        if (typeof a.text === 'string' || typeof b.text === 'string') {
+          return typeof a.text === 'string' && a.text === b.text;
+        }
+        try {
+          return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+          return false;
+        }
+      };
+      // Contiguous-subsequence match: the fingerprint is the pushed entry
+      // as captured at accept time; the candidate is an orphan entry the
+      // pop is about to drop. Subsequence (not full-array equality) keeps
+      // the match tolerant of parts core appends around the fingerprint
+      // (e.g. plan-exit notices) and degrades to an envelope-text
+      // containment match when accept-time history was unreadable and the
+      // fingerprint fell back to the envelope parts only.
+      const entryCarriesFingerprint = (
+        candidate: Part[],
+        fingerprint: Part[],
+      ): boolean => {
+        if (fingerprint.length === 0 || candidate.length < fingerprint.length) {
+          return false;
+        }
+        for (
+          let start = 0;
+          start + fingerprint.length <= candidate.length;
+          start++
+        ) {
+          if (
+            fingerprint.every((part, offset) =>
+              samePart(part, candidate[start + offset]!),
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+      const orphanedEntries: Part[][] = [];
       try {
         const history = geminiClient?.getHistoryShallow?.() ?? [];
         for (let i = history.length - 1; i >= 0; i--) {
@@ -4269,11 +4332,7 @@ export const useGeminiStream = (
                 part.text.trimEnd().endsWith('</system-reminder>'),
             );
           if (pureSystemReminder) break;
-          for (const part of parts) {
-            if (typeof part.text === 'string') {
-              orphanedTexts.add(part.text);
-            }
-          }
+          orphanedEntries.push(parts);
         }
       } catch (error) {
         // History unavailable: keep the stripped payload rather than fail
@@ -4284,17 +4343,25 @@ export const useGeminiStream = (
         return query;
       }
       const reattach: Part[] = [];
-      for (const parts of debt) {
+      for (const record of debt) {
         if (
-          parts.every(
-            (part) =>
-              typeof part.text === 'string' && orphanedTexts.has(part.text),
+          orphanedEntries.some((parts) =>
+            entryCarriesFingerprint(parts, record.pushedEntryParts),
           )
         ) {
-          reattach.push(...parts);
+          reattach.push(...record.envelopeParts);
         }
       }
-      return reattach.length > 0 ? [...query, ...reattach] : query;
+      if (reattach.length === 0) {
+        return query;
+      }
+      // `query` may be a string or contain string parts (Idle Teammate/
+      // Notification drains and plain prompts); normalize to Part[] only
+      // when something is actually re-attached.
+      const base: Part[] = (Array.isArray(query) ? query : [query]).map(
+        (part) => (typeof part === 'string' ? { text: part } : part),
+      );
+      return [...base, ...reattach];
     },
     [geminiClient],
   );
@@ -5459,9 +5526,40 @@ export const useGeminiStream = (
             // still fails terminally before any content, the pushed entry
             // becomes the trailing orphan the Retry path pops, and the
             // stripped payload alone would lose these envelopes.
-            boundaryEnvelopeRetryDebtRef.current.push(
-              entries.map((entry) => ({ text: entry.modelText })),
-            );
+            const envelopeParts = entries.map((entry) => ({
+              text: entry.modelText,
+            }));
+            // Identity for the retry-time match: capture the pushed entry
+            // itself (accept fires after the push landed). The youngest
+            // entry carrying every envelope text is the one this drain
+            // pushed — a concurrent push can only displace the scan when
+            // it carries byte-identical envelope texts, which the
+            // fingerprint's tool-response parts then still distinguish at
+            // retry time. History unreadable ⇒ fall back to the envelope
+            // parts alone (the pre-fingerprint containment match).
+            let pushedEntryParts: Part[] = envelopeParts;
+            try {
+              const history = geminiClient?.getHistoryShallow?.() ?? [];
+              for (let i = history.length - 1; i >= 0; i--) {
+                const candidate = history[i]?.parts ?? [];
+                if (
+                  entries.every((entry) =>
+                    candidate.some((part) => part.text === entry.modelText),
+                  )
+                ) {
+                  pushedEntryParts = candidate;
+                  break;
+                }
+              }
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to capture pushed teammate entry for retry debt: ${error}`,
+              );
+            }
+            boundaryEnvelopeRetryDebtRef.current.push({
+              envelopeParts,
+              pushedEntryParts,
+            });
           }
           return;
         }

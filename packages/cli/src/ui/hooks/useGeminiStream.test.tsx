@@ -2092,6 +2092,238 @@ describe('useGeminiStream', () => {
       expect(recordNotification).toHaveBeenCalledTimes(1);
     });
 
+    it('re-attaches the journaled envelope when the retry payload is a plain string', async () => {
+      // Regression pin for string retry payloads: Idle Teammate /
+      // Notification drains and plain user prompts store STRINGS in
+      // `lastPromptRef`, and a Ctrl+Y retry of such a payload must still
+      // evaluate the journaled debt. Discarding it unexamined would let
+      // the Retry path's orphan pop drop an accepted envelope entry while
+      // the delivery journal claims delivered — silent message loss.
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+        client,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Accepted boundary round fails terminally before content — debt
+      // journaled, entry left as a trailing orphan.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // A follow-up string submission — the same shape the Idle Teammate
+      // drain submits — overwrites `lastPromptRef` with a STRING and
+      // fails too, so Ctrl+Y retries that string payload.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'still down' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'status ping',
+          SendMessageType.Teammate,
+        );
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Both failed rounds leave trailing user orphans: the string entry
+      // and, behind it, the accepted boundary entry with the envelope.
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'run_shell_command', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            ...completed.response.responseParts,
+            { text: teammateModelText },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'status ping' }] },
+      ]);
+
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      // The string payload is wrapped into its text part and the orphaned
+      // envelope is re-attached behind it — exactly one copy survives the
+      // pop+push replacement.
+      expect(mockSendMessageStream.mock.calls[2][0]).toEqual([
+        { text: 'status ping' },
+        { text: teammateModelText },
+      ]);
+      expect(mockSendMessageStream.mock.calls[2][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-attach journaled debt when a younger orphaned entry carries byte-identical envelope text', async () => {
+      // Regression pin for debt identity: the re-attach match keys on the
+      // pushed entry's fingerprint captured at accept time, not on
+      // envelope text alone. Teammate envelopes are deterministic machine
+      // text, so a byte-identical resend can orphan a YOUNGER entry while
+      // this debt's own entry sits safely mid-history — a text-only match
+      // would re-attach the debt and hand the leader the same report
+      // twice.
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+        client,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Accept-time history exposes the pushed entry so the debt records
+      // its full identity (tool-response parts + envelope text).
+      const completed = createCompletedToolCall();
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            ...completed.response.responseParts,
+            { text: teammateModelText },
+          ],
+        },
+      ]);
+
+      // Accepted, produced content, then failed terminally: debt is
+      // journaled at accept while the entry ends up MID-history.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // At retry time the debt's own entry sits mid-history (content
+      // landed after it), but a YOUNGER trailing orphan carries the SAME
+      // envelope text — an identical report redelivered by a later
+      // failed round (e.g. the Idle drain's single-text entry).
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            ...completed.response.responseParts,
+            { text: teammateModelText },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'partial answer' }] },
+        { role: 'user', parts: [{ text: teammateModelText }] },
+      ]);
+
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      // The payload stays stripped: the orphan being popped is the
+      // younger identical entry, not the debt's own mid-history entry.
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        completed.response.responseParts,
+      );
+      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+    });
+
     it('restores a boundary-drained envelope when a UserPromptSubmit hook blocks the round submission', async () => {
       const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
         renderBusyMultiRoundTask([createExecutingToolCall()]);
