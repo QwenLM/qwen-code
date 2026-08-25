@@ -310,8 +310,8 @@ describe('<ScrollableList /> mouse scrolling', () => {
     await act(async () => {});
     expect(lastFrame()).toContain('item-0');
 
-    // Wheel down (queues a flush), then immediately click the top of the
-    // scrollbar — all before the frame timer fires.
+    // The leading wheel applies immediately; the second queues a trailing
+    // flush. Click the top of the scrollbar before that timer fires.
     await act(async () => {
       stdin.write(wheelDown(5, 5));
       stdin.write(wheelDown(5, 5));
