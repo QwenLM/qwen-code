@@ -1458,6 +1458,22 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
       ),
     ).toThrow(/does not name an address on this host/);
   });
+
+  // A zone-scoped link-local bind (`fe80::…%eth0`) is an address this host
+  // answers on, but `formatHostForUrl` percent-encodes the zone into the
+  // worker URL and WHATWG URL rejects zone IDs outright — so the parse
+  // inside the guard used to throw a raw `ERR_INVALID_URL` instead of the
+  // named boot diagnostic. Refuse it with an actionable message: the worker
+  // pipeline cannot carry a zone.
+  it('refuses a zone-scoped bind with the named diagnostic, not a raw URL error', () => {
+    const hostname = 'fe80::1%eth0';
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(hostname, 4170, true),
+        hostname,
+      ),
+    ).toThrow(/Channels cannot start: --hostname "fe80::1%eth0"/);
+  });
 });
 
 // A CA-issued leaf, the shape the documented `mkcert` flow produces: usable

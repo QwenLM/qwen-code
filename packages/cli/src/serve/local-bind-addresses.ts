@@ -9,7 +9,11 @@ import { networkInterfaces } from 'node:os';
 /**
  * Strip the URL brackets and the RFC 6874 zone identifier from an IPv6
  * literal so it can be compared against `os.networkInterfaces()`, which
- * reports the bare address and carries the scope separately.
+ * reports the bare address and carries the scope separately. Bracket
+ * stripping is load-bearing — `new URL(...).hostname` keeps brackets — but
+ * the zone handling is defensive only: production callers feed this from
+ * `new URL(...).hostname`, and WHATWG URL rejects zone IDs outright, so a
+ * zone never survives the parse layer to reach here.
  */
 function bareAddress(hostname: string): string {
   const unbracketed =

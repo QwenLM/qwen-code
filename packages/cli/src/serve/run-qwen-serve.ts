@@ -759,7 +759,21 @@ export function assertChannelWorkerDaemonUrlIsLocal(
   workerDaemonUrl: string,
   hostname: string,
 ): void {
-  const host = new URL(workerDaemonUrl).hostname;
+  let host: string;
+  try {
+    host = new URL(workerDaemonUrl).hostname;
+  } catch {
+    // A zone-scoped bind (`fe80::1%eth0`) arrives percent-encoded and WHATWG
+    // URL rejects zone IDs outright, so the worker pipeline cannot carry it
+    // even though this host answers on the address — refuse with the named
+    // boot diagnostic instead of a raw ERR_INVALID_URL.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" cannot be carried in ` +
+        `a worker URL (a zone-scoped address has no spelling the URL parser ` +
+        `accepts). Bind to loopback, to the wildcard (0.0.0.0 / ::), or to ` +
+        `a zone-less literal address of one of this machine's interfaces.`,
+    );
+  }
   if (isLoopbackBind(host) || isOwnInterfaceAddress(host)) return;
   throw new Error(
     `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
