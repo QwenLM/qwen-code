@@ -320,6 +320,7 @@ export async function assertDirectorySymlinksAreSafe(
       }
       const linkPath = await fs.promises.readlink(entryPath);
       const targetPath = path.resolve(path.dirname(entryPath), linkPath);
+      const rawTargetPath = `${path.dirname(entryPath)}${path.sep}${linkPath}`;
       let targetSize: number | undefined;
       try {
         if (
@@ -327,15 +328,17 @@ export async function assertDirectorySymlinksAreSafe(
           !WINDOWS_ABSOLUTE_PATH.test(linkPath) &&
           isContainedPath(resolvedRoot, targetPath)
         ) {
-          const targetStat = await fs.promises.lstat(targetPath);
-          const realTarget = await fs.promises.realpath(targetPath);
+          const targetStat = await fs.promises.lstat(rawTargetPath);
+          const realTarget = await fs.promises.realpath(entryPath);
           if (targetStat.isFile() && isContainedPath(realRoot, realTarget)) {
             targetSize = targetStat.size;
           }
         }
       } catch {
+        signal?.throwIfAborted();
         targetSize = undefined;
       }
+      signal?.throwIfAborted();
       if (targetSize === undefined) {
         throw new Error(
           `Tar archive contains unsupported link entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,

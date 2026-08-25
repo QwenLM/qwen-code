@@ -484,6 +484,17 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await expect(
           assertDirectorySymlinksAreSafe(absoluteCase),
         ).rejects.toThrow('unsupported link entry');
+
+        const noncanonicalCase = path.join(root, 'noncanonical-case');
+        await fs.mkdir(noncanonicalCase);
+        await fs.writeFile(path.join(noncanonicalCase, 'target'), 'content');
+        await fs.symlink(
+          'missing/../target',
+          path.join(noncanonicalCase, 'link'),
+        );
+        await expect(
+          assertDirectorySymlinksAreSafe(noncanonicalCase),
+        ).rejects.toThrow('unsupported link entry');
       },
     );
 
@@ -496,6 +507,36 @@ describe('assertTarArchiveLinksAreSafe', () => {
         assertDirectorySymlinksAreSafe(root, controller.signal),
       ).rejects.toBe(reason);
     });
+
+    it.runIf(process.platform !== 'win32')(
+      'preserves cancellation when final target resolution fails',
+      async () => {
+        const target = path.join(root, 'target');
+        const link = path.join(root, 'link');
+        await fs.writeFile(target, 'content');
+        await fs.symlink('target', link);
+        const controller = new AbortController();
+        const reason = new Error('install cancelled');
+        const realpath = fs.realpath.bind(fs);
+        const realpathSpy = vi
+          .spyOn(fs, 'realpath')
+          .mockImplementation(async (value) => {
+            if (value === link) {
+              controller.abort(reason);
+              throw new Error('filesystem race');
+            }
+            return realpath(value);
+          });
+
+        try {
+          await expect(
+            assertDirectorySymlinksAreSafe(root, controller.signal),
+          ).rejects.toBe(reason);
+        } finally {
+          realpathSpy.mockRestore();
+        }
+      },
+    );
 
     it.runIf(process.platform !== 'win32')(
       'counts the actual target of a backslash-named symlink',

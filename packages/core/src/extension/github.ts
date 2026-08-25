@@ -1391,6 +1391,8 @@ export async function extractFile(
         fs.createReadStream(file),
         tar.x({
           cwd: dest,
+          // The opt-in fallback intentionally treats every tar warning as a
+          // failure; see docs/design/safe-archive-symlinks.md.
           strict: options.allowContainedSymlinks === true,
         }),
         { signal },
