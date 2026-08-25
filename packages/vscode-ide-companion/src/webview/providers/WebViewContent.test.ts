@@ -20,9 +20,15 @@ vi.mock('vscode', () => ({
  */
 function createMockWebview() {
   return {
-    asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-      toString: () => `https://webview/${uri.fsPath}`,
-    })),
+    asWebviewUri: vi.fn((uri: { fsPath: string }) => {
+      const toString = () => `https://webview/${uri.fsPath}`;
+      return {
+        toString,
+        with: ({ query }: { query?: string } = {}) => ({
+          toString: () => (query ? `${toString()}?${query}` : toString()),
+        }),
+      };
+    }),
     cspSource: 'https://csp.source',
   };
 }
