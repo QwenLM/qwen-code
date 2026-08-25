@@ -12,7 +12,6 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
-  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -37,7 +36,6 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
-  SessionConflictError,
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
@@ -61,7 +59,7 @@ import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
@@ -133,11 +131,12 @@ import {
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
-  assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   DaemonDrainingError,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -1855,24 +1854,6 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            const guardSessionService = new SessionService(cwd, {
-              runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-            });
-            let persistedGuardId: string | undefined;
-            try {
-              persistedGuardId =
-                await guardSessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await guardSessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],
               async () => {
@@ -1880,30 +1861,20 @@ export class AcpDispatcher {
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
-                let storageSessionId = persistedGuardId ?? sessionId;
-                let persistedSessionId: string | undefined;
-                try {
-                  persistedSessionId =
-                    await sessionService.findSessionIdIgnoringCase(sessionId);
-                } catch (error) {
-                  if (
-                    error instanceof SessionIdCaseConflictError &&
-                    (await sessionService.getSessionLocation(
-                      error.candidateSessionId ?? sessionId,
-                    )) === 'conflict'
-                  ) {
-                    throw new SessionConflictError(sessionId);
-                  }
-                  throw error;
-                }
+                let storageSessionId = sessionId;
+                const persistedSessionId = await resolveSessionIdForRestore(
+                  sessionService,
+                  sessionId,
+                );
                 if (persistedSessionId) {
                   storageSessionId = persistedSessionId;
                 } else if (this.liveSessionIsolation) {
                   throw new SessionNotFoundError(sessionId);
                 }
-                await assertSessionLoadable(
+                await assertSessionRestorable(
                   cwd,
                   storageSessionId,
+                  sessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session

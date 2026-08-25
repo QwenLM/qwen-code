@@ -4662,39 +4662,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/load rejects active/archive conflicts', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
-      await writeStoredSession(sessionId);
-      await writeStoredSession(sessionId, 'archived');
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s restores an active/archive conflicted session from its active copy',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+        await writeStoredSession(sessionId);
+        await writeStoredSession(sessionId, 'archived');
 
-      const connId = await initialize();
-      const connStream = await openStream(connId);
-      const got = takeFrames(connStream, 1);
-      await new Promise((r) => setTimeout(r, 50));
-      await post(connId, {
-        jsonrpc: '2.0',
-        id: 212,
-        method: 'session/load',
-        params: { sessionId },
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 212,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          result?: unknown;
+          error?: { code: number; message: string };
+        }>;
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable over ACP.
+        expect(frame.id).toBe(212);
+        expect(frame.error).toBeUndefined();
+        expect(frame.result).toEqual(expect.any(Object));
       });
-
-      const [frame] = (await got) as Array<{
-        id: number;
-        error: {
-          code: number;
-          message: string;
-          data?: { errorKind?: string };
-        };
-      }>;
-      expect(frame.id).toBe(212);
-      expect(frame.error.code).toBe(-32603);
-      expect(frame.error.message).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(frame.error.data?.errorKind).toBe('session_conflict');
-    });
-  });
+    },
+  );
 
   it('session/load preserves sanitized session writer RPC errors', async () => {
     await withRuntimeDir(async () => {
@@ -5078,6 +5077,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           SessionArchiveCoordinator.prototype,
           'runSharedMany',
         );
+        const findSessionId = vi.spyOn(
+          SessionService.prototype,
+          'findSessionIdIgnoringCase',
+        );
 
         try {
           const connId = await initialize();
@@ -5103,7 +5106,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             [sessionId],
             expect.any(Function),
           );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
         } finally {
+          findSessionId.mockRestore();
           runSharedMany.mockRestore();
         }
       });
@@ -5111,7 +5116,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts a pre-guard both-states conflict to actionable session conflict',
+    '%s keeps a differently spelled both-states conflict strict',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5134,9 +5139,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(await reader.next()).toMatchObject({
           id: 231,
           error: {
-            message: expect.stringContaining(
-              'Delete the session with POST /sessions/delete',
-            ),
             data: expect.objectContaining({ errorKind: 'session_conflict' }),
           },
         });
@@ -5146,7 +5148,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts an in-guard both-states conflict to actionable session conflict',
+    '%s preserves a known case conflict without secondary classification',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5160,12 +5162,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         );
         const findSessionId = vi
           .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
           );
 
         try {
@@ -5188,9 +5189,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             },
           });
           reader.close();
-          // The conversion must re-check the resolver's candidate spelling:
-          // the request-case id finds nothing on a case-sensitive filesystem.
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(getSessionLocation).not.toHaveBeenCalled();
         } finally {
           getSessionLocation.mockRestore();
           findSessionId.mockRestore();
@@ -5351,8 +5350,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect.objectContaining({
           id: 219,
           error: expect.objectContaining({
-            message: expect.stringContaining('by case'),
-            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+            data: expect.objectContaining({
+              errorKind: 'session_conflict',
+              sessionId,
+            }),
           }),
         }),
       );

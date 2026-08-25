@@ -105,6 +105,26 @@ export interface Ledger {
    */
   model?: string;
   /**
+   * Source-diff line count as of the FIRST round that recorded one, carried
+   * forward unchanged. A baseline, never re-measured: growth is only legible
+   * cumulatively. A change that arrives at 228 source lines and leaves at 920
+   * grew 4x, yet only ~1.3x per round across six rounds — a per-round delta
+   * would never notice, which is why this is a baseline and not "last round's
+   * size".
+   *
+   * Its only consumer is one advisory paragraph telling a human that the shape
+   * of the change, rather than the current patch, may be the open question.
+   * Like every other marker field this is untrusted body data, but unlike a
+   * finding there is no code to re-assert a bare number against: a forged small
+   * value fires the paragraph, a forged large one silences it. That is the
+   * entire blast radius — it never reaches a verdict, a cap, or an event.
+   *
+   * Unlike `sha`, this survives truncation. A partial finding list must not
+   * certify a commit range, but it says nothing about how big the diff is, and
+   * the measurement is true either way.
+   */
+  src0?: number;
+  /**
    * How many inline comments this round posted — convergence telemetry, and
    * the ONLY field here that decides nothing.
    *
@@ -163,9 +183,48 @@ export interface Ledger {
    * which leaves the trend unevaluable rather than measured on the wrong
    * number.
    *
+   * One accepted seam: the counting RULE changed once — a fix-induced
+   * re-report (a carried id fronting a NEW defect) moved from re-post to
+   * first-time — and nothing parts an old-rule marker from a new one, on
+   * purpose. A loop in flight at the change compares one round counted under
+   * each rule for exactly one round; the old rule UNDERCOUNTED (it dropped
+   * the marked re-reports), so the mixed comparison can fire the volume
+   * advisory spuriously — and, when the undercount reaches 0 because the
+   * predecessor's whole new output was re-reports the old rule dropped, the
+   * `prev.fresh > 0` restart guard suppresses the comparison, masking the
+   * advisory for that one round. Either way the advisory decides
+   * nothing, names itself an observation, and heals the round after, when
+   * both points are counted under the new rule. A marker version was not
+   * paid for that: `parseLedger` refuses any `v` it does not know, so
+   * bumping it for a count no gate reads would cost an old reader the WHOLE
+   * marker — work list, anchor, streak — the same reason every field added
+   * since has degraded by absence instead.
+   *
    * Rides and sheds with `posted`, which it qualifies.
    */
   fresh?: number;
+  /**
+   * How many rounds — this one included — have been counted against the
+   * churn bar since the last round measured converging; a round that could
+   * not measure carries the count without adding to it. This is the ONE
+   * field here that is neither telemetry nor a gate on scope: it is the
+   * review's own standing claim about the pull request, carried exactly the
+   * way a finding id is, and `compose-review` reads it back to decide
+   * whether to file the non-convergence finding.
+   *
+   * So it does NOT ride in the volume tier that sheds first. It is a single
+   * small integer, and the pull request most likely to be churning is also
+   * the one whose marker is closest to its byte cap — shedding it there
+   * would disarm the mechanism on exactly the pull requests it exists for.
+   *
+   * It cannot decide alone, and that is deliberate: the body it rides on is
+   * another account's writable surface, so `compose-review` files nothing on
+   * a recovered streak unless THIS round's own census is also above the bar.
+   * Recovery hands this account only its OWN streak besides — a foreign
+   * winner's is stripped at the seam (`pr-context`) — so a forged marker
+   * plants neither the streak nor the finding.
+   */
+  churnRounds?: number;
 }
 
 /**
@@ -325,6 +384,21 @@ export function volumeOf(n: unknown): number | undefined {
 }
 
 /**
+ * The ONE reading of the churn streak: a non-negative whole number of rounds,
+ * clamped to the round cap it shares a domain with — or `undefined`.
+ *
+ * Separate from `volumeOf` because the ceilings mean different things: a
+ * volume is a comment count and caps where a review surface stops being one;
+ * a streak counts ROUNDS, and past `LEDGER_MAX_ROUND` the same float64
+ * argument that bounds `round` applies to it unchanged.
+ */
+export function streakOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_ROUND)
+    : undefined;
+}
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -415,6 +489,12 @@ export function serializeLedger(ledger: Ledger): string {
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
       }
     }
+    // The streak rides ABOVE the shed cascade — see the field's own note. It
+    // is bounded like the round it counts (same domain, same arithmetic
+    // hazard past the cap) and omitted at zero, so a converging pull request
+    // spends no bytes on it at all.
+    const streak = streakOf(ledger.churnRounds);
+    if (streak !== undefined && streak > 0) payload.churnRounds = streak;
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -433,6 +513,13 @@ export function serializeLedger(ledger: Ledger): string {
         payload.sha = ledger.sha;
         if (model) payload.model = model;
       }
+    }
+    // Unconditional, unlike `sha` above: the ruling that withholds an anchor
+    // from a partial list does not extend to a measurement of the diff. ~12
+    // bytes against LEDGER_MAX_BYTES, and losing it would silently reset a
+    // baseline the next round cannot recompute.
+    if (Number.isInteger(ledger.src0) && (ledger.src0 as number) > 0) {
+      payload.src0 = ledger.src0;
     }
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
@@ -645,6 +732,14 @@ export function parseLedger(body: string | undefined): Ledger | null {
       sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
         ? rawModel
         : undefined;
+    // Survives truncation on read as it does on write — a partial list still
+    // measured the same diff. Anything that is not a positive integer is
+    // dropped, so a garbled baseline degrades to "unknown" (silence) rather
+    // than to a number that would read as no growth.
+    const src0 =
+      Number.isInteger(raw.src0) && (raw.src0 as number) > 0
+        ? (raw.src0 as number)
+        : undefined;
     // The volume fields are normalised on READ exactly as they are bounded
     // on write, and independently of `dropped`: they qualify no range, so a
     // truncated work list has no bearing on them. A shape the serializer
@@ -653,6 +748,19 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
+    // The streak survives a truncated work list for the same reason the
+    // volumes do — it qualifies no range — and it is the field the
+    // non-convergence rule reads. Clamped on read as on write; a shape
+    // the serializer would not have written does not survive. Clamped to
+    // the marker's own ROUND too:
+    // the streak counts rounds INSIDE the round it rides, and the pipeline's
+    // own writes advance it at most once per round, so a legitimate marker
+    // can never carry more counted rounds than rounds it claims. The marker
+    // body is any GitHub user's writable surface, and an unclamped streak
+    // inflates the posted ordinal ("the 10000th round…") past everything the
+    // pull request ever ran. Same invariant the finding-id filter enforces
+    // above: a claim about rounds that did not exist is not read.
+    const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
     // The floor qualifies `posted`, so it survives only beside it: a floor
     // alone would let a later round compare postures across rounds whose
     // volumes it does not have, which is not a comparison anyone can act on.
@@ -675,8 +783,10 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
+      ...(src0 ? { src0 } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
+      ...(churnRounds === 0 ? {} : { churnRounds }),
       ...(floor === undefined ? {} : { floor }),
       ...(fresh === undefined ? {} : { fresh }),
     };

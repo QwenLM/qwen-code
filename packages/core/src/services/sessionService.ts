@@ -822,7 +822,7 @@ export class SessionService {
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
-        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+        fileNames = await fs.promises.readdir(this.getChatsDirForState(state));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;

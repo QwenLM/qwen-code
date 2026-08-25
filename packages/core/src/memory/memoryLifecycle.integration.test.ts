@@ -14,7 +14,15 @@ import { runManagedAutoMemoryDream } from './dream.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { MemoryManager } from './manager.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
-import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryFilePath,
+  getAutoMemoryIndexPath,
+} from './paths.js';
+import {
+  forgetManagedAutoMemoryMatches,
+  selectManagedAutoMemoryForgetCandidates,
+} from './forget.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -289,5 +297,95 @@ describe('managed auto-memory lifecycle integration', () => {
       targetPath,
     );
     expect(recall.prompt).toContain('OVERFLOW-ZEPHYR-7040');
+  });
+
+  it('forgets a topic beyond the general 200-document scan cap', async () => {
+    // Hermetic: forget deletes files, so the user-level scan must never reach
+    // the real `~/.qwen/memories`.
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
+    try {
+      await ensureAutoMemoryScaffold(
+        projectRoot,
+        new Date('2026-04-01T00:00:00.000Z'),
+      );
+      const referenceDir = path.dirname(
+        getAutoMemoryFilePath(projectRoot, 'reference/filler-000.md'),
+      );
+      await fs.mkdir(referenceDir, { recursive: true });
+      await Promise.all(
+        Array.from({ length: 200 }, (_, index) =>
+          fs.writeFile(
+            path.join(
+              referenceDir,
+              `filler-${String(index).padStart(3, '0')}.md`,
+            ),
+            [
+              '---',
+              'type: reference',
+              `name: Filler ${index}`,
+              'description: Unrelated historical note',
+              '---',
+              '',
+              'Unrelated historical note.',
+            ].join('\n'),
+            'utf-8',
+          ),
+        ),
+      );
+
+      const targetPath = getAutoMemoryFilePath(
+        projectRoot,
+        'reference/overflow-target.md',
+      );
+      await fs.writeFile(
+        targetPath,
+        [
+          '---',
+          'type: reference',
+          'name: Overflow Zephyr Marker',
+          'description: Unique forget target beyond the general scan cap',
+          '---',
+          '',
+          'The saved codeword is OVERFLOW-ZEPHYR-7040.',
+        ].join('\n'),
+        'utf-8',
+      );
+      // Oldest mtime, so the target ranks 201st and the capped scan drops it.
+      await fs.utimes(targetPath, new Date(0), new Date(0));
+
+      const cappedDocs = await scanAutoMemoryTopicDocuments(projectRoot);
+      expect(cappedDocs).toHaveLength(200);
+      expect(cappedDocs.some((doc) => doc.filePath === targetPath)).toBe(false);
+
+      // Recall can surface it (uncapped scan), so forget must be able to
+      // remove it.
+      const recall = await resolveRelevantAutoMemoryPromptForQuery(
+        projectRoot,
+        'What is the overflow zephyr codeword?',
+      );
+      expect(recall.selectedDocs.map((doc) => doc.filePath)).toContain(
+        targetPath,
+      );
+
+      const selection = await selectManagedAutoMemoryForgetCandidates(
+        projectRoot,
+        'overflow-zephyr-7040',
+      );
+      expect(selection.matches.map((match) => match.filePath)).toContain(
+        targetPath,
+      );
+
+      await forgetManagedAutoMemoryMatches(projectRoot, selection.matches);
+      await expect(fs.access(targetPath)).rejects.toThrow();
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 });
