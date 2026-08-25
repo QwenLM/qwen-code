@@ -448,7 +448,6 @@ export const legacyFilenames = [
   'useIdeTrustListener',
   'useInitializationAuthError',
   'useInputHistory',
-  'useInputHistoryStore',
   'useKeypress',
   'useKittyKeyboardProtocol',
   'useLaunchEditor',
