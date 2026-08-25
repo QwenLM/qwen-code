@@ -14,8 +14,10 @@ import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
+import { FindingsDisplay } from '../FindingsDisplay.js';
 import type {
   TodoResultDisplay,
+  FindingsResultDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
@@ -175,6 +177,7 @@ function sliceTextForMaxHeight(
 type DisplayRendererResult =
   | { type: 'none' }
   | { type: 'todo'; data: TodoResultDisplay }
+  | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'advisor'; data: AdvisorReviewDisplay }
   | { type: 'string'; data: string }
@@ -215,6 +218,19 @@ const useResultDisplayRenderer = (
       return {
         type: 'todo',
         data: resultDisplay as TodoResultDisplay,
+      };
+    }
+
+    // Check for FindingsResultDisplay
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'findings_list'
+    ) {
+      return {
+        type: 'findings',
+        data: resultDisplay as FindingsResultDisplay,
       };
     }
 
@@ -955,6 +971,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
               <TodoResultRenderer data={effectiveDisplayRenderer.data} />
+            )}
+            {effectiveDisplayRenderer.type === 'findings' && (
+              <FindingsDisplay data={effectiveDisplayRenderer.data} />
             )}
             {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer
