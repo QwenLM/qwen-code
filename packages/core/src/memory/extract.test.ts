@@ -19,14 +19,14 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
-import { getCacheSafeParamsSessionId } from '../utils/forkedAgent.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
 }));
 
-vi.mock('../utils/forkedAgent.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../utils/forkedAgent.js')>()),
+vi.mock('../agents/forkedAgent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../agents/forkedAgent.js')>()),
   getCacheSafeParamsSessionId: vi.fn(),
 }));
 

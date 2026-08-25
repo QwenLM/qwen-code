@@ -193,6 +193,55 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
   });
 
+  it('routes a findings_list result to the findings renderer', () => {
+    // Pins the ToolMessage discriminator itself: FindingsDisplay has its own
+    // render tests, but without this the routing branch could be removed and
+    // every test would stay green (the display would fall through to the
+    // JSON-string path, which never joins file and line as `file:line`).
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReportFindings"
+        resultDisplay={{
+          type: 'findings_list',
+          level: 'high',
+          findings: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              confidence: 'high',
+              file: 'src/foo.ts',
+              line: 42,
+              // shortSummary differs from summary so this also pins that the
+              // routed renderer shows the compact label, not the summary.
+              summary:
+                'the provider returns the wrong value on every cold-cache lookup',
+              shortSummary: 'cold-cache wrong return',
+              failureScenario: 'first call after start returns undefined',
+            },
+            {
+              severity: 'Suggestion',
+              confidence: 'low',
+              file: 'src/bar.ts',
+              summary: 'the helper is duplicated between bar.ts and baz.ts',
+              shortSummary: 'duplicated helper',
+              failureScenario: 'two copies drift',
+            },
+          ],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('src/foo.ts:42');
+    expect(output).toContain('cold-cache wrong return');
+    expect(output).toContain('(low confidence)');
+    expect(output).not.toContain('"findings"'); // not the JSON fallback
+    expect(output.replace(/\s+/g, ' ')).not.toContain(
+      'wrong value on every cold-cache lookup',
+    );
+  });
+
   it('renders inline images returned by a tool', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage

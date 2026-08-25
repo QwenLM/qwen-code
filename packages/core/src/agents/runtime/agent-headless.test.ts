@@ -36,7 +36,7 @@ import {
   normalizeModelToolCallIds,
 } from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import {
@@ -74,9 +74,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     createContentGenerator: vi.fn().mockResolvedValue({
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     }),
     createContentGeneratorConfig: vi.fn().mockReturnValue({
       model: DEFAULT_QWEN_MODEL,
@@ -92,7 +90,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../utils/environmentContext.js', () => ({
+vi.mock('../../core/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [

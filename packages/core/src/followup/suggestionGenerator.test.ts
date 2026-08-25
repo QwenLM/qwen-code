@@ -28,9 +28,9 @@ vi.mock('../utils/sideQuery.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
+vi.mock('../agents/forkedAgent.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/forkedAgent.js')>();
+    await importOriginal<typeof import('../agents/forkedAgent.js')>();
   return {
     ...actual,
     getCacheSafeParams: mockGetCacheSafeParams,
