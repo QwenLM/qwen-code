@@ -13,9 +13,7 @@ const MAX_MODEL_ID_LENGTH = 256;
 // The wizard joins ids with commas and renders them raw, so a served id with
 // a comma, control byte, or invisible format character would split into bogus
 // models or poison the TUI.
-const UNSAFE_MODEL_ID_CHARS =
-  // eslint-disable-next-line no-control-regex -- control bytes are exactly what this rejects
-  /[,\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
+const UNSAFE_MODEL_ID_CHARS = /[,\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 interface DiscoverProviderModelsOptions {
   baseUrl: string;

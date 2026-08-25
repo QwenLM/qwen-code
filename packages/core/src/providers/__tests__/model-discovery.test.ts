@@ -119,12 +119,34 @@ describe('discoverProviderModels', () => {
           { id: 'soft\u00adhyphen' },
           { id: 'a\ufeffb' },
           { id: 'qwen\u20663' },
+          { id: 'line\u2028sep' },
+          { id: 'para\u2029sep' },
+          { id: 'arabic\u061cmark' },
+          { id: 'mongolian\u180evs' },
         ],
       }),
     );
 
     await expect(discoverProviderModels(options)).resolves.toEqual([
       { id: 'qwen3.7-plus' },
+    ]);
+  });
+
+  it('skips ids with C1 control bytes', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'csi\u009b31m' },
+          { id: 'nel\u0085line' },
+          { id: 'dcs\u0090string' },
+          { id: 'st\u009cterm' },
+          { id: 'good-model' },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'good-model' },
     ]);
   });
 
@@ -154,7 +176,7 @@ describe('discoverProviderModels', () => {
   });
 
   it.each([
-    response({}, 401),
+    response({ data: [{ id: 'model-a' }] }, 401),
     {
       kind: 'cross-host-redirect' as const,
       originalUrl: 'https://example.com/v1/models',
