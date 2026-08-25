@@ -29,6 +29,19 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+// Managed auto-memory is keyed by the same sanitized cwd as the
+// snapshot entries (memory/paths.ts getAutoMemoryRoot), so every
+// session that ran extraction leaves its scaffold inside the entry.
+// Mirrors AUTO_MEMORY_DIRNAME / AUTO_MEMORY_METADATA_FILENAME /
+// AUTO_MEMORY_EXTRACT_CURSOR_FILENAME — kept literal here because
+// memory/paths.js imports Storage (circular). consolidation.lock is
+// deliberately NOT allowed: a present lock means an in-flight or
+// crashed consolidation, and the sweep fallback covers both.
+const AUTO_MEMORY_SCAFFOLD_DIR = 'memory';
+const AUTO_MEMORY_SCAFFOLD_FILES = new Set([
+  'meta.json',
+  'extract-cursor.json',
+]);
 
 function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
   const relativePath = path.relative(parentPath, childPath);
@@ -1012,9 +1025,10 @@ export class Storage {
 
   /**
    * True when the entry contains nothing but this session's own
-   * artifacts. Entries are keyed by sanitized cwd, which collisions and
-   * concurrent sessions can share, so whole-entry deletion at shutdown
-   * must be gated on exclusive ownership. Any subdirectory (including
+   * artifacts plus the project-scoped auto-memory scaffold. Entries
+   * are keyed by sanitized cwd, which collisions and concurrent
+   * sessions can share, so whole-entry deletion at shutdown must be
+   * gated on exclusive ownership. Any other subdirectory (including
    * `chats/archive/`) is treated as foreign by design: the shutdown
    * path is the fast path, and such entries simply fall back to the
    * grace-gated startup sweep.
@@ -1036,6 +1050,19 @@ export class Storage {
       // marked entry must still pass this guard or the shutdown leg
       // bails on exactly the entries another session's sweep touched.
       if (entry.name === Storage.ORPHAN_MARKER_FILE) continue;
+      // The per-project auto-memory scaffold shares this directory by
+      // construction (same sanitized-cwd key); headless sessions that
+      // ran extraction would otherwise never reach the deletion leg —
+      // precisely the scripted-usage population of issue #7906. It is
+      // project-scoped and disposable with the entry, like the sweep
+      // already treats it.
+      if (
+        entry.name === AUTO_MEMORY_SCAFFOLD_DIR
+          ? entry.isDirectory()
+          : !entry.isDirectory() && AUTO_MEMORY_SCAFFOLD_FILES.has(entry.name)
+      ) {
+        continue;
+      }
       if (entry.name !== 'chats' || !entry.isDirectory()) return false;
     }
     let files: string[];

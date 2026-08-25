@@ -1341,6 +1341,45 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       );
       expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
     });
+
+    it('accepts the auto-memory scaffold left by extracted sessions (F1)', () => {
+      // Managed auto-memory is keyed by the same sanitized cwd as the
+      // snapshot entry, so every headless session that ran extraction
+      // leaves memory/ + meta.json + extract-cursor.json at the entry
+      // top level. Without accepting them the shutdown deletion leg
+      // never fires for exactly the scripted-usage sessions of issue
+      // #7906.
+      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'memscaf-'));
+      actualFs.mkdirSync(path.join(dir, 'chats'));
+      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
+      actualFs.mkdirSync(path.join(dir, 'memory'));
+      actualFs.writeFileSync(path.join(dir, 'memory', 'preferences.md'), '');
+      actualFs.writeFileSync(path.join(dir, 'meta.json'), '{}');
+      actualFs.writeFileSync(path.join(dir, 'extract-cursor.json'), '{}');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
+
+      // The consolidation lock is NOT part of the accepted scaffold:
+      // it signals an in-flight or crashed dream, and the sweep
+      // fallback covers both.
+      actualFs.writeFileSync(path.join(dir, 'consolidation.lock'), '');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+      actualFs.rmSync(path.join(dir, 'consolidation.lock'));
+
+      // Name-only matches are not enough: the scaffold names must
+      // carry the right file kind.
+      actualFs.rmSync(path.join(dir, 'meta.json'));
+      actualFs.mkdirSync(path.join(dir, 'meta.json'));
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+      actualFs.rmSync(path.join(dir, 'meta.json'), { recursive: true });
+      actualFs.rmSync(path.join(dir, 'memory'), { recursive: true });
+      actualFs.writeFileSync(path.join(dir, 'memory'), '');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+      actualFs.rmSync(path.join(dir, 'memory'));
+
+      // Anything else foreign still fails the guard.
+      actualFs.writeFileSync(path.join(dir, 'other-session.txt'), '');
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
+    });
   });
 
   it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {
