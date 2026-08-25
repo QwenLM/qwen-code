@@ -403,6 +403,7 @@ export function useQueuedSubmissionDrain({
     goalQueueRevision: number;
     streamingState: StreamingState;
     isProcessing: boolean;
+    submissionSettledRevision: number;
   } | null>(null);
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
@@ -415,7 +416,11 @@ export function useQueuedSubmissionDrain({
         pendingSubmissionCount <= admissionFailure.pendingSubmissionCount &&
         goalQueueRevision === admissionFailure.goalQueueRevision &&
         streamingState === admissionFailure.streamingState &&
-        isProcessing === admissionFailure.isProcessing
+        isProcessing === admissionFailure.isProcessing &&
+        // A settle ends the turn the failed submission could not join;
+        // without this an idle session parks the restored entry forever
+        // while its sender holds a live 'delivered' receipt.
+        submissionSettledRevision === admissionFailure.submissionSettledRevision
       ) {
         return;
       } else {
@@ -459,6 +464,7 @@ export function useQueuedSubmissionDrain({
         goalQueueRevision,
         streamingState,
         isProcessing,
+        submissionSettledRevision,
       };
     };
     let request: Promise<void>;

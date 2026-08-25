@@ -1775,19 +1775,37 @@ describe('AppContainer State Management', () => {
         true,
       );
 
+      // The guard holds while nothing has settled or changed: a failed
+      // admission must not hot-loop pop/restore/pop on its own re-renders.
+      rerender({
+        pendingSubmissionCount: 1,
+        submissionSettledRevision: 0,
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledOnce();
+
+      // The blocking turn settling releases exactly one retry.
+      rerender({
+        pendingSubmissionCount: 1,
+        submissionSettledRevision: 1,
+      });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+
+      // The second failure re-arms the guard at the new revision: no
+      // loop without a further settle.
       rerender({
         pendingSubmissionCount: 1,
         submissionSettledRevision: 1,
       });
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      expect(submitQuery).toHaveBeenCalledOnce();
+      expect(submitQuery).toHaveBeenCalledTimes(2);
 
       synchronousPendingCount = 2;
       rerender({
         pendingSubmissionCount: 2,
         submissionSettledRevision: 1,
       });
-      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(3));
     });
 
     it('submits a peer submission on the preprocessing-free Teammate path', async () => {
@@ -1963,13 +1981,18 @@ describe('AppContainer State Management', () => {
       });
       expect(submitQuery).toHaveBeenCalledTimes(1);
 
-      // The restore must settle like a failed admission: the entry is
-      // back on the queue, but the drain must not immediately re-pop
-      // it into another doomed turn.
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 1 });
+      // The guard holds until the failed turn settles: the entry is
+      // back on the queue, but the drain must not immediately re-pop it
+      // into a turn while the cancelled one is still settling.
+      rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 0 });
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
       expect(submitQuery).toHaveBeenCalledTimes(1);
+
+      // Once the turn settles the restored envelope drains again —
+      // parking it until unrelated queue activity is a silent deadlock
+      // for a sender holding a live 'delivered' receipt.
+      rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 1 });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
     });
 
     it('renders the peer notification once across failed-admission retries', async () => {
