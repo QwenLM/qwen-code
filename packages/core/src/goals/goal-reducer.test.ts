@@ -1094,6 +1094,7 @@ describe('token budget transitions', () => {
       tokensUsed: 1_200,
       tokenBudget: 2_200,
       revision: 1,
+      evidenceCursor: { recordId: 'r-100' },
     });
     expect(resumed?.lastReason).toBeUndefined();
     expect(resumed?.limitKind).toBeUndefined();
