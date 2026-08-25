@@ -1109,9 +1109,8 @@ describe('git extension helpers', () => {
               destination,
             ),
           ).resolves.toBe(fallbackSha);
-          // The symlink survives extraction as a symlink rather than being
-          // flattened into a copy, so the installed extension keeps the
-          // repository's own file semantics.
+          // The extracted tree preserves the repository symlink for the
+          // format converter and installer to process.
           const installedLink = path.join(destination, 'AGENTS.md');
           expect((await fs.lstat(installedLink)).isSymbolicLink()).toBe(true);
           expect(await fs.readlink(installedLink)).toBe('CLAUDE.md');

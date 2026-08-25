@@ -558,11 +558,19 @@ describe('extension tests', () => {
       ).toBe(false);
     });
 
-    it('installs an anonymous public GitHub extension through the old-Git archive fallback', async () => {
+    it('installs a superpowers-style Gemini extension through the old-Git archive fallback', async () => {
       mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
       mockDownloadPublicGitHubArchiveFallback.mockImplementation(
         async (_metadata: ExtensionInstallMetadata, destination: string) => {
-          writeExtractedExtension(destination, 'old-git-extension');
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({ name: 'old-git-extension', version: '1.0.0' }),
+          );
+          fs.writeFileSync(path.join(destination, 'CLAUDE.md'), '# agents\n');
+          if (process.platform !== 'win32') {
+            fs.symlinkSync('CLAUDE.md', path.join(destination, 'AGENTS.md'));
+          }
           return '0123456789abcdef0123456789abcdef01234567';
         },
       );
@@ -581,7 +589,13 @@ describe('extension tests', () => {
         type: 'git',
         source: 'https://github.com/obra/superpowers',
         gitCommit: '0123456789abcdef0123456789abcdef01234567',
+        originSource: 'Gemini',
       });
+      if (process.platform !== 'win32') {
+        const installedAgents = path.join(installed.path, 'AGENTS.md');
+        expect(fs.lstatSync(installedAgents).isFile()).toBe(true);
+        expect(fs.readFileSync(installedAgents, 'utf8')).toBe('# agents\n');
+      }
       // Releases stay preferred over the archive fallback on older Git.
       expect(mockDownloadFromGitHubRelease).toHaveBeenCalled();
       expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalledWith(

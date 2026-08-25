@@ -417,8 +417,27 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await expect(assertDirectorySymlinksAreSafe(cycleCase)).rejects.toThrow(
           'unsupported link entry',
         );
+
+        const chainCase = path.join(root, 'chain-case');
+        await fs.mkdir(chainCase);
+        await fs.writeFile(path.join(chainCase, 'target'), 'content');
+        await fs.symlink('target', path.join(chainCase, 'middle'));
+        await fs.symlink('middle', path.join(chainCase, 'link'));
+        await expect(assertDirectorySymlinksAreSafe(chainCase)).rejects.toThrow(
+          'unsupported link entry',
+        );
       },
     );
+
+    it('honors cancellation before scanning the extracted tree', async () => {
+      const controller = new AbortController();
+      const reason = new Error('install cancelled');
+      controller.abort(reason);
+
+      await expect(
+        assertDirectorySymlinksAreSafe(root, controller.signal),
+      ).rejects.toBe(reason);
+    });
 
     it('counts materialized symlink targets toward the expanded-size limit', async () => {
       const archive = path.join(root, 'materialized-size.tar');

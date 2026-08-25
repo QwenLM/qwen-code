@@ -256,13 +256,16 @@ export async function assertTarArchiveLinksAreSafe(
 
 export async function assertDirectorySymlinksAreSafe(
   root: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   const resolvedRoot = path.resolve(root);
   const realRoot = await fs.promises.realpath(root);
   const visit = async (directory: string): Promise<void> => {
     for (const entry of await fs.promises.readdir(directory, {
       withFileTypes: true,
     })) {
+      signal?.throwIfAborted();
       const entryPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(entryPath);
@@ -273,19 +276,18 @@ export async function assertDirectorySymlinksAreSafe(
         path.dirname(entryPath),
         await fs.promises.readlink(entryPath),
       );
-      let realTarget: string | undefined;
+      let targetIsSafe = false;
       try {
-        realTarget = await fs.promises.realpath(targetPath);
+        if (isContainedPath(resolvedRoot, targetPath)) {
+          const targetStat = await fs.promises.lstat(targetPath);
+          const realTarget = await fs.promises.realpath(targetPath);
+          targetIsSafe =
+            targetStat.isFile() && isContainedPath(realRoot, realTarget);
+        }
       } catch {
-        realTarget = undefined;
+        targetIsSafe = false;
       }
-      const targetStat =
-        isContainedPath(resolvedRoot, targetPath) &&
-        realTarget &&
-        isContainedPath(realRoot, realTarget)
-          ? await fs.promises.stat(realTarget)
-          : undefined;
-      if (!targetStat?.isFile()) {
+      if (!targetIsSafe) {
         throw new Error(
           `Tar archive contains unsupported link entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
         );

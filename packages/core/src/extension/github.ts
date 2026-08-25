@@ -1015,7 +1015,7 @@ export async function extractArchiveFile(
   await flattenSingleExtensionDirectory(destination, archivePath);
   signal?.throwIfAborted();
   if (options.allowContainedSymlinks === true) {
-    await assertDirectorySymlinksAreSafe(destination);
+    await assertDirectorySymlinksAreSafe(destination, signal);
   }
   signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);
