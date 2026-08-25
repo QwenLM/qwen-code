@@ -311,6 +311,44 @@ describe('CommandService', () => {
     expect(deployCommand?.kind).toBe(CommandKind.FILE);
   });
 
+  it('keeps namespaced extension-skill keys and numeric-suffixes collisions', async () => {
+    const userCommand = createMockCommand('demo:chat', CommandKind.FILE);
+    const collidingSkill = {
+      ...createMockCommand('demo:chat', CommandKind.SKILL),
+      extensionName: 'demo',
+      modelInvocable: true,
+    };
+    const cleanSkill = {
+      ...createMockCommand('other:tool', CommandKind.SKILL),
+      extensionName: 'other',
+      modelInvocable: true,
+    };
+
+    const service = await CommandService.create(
+      [new MockCommandLoader([userCommand, collidingSkill, cleanSkill])],
+      new AbortController().signal,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(3);
+
+    // The user command keeps the contested name.
+    const userOwner = commands.find((cmd) => cmd.name === 'demo:chat');
+    expect(userOwner?.kind).toBe(CommandKind.FILE);
+    expect(userOwner?.extensionName).toBeUndefined();
+
+    // The colliding skill is suffixed, not re-prefixed (`demo.demo:chat`
+    // would be wrong).
+    const renamedSkill = commands.find((cmd) => cmd.extensionName === 'demo');
+    expect(renamedSkill?.name).toBe('demo:chat1');
+    expect(renamedSkill?.kind).toBe(CommandKind.SKILL);
+
+    // A non-colliding namespaced key passes through untouched.
+    const cleanResult = commands.find((cmd) => cmd.name === 'other:tool');
+    expect(cleanResult?.kind).toBe(CommandKind.SKILL);
+    expect(cleanResult?.extensionName).toBe('other');
+  });
+
   it('should handle secondary conflicts when renaming extension commands', async () => {
     // User has both /deploy and /gcp.deploy commands
     const userCommand1 = createMockCommand('deploy', CommandKind.FILE);

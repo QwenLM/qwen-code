@@ -326,6 +326,27 @@ describe('SkillCommandLoader', () => {
   });
 
   describe('extension skills', () => {
+    it('carries the owning extension on the command for registry resolution', async () => {
+      const skill = makeSkill({
+        name: 'rust:never-type',
+        level: 'extension',
+        extensionName: 'rust',
+        description: 'Rust never type',
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'extension' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands[0].name).toBe('rust:never-type');
+      expect(commands[0].extensionName).toBe('rust');
+      expect(commands[0].skillDetail?.name).toBe('rust:never-type');
+      expect(commands[0].sourceLabel).toBe('Extension: rust');
+    });
+
     it('should be modelInvocable when description is present', async () => {
       const skill = makeSkill({
         level: 'extension',

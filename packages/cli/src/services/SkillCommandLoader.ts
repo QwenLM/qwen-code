@@ -140,6 +140,11 @@ export class SkillCommandLoader implements ICommandLoader {
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          // Marks this as an extension command so CommandService can
+          // disambiguate duplicate names instead of overwriting them.
+          ...(isExtension && skill.extensionName
+            ? { extensionName: skill.extensionName }
+            : {}),
           skillDetail: {
             name: skill.name,
             description: skill.description,

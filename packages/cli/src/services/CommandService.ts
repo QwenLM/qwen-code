@@ -5,6 +5,7 @@
  */
 
 import type { SlashCommand, ExecutionMode } from '../ui/commands/types.js';
+import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { filterCommandsForMode } from './commandUtils.js';
@@ -38,8 +39,11 @@ export class CommandService {
    * fully constructed `CommandService` instance.
    *
    * Conflict resolution:
-   * - Extension commands that conflict with existing commands are renamed to
-   *   `extensionName.commandName`
+   * - Extension skills arrive pre-namespaced as `<extension>:<name>` from the
+   *   SkillManager. Collisions on that full name get numeric suffixes
+   *   (`<extension>:<name>1`)
+   * - Other extension commands that conflict with existing commands are renamed
+   *   to `extensionName.commandName`
    * - Non-extension commands (built-in, user, project) override earlier commands
    *   with the same name based on loader order
    *
@@ -74,18 +78,29 @@ export class CommandService {
     for (const cmd of allCommands) {
       let finalName = cmd.name;
 
-      // Extension commands get renamed if they conflict with existing commands
       if (cmd.extensionName && commandMap.has(cmd.name)) {
-        let renamedName = `${cmd.extensionName}.${cmd.name}`;
-        let suffix = 1;
+        if (cmd.kind === CommandKind.SKILL) {
+          // Skill commands already carry their extension prefix, so adding
+          // another would be wrong. Suffix a number instead.
+          let suffix = 1;
+          while (commandMap.has(`${cmd.name}${suffix}`)) {
+            suffix++;
+          }
+          finalName = `${cmd.name}${suffix}`;
+        } else {
+          // Non-skill extension commands get renamed to
+          // `extensionName.commandName`.
+          let renamedName = `${cmd.extensionName}.${cmd.name}`;
+          let suffix = 1;
 
-        // Keep trying until we find a name that doesn't conflict
-        while (commandMap.has(renamedName)) {
-          renamedName = `${cmd.extensionName}.${cmd.name}${suffix}`;
-          suffix++;
+          // Keep trying until we find a name that doesn't conflict
+          while (commandMap.has(renamedName)) {
+            renamedName = `${cmd.extensionName}.${cmd.name}${suffix}`;
+            suffix++;
+          }
+
+          finalName = renamedName;
         }
-
-        finalName = renamedName;
       }
 
       commandMap.set(finalName, {
