@@ -2726,8 +2726,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // update: a never-running launch must not emit a running frame whose
         // authoritative executionMode ('background') contradicts the blocked
         // result frame, which carries no executionMode and therefore falls
-        // back to the frozen legacy heuristic (foreground for a
-        // working_dir-bearing call).
+        // back to the frozen legacy heuristic (background when the args carry
+        // explicit run_in_background: true — a named launch that falls through
+        // without an active team — otherwise foreground for a working_dir-bearing
+        // call).
         return this.buildSpawnBlockedResult(
           'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
           'working_dir is incompatible with a background agent',
