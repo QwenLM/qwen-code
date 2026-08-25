@@ -77,6 +77,7 @@ import {
   LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
   LEDGER_MAX_TITLE,
+  claimLocator,
   isLedgerClosure,
   isLedgerFinding,
   isStandInName,
@@ -1689,24 +1690,34 @@ export function composeReview(
   // rule the anchor applies, one consumer down, with the SAME legs the
   // sibling `openCriticals` gate applies to the identical inference: a
   // PARTIAL previous list (a vanished id may be the byte budget, not a
-  // ruling), a diff-only round that could not rule, a round that publicly
-  // answered "cannot tell" on a Critical it declined to rule, and a
-  // PURE-FOREIGN list whose entries are a stranger's, not a shortened
-  // version of this account's (#9526). In all of them the mint stays
-  // silent rather than guesses — thin history stays silent.
+  // ruling) and a PURE-FOREIGN list whose entries are a stranger's, not a
+  // shortened version of this account's (#9526). The anchor's fail-closed
+  // predicate — `anchorFailsClosed(cappedBy, scopeUnproven, …)` — binds the
+  // closures too, at the diagnosis and the marker where `cappedBy` and
+  // `scopeUnproven` are known (this function returns before the body
+  // computes them): a closure is the inference "ruled fixed", and a round
+  // that could not show it READ the diff — or that publicly answered
+  // "cannot tell" on a Critical — cannot support it. In all of them the
+  // mint stays silent rather than guesses — thin history stays silent.
   const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
   // Claim identity, not id identity: a claim this round RE-POSTS without a
   // carried id — a gate Critical regenerated from the report, a model
-  // re-post the readback lost — gets a FRESH id in the build, so the
+  // re-post the readback lost, a floor-stripped Suggestion that re-voiced
+  // it — gets a FRESH id in the build (or no build entry at all), so the
   // original is absent from `postedIds` while the claim still stands. Read
   // absent-by-id alone, a still-standing blocker mints a closure every
   // round of its life, in the very body that re-posts it open. So the join
   // also runs on the locator projection the gate-repost dedup uses — over
   // the SAME build the marker stamps, so the record and the mint cannot
-  // disagree about what closed.
+  // disagree about what closed. Both sides project from the WRITE-CAPPED
+  // title: the previous list's titles were sliced to LEDGER_MAX_TITLE at
+  // write time (and again at read), so a build-side projection over the
+  // uncapped title never meets a previous locator that outruns the cap —
+  // and every entry side below caps BEFORE projecting, the serializer's
+  // order, never after.
   const standingClaims = new Set(
     (postedLedger?.findings ?? [])
-      .map((g) => claimLocator(g.title))
+      .map((g) => claimLocator(g.title.slice(0, LEDGER_MAX_TITLE)))
       .filter((k) => k !== ''),
   );
   // The deferral channel's relocated Criticals re-post their claim under a
@@ -1724,14 +1735,24 @@ export function composeReview(
       .filter((e) => e.severity === 'Critical')
       .map(
         (e) =>
-          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title).slice(0, LEDGER_MAX_TITLE)}`,
+          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title.slice(0, LEDGER_MAX_TITLE))}`,
       ),
+  );
+  // The reroute output is a third channel the joins above are blind to: a
+  // floor-stripped Suggestion that RE-VOICED a previous Critical leaves the
+  // posting set (no build entry) and is not a typed deferral — its claim
+  // rides only the deferral line this render prints. Project it the same
+  // way the relocated entries are projected, so the re-voiced claim still
+  // stands for the mint.
+  const reroutedClaims = new Set(
+    reroute.entries.map(
+      (e) =>
+        `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title.slice(0, LEDGER_MAX_TITLE))}`,
+    ),
   );
   const closuresThisRound: LedgerClosure[] =
     carriedWorkList.complete &&
     postedLedger !== null &&
-    input.contextUnavailable !== true &&
-    (input.cannotTellCriticals?.length ?? 0) === 0 &&
     !(prevFacts.foreign === true && prevFacts.merged !== true)
       ? prevFacts.findings
           .filter(
@@ -1739,7 +1760,8 @@ export function composeReview(
               f.sev === 'C' &&
               !postedIds.has(f.id) &&
               !standingClaims.has(claimLocator(f.title)) &&
-              !relocatedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`),
+              !relocatedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`) &&
+              !reroutedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`),
           )
           .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
       : [];
@@ -2410,8 +2432,11 @@ function ledgerMarkerFor(
   /**
    * The closures the caller minted over the recovered previous list. The
    * marker carries them so the next round's sentinel reads one generation
-   * back (#9905); advisory data — it rides fail-closed rounds like the
-   * findings do, and the serializer's cascade sheds it before the anchor.
+   * back (#9905). Advisory data, but NOT like the findings: a closure is
+   * the inference "ruled fixed", and a fail-closed round supports no such
+   * inference — a vanished id may sit in the territory nobody re-read — so
+   * the field rides only when the anchor's own predicate lets the anchor
+   * ride, and the serializer's cascade sheds it before the anchor.
    */
   closed: LedgerClosure[],
   churnRounds: number,
@@ -2531,7 +2556,10 @@ function ledgerMarkerFor(
         : undefined;
     return serializeLedger({
       ...postedLedger,
-      ...(closed.length > 0 ? { closed } : {}),
+      // Gated by the SAME predicate the diagnosis applies (composeReviewBody):
+      // one shared decision, evaluated once per consumer, over the one set
+      // of cap inputs the caller passes both.
+      ...(!failClosed && closed.length > 0 ? { closed } : {}),
       // The pair falls together: a sha with no model reads to the next
       // round as a pre-field marker rather than as "nobody certified this".
       ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
@@ -3620,7 +3648,13 @@ function composeReviewBody(
         posted: postedInline,
         prev: convergence.prev,
         drafts: draftedFindingsOf(input.draftedComments),
-        ...(convergence.closuresThisRound === undefined
+        // The fail-closed leg the mint's comment names: cappedBy and
+        // scopeUnproven are only known here, after the body's caps were
+        // computed, so this is where the gate applies for the note — the
+        // marker applies the same predicate for the record (ledgerMarkerFor),
+        // and the two cannot disagree about what closed.
+        ...(convergence.closuresThisRound === undefined ||
+        anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly)
           ? {}
           : { closuresThisRound: convergence.closuresThisRound }),
         ...(convergence.thisRoundFindings === undefined
@@ -5641,23 +5675,6 @@ export function withoutGateReposts(
   const regenerated = new Set(gateCriticals.map(claimLocator).filter((k) => k));
   if (regenerated.size === 0) return [...ownBodyCriticals];
   return ownBodyCriticals.filter((c) => !regenerated.has(claimLocator(c)));
-}
-
-/**
- * The claim LOCATOR of a work-list entry or a built finding's title: the
- * carried id stripped through the ledger's OWN readback, the part before
- * the first ' — ' kept, backticks gone. Stated once because two consumers
- * join claims by it — the gate-repost dedup above and the closure mint
- * (#9905), which must not call a claim closed while the SAME build
- * re-posts it under a fresh id — and a second spelling is the drift class
- * `lib/ledger.ts`'s header exists to prevent.
- */
-function claimLocator(entry: string): string {
-  const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
-  const dash = claim.indexOf(' — ');
-  // Backticks stripped: the gate renders the path through `mdField`, and a
-  // re-post that types the locator plainly names the same finding.
-  return (dash === -1 ? claim : claim.slice(0, dash)).replace(/`/g, '').trim();
 }
 
 export function scriptLintGate(planPath: string): {

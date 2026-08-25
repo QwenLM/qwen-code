@@ -721,13 +721,13 @@ describe('ledger marker — the closure list (#9905)', () => {
       ...LEDGER,
       closed: [
         { r: 2, id: 'R1-1', f: 'src/a.ts' },
-        { r: 1, id: 'R1-2', f: 'src/c.ts' },
+        { r: 2, id: 'R1-2', f: 'src/c.ts' },
       ],
     });
     const back = parseLedger(`body\n\n${marker}`)!;
     expect(back.closed).toEqual([
       { r: 2, id: 'R1-1', f: 'src/a.ts' },
-      { r: 1, id: 'R1-2', f: 'src/c.ts' },
+      { r: 2, id: 'R1-2', f: 'src/c.ts' },
     ]);
     expect(back.dropped).toBeUndefined();
     expect(back.findings).toHaveLength(2);
@@ -779,9 +779,14 @@ describe('ledger marker — the closure list (#9905)', () => {
         '{"r":2,"id":"[x](http://evil.example)","f":"a.ts"},' +
         '{"r":2,"id":"@mention ping","f":"a.ts"},' +
         '{"r":2,"id":"R1-1","f":""},' +
+        '{"r":2,"id":"R2-1","f":"b.ts"},' +
         '{"r":2,"id":"R1-2","f":"a.ts"}' +
         ']} -->',
     )!;
+    // `R2-1` at r=2 spells a finding closed the very round it was minted —
+    // the pipeline's own writer cannot produce that shape (a closure at
+    // round r closes a finding OPEN in round r-1's work list), so the
+    // admission test refuses it like the other planted tokens.
     expect(back.closed).toEqual([{ r: 2, id: 'R1-2', f: 'a.ts' }]);
   });
 

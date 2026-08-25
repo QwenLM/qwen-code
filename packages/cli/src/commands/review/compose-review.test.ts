@@ -33,6 +33,7 @@ import {
   LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
   LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
   LEDGER_MAX_VOLUME,
   parseLedger,
   serializeLedger,
@@ -13194,18 +13195,24 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   // file carries the previous round's minted closures, this round closes
   // another same-file Critical and posts a fresh one — the note names the
   // subsystem and the chain on the body, and the marker carries this
-  // round's closures forward.
+  // round's closures forward. These run over COVERED plans: the mint now
+  // obeys the fail-closed predicate the anchor applies, so a round that
+  // cannot show it read the diff mints nothing — a bare plan here would
+  // hide every leg behind that one.
+  const coveredPrev = (prev: Record<string, unknown>) =>
+    coveredWithLedger({ v: 1, ...prev });
+
   it('emits the divergence note on the #9659 rebound shape, and carries the closures forward', () => {
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-      closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13229,15 +13236,15 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   });
 
   it('stays silent on the first rebound — one closure generation is normal', () => {
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13252,16 +13259,16 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   });
 
   it('mints no closures over a truncated previous list', () => {
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-      dropped: 2,
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        dropped: 2,
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13277,16 +13284,18 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // "cannot tell" on a Critical declined to rule on it — the id is absent
     // from the posting set by construction, but absence there is not
     // "ruled fixed". The sibling `openCriticals` gate withholds the same
-    // inference under the same state.
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-    });
+    // inference under the same state, and the anchor's fail-closed
+    // predicate — which this round engages via its cap — subsumes the leg
+    // at the marker and the diagnosis.
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13304,15 +13313,15 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // Leg two: a diff-only round could not re-read the context the previous
     // work list was ruled under, so a vanished id is not a ruling there
     // either — the same state the sibling gate cites `cannot-tell` beside.
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       contextUnavailable: true,
@@ -13324,21 +13333,53 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.closed).toBeUndefined();
   });
 
+  it('mints no closures on a fail-closed round — absence may be unread territory', () => {
+    // The anchor's fail-closed predicate binds the mint too: a closure is
+    // the inference "ruled fixed", and a round that cannot show it READ the
+    // whole diff cannot support that inference — the vanished id may be
+    // sitting in the territory nobody re-read. cappedBy/scopeUnproven are
+    // only known after the body is composed, so the gate applies where they
+    // are known — at the diagnosis and at the marker — which is where this
+    // assertion meets it. The bare plan this describe writes proves no
+    // coverage, which is exactly the unproven-scope shape.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+      closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.scopeUnproven).toBe(true);
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // …and the chain's THIS-round generation is gated with it: closedPrev
+    // alone never fires the note.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
   it('mints no closures over a PURE-FOREIGN previous list', () => {
     // Leg three (#9526): a list recovered from another account's marker,
     // NOT merged over this account's own, is a stranger's — its unreposted
     // Criticals are not rulings this account made, and minting closures
     // over them seeds the sentinel with a lineage this loop never produced.
-    sideFile({
-      round: 10,
-      foreign: true,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        foreign: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13354,17 +13395,17 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // by entry, so a vanished one WAS ruled. Over-tightening the leg to
     // `foreign !== true` would disarm the mint on exactly the merged rounds
     // the union exists to protect.
-    sideFile({
-      round: 10,
-      foreign: true,
-      merged: true,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        foreign: true,
+        merged: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13376,79 +13417,92 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     ]);
   });
 
-  it('mints no closure for a standing gate blocker re-minted under a fresh id', () => {
-    // Claim identity, not id identity. The gate's Critical renders
-    // path-first with no carried id, so `buildLedger` mints it a FRESH id
-    // every round while the claim stands: round 1 posted it as R1-1, round
-    // 2 re-derives it as R2-1, and R1-1 is absent from the posting set —
-    // read by id alone, the blocker mints a closure every round of its
-    // life, in the very body that re-posts it open (#9526's renumbering
-    // walk). The mint joins on the locator projection instead, sees the
-    // claim still standing in the SAME build, and stays silent.
-    const diffPath = join(dir, 'the.diff');
-    writeFileSync(
-      diffPath,
-      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
-      'utf8',
-    );
-    const diffHash = createHash('sha256')
-      .update(readFileSync(diffPath))
-      .digest('hex');
-    const gatePlan = join(dir, 'plan-gate.json');
-    writeFileSync(
-      gatePlan,
-      JSON.stringify({
-        prNumber: 8255,
-        worktreePath: '.qwen/tmp/review-pr-8255',
-        diffPathAbsolute: diffPath,
-      }),
-      'utf8',
-    );
-    writeFileSync(
-      join(dir, 'qwen-review-pr-8255-script-lint.json'),
-      JSON.stringify({
-        checked: [
+  it('mints no closure for a standing claim re-minted under a fresh id', () => {
+    // Claim identity, not id identity. A re-post that loses its carried id
+    // in the readback — the gate's regenerated blockers render path-first
+    // with no id (#9526's renumbering walk), a model re-post can drop it —
+    // gets a FRESH id in the build: round 10 posted the claim as R10-1,
+    // round 11 re-voices it as R11-1, and R10-1 is absent from the posting
+    // set. Read absent-by-id alone, the claim mints a closure every round
+    // of its life, in the very body that re-posts it open. The mint joins
+    // on the locator projection instead, sees the claim still standing in
+    // the SAME build, and stays silent.
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
           {
-            path: 'deploy.sh',
-            tool: 'shellcheck',
-            findings: [
-              {
-                line: 1,
-                code: 'SC2086',
-                level: 'info',
-                message: 'quote the variable',
-                inDiff: true,
-              },
-            ],
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'the standing claim',
           },
         ],
-        skipped: [],
-        errored: [],
-        deferred: [],
-        ok: false,
-        note: '',
-        diffHash,
       }),
-      'utf8',
-    );
-    const gateLine = scriptLintGate(gatePlan).criticals[0]!;
-    sideFile({
-      round: 1,
-      findings: [{ id: 'R1-1', sev: 'C', file: '(body)', title: gateLine }],
-    });
-    const r = composeReview({
-      planPath: gatePlan,
-      modelId: 'm',
-      criticalsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
       suggestionsInline: 0,
-      draftedComments: [],
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 3,
+          body: '**[Critical]** the standing claim',
+        },
+      ],
     });
-    // The blocker IS on the work list again — under this round's fresh id.
+    // The claim IS on the work list again — under this round's fresh id …
     const marker = parseLedger(r.body)!;
     expect(
-      marker.findings.some((f) => f.file === '(body)' && f.title === gateLine),
+      marker.findings.some(
+        (f) => f.id === 'R11-1' && f.title === 'the standing claim',
+      ),
     ).toBe(true);
-    // ...so it is NOT closed.
+    // … so it is NOT closed.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a standing claim whose locator outruns the title cap', () => {
+    // The cap-stage half of the claim-identity join: the PREVIOUS side's
+    // titles were sliced to LEDGER_MAX_TITLE at write time, so a claim
+    // whose locator exceeds the cap must be projected from the SAME
+    // capped form this round — projecting the uncapped build title misses
+    // the capped previous one, and the claim mints a closure in the very
+    // body that re-posts it. This is the gate blocker's shape — the script
+    // lint gate renders `path:line CODE — message [lint]`, and a deep
+    // path's locator prefix alone outruns the cap — reproduced here over
+    // a covered round, where the mint is not fail-closed and the join
+    // alone decides.
+    const longClaim = `claim whose locator outruns the cap ${'x'.repeat(60)}`;
+    expect(longClaim.length).toBeGreaterThan(LEDGER_MAX_TITLE);
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: longClaim },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 3, body: `**[Critical]** ${longClaim}` },
+      ],
+    });
+    expect(r.cappedBy).toEqual([]);
+    // The claim IS on the work list again — its title carrying the same
+    // write-time cap the previous marker's did …
+    const marker = parseLedger(r.body)!;
+    expect(
+      marker.findings.some(
+        (f) => f.title === longClaim.slice(0, LEDGER_MAX_TITLE),
+      ),
+    ).toBe(true);
+    // … so it is NOT closed.
     expect(marker.closed).toBeUndefined();
     expect(r.body).not.toContain('⚠️ Divergence:');
   });
@@ -13462,16 +13516,16 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // mints a closure on a claim this very body re-posts open. A round
     // later, the fabricated entry arms the sentinel over a lineage whose
     // first link never happened.
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
-        { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 0,
       suggestionsInline: 0,
       deferredSuggestions: [
@@ -13492,6 +13546,123 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
   });
 
+  it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {
+    // The floor reroute strips a drafted Suggestion that RE-VOICES a
+    // previous Critical back to the deferral channel: the claim leaves the
+    // posting set by construction, never reaches the build, and is absent
+    // from `input.deferredSuggestions` — every join the mint has on it is
+    // blind, and the absence mints a closure in the very body whose
+    // deferral list still carries the claim. The reroute output must fold
+    // into the standing-claim join like the typed channel does.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body: '**[Suggestion]** R10-1: claim X — now looks minor',
+        },
+      ],
+    });
+    // The reroute fired — the claim is gone from the posting set …
+    expect(r.floorEnforced).toEqual([1]);
+    expect(r.body).toContain('src/f.ts:5');
+    // … and still it mints no closure, while the genuinely vanished
+    // same-file Critical beside it does.
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    // The sentinel's lineage is exactly the true one — the re-voiced claim
+    // is NOT in the chain's second generation.
+    expect(r.body).toContain('R9-1 → R10-2 → R11-1');
+    expect(r.body).not.toContain('R10-1/R10-2');
+  });
+
+  it("names no re-minted re-post as the chain's fresh generation", () => {
+    // The fresh side's mirror of the mint's claim-identity join: a re-post
+    // whose readback lost the carried id is stamped with a FRESH id in the
+    // build, and the chain's fresh scan keyed on the id alone counts the
+    // still-standing claim as a new Critical — firing the divergence note
+    // over a claim the same body's work list says never left.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'gen 2' },
+          {
+            id: 'R10-3',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'the standing claim',
+          },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 9,
+          body: '**[Critical]** the standing claim',
+        },
+      ],
+    });
+    // The marker's mint already defends the standing claim …
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    // … and the chain reads the same evidence: its "fresh" generation is a
+    // re-mint, so the note stays silent.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a same-id re-post whose wording drifted', () => {
+    // The id-exact conjunct the locator joins cannot replace: a re-post
+    // that CARRIES its id keeps it in the build, but a redrafted claim
+    // line projects to a DIFFERENT locator — the claim-identity joins
+    // miss it, and only the id check keeps the still-standing entry out
+    // of the closures.
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 3,
+          body: '**[Critical]** R10-1: claim Y, restated with new wording',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.findings.some((f) => f.id === 'R10-1')).toBe(true);
+    expect(marker.closed).toBeUndefined();
+  });
+
   it('mints a closure only for the Critical half of a mixed work list', () => {
     // Suggestions are not tracked — Critical churn is the signal. Every
     // sibling fixture's work list is Critical-only, which left the mint's
@@ -13499,16 +13670,16 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // `--severity-floor critical` round that moved one out of the posting
     // set, would mint a closure, and two such rounds plus a fresh
     // same-file Critical would fire the note over Suggestion churn.
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-        { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+          { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13521,16 +13692,16 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   });
 
   it('mints nothing when only the Suggestion vanishes, and no note fires', () => {
-    sideFile({
-      round: 10,
-      findings: [
-        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
-        { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
-      ],
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+          { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [
@@ -13559,14 +13730,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       id: `R9-${i}`,
       f: 'src/a.ts',
     }));
-    sideFile({
-      round: 10,
-      findings: [{ id: 'R10-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
-      closed,
-    });
     const r = composeReview({
-      planPath: plan(),
-      modelId: 'm',
+      planPath: coveredPrev({
+        round: 10,
+        findings: [{ id: 'R10-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+        closed,
+      }),
+      env: ENV,
+      modelId: MODEL,
       criticalsInline: 1,
       suggestionsInline: 0,
       draftedComments: [

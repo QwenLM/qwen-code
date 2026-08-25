@@ -357,6 +357,22 @@ export const LEDGER_ID_READBACK = new RegExp(
  */
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
+/**
+ * The claim LOCATOR of a work-list entry or a built finding's title: the
+ * carried id stripped through the readback above, the part before the first
+ * ' — ' kept, backticks gone. Stated once because every consumer that joins
+ * claims by it — the gate-repost dedup, the closure mint (#9905), and the
+ * successor chain's fresh side — must project the SAME shape, and a second
+ * spelling is the drift class this module's header exists to prevent.
+ */
+export function claimLocator(entry: string): string {
+  const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
+  const dash = claim.indexOf(' — ');
+  // Backticks stripped: the gate renders the path through `mdField`, and a
+  // re-post that types the locator plainly names the same finding.
+  return (dash === -1 ? claim : claim.slice(0, dash)).replace(/`/g, '').trim();
+}
+
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
  *  the serializer so the write side is bounded, the parser so a hand-edited
@@ -770,7 +786,18 @@ export function isLedgerClosure(
   }
   const idRound = Number(e.id.slice(1).split('-')[0]);
   if (!Number.isSafeInteger(idRound)) return false;
-  return idRound >= 1 && idRound <= Math.min(markerRound, LEDGER_MAX_ROUND);
+  if (idRound < 1 || idRound > Math.min(markerRound, LEDGER_MAX_ROUND)) {
+    return false;
+  }
+  // The id must also be OLDER than the closure: a closure at round r
+  // records a finding still OPEN in round r-1's work list, so its mint
+  // round is strictly below r — equality is only possible at the round cap,
+  // where consecutive rounds re-stamp the same `R<cap>-*` space. The mint
+  // (compose-review) copies ids out of the recovered work list, so its own
+  // output cannot violate this; the cross-check binds the hand-edited and
+  // planted routes, where an `idRound >= r` entry seeds the chain join with
+  // a generation that never stood open.
+  return idRound < e.r || e.r >= LEDGER_MAX_ROUND;
 }
 
 /**

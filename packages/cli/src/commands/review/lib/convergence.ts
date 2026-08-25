@@ -32,6 +32,8 @@ import {
   LEDGER_ID_TOKEN,
   LEDGER_MAX_FILE,
   LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
+  claimLocator,
   isStandInName,
   type LedgerClosure,
   type LedgerFinding,
@@ -99,11 +101,12 @@ export interface DraftedFinding {
 
 /**
  * One subsystem whose Criticals keep regrowing (#9905): a file that closed
- * a Critical in EACH of the last two rounds — the previous marker's minted
- * closures and this round's — while posting a fresh Critical on it now.
- * That is the patch-and-regress shape: each fix grew the next Critical in
- * the same mechanism, which is a claim about the MECHANISM, not about any
- * one finding.
+ * Critical(s) in the previous round and again this round — the previous
+ * marker's minted closures (`r === round - 1`) and this round's
+ * (`r === round`) — while posting a fresh Critical on it now. That is the
+ * patch-and-regress shape: each fix grew the next Critical in the same
+ * mechanism, which is a claim about the MECHANISM, not about any one
+ * finding.
  */
 export interface SuccessorChain {
   /** The subsystem, named by the file every generation landed on. */
@@ -619,12 +622,26 @@ export function diagnoseConvergence(input: {
   const closedNow = input.closuresThisRound ?? [];
   const closedPrev = input.prev.closed ?? [];
   const thisRoundFindings = input.thisRoundFindings ?? [];
+  // The fresh side's claim-identity defense — the mint's mirror. A re-post
+  // whose readback lost the carried id is stamped with a FRESH id in the
+  // build (see `idFor`), so `birthRound === round` alone counts a
+  // still-standing claim as the chain's new generation — the note firing
+  // over a claim the same round's work list says never left. Join on the
+  // locator projection the mint uses, over the recovered previous list:
+  // PRESENT in it is evidence regardless of its completeness, and its
+  // titles are already write-capped, so the built side caps before
+  // projecting the way the serializer would.
   if (
     input.round >= 2 &&
     closedNow.length > 0 &&
     closedPrev.length > 0 &&
     thisRoundFindings.length > 0
   ) {
+    const standingPrevClaims = new Set(
+      input.prev.findings
+        .map((g) => claimLocator(g.title))
+        .filter((k) => k !== ''),
+    );
     const freshCriticalsByFile = new Map<string, string[]>();
     for (const f of thisRoundFindings) {
       if (f.sev !== 'C') continue;
@@ -635,6 +652,10 @@ export function diagnoseConvergence(input: {
       // The built id's round IS the first-reported round: a fresh finding
       // was stamped this round, a carried one keeps its original id.
       if (birthRound(f.id) !== input.round) continue;
+      // A re-mint of a claim still standing in the previous list is a
+      // re-post, not a new generation — see `standingPrevClaims` above.
+      const locator = claimLocator(f.title.slice(0, LEDGER_MAX_TITLE));
+      if (locator !== '' && standingPrevClaims.has(locator)) continue;
       const ids = freshCriticalsByFile.get(f.file);
       if (ids) ids.push(f.id);
       else freshCriticalsByFile.set(f.file, [f.id]);
@@ -646,7 +667,24 @@ export function diagnoseConvergence(input: {
         [closedNow, input.round],
       ] as const) {
         const idsAt = closures
-          .filter((c) => c.f === file && c.r === r)
+          .filter(
+            (c) =>
+              c.r === r &&
+              // Stand-in-named closures never join: `LedgerClosure` carries
+              // no `k`, so a body-only closure is indistinguishable from a
+              // closure on a REAL file spelled like the stand-in. Joining
+              // them would post a lineage over a mechanism the closures
+              // never anchored on — silence, never a guess.
+              !isStandInName(c.f) &&
+              // Closures are capped at LEDGER_MAX_FILE on every route while
+              // this side keys on the RAW built path, so an exact join is
+              // permanently silent past the cap — mirror `priorFor`'s slice
+              // fallback, or the advisory disarms on exactly the deep
+              // subsystems it exists for.
+              (c.f === file ||
+                (file.length > LEDGER_MAX_FILE &&
+                  c.f === file.slice(0, LEDGER_MAX_FILE))),
+          )
           .map((c) => c.id);
         if (idsAt.length === 0) {
           generations.length = 0;
@@ -788,7 +826,7 @@ export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
     out.push({
       code: 'successor-chain',
       basis:
-        `${d.successorChains.length} subsystem(s) closed a Critical in each of the last two rounds and post a new one now: ` +
+        `${d.successorChains.length} subsystem(s) closed Critical(s) in the previous round and again this round, and post a new one now: ` +
         `${shown.join(', ')}${d.successorChains.length > shown.length ? ', …' : ''}`,
     });
   }
@@ -936,10 +974,10 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
       .map((c) => `${mdField(c.file)}(${mdField(renderSuccessorChain(c))})`)
       .join('；');
     reasonsEn.push(
-      `⚠️ Divergence: the same subsystem closed a Critical in each of the last two rounds and posts a new one now — ${chainsEn}${more > 0 ? `; and ${more} more` : ''}.`,
+      `⚠️ Divergence: the same subsystem closed Critical(s) in the previous round and again this round, and posts a new one now — ${chainsEn}${more > 0 ? `; and ${more} more` : ''}.`,
     );
     reasonsZh.push(
-      `⚠️ 发散：同一子系统在过去两轮各有一个 Critical 被关闭，而本轮又出现了新的 Critical——${chainsZh}${more > 0 ? `；另有 ${more} 个` : ''}。`,
+      `⚠️ 发散：同一子系统在上一轮和本轮各关闭了至少一个 Critical，本轮又出现了新的 Critical——${chainsZh}${more > 0 ? `；另有 ${more} 个` : ''}。`,
     );
   }
   if (d.clusters.length > 0) {

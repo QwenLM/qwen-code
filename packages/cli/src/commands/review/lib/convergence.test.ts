@@ -19,7 +19,12 @@ import {
   type DraftedFinding,
   type ConvergenceFacts,
 } from './convergence.js';
-import { LEDGER_MAX_ROUND, type LedgerFinding } from './ledger.js';
+import {
+  LEDGER_MAX_FILE,
+  LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
+  type LedgerFinding,
+} from './ledger.js';
 
 const f = (id: string, file: string): LedgerFinding => ({
   id,
@@ -685,7 +690,9 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
       },
       drafts: [],
       closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
-      thisRoundFindings: [c('R11-4', 'src/mechanism.ts')],
+      thisRoundFindings: [
+        { ...c('R11-4', 'src/mechanism.ts'), title: 'gen 3' },
+      ],
     })!;
     expect(r.successorChains).toEqual([
       {
@@ -712,7 +719,9 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
       },
       drafts: [],
       closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
-      thisRoundFindings: [c('R11-4', 'src/mechanism.ts')],
+      thisRoundFindings: [
+        { ...c('R11-4', 'src/mechanism.ts'), title: 'gen 3' },
+      ],
     })!;
     const text = renderConvergenceDiagnosis(r);
     expect(text.en).toContain('⚠️ Divergence:');
@@ -721,6 +730,25 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     expect(text.en).toContain("raising the pattern with the mechanism's owner");
     expect(text.zh).toContain('⚠️ 发散：');
     expect(text.zh).toContain('提给该机制的负责人');
+    // The sentences state what was MEASURED — one closure generation in the
+    // PREVIOUS round and one THIS round (r === round - 1 and r === round),
+    // never "exactly one per round" and never the two rounds before this
+    // one. A generation can close several Criticals (the chain beside the
+    // sentence renders them), and dating the closures to rounds 9-10 beside
+    // a chain whose R10-2 was BORN in round 10 refutes itself.
+    expect(text.en).toContain(
+      'closed Critical(s) in the previous round and again this round',
+    );
+    expect(text.en).not.toContain('in each of the last two rounds');
+    expect(text.zh).toContain('在上一轮和本轮各关闭了至少一个 Critical');
+    expect(text.zh).not.toContain('过去两轮');
+    const basis = recommendationsFor(r).find(
+      (x) => x.code === 'successor-chain',
+    )?.basis;
+    expect(basis).toContain(
+      'closed Critical(s) in the previous round and again this round',
+    );
+    expect(basis).not.toContain('in each of the last two rounds');
   });
 
   it('stays silent with only ONE round of closures on the file', () => {
@@ -733,7 +761,7 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
         prev: { findings: [c('R1-1', 'src/a.ts')] },
         drafts: [],
         closuresThisRound: [closedAt(2, 'R1-1', 'src/a.ts')],
-        thisRoundFindings: [c('R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R2-1', 'src/a.ts'), title: 'gen 2' }],
       }),
     ).toBeNull();
   });
@@ -749,7 +777,7 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
         },
         drafts: [],
         closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
-        thisRoundFindings: [c('R3-1', 'src/b.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/b.ts'), title: 'new claim' }],
       }),
     ).toBeNull();
   });
@@ -768,7 +796,7 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
         },
         drafts: [],
         closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
-        thisRoundFindings: [c('R1-9', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R1-9', 'src/a.ts'), title: 'new claim' }],
       }),
     ).toBeNull();
   });
@@ -791,20 +819,109 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     }
   });
 
-  it('respects the k flag — a REAL file spelled like a stand-in still clusters', () => {
+  it('stays silent on a REAL file spelled like a stand-in — its closures are undisambiguatable', () => {
+    // The fresh side respects `k` — a real path spelled like a stand-in
+    // still counts. But `LedgerClosure` carries no `k`: a closure stamped
+    // `(body)` is a body-only closure OR a closure on that real file, and
+    // nothing parts the two. Joining them to the real file's chain would
+    // post a lineage over a mechanism the closures never anchored on, so
+    // stand-in-named closures never join — silence, never a guess.
     const real: LedgerFinding = { ...c('R3-1', '(body)'), k: 1 };
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', '(body)')],
+          closed: [closedAt(2, 'R1-1', '(body)')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', '(body)')],
+        thisRoundFindings: [{ ...real, title: 'gen 3' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('reaches across the file cap — closures are capped, the fresh side is not', () => {
+    // Every closure route caps `f` at LEDGER_MAX_FILE while the fresh side
+    // keys on the RAW built path, so an exact join is permanently silent on
+    // a path past the cap — disarming the advisory for exactly the deep
+    // subsystems it exists for, while the recurrence cluster one function
+    // up still fires via its prefix fallback. The join mirrors `priorFor`.
+    const longPath = `src/${'deep/'.repeat(60)}mechanism.ts`;
+    expect(longPath.length).toBeGreaterThan(LEDGER_MAX_FILE);
+    const capped = longPath.slice(0, LEDGER_MAX_FILE);
     const r = diagnoseConvergence({
       round: 3,
       posted: 1,
       prev: {
-        findings: [c('R2-1', '(body)')],
-        closed: [closedAt(2, 'R1-1', '(body)')],
+        findings: [{ ...c('R2-1', longPath), file: capped }],
+        closed: [closedAt(2, 'R1-1', capped)],
       },
       drafts: [],
-      closuresThisRound: [closedAt(3, 'R2-1', '(body)')],
-      thisRoundFindings: [real],
+      closuresThisRound: [closedAt(3, 'R2-1', capped)],
+      thisRoundFindings: [{ ...c('R3-1', longPath), title: 'gen 3' }],
     })!;
-    expect(r.successorChains).toHaveLength(1);
+    expect(r.successorChains).toEqual([
+      {
+        file: longPath,
+        generations: [['R1-1'], ['R2-1']],
+        newIds: ['R3-1'],
+      },
+    ]);
+  });
+
+  it('stays silent when the fresh id is a re-mint of a claim still standing', () => {
+    // The fresh side's mirror of the mint's claim-identity join: a re-post
+    // whose readback lost the carried id gets a FRESH `R<round>-<n>` stamp
+    // in the build, so id alone counts a still-standing claim as the chain's
+    // new generation — narrating divergence over a claim that never left
+    // the work list, in a body whose own marker says it still stands.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [
+            c('R2-1', 'src/a.ts'),
+            { ...c('R1-9', 'src/a.ts'), title: 'the standing claim' },
+          ],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [
+          { ...c('R3-1', 'src/a.ts'), title: 'the standing claim' },
+        ],
+      }),
+    ).toBeNull();
+
+    // The same defense at the cap stage: the previous side's titles were
+    // sliced to LEDGER_MAX_TITLE at write time, so the fresh side must
+    // project from the SAME capped form — the uncapped projection of a
+    // long claim never meets the capped previous one, and the re-mint
+    // counts as a new generation.
+    const longClaim = `the standing claim ${'x'.repeat(70)}`;
+    expect(longClaim.length).toBeGreaterThan(LEDGER_MAX_TITLE);
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [
+            c('R2-1', 'src/a.ts'),
+            {
+              ...c('R1-9', 'src/a.ts'),
+              title: longClaim.slice(0, LEDGER_MAX_TITLE),
+            },
+          ],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: longClaim }],
+      }),
+    ).toBeNull();
   });
 
   it('stays silent when the fresh finding is a Suggestion', () => {
@@ -818,7 +935,7 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
         },
         drafts: [],
         closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
-        thisRoundFindings: [f('R3-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...f('R3-1', 'src/a.ts'), title: 'new claim' }],
       }),
     ).toBeNull();
   });
@@ -853,7 +970,10 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
       },
       drafts: [],
       closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
-      thisRoundFindings: [c('R3-1', 'src/a.ts'), c('R3-2', 'src/a.ts')],
+      thisRoundFindings: [
+        { ...c('R3-1', 'src/a.ts'), title: 'claim one' },
+        { ...c('R3-2', 'src/a.ts'), title: 'claim two' },
+      ],
     })!;
     expect(r.successorChains).toHaveLength(1);
     expect(r.successorChains[0]!.newIds).toEqual(['R3-1', 'R3-2']);
