@@ -88,7 +88,14 @@ function treeState(wt: string): string {
  * passes regardless (so a revert probe reads it as inert). Returns the shared
  * worktree and base SHA, with the report already written to `report.json`.
  */
-function scaffoldModifiedPr(): { wt: string; base: string } {
+function scaffoldModifiedPr(
+  // The gate tests need the worktree UNDER `.qwen/tmp`, because that is the
+  // only place `mountRootFor` answers and so the only place the gates speak.
+  // A parameter rather than a fork: the fixture's shape — the report schema,
+  // the workspace layout the handler requires, the fake runner's contract —
+  // stays in one place when any of them moves.
+  wtPath: string = join(repo, 'wt'),
+): { wt: string; base: string } {
   write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
   write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
   const base = commitAll('base');
@@ -98,8 +105,8 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
     'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
   );
   commitAll('pr');
-  const wt = join(repo, 'wt');
-  git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+  mkdirSync(dirname(wtPath), { recursive: true });
+  git(repo, 'worktree', 'add', '-q', '--detach', wtPath, 'HEAD');
   writeFileSync(
     join(repo, 'report.json'),
     JSON.stringify({
@@ -109,7 +116,7 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
       ],
     }),
   );
-  return { wt, base };
+  return { wt: wtPath, base };
 }
 
 function vitestScript(): string {
@@ -257,6 +264,13 @@ afterEach(() => {
   reviewSettingsIsolation?.dispose();
 });
 
+// Skipped on win32, and not for convenience: `mountRootFor` refuses every
+// absolute Windows path (a drive letter is a colon, which the `-v` grammar
+// cannot spell), so containment is unavailable there BY DESIGN and these gates
+// never speak. The assertions would fail for that reason and nothing else —
+// first inside the merge queue, where the Windows lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
 describe('fixture git-config isolation', () => {
   it('spawned git reads the throwaway global config, not the host user config', () => {
     // Tripwire for every leg of the beforeEach isolation. Global leg: if
@@ -293,119 +307,88 @@ describe('fixture git-config isolation', () => {
 });
 
 describe('the review worktree is the first pointer a probe run trusts', () => {
-  it('refuses to create a probe tree through a rewritten gitfile', async () => {
-    // `worktree add` is the first host-side git write of the probe phase that
-    // CHECKS FILES OUT — `discardWorktree` above writes too, but materialises
-    // nothing, so no filter runs there — and it resolves the repository
-    // through the REVIEW worktree's own gitfile —
-    // which lives inside the directory the sandbox mounts read-write, and
-    // which the build/test phase already gave the PR's code a chance to
-    // rewrite. It checks files out, so it runs whatever filter the pointer
-    // leads to, on the host, before any gate inside the restore could fire.
-    //
-    // The fixture has to sit under `.qwen/tmp`: everywhere else `mountRootFor`
-    // answers null and the gate short-circuits, which is how deleting it
-    // shipped green.
-    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
-    write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
-    const base = commitAll('base');
-    write('packages/lib/src/f.ts', 'export const f = () => 2;\n');
-    write(
-      'packages/lib/src/f.test.ts',
-      'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
-    );
-    commitAll('pr');
-    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
-    mkdirSync(dirname(wt), { recursive: true });
-    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
-    writeFileSync(
-      join(repo, 'report.json'),
-      JSON.stringify({
-        files: [
-          { path: 'packages/lib/src/f.ts', kind: 'source' },
-          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
-        ],
-      }),
-    );
+  itWhereContainmentExists(
+    'refuses to create a probe tree through a rewritten gitfile',
+    async () => {
+      // `worktree add` is the first host-side git write of the probe phase that
+      // CHECKS FILES OUT — `discardWorktree` above writes too, but materialises
+      // nothing, so no filter runs there — and it resolves the repository
+      // through the REVIEW worktree's own gitfile —
+      // which lives inside the directory the sandbox mounts read-write, and
+      // which the build/test phase already gave the PR's code a chance to
+      // rewrite. It checks files out, so it runs whatever filter the pointer
+      // leads to, on the host, before any gate inside the restore could fire.
+      //
+      // The fixture has to sit under `.qwen/tmp`: everywhere else `mountRootFor`
+      // answers null and the gate short-circuits, which is how deleting it
+      // shipped green.
+      const { wt, base } = scaffoldModifiedPr(
+        join(repo, '.qwen', 'tmp', 'review-pr-1'),
+      );
 
-    // The rewrite reviewed code can make from inside the mount — and a
-    // COHERENT one, which is the point: the planted entry answers `rev-parse
-    // HEAD` with the real sha, so every read before the write agrees and the
-    // run reaches the checkout. An empty directory would fail earlier for a
-    // reason that has nothing to do with the gate.
-    const realEntry = readFileSync(join(wt, '.git'), 'utf8')
-      .trim()
-      .replace('gitdir: ', '');
-    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    cpSync(realEntry, planted, { recursive: true });
-    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-    writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(wt, '.git')}\n`);
-    writeFileSync(join(wt, '.git'), `gitdir: ${planted}\n`);
-    // Coherence check, so a fixture that breaks silently fails HERE and not as
-    // a green assertion below.
-    expect(git(wt, 'rev-parse', 'HEAD').trim()).toBe(
-      git(repo, 'rev-parse', 'HEAD').trim(),
-    );
+      // The rewrite reviewed code can make from inside the mount — and a
+      // COHERENT one, which is the point: the planted entry answers `rev-parse
+      // HEAD` with the real sha, so every read before the write agrees and the
+      // run reaches the checkout. An empty directory would fail earlier for a
+      // reason that has nothing to do with the gate.
+      const realEntry = readFileSync(join(wt, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      cpSync(realEntry, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(wt, '.git')}\n`);
+      writeFileSync(join(wt, '.git'), `gitdir: ${planted}\n`);
+      // Coherence check, so a fixture that breaks silently fails HERE and not as
+      // a green assertion below.
+      expect(git(wt, 'rev-parse', 'HEAD').trim()).toBe(
+        git(repo, 'rev-parse', 'HEAD').trim(),
+      );
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
 
-    const out = JSON.parse(
-      readFileSync(join(repo, 'out.json'), 'utf8'),
-    ) as Record<string, unknown>;
-    expect(JSON.stringify(out)).toContain('review temp dir');
-  });
+      const out = JSON.parse(
+        readFileSync(join(repo, 'out.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(JSON.stringify(out)).toContain('review temp dir');
+    },
+  );
 });
 
 describe('the revert phase is reached after the gates refuse', () => {
-  it('refuses to revert through a gitfile the probe run rewrote', async () => {
-    // The route R1-13 names: a restore refusal becomes `inconclusive` without
-    // throwing, and the mutation phase's catch continues on purpose so the
-    // revert probe still runs — so the revert is reached PRECISELY WHEN the
-    // earlier gates fired. Guarding the first two writes and not this one
-    // leaves the route open exactly where the others closed it.
-    //
-    // The rewrite is done by the PR's own suite, which is who does it in
-    // production: the fake runner below runs with the probe tree as its cwd.
-    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
-    write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
-    const base = commitAll('base');
-    write('packages/lib/src/f.ts', 'export const f = () => 2;\n');
-    write(
-      'packages/lib/src/f.test.ts',
-      'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
-    );
-    commitAll('pr');
-    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
-    mkdirSync(dirname(wt), { recursive: true });
-    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
-    writeFileSync(
-      join(repo, 'report.json'),
-      JSON.stringify({
-        files: [
-          { path: 'packages/lib/src/f.ts', kind: 'source' },
-          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
-        ],
-      }),
-    );
+  itWhereContainmentExists(
+    'refuses to revert through a gitfile the probe run rewrote',
+    async () => {
+      // The route R1-13 names: a restore refusal becomes `inconclusive` without
+      // throwing, and the mutation phase's catch continues on purpose so the
+      // revert probe still runs — so the revert is reached PRECISELY WHEN the
+      // earlier gates fired. Guarding the first two writes and not this one
+      // leaves the route open exactly where the others closed it.
+      //
+      // The rewrite is done by the PR's own suite, which is who does it in
+      // production: the fake runner below runs with the probe tree as its cwd.
+      const { wt, base } = scaffoldModifiedPr(
+        join(repo, '.qwen', 'tmp', 'review-pr-1'),
+      );
 
-    // A runner that rewrites its own tree's `.git` the first time it is
-    // asked to run anything, then answers normally.
-    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    mkdirSync(planted, { recursive: true });
-    writeFileSync(
-      vitestScript(),
-      `#!/usr/bin/env node
+      // A runner that rewrites its own tree's `.git` the first time it is
+      // asked to run anything, then answers normally.
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      mkdirSync(planted, { recursive: true });
+      writeFileSync(
+        vitestScript(),
+        `#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
 try {
   const dotGit = path.join(process.cwd(), '.git');
   if (fs.existsSync(dotGit) && fs.lstatSync(dotGit).isFile()) {
-    fs.writeFileSync(dotGit, 'gitdir: ${planted}\\n');
+    fs.writeFileSync(dotGit, ${JSON.stringify(`gitdir: ${planted}\n`)});
   }
 } catch {}
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
@@ -418,20 +401,21 @@ process.stdout.write(JSON.stringify({
   })),
 }));
 `,
-    );
+      );
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
 
-    const out = readFileSync(join(repo, 'out.json'), 'utf8');
-    // Whichever gate spoke, the run must not have reverted through the
-    // rewritten pointer — and the refusal must name why.
-    expect(out).toContain('review temp dir');
-  });
+      const out = readFileSync(join(repo, 'out.json'), 'utf8');
+      // Whichever gate spoke, the run must not have reverted through the
+      // rewritten pointer — and the refusal must name why.
+      expect(out).toContain('review temp dir');
+    },
+  );
 });
 
 describe('test-efficacy probe isolation (#6832)', () => {
