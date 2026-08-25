@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
@@ -188,12 +189,12 @@ export function mergeSessionPrLists(
   );
 }
 
-// Eviction rank for the tail cap. Entries persisted before provenance was
-// recorded sit between reviews and creates: they may be a session's created
-// or convention binding, so a weak candidate must never displace one — but
-// a verified create still outranks them.
-function evictionAuthority(entry: SessionPr): number {
-  switch (entry.source) {
+// Provenance rank for the tail cap and for source merges. Entries persisted
+// before provenance was recorded sit between reviews and creates: they may
+// be a session's created or convention binding, so a weak candidate must
+// never displace one — but a verified create still outranks them.
+function sourceAuthority(source: SessionPrSource | undefined): number {
+  switch (source) {
     case 'worktree':
       return 3;
     case 'create':
@@ -220,7 +221,8 @@ function capSessionPrListByAuthority(list: SessionPr[]): SessionPr[] {
       .map((_, index) => index)
       .sort(
         (a, b) =>
-          evictionAuthority(list[a]) - evictionAuthority(list[b]) || a - b,
+          sourceAuthority(list[a].source) - sourceAuthority(list[b].source) ||
+          a - b,
       )
       .slice(0, overflow),
   );
@@ -304,8 +306,9 @@ function enqueuePrMutation<T>(
  * keeping at most {@link SESSION_PR_LIST_LIMIT} entries. A number re-bound
  * to a DIFFERENT url moves to the end (latest) with a fresh createdAt; a
  * same-url refresh rewrites the entry in place, preserving its position and
- * createdAt. An explicitly supplied `state`/`source` wins; the persisted
- * value survives only a re-bind that does not name one, and state never
+ * createdAt. An explicitly supplied `state` wins; an explicit `source` wins
+ * only against a weaker-or-equal persisted one (a re-bind never downgrades
+ * provenance). State never
  * crosses a URL change — the same number in another repository is another
  * PR, and inheriting a terminal 'merged' would poison the new binding
  * permanently (the sweep never re-queries merged entries).
@@ -326,7 +329,15 @@ export function upsertSessionPr(
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
     const known = existing.find((entry) => entry.number === pr.number);
-    const source = pr.source ?? known?.source;
+    // An explicit source upgrades the entry (review → create) but never
+    // DOWNGRADES it: the worktree convention binding names the PR the
+    // session exists for, and a client-driven re-bind stamping 'create'
+    // must not drop it into the rank the tail cap evicts first.
+    const source =
+      pr.source !== undefined &&
+      sourceAuthority(pr.source) >= sourceAuthority(known?.source)
+        ? pr.source
+        : known?.source;
     const state =
       pr.state ?? (known && known.url === pr.url ? known.state : undefined);
     const entry: SessionPr = {
@@ -470,4 +481,52 @@ export function updateSessionPrStates(
     await writeSessionPrs(filePath, next);
     return changed;
   });
+}
+
+/**
+ * Moves a sidecar across archive states under the cross-process lock
+ * covering BOTH endpoints, and serialized on both in-process queues. The
+ * live shell binder runs in the session child process and may hold a
+ * pending mutation on either path; a move whose read/write/unlink
+ * interleaved with it would clobber the write and drop the binding.
+ *
+ * Same policy as the transition's ledger move: the sidecar is the
+ * append-only binding history, so when both halves of a split pair exist
+ * (a crash between the transcript rename and the sidecar move, or an
+ * orphaned write) they are merged by PR number instead of wedging the pair
+ * forever — no transition would ever reunite them otherwise.
+ */
+export function moveSessionPrSidecar(
+  sourcePath: string,
+  destinationPath: string,
+): Promise<void> {
+  // Lock order is path-sorted so an opposite-direction move of the same
+  // pair can never deadlock the file locks. The queue entry serializes with
+  // same-process mutations of the first endpoint and runs under its lock
+  // (enqueuePrMutation wraps the mutation in it); the second endpoint's
+  // lock is acquired inside, which is also where same-process mutations of
+  // THAT path serialize — on the file lock itself. The source is
+  // re-checked under the locks: only a still-present file moves.
+  const [first, second] =
+    sourcePath <= destinationPath
+      ? [sourcePath, destinationPath]
+      : [destinationPath, sourcePath];
+  return enqueuePrMutation(first, () =>
+    withSidecarLock(second, async () => {
+      if (!existsSync(sourcePath)) return;
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      if (!existsSync(destinationPath)) {
+        await fs.rename(sourcePath, destinationPath);
+        return;
+      }
+      const merged = mergeSessionPrLists(
+        (await readSessionPrs(destinationPath)) ?? [],
+        (await readSessionPrs(sourcePath)) ?? [],
+      );
+      if (merged.length > 0) {
+        await writeSessionPrs(destinationPath, merged);
+      }
+      await fs.unlink(sourcePath);
+    }),
+  );
 }

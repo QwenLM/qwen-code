@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SESSION_PR_LIST_LIMIT,
   Storage,
+  fetchAttributionRepoKeys,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   readSessionPrs,
@@ -34,10 +35,12 @@ import {
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  fetchAttributionRepoKeys: vi.fn(),
   fetchGitHubPullRequests: vi.fn(),
   fetchRemoteWebUrl: vi.fn(),
 }));
 
+const fetchAttributionRepoKeysMock = vi.mocked(fetchAttributionRepoKeys);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 const fetchRemoteWebUrlMock = vi.mocked(fetchRemoteWebUrl);
 
@@ -103,6 +106,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // The repo-key gate fail-closes without a resolvable workspace origin,
     // so tests default to the same repo the `pr()` fixture URLs belong to.
     fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    fetchAttributionRepoKeysMock.mockResolvedValue({});
     runtimeDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-runtime-'),
     );
@@ -604,11 +608,11 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
-  it("keeps the run's new bindings under the sidecar tail cap", async () => {
-    // Seeded at 8 so the 3 new bindings overflow the cap: the single
-    // capped write must keep every new binding (evicting the oldest seeded
-    // entry) instead of cascading re-upserts that drop the new ones, and
-    // survivors keep their binding-time createdAt.
+  it('offers only free sidecar slots, never evicting persisted occupants', async () => {
+    // Seeded at 8 with two reviewed candidates plus the convention number:
+    // the run offers only the two FREE slots (strongest last), leaves every
+    // persisted occupant untouched, and the weakest candidate waits for a
+    // free slot instead of displacing one.
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
       'active',
@@ -630,12 +634,12 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ bound: 3, alreadyBound: 0 });
+    expect(result).toMatchObject({ bound: 2, alreadyBound: 0 });
     const final = await readSessionPrs(prPath);
     expect(final?.map((p) => p.number)).toEqual([
-      2, 3, 4, 5, 6, 7, 8, 102, 103, 101,
+      1, 2, 3, 4, 5, 6, 7, 8, 103, 101,
     ]);
-    expect(final?.[0]?.createdAt).toBe('2026-08-01T00:00:01.000Z');
+    expect(final?.[0]?.createdAt).toBe('2026-08-01T00:00:00.000Z');
   });
 
   it('binds /review typed through the TUI slash-command expansion', async () => {
@@ -724,13 +728,13 @@ describe('backfillWorkspaceSessionPrs', () => {
       await appendUserText(SESSION_A, `/review ${n}`);
     }
     const run3 = await backfillWorkspaceSessionPrs(runtime);
-    expect(run3.bound).toBe(5);
+    expect(run3.bound).toBe(3);
     const afterRun3 = await readSessionPrs(prPath);
-    expect(afterRun3).toHaveLength(SESSION_PR_LIST_LIMIT);
-    // The convention binding survives; only the weakest non-re-offered
-    // number (101) made room for the new ones.
+    // Only the four FREE slots were offered: the three strongest reviewed
+    // numbers land and the convention binding, and no persisted occupant
+    // is evicted to make room.
     expect(afterRun3?.map((p) => p.number)).toEqual([
-      7, 102, 103, 104, 105, 106, 107, 108, 109, 110,
+      7, 101, 102, 103, 104, 105, 108, 109, 110,
     ]);
 
     // A fourth run on the same transcript binds nothing new and changes
@@ -865,6 +869,106 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(afterRun2?.map((p) => p.number)).toContain(7);
   });
 
+  it('stays idempotent when non-re-offered occupants hold slots', async () => {
+    // A live `create` binding occupies a slot backfill never re-offers.
+    // Offering past the free count would evict the weakest persisted entry
+    // and re-append it with a fresh createdAt on every re-run — a
+    // permanent rotation. Sizing the offer to the free slots keeps the
+    // list byte-stable from run 2 on.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await writeSessionPrs(prPath, [
+      {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        source: 'create' as const,
+      },
+    ]);
+    await seedSession(SESSION_A);
+    for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      await appendUserText(SESSION_A, `/review ${n}`);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const run1 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run1.bound).toBe(SESSION_PR_LIST_LIMIT - 1);
+    const afterRun1 = await readSessionPrs(prPath);
+    expect(afterRun1?.map((p) => p.number)).toEqual([
+      100, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+
+    const run2 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run2).toMatchObject({ bound: 0 });
+    expect(await readSessionPrs(prPath)).toEqual(afterRun1);
+    const run3 = await backfillWorkspaceSessionPrs(runtime);
+    expect(run3).toMatchObject({ bound: 0 });
+    expect(await readSessionPrs(prPath)).toEqual(afterRun1);
+  });
+
+  it('does not resolve bare numbers through a divergent gh page', async () => {
+    // gh's repo resolution is git-config driven and can diverge from the
+    // workspace repo entirely; an untrusted page must not feed a bare
+    // convention number — the number falls back to the workspace's own
+    // remote URL instead of binding the stranger's same-numbered PR.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(42, 'whatever'),
+          url: 'https://github.com/stranger/repoB/pull/42',
+          state: 'merged' as const,
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]?.url).toBe('https://github.com/o/r/pull/42');
+    // The divergent page's state map is gated the same way.
+    expect(prs?.[0]?.state).toBeUndefined();
+  });
+
+  it('binds the user-named URL of a /review url form without a trusted page', async () => {
+    // The URL form names its PR explicitly and was repo-gated when
+    // collected; it binds the named URL itself even when the gh page is
+    // divergent and cannot feed bare numbers.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/parent/repo/pull/55 --comment',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(99, 'whatever'),
+          url: 'https://github.com/parent/repo/pull/99',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({
+      number: 55,
+      url: 'https://github.com/parent/repo/pull/55',
+      source: 'review',
+    });
+  });
+
   it('does not bind /review lines inside @-imported content parts', async () => {
     // @-imports persist the EXPANDED request: the typed prompt leads, the
     // inlined file body follows as later text parts. Only the typed prompt
@@ -990,6 +1094,10 @@ describe('backfillWorkspaceSessionPrs', () => {
     // bare number binds through the page, so dropping the URL form leaves
     // it systematically dead in fork layouts.
     fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
     await seedSession(SESSION_A);
     await appendUserText(
       SESSION_A,

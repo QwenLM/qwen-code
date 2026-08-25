@@ -46,11 +46,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import {
-  mergeSessionPrLists,
-  readSessionPrs,
-  writeSessionPrs,
-} from './session-pr-service.js';
+import { moveSessionPrSidecar } from './session-pr-service.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -1092,37 +1088,6 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
-  /**
-   * Move a PR sidecar across archive states. Same policy as
-   * {@link moveLedgerSidecar}: the sidecar is the append-only binding
-   * history, so when both halves of a split pair exist (a crash between
-   * the transcript rename and the sidecar move, or an orphaned write)
-   * they are merged by PR number instead of wedging the pair forever —
-   * no transition would ever reunite them otherwise. Throws propagate to
-   * the caller, which owns the warn-only policy.
-   */
-  private async movePrSidecar(
-    sourcePath: string,
-    destinationPath: string,
-  ): Promise<void> {
-    if (!fs.existsSync(sourcePath)) {
-      return;
-    }
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    if (!fs.existsSync(destinationPath)) {
-      fs.renameSync(sourcePath, destinationPath);
-      return;
-    }
-    const merged = mergeSessionPrLists(
-      (await readSessionPrs(destinationPath)) ?? [],
-      (await readSessionPrs(sourcePath)) ?? [],
-    );
-    if (merged.length > 0) {
-      await writeSessionPrs(destinationPath, merged);
-    }
-    fs.unlinkSync(sourcePath);
-  }
-
   private sessionFileMoveError(
     action: 'archive' | 'unarchive',
     error: unknown,
@@ -2076,7 +2041,10 @@ export class SessionService {
           );
         }
         try {
-          await this.movePrSidecar(
+          // The move runs under the sidecar lock: the session child's
+          // shell binder may hold a pending write on either half, and an
+          // unlocked move would clobber and unlink it.
+          await moveSessionPrSidecar(
             this.getPrSessionPathForState(sessionId, 'active'),
             this.getPrSessionPathForState(sessionId, 'archived'),
           );
@@ -2158,7 +2126,7 @@ export class SessionService {
           );
         }
         try {
-          await this.movePrSidecar(
+          await moveSessionPrSidecar(
             this.getPrSessionPathForState(sessionId, 'archived'),
             this.getPrSessionPathForState(sessionId, 'active'),
           );

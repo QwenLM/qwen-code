@@ -16,6 +16,8 @@ vi.mock('node:child_process', () => ({
 import { execFile } from 'node:child_process';
 import {
   createGitHubPullRequest,
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
@@ -552,17 +554,23 @@ describe('fetchCurrentBranchPullRequest', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('resolves number, url, and normalized state from gh', async () => {
+  it('resolves number, url, state, and head branch from gh', async () => {
     fs.mkdirSync(path.join(dir, '.git'));
     mockExecFile.mockImplementation(
       (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-        expect(args).toEqual(['pr', 'view', '--json', 'number,url,state']);
+        expect(args).toEqual([
+          'pr',
+          'view',
+          '--json',
+          'number,url,state,headRefName',
+        ]);
         (cb as ExecCallback)(
           null,
           JSON.stringify({
             number: 77,
             url: 'https://github.com/o/r/pull/77',
             state: 'OPEN',
+            headRefName: 'feat/x',
           }),
           '',
         );
@@ -575,6 +583,7 @@ describe('fetchCurrentBranchPullRequest', () => {
       number: 77,
       url: 'https://github.com/o/r/pull/77',
       state: 'open',
+      headRefName: 'feat/x',
     });
   });
 
@@ -622,10 +631,129 @@ describe('fetchCurrentBranchPullRequest', () => {
     });
   });
 
-  it('reports none outside a git repository without spawning gh', async () => {
+  it('reports error outside a git repository without spawning gh', async () => {
+    // No repo proves nothing about a branch's PR — a gate-passing command
+    // may clone the repo into the working dir and resolve its existing PR
+    // post-run — so the pre-state fails closed instead of reading as
+    // "no prior PR".
     expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
-      status: 'none',
+      status: 'error',
     });
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchCurrentBranchName', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-branch-name-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves the checked-out branch', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
+        expect(args).toEqual(['branch', '--show-current']);
+        (cb as ExecCallback)(null, 'feat/x\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    expect(await fetchCurrentBranchName(dir)).toBe('feat/x');
+  });
+
+  it('returns undefined outside a git repository without spawning git', async () => {
+    expect(await fetchCurrentBranchName(dir)).toBeUndefined();
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined on a detached HEAD or git failure', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+        (cb as ExecCallback)(null, '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    expect(await fetchCurrentBranchName(dir)).toBeUndefined();
+
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+        (cb as ExecCallback)(new Error('not a git repository'), '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    expect(await fetchCurrentBranchName(dir)).toBeUndefined();
+  });
+});
+
+describe('fetchAttributionRepoKeys', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-repo-keys-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves the repo key and the fork-parent key', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
+        expect(args).toEqual(['repo', 'view', '--json', 'url,parent']);
+        (cb as ExecCallback)(
+          null,
+          JSON.stringify({
+            url: 'https://github.com/fork/r',
+            parent: { url: 'https://github.com/parent/r' },
+          }),
+          '',
+        );
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    expect(await fetchAttributionRepoKeys(dir)).toEqual({
+      resolved: 'github.com/fork/r',
+      parent: 'github.com/parent/r',
+    });
+  });
+
+  it('omits the parent key for a non-fork repo', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhSuccess({ url: 'https://github.com/o/r', parent: {} });
+    expect(await fetchAttributionRepoKeys(dir)).toEqual({
+      resolved: 'github.com/o/r',
+    });
+  });
+
+  it('returns no keys outside a git repository without spawning gh', async () => {
+    expect(await fetchAttributionRepoKeys(dir)).toEqual({});
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when gh cannot answer', async () => {
+    // An unresolvable pre-run identity must decline attribution, not read
+    // as "any repo may bind".
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhError(Object.assign(new Error('network timeout'), { killed: true }));
+    expect(await fetchAttributionRepoKeys(dir)).toEqual({});
+
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+        (cb as ExecCallback)(null, 'not json', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    expect(await fetchAttributionRepoKeys(dir)).toEqual({});
   });
 });

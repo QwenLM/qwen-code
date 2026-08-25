@@ -14,6 +14,7 @@ import {
   SESSION_PR_URL_MAX_LENGTH,
   commandRunsGhPrCreate,
   mergeSessionPrLists,
+  moveSessionPrSidecar,
   readSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
@@ -210,6 +211,21 @@ describe('upsertSessionPr', () => {
     });
     expect(prs[0]?.source).toBe('create');
     expect((await readSessionPrs(filePath))?.[0]?.source).toBe('create');
+  });
+
+  it('never downgrades the persisted provenance on a weaker explicit source', async () => {
+    // The worktree convention binding names the PR the session exists for;
+    // a client-driven metadata re-bind stamping 'create' must not drop it
+    // into the rank the tail cap evicts first.
+    await writeSessionPrs(filePath, [{ ...entry(42), source: 'worktree' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 42,
+      url: entry(42).url,
+      state: 'open',
+      source: 'create',
+    });
+    expect(prs[0]?.source).toBe('worktree');
+    expect((await readSessionPrs(filePath))?.[0]?.source).toBe('worktree');
   });
 
   it('rewrites a same-URL refresh in place, keeping position and createdAt', async () => {
@@ -662,5 +678,71 @@ describe('commandRunsGhPrCreate', () => {
     expect(commandRunsGhPrCreate('git commit -m gh')).toBe(false);
     // The phrase as a search argument is not an execution.
     expect(commandRunsGhPrCreate(`grep -rn 'gh pr create' .`)).toBe(false);
+  });
+});
+
+describe('moveSessionPrSidecar', () => {
+  let sourcePath: string;
+  let destinationPath: string;
+
+  beforeEach(() => {
+    sourcePath = path.join(tmpDir, 'active', 's.pr.json');
+    destinationPath = path.join(tmpDir, 'archived', 's.pr.json');
+  });
+
+  it('renames the sidecar when the destination is free', async () => {
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('merges a split pair instead of clobbering either half', async () => {
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await writeSessionPrs(destinationPath, [entry(2)]);
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(
+      (await readSessionPrs(destinationPath))?.map((p) => p.number),
+    ).toEqual([2, 1]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('does nothing when the source is absent', async () => {
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+  });
+
+  it('waits for a lock held on the destination before moving', async () => {
+    // The move must serialize against pending mutations on BOTH endpoints:
+    // a binder write landing on the destination mid-transition must not be
+    // clobbered by the merge write.
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.writeFile(destinationPath, '', 'utf-8');
+    const release = await lockfile.lock(destinationPath);
+    const movePromise = moveSessionPrSidecar(sourcePath, destinationPath);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readSessionPrs(sourcePath)).toEqual([entry(1)]);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+    await release();
+    await movePromise;
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('waits for a held sidecar lock before moving', async () => {
+    // The move runs under the cross-process lock: while another holder
+    // keeps the source locked, no binding may be relocated — an unlocked
+    // move would merge and unlink the source immediately.
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    const release = await lockfile.lock(sourcePath);
+    const movePromise = moveSessionPrSidecar(sourcePath, destinationPath);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readSessionPrs(sourcePath)).toEqual([entry(1)]);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+    await release();
+    await movePromise;
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
   });
 });

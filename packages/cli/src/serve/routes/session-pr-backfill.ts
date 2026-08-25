@@ -8,8 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
+  fetchAttributionRepoKeys,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
+  readSessionPrs,
   readWorktreeSession,
   repoKeyFromWebUrl,
   SESSION_PR_LIST_LIMIT,
@@ -96,6 +98,7 @@ const REVIEW_COMMAND_PATTERN =
   /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
 const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
+const EMPTY_STATE_MAP: ReadonlyMap<number, SessionPrState> = new Map();
 
 // Only the prompt the user typed counts: assistant prose, tool calls, and
 // tool results (read_file echoes of fixtures/docs) quote `/review <N>`
@@ -178,6 +181,7 @@ function collectReviewedPrNumbers(raw: string): {
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  fetchRepoKeys: typeof fetchAttributionRepoKeys = fetchAttributionRepoKeys,
 ): Promise<SessionPrBackfillWorkspaceResult> {
   const result: SessionPrBackfillWorkspaceResult = {
     workspaceCwd: runtime.workspaceCwd,
@@ -274,6 +278,12 @@ export async function backfillWorkspaceSessionPrs(
     runtime.env.effectiveEnv,
     { state: 'all', limit: 500, slim: true },
   );
+  // gh's page may only feed bindings when it lists the workspace's OWN
+  // repo or a CONFIRMED fork parent: gh's repo resolution is git-config
+  // driven (`gh repo set-default`, remaining remotes), so it can diverge
+  // from the workspace repo entirely, and bare numbers resolving through a
+  // divergent page would bind a stranger's same-numbered PR.
+  let pageMapTrusted = false;
   if (prs.kind === 'ok') {
     for (const pr of prs.pullRequests) {
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
@@ -295,6 +305,20 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       numberToUrl.set(pr.number, pr.url);
+    }
+    if (pageRepoKey !== undefined) {
+      if (workspaceRepoKey !== undefined && pageRepoKey === workspaceRepoKey) {
+        pageMapTrusted = true;
+      } else {
+        // Fork layout: gh lists the PARENT repo's PRs from a fork
+        // checkout. Confirm the parent relationship before trusting the
+        // page; an unrelated page fails closed.
+        const { parent } = await fetchRepoKeys(
+          runtime.workspaceCwd,
+          runtime.env.effectiveEnv,
+        );
+        pageMapTrusted = parent === pageRepoKey;
+      }
     }
   }
 
@@ -333,13 +357,38 @@ export async function backfillWorkspaceSessionPrs(
       numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
-    // Offer at most one full sidecar: weak candidates beyond the cap would
-    // only be appended past it and re-appended on every re-run, rotating
-    // the persisted list until the convention binding itself is evicted.
-    // Dropping them here keeps re-runs idempotent — the strongest candidates
-    // land in the persisted tail and later runs find everything bound.
-    if (numbers.length > SESSION_PR_LIST_LIMIT) {
-      numbers.splice(0, numbers.length - SESSION_PR_LIST_LIMIT);
+    // Offer only FREE sidecar slots. Occupants this run does not re-offer
+    // (live `create` bindings, pre-provenance entries) already hold slots;
+    // offering past the free count would evict the weakest persisted entry
+    // and re-append it with a fresh createdAt on every re-run — a
+    // permanent rotation falsifying the binding-time order and bumping the
+    // catalog each call. Sizing to the free slots keeps re-runs idempotent:
+    // the strongest candidates land in the persisted tail and later runs
+    // find everything bound. The pre-read is an unlocked sizing hint — the
+    // locked mutation re-reads authoritative state.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      candidate.sessionId,
+      candidate.archiveState,
+    );
+    let existing = null as Awaited<ReturnType<typeof readSessionPrs>>;
+    try {
+      existing = await readSessionPrs(prPath);
+    } catch {
+      // An unwritable sidecar keeps today's offer shape; the write fails
+      // and is counted per candidate below.
+    }
+    const freeSlots = SESSION_PR_LIST_LIMIT - (existing?.length ?? 0);
+    if (freeSlots <= 0) {
+      if (existing) {
+        const present = new Set(existing.map((entry) => entry.number));
+        result.alreadyBound += numbers.filter((number) =>
+          present.has(number),
+        ).length;
+      }
+      continue;
+    }
+    if (numbers.length > freeSlots) {
+      numbers.splice(0, numbers.length - freeSlots);
     }
     // One unwritable sidecar (EISDIR/EACCES/EIO) must not abort the whole
     // workspace run and drop every later candidate; record and continue.
@@ -350,16 +399,18 @@ export async function backfillWorkspaceSessionPrs(
         numbers,
         {
           numberToUrl,
-          // The page map holds foreign entries too (fork layout needs them,
-          // gh's own attribution names the PR authoritatively). Consuming
-          // them with an unknown workspace key would bind whatever default
-          // repo gh resolved — the exact collision numberToUrl fails
-          // closed on — so the fallback map is empty in that state.
-          pageUrlByNumber:
-            workspaceRepoKey !== undefined
-              ? pageUrlByNumber
-              : EMPTY_NUMBER_URL_MAP,
-          pageStateByNumber,
+          // The page maps hold foreign entries whenever gh resolved another
+          // repo (divergent default, fork parent); only a RELATED page —
+          // the workspace's own repo or a confirmed fork parent — may feed
+          // a binding. Consuming a divergent page would bind a stranger's
+          // same-numbered PR, the exact collision numberToUrl fails closed
+          // on.
+          pageUrlByNumber: pageMapTrusted
+            ? pageUrlByNumber
+            : EMPTY_NUMBER_URL_MAP,
+          pageStateByNumber: pageMapTrusted
+            ? pageStateByNumber
+            : EMPTY_STATE_MAP,
           remote,
         },
         result,
@@ -387,6 +438,13 @@ async function bindCandidateNumbers(
     candidate.sessionId,
     candidate.archiveState,
   );
+  // `/review <url>` forms name their PR's URL explicitly and were already
+  // repo-gated against the workspace/page keys — bind the named URL itself
+  // instead of re-resolving the bare number, which could land another
+  // repo's same-numbered PR.
+  const formUrlByNumber = new Map<number, string>(
+    candidate.reviewedUrlForms.map((form) => [form.number, form.url]),
+  );
   const bindings: Array<{
     number: number;
     url?: string;
@@ -396,11 +454,15 @@ async function bindCandidateNumbers(
   for (const number of numbers) {
     let url = sources.numberToUrl.get(number);
     if (url === undefined) {
-      // Fork layout: the repo gate above rejects the parent-repo page, but
-      // gh's own attribution still names the PR authoritatively — prefer it
-      // over a synthesized fork URL (forks host no PRs, the link would
-      // 404). Only a number gh's page lacks entirely falls back to the
-      // workspace remote (gh unavailable or outside the list window).
+      url = formUrlByNumber.get(number);
+    }
+    if (url === undefined) {
+      // Fork layout: gh's own attribution names the parent repo's PR
+      // authoritatively — a RELATED page (same repo or confirmed fork
+      // parent) is preferred over a synthesized fork URL (forks host no
+      // PRs, the link would 404). Only a number gh's page lacks entirely
+      // falls back to the workspace remote (gh unavailable, divergent
+      // page, or outside the list window).
       url = sources.pageUrlByNumber.get(number);
       if (url === undefined && sources.remote !== undefined) {
         url = `${sources.remote}/pull/${number}`;

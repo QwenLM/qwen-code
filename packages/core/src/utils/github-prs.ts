@@ -497,7 +497,14 @@ export function fetchRemoteWebUrl(
 export type BranchPullRequestSnapshot =
   | { status: 'none' }
   | { status: 'error' }
-  | { status: 'pr'; number: number; url: string; state: SessionPrState };
+  | {
+      status: 'pr';
+      number: number;
+      url: string;
+      state: SessionPrState;
+      /** The PR's head branch; lets the caller pin branch identity. */
+      headRefName?: string;
+    };
 
 /**
  * Resolves the PR gh associates with the current branch of the repo
@@ -511,11 +518,14 @@ export function fetchCurrentBranchPullRequest(
   cwd: string,
 ): Promise<BranchPullRequestSnapshot> {
   const gitRoot = findGitRoot(cwd);
-  if (!gitRoot) return Promise.resolve({ status: 'none' });
+  // No repo proves nothing about a branch's PR — the command may CREATE
+  // the repo (clone into the working dir) — so this is an unproven
+  // pre-state, not a proved absence; callers decline on `error`.
+  if (!gitRoot) return Promise.resolve({ status: 'error' });
   return new Promise((resolve) => {
     execFile(
       'gh',
-      ['pr', 'view', '--json', 'number,url,state'],
+      ['pr', 'view', '--json', 'number,url,state,headRefName'],
       {
         cwd: gitRoot,
         timeout: GH_TIMEOUT_MS,
@@ -541,6 +551,7 @@ export function fetchCurrentBranchPullRequest(
             number?: number;
             url?: string;
             state?: string;
+            headRefName?: string;
           };
           // gh reports OPEN/MERGED/CLOSED; anything else fails closed.
           const state = parsed.state?.toLowerCase();
@@ -553,11 +564,113 @@ export function fetchCurrentBranchPullRequest(
                   number: parsed.number,
                   url: parsed.url,
                   state,
+                  ...(typeof parsed.headRefName === 'string'
+                    ? { headRefName: parsed.headRefName }
+                    : {}),
                 }
               : { status: 'error' },
           );
         } catch {
           resolve({ status: 'error' });
+        }
+      },
+    );
+  });
+}
+
+/**
+ * The checked-out branch name of the repo containing `cwd` (undefined
+ * outside a repo, on a detached HEAD, or when git fails). Pins branch
+ * identity across the `gh pr create` attribution window: the post-run gh
+ * resolution must name this same branch, or a command that switched
+ * branches mid-run would bind the new branch's existing PR as this run's
+ * creation.
+ */
+export function fetchCurrentBranchName(
+  cwd: string,
+): Promise<string | undefined> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['branch', '--show-current'],
+      {
+        cwd: gitRoot,
+        timeout: GIT_REMOTE_TIMEOUT_MS,
+        encoding: 'utf8',
+        windowsHide: true,
+        env: gitEnv(),
+      },
+      (error, stdout) => {
+        const name = stdout.trim();
+        resolve(error || name === '' ? undefined : name);
+      },
+    );
+  });
+}
+
+export interface AttributionRepoKeys {
+  /** Repo key gh resolves for this checkout; undefined when unresolvable. */
+  resolved?: string;
+  /** The resolved repo's fork-parent key, when it is a fork. */
+  parent?: string;
+}
+
+/**
+ * The repo identities gh attributes PR operations to from `cwd`: the repo
+ * gh resolves for this checkout plus, when it is a fork, its parent — from
+ * a fork checkout `gh pr view`/`gh pr create` resolve the PARENT repo
+ * (forks host no PRs), so a create legitimately made in that layout carries
+ * the parent's key. Both keys are empty when gh cannot answer (no repo, gh
+ * unavailable, unparseable); callers pinning repo identity across the
+ * attribution window must decline on that state, or an origin retarget
+ * inside the window (`git remote set-url`, `gh repo set-default`) would
+ * bind a stranger's pre-existing PR.
+ */
+export function fetchAttributionRepoKeys(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<AttributionRepoKeys> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return Promise.resolve({});
+  return new Promise((resolve) => {
+    execFile(
+      'gh',
+      ['repo', 'view', '--json', 'url,parent'],
+      {
+        cwd: gitRoot,
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve({});
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout) as {
+            url?: unknown;
+            parent?: { url?: unknown } | null;
+          };
+          const resolved =
+            typeof parsed.url === 'string'
+              ? repoKeyFromWebUrl(parsed.url)
+              : undefined;
+          const parentUrl = parsed.parent?.url;
+          const parent =
+            typeof parentUrl === 'string'
+              ? repoKeyFromWebUrl(parentUrl)
+              : undefined;
+          resolve({
+            ...(resolved ? { resolved } : {}),
+            ...(parent ? { parent } : {}),
+          });
+        } catch {
+          resolve({});
         }
       },
     );

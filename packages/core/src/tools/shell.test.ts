@@ -45,6 +45,8 @@ vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
 }));
 vi.mock('../utils/github-prs.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../utils/github-prs.js')>()),
+  fetchAttributionRepoKeys: vi.fn(),
+  fetchCurrentBranchName: vi.fn(),
   fetchCurrentBranchPullRequest: vi.fn(),
 }));
 
@@ -56,7 +58,11 @@ import {
 } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { upsertSessionPrs } from '../services/session-pr-service.js';
-import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
+import {
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
+  fetchCurrentBranchPullRequest,
+} from '../utils/github-prs.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
@@ -243,9 +249,17 @@ describe('ShellTool', () => {
     const fetchCurrentBranchPullRequestMock = vi.mocked(
       fetchCurrentBranchPullRequest,
     );
+    const fetchCurrentBranchNameMock = vi.mocked(fetchCurrentBranchName);
+    const fetchAttributionRepoKeysMock = vi.mocked(fetchAttributionRepoKeys);
     const upsertSessionPrsMock = vi.mocked(upsertSessionPrs);
 
     beforeEach(() => {
+      // Default attribution identity: the fixture URLs belong to `o/r` and
+      // the session sits on `main`. Tests override per shape.
+      fetchCurrentBranchNameMock.mockResolvedValue('main');
+      fetchAttributionRepoKeysMock.mockResolvedValue({
+        resolved: 'github.com/o/r',
+      });
       // Default: every offered candidate lands as a new binding. Tests that
       // simulate an already-bound number override this per test.
       upsertSessionPrsMock.mockImplementation(
@@ -262,14 +276,21 @@ describe('ShellTool', () => {
       command: string,
       result: Partial<ShellExecutionResult>,
     ): Promise<void> {
+      const callsBefore = mockShellExecutionService.mock.calls.length;
       const invocation = shellTool.build({
         command,
         directory: '/test/dir',
         is_background: false,
       });
       const resultPromise = invocation.execute(new AbortController().signal);
+      // Wait for THIS invocation's spawn: `.toHaveBeenCalled()` alone is
+      // already true after an earlier runShell in the same test, and
+      // resolving the stale resolver first would orphan the new one (the
+      // pre-spawn attribution snapshot yields before the service call).
       await vi.waitFor(() =>
-        expect(mockShellExecutionService).toHaveBeenCalled(),
+        expect(mockShellExecutionService.mock.calls.length).toBeGreaterThan(
+          callsBefore,
+        ),
       );
       resolveExecutionPromise(result as ShellExecutionResult);
       await resultPromise;
@@ -290,6 +311,7 @@ describe('ShellTool', () => {
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',
+        headRefName: 'main',
       });
       await runShell('gh pr create --title x --body y', {
         output: 'noise\nhttps://github.com/o/r/pull/77\n',
@@ -334,6 +356,7 @@ describe('ShellTool', () => {
         number: 100,
         url: 'https://github.com/o/r/pull/100',
         state: 'open',
+        headRefName: 'main',
       });
       await runShell('gh pr create --fill', {
         output:
@@ -416,6 +439,7 @@ describe('ShellTool', () => {
         number: 5,
         url: 'https://github.com/o/r/pull/5',
         state: 'open',
+        headRefName: 'main',
       });
       await runShell('gh pr create --help', {
         output: 'usage: gh pr create\n',
@@ -439,6 +463,7 @@ describe('ShellTool', () => {
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',
+        headRefName: 'main',
       });
       const invocation = shellTool.build({
         command: 'gh pr create --fill',
@@ -546,6 +571,7 @@ describe('ShellTool', () => {
         number: 42,
         url: 'https://github.com/o/r/pull/42',
         state: 'open',
+        headRefName: 'main',
       });
       upsertSessionPrsMock.mockResolvedValue({
         prs: [],
@@ -588,6 +614,7 @@ describe('ShellTool', () => {
         number: 77,
         url: 'https://github.com/o/r/pull/77',
         state: 'open',
+        headRefName: 'main',
       });
       const setPromoteAc = vi.fn();
       const invocation = shellTool.build({
@@ -617,6 +644,170 @@ describe('ShellTool', () => {
 
       expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('does not bind when the command switched branches mid-run', async () => {
+      // A gate-passing compound that checks out another branch resolves the
+      // NEW branch's existing PR post-run (its view segment prints the URL
+      // and exits 0). The resolved head branch differs from the pre-run
+      // branch, so this run did not create it.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 9,
+        url: 'https://github.com/o/r/pull/9',
+        state: 'open',
+        headRefName: 'other-branch',
+      });
+      await runShell(
+        'git checkout other-branch && gh pr create --fill || gh pr view --json url --jq .url',
+        {
+          output: 'https://github.com/o/r/pull/9\n',
+          exitCode: 0,
+          aborted: false,
+        },
+      );
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run branch could not be captured', async () => {
+      // Detached HEAD or a git failure leaves the pre-run branch unproven;
+      // decline instead of binding whatever the post-run fetch resolves.
+      fetchCurrentBranchNameMock.mockResolvedValueOnce(undefined);
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a PR outside the pre-run repo identity', async () => {
+      // An in-command `git remote set-url origin` / `gh repo set-default`
+      // retargets the post-run resolution at another repo whose same-named
+      // branch holds an open PR; the pre-run repo keys decline it.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({
+        resolved: 'github.com/o/r',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 5,
+        url: 'https://github.com/victim/other/pull/5',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/victim/other/pull/5\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run repo identity could not be resolved', async () => {
+      // gh unable to answer which repo this checkout attributes to —
+      // decline like the errored-snapshot arm instead of binding anywhere.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({});
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('binds a fork-layout create attributed to the parent repo', async () => {
+      // From a fork checkout gh resolves PR operations to the PARENT repo,
+      // so a create legitimately made in this layout carries the parent's
+      // key — the fork-parent identity is part of the pre-run set.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({
+        resolved: 'github.com/fork/r',
+        parent: 'github.com/o/r',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('writes the binding to the archived sidecar when the session was archived mid-run', async () => {
+      // An archive transition landing during the gh round-trip must not
+      // strand the binding on a resurrected active sidecar: the location is
+      // re-resolved immediately before the locked mutation.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      const sessionService = mockConfig.getSessionService() as unknown as {
+        getSessionLocation: unknown;
+        getPrSessionPathForArchiveState: ReturnType<typeof vi.fn>;
+      };
+      sessionService.getSessionLocation = vi.fn().mockResolvedValue('archived');
+      sessionService.getPrSessionPathForArchiveState.mockImplementation(
+        (_sessionId: string, state: string) =>
+          `/test/proj/chats-${state}/test-session.pr.json`,
+      );
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats-archived/test-session.pr.json',
         [expect.objectContaining({ number: 77 })],
       );
     });

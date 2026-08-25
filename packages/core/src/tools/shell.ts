@@ -41,7 +41,11 @@ import {
   upsertSessionPrs,
 } from '../services/session-pr-service.js';
 import {
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
   fetchCurrentBranchPullRequest,
+  repoKeyFromWebUrl,
+  type AttributionRepoKeys,
   type BranchPullRequestSnapshot,
 } from '../utils/github-prs.js';
 import type {
@@ -2336,15 +2340,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ? this.getGitHeadSync(cwd)
       : null;
 
-    // Snapshot the branch's current PR BEFORE spawn so bindGhPrCreate can
+    // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
     // tell a run that CREATED a PR from one that merely RESOLVED the
     // branch's existing PR: the retry shape `gh pr create --fill || gh pr
     // view` exits 0 through the view segment and prints the existing URL,
-    // and post-run gh resolution alone cannot distinguish the two. Awaited
-    // before spawn so the snapshot strictly precedes the command.
-    const preRunPrSnapshot = commandRunsGhPrCreate(commandToExecute)
-      ? await fetchCurrentBranchPullRequest(cwd)
-      : undefined;
+    // and post-run gh resolution alone cannot distinguish the two. The
+    // branch name and repo identity pin what may legitimately differ
+    // post-run — a mid-command branch switch or origin retarget resolves a
+    // PR this run did not create. Awaited before spawn so every snapshot
+    // strictly precedes the command.
+    let preRunPrSnapshot: BranchPullRequestSnapshot | undefined;
+    let preRunBranch: string | undefined;
+    let preRunRepoKeys: AttributionRepoKeys | undefined;
+    if (commandRunsGhPrCreate(commandToExecute)) {
+      [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
+        fetchCurrentBranchPullRequest(cwd),
+        fetchCurrentBranchName(cwd),
+        fetchAttributionRepoKeys(cwd),
+      ]);
+    }
 
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Number.NEGATIVE_INFINITY;
@@ -2747,6 +2761,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         result.output,
         cwd,
         preRunPrSnapshot,
+        preRunBranch,
+        preRunRepoKeys,
       );
     }
 
@@ -3091,16 +3107,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * attribution authority: the binding is the PR gh resolves for the working
    * branch, accepted only when it is OPEN, this command's output carries
    * gh's URL, the pre-run fetch proved the branch's prior state, and the
-   * number did not already exist before the run — command/output text alone
+   * number differs from the pre-run snapshot — command/output text alone
    * cannot attribute a printed URL to gh's own execution, and a retry that
    * passes the execution gate (`gh pr create || gh pr view`) resolves the
-   * branch's EXISTING PR, which the pre-run snapshot declines.
+   * branch's EXISTING PR, which the pre-run snapshot declines. The
+   * pre-state proof is per-session: two sessions sharing one checkout can
+   * still race inside the snapshot→bind window, which this gate does not
+   * serialize.
    */
   private bindGhPrCreate(
     command: string,
     output: string,
     cwd: string,
     preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
+    preRunBranch: string | undefined,
+    preRunRepoKeys: AttributionRepoKeys | undefined,
   ): void {
     void (async () => {
       try {
@@ -3126,13 +3147,56 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ) {
           return;
         }
+        // Repo identity lives in on-disk state an in-command
+        // `git remote set-url origin` / `gh repo set-default` retargets, so
+        // the resolved PR must belong to a repo gh already attributed to
+        // this checkout BEFORE the run (itself, or its fork parent — from
+        // a fork checkout gh resolves the parent for PR operations). An
+        // unresolvable pre-run identity fails closed like the errored
+        // snapshot arm.
+        const createdRepoKey = repoKeyFromWebUrl(created.url);
+        if (
+          createdRepoKey === undefined ||
+          preRunRepoKeys === undefined ||
+          (createdRepoKey !== preRunRepoKeys.resolved &&
+            createdRepoKey !== preRunRepoKeys.parent)
+        ) {
+          return;
+        }
+        // Branch identity: a command that switched branches mid-run
+        // resolves the NEW branch's existing PR post-run (its `|| gh pr
+        // view` segment prints the URL and exits 0); only a PR whose head
+        // branch is the pre-run branch was created by this run. An
+        // uncaptured pre-run branch (detached HEAD, git failure) cannot
+        // prove stability — decline.
+        if (
+          preRunBranch === undefined ||
+          created.headRefName !== preRunBranch
+        ) {
+          return;
+        }
         if (!output.includes(created.url)) return;
-        const prPath = this.config
-          .getSessionService()
-          .getPrSessionPathForArchiveState(
-            this.config.getSessionId(),
-            'active',
-          );
+        const sessionService = this.config.getSessionService();
+        // Re-resolve the session's archive location immediately before the
+        // locked mutation: an archive transition landing during the gh
+        // round-trip above must not strand the binding on a resurrected
+        // active sidecar.
+        let archiveState: 'active' | 'archived' = 'active';
+        try {
+          if (
+            (await sessionService.getSessionLocation(
+              this.config.getSessionId(),
+            )) === 'archived'
+          ) {
+            archiveState = 'archived';
+          }
+        } catch {
+          // Best-effort binding — keep the default active location.
+        }
+        const prPath = sessionService.getPrSessionPathForArchiveState(
+          this.config.getSessionId(),
+          archiveState,
+        );
         // An already-bound number stays untouched (position and createdAt):
         // only a genuinely new binding persists and notifies — a re-bind
         // would move the entry to the tail with a fresh createdAt.
