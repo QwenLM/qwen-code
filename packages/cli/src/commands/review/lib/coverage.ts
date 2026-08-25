@@ -1062,6 +1062,17 @@ export function coverageFromTranscripts(
       c.maxLineChars <= READ_FILE_CHAR_CAP
     );
   };
+  // The truncatable shape the refutation guard's `> CAP` arm names, reused
+  // by the suppression conjunct below: the planner's own measurement proves
+  // no read can return this chunk's window.
+  const chunkTruncatableByPlan = (chunkId: number): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    return (
+      c !== undefined &&
+      c.maxLineChars !== undefined &&
+      c.maxLineChars > READ_FILE_CHAR_CAP
+    );
+  };
 
   const refutedByReturnedSpanningRead = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
@@ -1074,8 +1085,15 @@ export function coverageFromTranscripts(
     // plan that carries NO metadata leaves the truncation question
     // unanswered — the spanning read may have been the truncated kind, and
     // a refutation the metadata cannot clear would delete an honest
-    // declaration on a guess. Fail closed: no metadata, no refutation.
-    if (c.maxLineChars === undefined || c.maxLineChars > READ_FILE_CHAR_CAP)
+    // declaration on a guess. `<= 0` is the same shape: the planner
+    // measures >= 1 for any non-empty chunk, so a zero or negative lives
+    // only on a hand-edited plan, and untrusted metadata clears nothing.
+    // Fail closed: no trusted metadata, no refutation.
+    if (
+      c.maxLineChars === undefined ||
+      c.maxLineChars <= 0 ||
+      c.maxLineChars > READ_FILE_CHAR_CAP
+    )
       return false;
     return records.some(
       (r) =>
@@ -1242,7 +1260,14 @@ export function coverageFromTranscripts(
         // the launch prompt only points at it — so this is a NOTE, not a
         // relaunch. Not pushed through `disclose()`: the posted body caps on
         // disclosures, and a delivery that demonstrably arrived caps nothing.
-        if (openedBriefOf(rec, `chunk-${chunk}`) && rec.diffToolCalls > 0) {
+        if (
+          // Sealed like the note arms: a launch marked with ANOTHER plan's
+          // token is positively the old plan's — its brief-open and diff
+          // read are facts about THAT plan's delivery, not this one's.
+          launchOfThisPlan(rec.launchPrompt) &&
+          openedBriefOf(rec, `chunk-${chunk}`) &&
+          rec.diffToolCalls > 0
+        ) {
           if (!superseded(rec, chunk)) {
             driftedLaunches.push(
               `${name} — launched with a near-verbatim prompt; its brief was ` +
@@ -1377,7 +1402,19 @@ export function coverageFromTranscripts(
         declarationStillOnTerritory(told, chunk) &&
         declarerReadItsChunk(rec, chunk) &&
         !planContradictsDeclaration(chunk) &&
-        !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
+        // A chunk the plan's own measurement proves unspannable cannot have
+        // been returned by a relaunch that does not re-declare, whatever
+        // `chunkSatisfied`'s bar (returned + verbatim + a diff call) says:
+        // no read returns the tail of an over-cap line. Admitting the
+        // suppression certified such a chunk covered off the relaunch's
+        // told-range presumption — the back door beside the guarded front
+        // door (`refutedByReturnedSpanningRead`'s `> CAP` arm).
+        (chunkTruncatableByPlan(chunk) ||
+          !chunkSatisfied(
+            chunk,
+            rec,
+            (r) => !declaresOwnUncoverable(r, chunk),
+          )) &&
         !refutedByReturnedSpanningRead(chunk)
       ) {
         uncoverable.add(chunk);
@@ -1386,15 +1423,23 @@ export function coverageFromTranscripts(
       continue;
     }
 
-    for (const c of plan.chunks) {
-      if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
-        covered.add(c.id);
-        // A whole-diff agent spans every chunk, so this credits chunks it was
-        // never assigned — which is the point, and why `chunkAgents` is fed
-        // from the assignment above rather than from here: the ledger's
-        // `agents` should name who OWNED the chunk, not everyone whose range
-        // happened to contain it.
-        if (!rec.fromPriorSession) coveredLive.add(c.id);
+    // Sealed like the note arms and the declaration branch: a launch
+    // marked with ANOTHER plan's token is positively the old plan's, and a
+    // modify-only re-plan keeps every window, so its told-range and reads
+    // are geometrically identical to this plan's — only the token tells the
+    // plans apart. Its ranges earned coverage for the plan that wrote it,
+    // not this one; marker-less launches keep the geometry seals alone.
+    if (launchOfThisPlan(rec.launchPrompt)) {
+      for (const c of plan.chunks) {
+        if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
+          covered.add(c.id);
+          // A whole-diff agent spans every chunk, so this credits chunks it was
+          // never assigned — which is the point, and why `chunkAgents` is fed
+          // from the assignment above rather than from here: the ledger's
+          // `agents` should name who OWNED the chunk, not everyone whose range
+          // happened to contain it.
+          if (!rec.fromPriorSession) coveredLive.add(c.id);
+        }
       }
     }
   }

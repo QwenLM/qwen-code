@@ -1020,7 +1020,15 @@ export function buildWholeDiffBlock(
   residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
-  const parts = [...diffReadingBlock(report, diffPath)];
+  // The plan's epoch, exactly as the chunk launch carries it: a same-session
+  // re-plan keeps every window these reads spell out, so the coverage seal
+  // orders fence-surviving whole-diff records by this token too (see
+  // lib/selection.ts). Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
+  const parts = [
+    ...(tokenLine === null ? [] : [tokenLine, '']),
+    ...diffReadingBlock(report, diffPath),
+  ];
   // An Agent 8 specialist reads source out of the same shared worktree every
   // other agent is pinned to, so it owes the same rule (#9207). It is the one
   // launch class built outside `buildLaunch`, which is exactly how it was
@@ -2142,9 +2150,16 @@ export function buildRoleLaunchPrompt(
   // delivery check anchors on — both launches read as rewritten. What the
   // caller will reach for, the CLI prints.
   const roundLabel = opts.round !== undefined ? ` (round ${opts.round})` : '';
+  // The plan's epoch, exactly as the chunk launch carries it: role records
+  // credit coverage, and a same-session re-plan keeps every window their
+  // reads spell out, so the seal orders them by this token too (see
+  // lib/selection.ts). After the identity line — `foldFindings` requires
+  // that line first. Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
   const parts = [
     `You are review agent \`${role}\` — ${b.label}${roundLabel}.` +
       (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',

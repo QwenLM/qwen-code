@@ -2818,19 +2818,18 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.coveredChunks).not.toContain(1);
   });
 
-  it('a returned spanning read refutes a stale declaration the relaunch was too paraphrased to supersede', () => {
+  it('a declaration the plan measurement contradicts does not cap a paraphrased relaunch', () => {
     // Attempt 1 declared chunk 1 unreachable; the continuation relaunched
     // chunk 1 with a paraphrased prompt, and the agent read lines spanning
-    // the chunk. The walk credits a rewritten launch that still read the
-    // diff — coverage WAS earned — but the guard's supersession bar
-    // (returned + VERBATIM launch + diff call) diverges from that
-    // coverage-earning bar: the paraphrase fails `chunkSatisfied`, the
-    // stale declaration passed the guard, and the post-loop subtraction
-    // deleted the very coverage the walk credited. The verbatim control
-    // above reports the identical spanning read as covered; the ledger
-    // must not say "no read can span it" of a chunk this session
-    // demonstrably spanned.
-    const p = plan();
+    // the chunk. The plan's own measurement says every line fits under the
+    // read cap, so `planContradictsDeclaration` refuses the declaration and
+    // the paraphrased relaunch keeps its spanning coverage — without the
+    // refusal the paraphrase fails `chunkSatisfied`'s verbatim bar, the
+    // declaration passes the guard, and the post-loop subtraction deletes
+    // the very coverage the walk credited. The fixture measures its chunks
+    // at 42: a zero measurement is untrusted metadata (the planner writes
+    // >= 1 for any non-empty chunk) that contradicts nothing.
+    const p = plan(2, { maxLineChars: 42 });
     ledger(p, 'S0', 'S1');
     transcript('a1old', good(1), {
       calls: 1,
@@ -2850,16 +2849,17 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(true);
   });
 
-  it('a whole-diff record that merely QUOTES a declaration still refutes it', () => {
-    // The refuter exclusion is keyed on the record's own ASSIGNMENT, the way
-    // `certifies()` keys: a whole-diff auditor whose return quotes the
+  it('a false declaration beside a quoting whole-diff auditor does not cap live coverage', () => {
+    // The quoter shape: a whole-diff auditor whose return QUOTES the
     // declaration it audited is not declaring — `declaresOwnUncoverable`
     // alone matches the quotation, because an indented quote starts a line.
-    // The exclusion can only remove refuters, so the error is
-    // one-directional: the false declaration survives, the quoter's live
-    // spanning coverage is erased, and the chunk pins `declared-uncoverable`
-    // — nothing a relaunch repairs — over a chunk the same run demonstrably
-    // spanned.
+    // The plan's own measurement says every line fits, so the false
+    // declaration is contradicted outright and the auditor's live spanning
+    // coverage stands; admitted anyway, the declaration would pin
+    // `declared-uncoverable` — nothing a relaunch repairs — over a chunk
+    // the same run demonstrably spanned. The fixture measures its chunks at
+    // 42: a zero measurement is untrusted metadata (the planner writes
+    // >= 1 for any non-empty chunk) that contradicts nothing.
     transcript('a1', good(1), {
       calls: 1,
       text: 'Uncoverable: chunk 1 — line exceeds the read limit',
@@ -2876,7 +2876,7 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     });
     transcript('a2', good(2), { calls: 2 });
 
-    const r = coverageFromTranscripts(plan(), ENV);
+    const r = coverageFromTranscripts(plan(2, { maxLineChars: 42 }), ENV);
     expect(r.uncoverableChunks).toEqual([]);
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.ok).toBe(true);
@@ -3076,6 +3076,67 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     expect(r.coveredChunks).toEqual([2]);
     expect(r.missingChunks).toEqual([]);
     expect(r.ok).toBe(false);
+  });
+
+  it('a hand-zeroed maxLineChars cannot refute a declaration either', () => {
+    // The planner measures >= 1 for every non-empty chunk, so a zero lives
+    // only on a hand-edited plan — untrusted metadata, the same shape as
+    // its absence above: the spanning read may have been the truncated
+    // kind, and a refutation the metadata cannot clear would delete an
+    // honest declaration on a guess. Fail closed: `<= 0`, no refutation.
+    // The fixture mirrors the quoting-auditor shape, differing only in the
+    // measurement — there the plan's measurement contradicts the
+    // declaration; here the declaration stands.
+    const p = plan();
+    transcript('a1', good(1), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('w1', wholeDiff(), {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+      text: 'My reads spanned the whole diff.',
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('a returned verbatim relaunch does not supersede a declaration the plan itself confirms', () => {
+    // The honest-declaration shape is exactly `maxLineChars > CAP`: the
+    // builder hands the template only to such chunks, and the planner's
+    // measurement proves no read can return the window. A relaunch that
+    // returns ordinary prose after one diff call clears `chunkSatisfied`'s
+    // bar — returned, verbatim, a diff call — but cannot have returned the
+    // window the plan proves unspannable; admitting the suppression let the
+    // told-range presumption certify a tail no read ever returned — the
+    // back door beside the guarded front door (the refutation guard's
+    // `> CAP` arm, pinned above). The UNRETURNED twin is pinned in the
+    // sibling describe ('survives an unreturned relaunch'); this is the
+    // returned one.
+    const p = plan(2, { longLineChunk: 1 });
+    transcript('a1', good(1), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('a1b', good(1), { calls: 1, text: 'Reviewed the chunk.' });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+    const entry = r.chunkItems.find((i) => i.id === 1);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
   });
 
   it('a superseded rewritten record leaves no cause behind', () => {
@@ -3683,6 +3744,64 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('uncoverable');
     expect(entry?.classification).toBe('declared-uncoverable');
+  });
+
+  it('a stale-token record earns no coverage credit, even when it spans', () => {
+    // The credit-loop witness: the re-plan kept every window, so the stale
+    // record's told-range and reads are geometrically identical to this
+    // plan's chunk 2 — geometry alone would cover the chunk off the OLD
+    // plan's read. The token is the only fact that tells the plans apart,
+    // so the credit loop asks for it exactly the way the note arms do.
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    transcript('a1', launch(1, current), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2stale', launch(2, tokenOf(OLD)), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+      opens: [],
+      text: 'Reviewed chunk 2 thoroughly.',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('a stale-token record earns no drifted-launch rescue either', () => {
+    // The rescue witness: the stale record opened THIS plan's brief file —
+    // the path survives the re-plan — and did real diff work, so the
+    // near-verbatim rescue would vouch for it as a delivery that "stands".
+    // The open and the read are facts about the OLD plan's delivery; the
+    // token tells the plans apart, and refused, the record lands where the
+    // rewrite check puts any launch that is not this plan's.
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    transcript('a1', launch(1, current), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2stale', launch(2, tokenOf(OLD)), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+      opens: [chunkBrief(2)],
+      text: 'Reviewed chunk 2 thoroughly.',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
   });
 });
 

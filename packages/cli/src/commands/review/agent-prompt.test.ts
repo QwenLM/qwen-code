@@ -3962,6 +3962,42 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
     const p = buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md');
     expect(p).not.toContain('Plan identity:');
   });
+
+  it('whole-diff and role launches carry the token too', () => {
+    // The whole-diff and role launch classes credit coverage exactly like
+    // chunk launches — a same-session re-plan keeps every window their
+    // reads spell out, so the seal must be able to order their
+    // fence-surviving records too, and it orders by the token the builder
+    // writes. One writer shape per class, all three carrying the same
+    // plan's token.
+    const selection = buildSelectionIdentity(
+      'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n',
+      PLAN.chunks as unknown as DiffChunk[],
+      4202,
+    );
+    const token = planIdentityToken(selection);
+    expect(buildWholeDiffBlock({ ...PLAN, selection })).toContain(
+      `Plan identity: ${token}`,
+    );
+    const role = buildRoleLaunchPrompt(
+      { ...PLAN, selection },
+      'reverse-audit',
+      '/t/ra.brief.md',
+    );
+    expect(role).toContain(`Plan identity: ${token}`);
+    // The identity line stays FIRST — `foldFindings` splits on line one
+    // being it, and refuses any prompt shape that moved it.
+    expect(role.split('\n')[0]).toMatch(/^You are review agent `/);
+  });
+
+  it('writes no token line in whole-diff and role launches without an identity', () => {
+    // Same absence rule as the chunk launch: no identity, no marker, the
+    // older seals alone.
+    expect(buildWholeDiffBlock(PLAN)).not.toContain('Plan identity:');
+    expect(
+      buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md'),
+    ).not.toContain('Plan identity:');
+  });
 });
 
 // `/review` runs on other people's repositories. A checklist that arrives when it
