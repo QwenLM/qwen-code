@@ -250,6 +250,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       // implementation detail; QuickPick should show human-readable labels.
       const protocolLabels: Record<string, string> = {
         [AuthType.USE_OPENAI]: 'OpenAI Compatible',
+        [AuthType.USE_OPENAI_RESPONSES]: 'OpenAI Responses',
         [AuthType.USE_ANTHROPIC]: 'Anthropic',
         [AuthType.USE_GEMINI]: 'Gemini',
       };

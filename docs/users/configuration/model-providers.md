@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `openai-responses`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
@@ -90,7 +90,7 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 
 ### Custom provider ids (`providerProtocol`)
 
-Built-in provider ids (`openai`, `gemini`, `anthropic`, `vertex-ai`, `qwen-oauth`) are routed to their SDK protocol automatically. To use a **custom** provider id — for example to group several OpenAI-compatible endpoints under a friendlier name — declare it under `modelProviders` and map it to a built-in protocol with the top-level `providerProtocol` setting:
+Built-in provider ids (`openai`, `openai-responses`, `gemini`, `anthropic`, `vertex-ai`, `qwen-oauth`) are routed to their SDK protocol automatically. To use a **custom** provider id — for example to group several OpenAI-compatible endpoints under a friendlier name — declare it under `modelProviders` and map it to a built-in protocol with the top-level `providerProtocol` setting:
 
 ```json
 {
@@ -115,13 +115,13 @@ Without a matching `providerProtocol` entry, a custom provider id is skipped (se
 
 Qwen Code uses the following official SDKs to send requests to each provider:
 
-| Auth Type          | SDK Package                                                                                     |
-| ------------------ | ----------------------------------------------------------------------------------------------- |
-| `openai`           | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                  |
-| `openai-responses` | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK, `/v1/responses` |
-| `anthropic`        | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK |
-| `gemini`           | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
-| `qwen-oauth`       | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)    |
+| Auth Type          | SDK Package                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `openai`           | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                                     |
+| `openai-responses` | Direct HTTP/SSE calls to `/v1/responses` (no SDK); embeddings use [`openai`](https://www.npmjs.com/package/openai) |
+| `anthropic`        | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK                    |
+| `gemini`           | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK                         |
+| `qwen-oauth`       | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)                       |
 
 This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
 
@@ -418,7 +418,7 @@ export VLLM_API_KEY="not-needed"
 
 > [!note]
 >
-> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers.
+> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `openai-responses`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers. On `openai-responses` the `enable_thinking` key is translated rather than forwarded — see the [OpenAI Responses API](#openai-responses-api-openai-responses) note.
 
 > [!note]
 >
