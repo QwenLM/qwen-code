@@ -39,11 +39,6 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
-import {
-  isValidStopReason,
-  readStopSidecarFields,
-  stopSidecarNameFor,
-} from './lib/stop-sidecar.js';
 import { safeTarget } from '../../utils/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
@@ -86,23 +81,6 @@ export interface RunReviewResult {
   downgradedFrom: string | null;
   remediation: string[];
   composedPath: string | null;
-  /**
-   * The decided-stop reason the capture stamped this run (`clean-tree`,
-   * `unchanged-since-last-round`, `scope-emptied`), or null when the round
-   * was not a decided stop. Its one true contract: it separates a DECIDED
-   * STOP (non-null + reason) from a VERDICT ROUND (null). It does NOT
-   * separate a legitimate clean stop from a stop whose ledger held open
-   * findings but whose re-rule verdict never composed — both of those are
-   * `stopReason` non-null with `composedPath` null, byte-identical in this
-   * payload, because the sidecar is what makes either a stop and it carries
-   * no ledger knowledge. Detecting that lost-re-rule shape requires reading
-   * the cache ledger for open findings, which this result deliberately does
-   * not carry; a gate that needs it must read the ledger itself. The field
-   * exists so a caller can at least tell a stop from a verdict round and
-   * reason about exit 0 accordingly, instead of reading every
-   * `event: null` the same way.
-   */
-  stopReason: string | null;
   /**
    * The exact `.qwen/tmp` filename this run's target class pins — named in
    * the result so a completed-but-uncaptured review (a naming drift between
@@ -230,10 +208,8 @@ const escapeRe = (s: string): string =>
 function stopNameFor(cls: RunTargetClass): string {
   // The capture's sidecar, not the plan: `--out` is the orchestrator's to
   // choose, so the plan has no name the parent can predict. This one is
-  // derived from the same target the parent derives — and spelled through
-  // the shared sidecar module, so the writer and both readers agree on the
-  // name.
-  return stopSidecarNameFor(planStemFor(cls));
+  // derived from the same target the parent derives.
+  return `qwen-review-${planStemFor(cls)}-stop.json`;
 }
 
 /** The stop sidecar's verdict-bearing shape. */
@@ -251,11 +227,17 @@ interface StopVerdict {
  * unreadable or not JSON: no claim either way.
  */
 function readStopSidecar(path: string, runId: string): StopVerdict | null {
-  const stop = readStopSidecarFields(path);
-  if (stop === null) return null;
-  if (stop.runId !== runId) return null;
-  if (!isValidStopReason(stop.reason)) return null;
-  return { reason: stop.reason };
+  try {
+    const stop = JSON.parse(readFileSync(path, 'utf8')) as {
+      reason?: unknown;
+      runId?: unknown;
+    };
+    if (stop.runId !== runId) return null;
+    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+    return { reason: stop.reason };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -440,14 +422,13 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop round
- * whose cache ledger still holds open Criticals writes a real composed
- * verdict — the orchestrator's re-rule of those findings against the current
- * tree (SKILL Step 1's stop branches) — and gates exactly like a full round;
- * a stop round the re-rule finds nothing standing in completes with no event
- * and exits 0. 3, not 2 — yargs exits 1 on usage errors and some shells
- * reserve 2, so a CI gate can tell "review is blocking" from "the tool
- * broke" without parsing anything.
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop carries
+ * no composed verdict and no synthesised one: the cache ledger a stop renders
+ * is rewritten only by a round that writes the cache, so a blocker fixed and
+ * committed stays `open` in it — an exit code keyed on that count is a
+ * failure no action clears. 3, not 2 — yargs exits 1 on usage errors and
+ * some shells reserve 2, so a CI gate can tell "review is blocking" from
+ * "the tool broke" without parsing anything.
  */
 export function exitCodeFor(
   completed: boolean,
@@ -750,29 +731,26 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  // A round the CAPTURE decided had nothing to review is complete even when
-  // no composed verdict exists: a stop round whose ledger holds no open
-  // findings stops without composing. (A stop round whose ledger holds open
-  // findings does compose — Step 1's stop branches re-rule them and call
-  // `compose-review`, and the composed verdict read above gates this run.)
-  // Polling for the verdict alone used to report "Review did not complete"
-  // over a round whose own output was decided — a cached second round on an
-  // unchanged tree, or a clean tree whose earlier blocker the ledger still
-  // renders as standing. The signal is a field the CLI wrote into its own
-  // plan, not a sentence the model chose. The in-run snapshot first: it
-  // holds the stamped verdict even if a concurrent run overwrote or swept
-  // the shared sidecar since. The post-close scan covers a child that wrote
-  // the sidecar and exited inside one poll tick.
+  // A round the CAPTURE decided had nothing to review is complete, even
+  // though no composed verdict exists: `compose-review` is reached only from
+  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
+  // reported "Review did not complete" over a round whose own output was
+  // decided — a cached second round on an unchanged tree, or a clean tree
+  // whose earlier blocker the ledger still renders as standing. The signal is
+  // a field the CLI wrote into its own plan, not a sentence the model chose.
+  // The in-run snapshot first: it holds the stamped verdict even if a
+  // concurrent run overwrote or swept the shared sidecar since. The
+  // post-close scan covers a child that wrote the sidecar and exited inside
+  // one poll tick.
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
-  // A stop sidecar carries no synthesised event, deliberately: a rendered
-  // blocker count read off the cache ledger is a byte property, and the
-  // chain that tried to answer "does the blocker still stand" from bytes
-  // produced the next round's Criticals every regime (#9659). The gate on
-  // the stop path is the composed verdict above — the orchestrator's re-rule
-  // of the open ledger against the current tree — which gates exactly like
-  // a full round; a stop round with no such verdict exits 0.
+  // A stop carries no synthesised event, deliberately: the stop's rendered
+  // blocker list comes from the cache ledger, which only a cache-writing
+  // round rewrites — a stop never does — so a blocker fixed and committed
+  // stays `open` there, and an exit code keyed on it is a failure no action
+  // clears. A composed verdict on the stop path — the model re-ruling the
+  // ledger — is the answer that can gate; until then a stop exits 0.
 
   const result: RunReviewResult = {
     completed,
@@ -784,7 +762,6 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     downgradedFrom: composed?.downgradedFrom ?? null,
     remediation: composed?.remediation ?? [],
     composedPath: composedPath ? resolve(composedPath) : null,
-    stopReason: stop?.reason ?? null,
     expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
     childExitCode,

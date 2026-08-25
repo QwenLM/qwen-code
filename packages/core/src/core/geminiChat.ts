@@ -1942,8 +1942,7 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-    | null = null;
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 

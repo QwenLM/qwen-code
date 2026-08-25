@@ -1265,10 +1265,10 @@ describe('review run (handler)', () => {
   });
 
   it('exits 0 under --fail-on for a decided stop round', async () => {
-    // A stop round whose ledger holds no open findings — or whose re-rule
-    // left nothing standing — stops without a composed verdict and exits 0:
-    // the gate fires only on a composed REQUEST_CHANGES, and a stop sidecar
-    // alone synthesises no event (#9908).
+    // A stop composes no verdict and synthesises none: the ledger it renders
+    // is rewritten only by a cache-writing round, so a blocker fixed and
+    // committed stays `open` there — gating on it was a failure no action
+    // could clear. The gate fires only on a composed REQUEST_CHANGES.
     spawnMock.mockImplementation(
       (
         _cmd: unknown,
@@ -1297,53 +1297,7 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
     expect(result.event).toBeNull();
-    expect(result.stopReason).toBe('clean-tree');
     expect(process.exitCode).toBe(0);
-  });
-
-  it('exits 3 under --fail-on when a stop round composes REQUEST_CHANGES', async () => {
-    // #9908: a stop round whose ledger holds open findings composes its
-    // verdict on the stop path (the orchestrator re-rules the ledger against
-    // the current tree); a still-standing Critical gates exactly like a full
-    // round. The composed verdict wins over the stop sidecar.
-    spawnMock.mockImplementation(
-      (
-        _cmd: unknown,
-        _argv: unknown,
-        opts: { env: Record<string, string> },
-      ) => {
-        const child = new FakeChild();
-        setImmediate(() => {
-          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-          writeFileSync(
-            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
-            JSON.stringify({
-              reason: 'clean-tree',
-              runId: opts.env['QWEN_REVIEW_RUN_ID'],
-            }),
-            'utf8',
-          );
-          writeFileSync(
-            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-            JSON.stringify({
-              event: 'REQUEST_CHANGES',
-              verdictLine: 'Verdict: Request changes',
-            }),
-            'utf8',
-          );
-          child.emit('close', 0);
-        });
-        return child;
-      },
-    );
-
-    await runHandler({ 'fail-on': 'request-changes' });
-
-    const result = JSON.parse(outs.join(''));
-    expect(result.completed).toBe(true);
-    expect(result.event).toBe('REQUEST_CHANGES');
-    expect(result.stopReason).toBe('clean-tree');
-    expect(process.exitCode).toBe(3);
   });
 });
 

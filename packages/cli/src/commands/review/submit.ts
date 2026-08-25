@@ -402,25 +402,15 @@ function compose(
   // `draftedComments` joins them: the ledger marker's contents are the comments
   // this submission actually carries, taken from the payload below — not an
   // assertion a caller's state JSON gets to make about what it reviewed.
-  // `stopReRule` joins them at this boundary specifically: a POSTED verdict is
-  // a PR round's, and no PR round is ever a decided stop (only `capture-local`
-  // writes `nothingToReview`, and it never runs on a PR target) — so the
-  // floor exemption the flag grants is illegitimate on every path that
-  // reaches this function, and a state carrying it here is a full round
-  // laundering itself past the evidence floors. The exemption stays
-  // available where it is legitimate: the local stop rounds that compose
-  // through compose-review's own CLI and never post.
   const {
     env: _dropped,
     prBodyFetcher: _droppedFetcher,
     draftedComments: _droppedDrafted,
-    stopReRule: _droppedStopReRule,
     ...rest
   } = state;
   void _dropped;
   void _droppedFetcher;
   void _droppedDrafted;
-  void _droppedStopReRule;
 
   const r = composeReview(
     {

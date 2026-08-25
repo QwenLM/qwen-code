@@ -35,7 +35,6 @@ import {
   REVIEW_TMP_DIR,
   tmpFile,
 } from './lib/paths.js';
-import { STOP_SIDECAR_SUFFIX } from './lib/stop-sidecar.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
@@ -996,7 +995,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // round. This name is derived from the same `target` the parent derives.
   if (nothingToReview) {
     writeFileSync(
-      tmpFile(target, STOP_SIDECAR_SUFFIX),
+      tmpFile(target, 'stop.json'),
       `${JSON.stringify(
         {
           ...nothingToReview,
