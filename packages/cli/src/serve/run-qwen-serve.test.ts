@@ -11688,6 +11688,53 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('still names the anchor gap when the operator CA is only in a home env file', async () => {
+    // R13-1 claimed this was a false alarm: the diagnostic reads the frozen
+    // daemon base env while workers supposedly receive a home-scoped
+    // `~/.env` overlay carrying the CA. Measured at this head the two sources
+    // CANNOT disagree for this key — buildRuntimeEnvironment applies reload
+    // semantics, and isReloadExcludedKey subsumes the hardcoded exclusions,
+    // so a home-scoped NODE_EXTRA_CA_CERTS is rejected from the runtime env
+    // exactly like a project one and never reaches the workers' bundle.
+    // Probed: with the key set only in ~/.env, buildRuntimeEnvironment
+    // discovers the file (envFilePaths) yet applies nothing (overlayKeys
+    // empty, key undefined in effectiveEnv). The gap the warning names is
+    // therefore real — pin that the home file neither reaches the workers
+    // nor silences the diagnostic.
+    const fakeHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-home-')),
+    );
+    const caDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-home-ca-')),
+    );
+    const operatorCaPath = path.join(caDir, 'rootCA.pem');
+    fs.writeFileSync(operatorCaPath, TEST_TLS_CERT_ISSUING_ROOT);
+    fs.writeFileSync(
+      path.join(fakeHome, '.env'),
+      `NODE_EXTRA_CA_CERTS=${operatorCaPath}\n`,
+    );
+    const savedHome = process.env['HOME'];
+    const savedUserProfile = process.env['USERPROFILE'];
+    process.env['HOME'] = fakeHome;
+    process.env['USERPROFILE'] = fakeHome;
+    vi.stubEnv('NODE_EXTRA_CA_CERTS', '');
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        issuedLeafServing,
+      );
+      expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.unstubAllEnvs();
+      if (savedHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = savedHome;
+      if (savedUserProfile === undefined) delete process.env['USERPROFILE'];
+      else process.env['USERPROFILE'] = savedUserProfile;
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+      fs.rmSync(caDir, { recursive: true, force: true });
+    }
+  });
+
   it('still boots and still names the gap when NODE_EXTRA_CA_CERTS is unreadable', async () => {
     // R3-7(b): the try/catch around the read is what lets a typo'd path
     // degrade to "it anchors nothing". Without it the throw lands inside the
