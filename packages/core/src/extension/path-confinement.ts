@@ -66,6 +66,11 @@ export function readExtensionManifest(
   if (!fs.existsSync(filePath)) {
     return null;
   }
+  if (!isRegularFile(filePath)) {
+    throw new Error(
+      `Invalid ${stripAnsiAndControl(filename)} at ${stripAnsiAndControl(filePath)}: not a regular file`,
+    );
+  }
   if (!trustSymlinks && !realPathWithin(filePath, extensionDir)) {
     // A symlinked manifest is only valid for a trusted install (link mode,
     // where the user owns the dev tree); untrusted content must stay confined.

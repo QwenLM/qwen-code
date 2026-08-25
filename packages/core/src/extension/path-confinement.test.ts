@@ -181,6 +181,23 @@ describe('readExtensionManifest', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'throws when the manifest path is not a regular file (e.g. FIFO)',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      try {
+        (fs as unknown as { mkfifoSync: (p: string) => void }).mkfifoSync(
+          path.join(dir, 'plugin.json'),
+        );
+        expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
+          /not a regular file/,
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('resolvePluginRelativeFile', () => {
@@ -329,6 +346,26 @@ describe('readExtraJsonFile', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'returns null with `directory` reason when the path is a FIFO',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      try {
+        (fs as unknown as { mkfifoSync: (p: string) => void }).mkfifoSync(
+          path.join(dir, 'hooks.json'),
+        );
+        let observed: ExtraJsonNullReason | null = null;
+        const result = readExtraJsonFile(dir, 'hooks.json', false, (reason) => {
+          observed = reason;
+        });
+        expect(result).toBeNull();
+        expect(observed).toBe('directory');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('returns null for a relative path escaping the extension', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));

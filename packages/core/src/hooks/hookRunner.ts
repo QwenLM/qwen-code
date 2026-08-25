@@ -628,6 +628,18 @@ export class HookRunner {
       // successful statement resetting $? and exit code 0). The stderr
       // carries the exact $VAR name into HookExecutionResult for systemMessage
       // surfacing.
+      if (
+        shellConfig.shell === 'powershell' &&
+        /(?:^|[\n;])\s*["'][^"']*\.(?:cmd|bat|exe)\b/i.test(
+          hookConfig.command,
+        )
+      ) {
+        throw new Error(
+          `PowerShell command contains a bare-quoted Windows executable path; ` +
+            `if you intend to invoke it, prefix with the call operator '& '. ` +
+            `Example: & ${hookConfig.command}`,
+        );
+      }
       const command =
         shellConfig.shell === 'powershell'
           ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}`

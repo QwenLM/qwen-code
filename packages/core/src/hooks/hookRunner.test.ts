@@ -1168,6 +1168,64 @@ describe('HookRunner', () => {
       }
     });
 
+    it.each([
+      ['bare-quoted .cmd path at start', '"C:\\Program Files\\My App\\hook.cmd"'],
+      [
+        'bare-quoted .bat path with arguments',
+        '"C:\\Scripts\\setup.bat" arg1 arg2',
+      ],
+      [
+        'bare-quoted .exe path at start',
+        '"C:\\Windows\\notepad.exe"',
+      ],
+      [
+        'multi-statement with bare-quoted .cmd',
+        'cmd1; "foo.cmd"',
+      ],
+      ['bare-quoted .bat after comment line', '# my hook\n"foo.bat"'],
+      ['single-quoted .exe', "'C:\\foo.exe'"],
+    ])('rejects a PowerShell command that is %s', async (_label, command) => {
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command,
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toMatch(/prefix with the call operator/);
+    });
+
+    it.each([
+      ['call-operator prefix on quoted .cmd', '& "C:\\hook.cmd"'],
+      ['command with quoted arguments', 'Get-Process "name"'],
+      ['write-output with quoted argument', 'Write-Output "hello"'],
+      ['cmd-style invocation with quoted tail', 'cmd /c "echo hello"'],
+      ['bare-quoted .ps1 not in cmd-regression class', '"C:\\foo.ps1"'],
+      ['bare-quoted .ps1 with arguments', '"C:\\foo.ps1" arg1 arg2'],
+      ['bare-quoted no-extension command', '"foo"'],
+    ])(
+      'does not throw for a PowerShell command that is %s',
+      async (_label, command) => {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(result.success).toBe(true);
+        expect(mockSpawn).toHaveBeenCalled();
+      },
+    );
+
     it('does NOT wrap bash commands with Set-StrictMode', async () => {
       // PowerShell-only wrapping. bash spawn uses `bash -c` (no -u flag);
       // adding `set -u` here would break existing hooks that rely on
