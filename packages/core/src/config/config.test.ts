@@ -4285,6 +4285,16 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
     });
 
+    it('keeps Agent View opt-in', () => {
+      expect(new Config({ ...baseParams }).isAgentViewEnabled()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          agentViewEnabled: true,
+        }).isAgentViewEnabled(),
+      ).toBe(true);
+    });
+
     it('registers read_mcp_resource so the model can read MCP resources', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();

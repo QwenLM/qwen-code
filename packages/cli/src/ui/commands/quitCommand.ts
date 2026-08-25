@@ -7,6 +7,7 @@
 import { formatDuration } from '../utils/formatters.js';
 import { CommandKind, type SlashCommand } from './types.js';
 import { t } from '../../i18n/index.js';
+import { readAgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
 
 export const quitCommand: SlashCommand = {
   name: 'quit',
@@ -17,6 +18,10 @@ export const quitCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: (context) => {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      return { type: 'agent_view_detach' };
+    }
+
     const now = Date.now();
     const { sessionStartTime } = context.session.stats;
     const wallDuration = now - sessionStartTime.getTime();

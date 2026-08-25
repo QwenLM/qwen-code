@@ -1152,6 +1152,7 @@ export interface ConfigParameters {
    * result. Default false. CLI: `--restore-ask-user-question`.
    */
   restoreAskUserQuestion?: boolean;
+  agentViewEnabled?: boolean;
   sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
@@ -2130,6 +2131,7 @@ export class Config {
    * Gemini history is repaired in lockstep with replay finalization.
    */
   private preserveRestorableAskUserQuestion = false;
+  private readonly agentViewEnabled: boolean = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
@@ -2414,6 +2416,7 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.restoreAskUserQuestion = params.restoreAskUserQuestion === true;
     this.preserveRestorableAskUserQuestion = this.restoreAskUserQuestion;
+    this.agentViewEnabled = params.agentViewEnabled ?? false;
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
@@ -7115,6 +7118,10 @@ export class Config {
         (name) => parseRule(name).toolName === ToolNames.LS,
       ) ?? false
     );
+  }
+
+  isAgentViewEnabled(): boolean {
+    return this.agentViewEnabled;
   }
 
   isAgentTeamEnabled(): boolean {

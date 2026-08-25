@@ -462,7 +462,7 @@ export async function runAgentViewPtyHostProcess({
   authToken,
   hostId,
   loadPty,
-}: RunAgentViewPtyHostProcessOptions): Promise<void> {
+}: RunAgentViewPtyHostProcessOptions): Promise<AgentViewPtyHostExit> {
   const launch = JSON.parse(await fs.readFile(launchPath, 'utf8')) as unknown;
   const host = await launchAgentViewPtyHost(launch, {
     ...(loadPty ? { loadPty } : {}),
@@ -477,10 +477,11 @@ export async function runAgentViewPtyHostProcess({
     host.dispose();
     throw error;
   }
-  await host.exited.finally(async () => {
+  const exit = await host.exited.finally(async () => {
     host.dispose();
     await server.close();
   });
+  return exit;
 }
 
 export function getAgentViewPtyHostSocketPath(

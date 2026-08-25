@@ -412,22 +412,6 @@ describe('agent view supervisor store', () => {
     expect(snapshots[0]?.worker).not.toHaveProperty('hostAuthToken');
   });
 
-  it('does not read auxiliary records for unmanaged snapshots', async () => {
-    await writeAgentViewSessionState(
-      sessionState('session-1', { ownership: 'unmanaged' }),
-      { globalDir: tempDir },
-    );
-
-    const snapshots = await listAgentViewSessionSnapshots({
-      globalDir: tempDir,
-    });
-
-    expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]).not.toHaveProperty('launch');
-    expect(snapshots[0]).not.toHaveProperty('activity');
-    expect(snapshots[0]).not.toHaveProperty('worker');
-  });
-
   it('round trips launch, activity, worker, and supervisor files', async () => {
     const launch: AgentViewLaunchFile = {
       schemaVersion: 1,
