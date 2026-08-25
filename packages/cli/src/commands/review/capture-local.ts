@@ -60,6 +60,7 @@ import { inertText } from './lib/inert-text.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
+  invisibleTrackedPaths,
   movedSince,
   hashWorktreeFiles,
   readLocalCache,
@@ -208,6 +209,45 @@ function vanishedStillOnDisk(
 }
 
 /**
+ * Why a decided stop is withheld when tracked paths carry a visibility bit —
+ * or when the bits themselves could not be enumerated.
+ */
+function invisibleStopRefusal(invisible: string[] | null): string {
+  return invisible === null
+    ? 'The tracked-file visibility bits could not be enumerated ' +
+        '(`git ls-files -v` failed) — a stop is a DECIDED outcome, and a ' +
+        'tree the capture cannot measure cannot be decided. Re-run the review.'
+    : `${invisible.length} tracked path(s) carry an --assume-unchanged or ` +
+        `--skip-worktree bit (e.g. ${display(
+          invisible[0].slice(0, 96),
+        )}) — \`git diff\` is blind to any edit on them, so no decided stop ` +
+        `can be made: the bytes it would certify were read by no round. Clear ` +
+        `the bit(s) (\`git update-index --no-assume-unchanged\` / ` +
+        `\`--no-skip-worktree\`) and re-run the review.`;
+}
+
+/**
+ * Why the cache candidate is withheld when tracked paths carry a visibility
+ * bit — or when the bits themselves could not be enumerated.
+ */
+function invisibleCandidateRefusal(invisible: string[] | null): string {
+  return invisible === null
+    ? 'The tracked-file visibility bits could not be enumerated ' +
+        '(`git ls-files -v` failed) — the cache candidate is withheld: an ' +
+        'anchor recorded over a tree the capture cannot measure would let ' +
+        'a later round certify bytes no round ever read. Re-run the review.'
+    : `${invisible.length} tracked path(s) carry an --assume-unchanged or ` +
+        `--skip-worktree bit (e.g. ${display(
+          invisible[0].slice(0, 96),
+        )}) — \`hash-object\` reads the worktree bytes through the bit ` +
+        `while \`git diff\` cannot see them, so the cache candidate is ` +
+        `withheld: promoted, it would anchor a later round on bytes this ` +
+        `round never reviewed. Clear the bit(s) ` +
+        `(\`git update-index --no-assume-unchanged\` / ` +
+        `\`--no-skip-worktree\`) and re-run the review.`;
+}
+
+/**
  * Why the previous round's anchor cannot scope this capture — or null when it
  * can. Every reason is said out loud: an anchor silently ignored looks
  * exactly like an anchor honoured over a full-size diff.
@@ -292,6 +332,15 @@ function anchorRefusalReason(
     // Integrity: a shape-valid cache whose hashes were edited without
     // recomputing stateId is not the state any clean round certified.
     return 'the cache stateId does not match its own files (tampered or corrupted)';
+  }
+  if (Object.keys(cache.files).length === 0) {
+    // A no-diff round promotes an empty files map, and an empty map
+    // certifies nothing: `changedSince` over two empty maps answers
+    // "unchanged" under ANY tree state the capture cannot see — an
+    // `--assume-unchanged` edit is the live case — so the unchanged stop
+    // would decide over bytes no round ever read. An anchor with no
+    // identities is not an anchor; the full capture costs one round.
+    return 'the cache recorded no file identities, so it cannot certify this round';
   }
   if (cache.headSha !== headSha) {
     // The captured diff is HEAD-vs-worktree: under a moved HEAD the same
@@ -395,6 +444,17 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const target =
     sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
+  // Visibility-bit sample 0 — BEFORE the first capture. The oracle rides the
+  // same both-endpoints discipline as the diffs and hashes below: sampled
+  // only after the loop, a bit set through every diff pass and cleared just
+  // before the one query read clean while the captured diffs were blind to
+  // the edit it hid — the candidate then certified bytes no pass ever
+  // showed. Bracketing narrows that to a set-AND-cleared toggle inside one
+  // inter-sample gap, the same honest-tightening the capture loop claims
+  // for itself.
+  const invisibleSamples: Array<string[] | null> = [
+    invisibleTrackedPaths(gitOpt('rev-parse', '--show-toplevel') ?? '.'),
+  ];
   const capture = captureLocalDiff({
     file,
     includeUntracked: args.untracked,
@@ -430,13 +490,20 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // edit. Local plans therefore DO carry `renameFrom`, which is what makes
   // the slice filter below a live fix rather than a spare part.
   const planPaths = [
-    ...new Set(
-      fullPlan.files.flatMap((f) =>
+    ...new Set([
+      ...fullPlan.files.flatMap((f) =>
         f.renameFrom && f.renameFrom !== f.path
           ? [f.path, f.renameFrom]
           : [f.path],
       ),
-    ),
+      // A FILE review's subject enters the anchor even with NO diff section.
+      // Without it the no-diff shape promotes an empty files map, and an
+      // `--assume-unchanged` edit on the subject then hides from
+      // `git diff HEAD` while `hash-object` reads through the bit — hashing
+      // the subject keeps the next round's comparison honest instead of
+      // certifying "unchanged since last round" over bytes nobody read.
+      ...(sourcePath !== undefined ? [sourcePath] : []),
+    ]),
   ];
   const hashes = hashWorktreeFiles(capture.repoRoot, planPaths);
   // TOCTOU guard: the diff was snapshotted before the hashes were computed,
@@ -487,6 +554,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       captureLocalDiff({ file, includeUntracked: args.untracked }).diff,
     );
     hashPasses.push(hashWorktreeFiles(capture.repoRoot, planPaths));
+    // Visibility-bit samples 1 and 2 — interleaved with the re-captures for
+    // the same reason the hashes are: see sample 0 above.
+    invisibleSamples.push(invisibleTrackedPaths(capture.repoRoot));
   }
   const treeHeldStill =
     captures.every((d) => d.equals(captures[0])) &&
@@ -532,13 +602,51 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // erased the first file's anchor and its open findings.
     ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
+  // The visibility-bit oracle — every stop is a claim that nothing in the
+  // tree needs review, and the candidate records the identity of the tree
+  // this round reviewed; `git diff` is blind to the marked paths, so the
+  // three stops AND the candidate write are conditioned on the enumeration
+  // coming back clean AT EVERY SAMPLE POINT: the three bracketing samples
+  // taken alongside the captures above, plus a final one here after the
+  // loop. A bit visible at ANY of them withholds (the union is reported),
+  // and a single failed enumeration withholds everything — the same
+  // fail-closed lean as one unhashable path.
+  let invisibleBits: string[] | null | undefined;
+  const invisibleTracked = (): string[] | null => {
+    if (invisibleBits === undefined) {
+      invisibleBits = invisibleTrackedPaths(capture.repoRoot);
+    }
+    if (invisibleBits === null || invisibleSamples.some((v) => v === null)) {
+      return null;
+    }
+    return [
+      ...new Set([
+        ...invisibleSamples.flatMap((v) => v ?? []),
+        ...invisibleBits,
+      ]),
+    ];
+  };
+  const invisibleCertified = (): boolean => {
+    const inv = invisibleTracked();
+    return inv !== null && inv.length === 0;
+  };
   const candidatePath = tmpFile(target, 'cache-candidate.json');
   // The field rides the plan ONLY when a candidate exists to promote: Step 8
   // keys its cache-commit-vs-hand-write branch on the field's presence, and
   // announcing a path to a file this run deliberately withheld would send it
   // promoting a stale candidate from an earlier round.
   let cacheCandidatePath: string | undefined;
-  if (treeHeldStill) {
+  // The same uncertainty that withholds a decided stop withholds the
+  // candidate: `hash-object` reads the worktree bytes THROUGH a set
+  // assume-unchanged/skip-worktree bit while `git diff` cannot see them, so
+  // the hashes above record the identity of bytes this round's diff never
+  // showed. Promoted, the unread bytes become anchor state — and when the
+  // bit is cleared between rounds keeping the bytes, every comparison finds
+  // no change, every visibility gate reads clean, and the unchanged-since
+  // stop certifies them: a loop deciding "nothing to re-review" over bytes
+  // no round ever read.
+  const invisible = invisibleTracked();
+  if (treeHeldStill && invisible !== null && invisible.length === 0) {
     // Guarded as a whole, like the PR flow's candidate write and for the
     // reason that one states: a convenience artefact must never take the
     // round with it. The refusal below arrives AFTER the capture, the
@@ -584,12 +692,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     } catch {
       // The absent field above is the load-bearing half.
     }
-    writeStderrLine(
-      'The working tree changed while the capture was being hashed — the ' +
-        'cache candidate is withheld, so the next round cannot anchor on ' +
-        'bytes this round never reviewed. The review itself proceeds on ' +
-        'the first capture.',
-    );
+    if (treeHeldStill) {
+      writeStderrLine(invisibleCandidateRefusal(invisible));
+    } else {
+      writeStderrLine(
+        'The working tree changed while the capture was being hashed — the ' +
+          'cache candidate is withheld, so the next round cannot anchor on ' +
+          'bytes this round never reviewed. The review itself proceeds on ' +
+          'the first capture.',
+      );
+    }
   }
 
   // Incremental scoping, when the caller brought the previous round's anchor.
@@ -735,42 +847,57 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       const removedCount = stateChanged.filter(
         (p) => !planPaths.includes(p),
       ).length;
-      writeStderrLine(
-        // The stop condition is the SYMMETRIC set: a deleted-since-cache
-        // path with no diff section left is still a change, and "no
-        // changes" must not be claimed over it.
-        stateMoved.length === 0 && stateChanged.length === 0
-          ? ((nothingToReview = { reason: 'unchanged-since-last-round' }),
+      // The stop condition is the SYMMETRIC set: a deleted-since-cache
+      // path with no diff section left is still a change, and "no
+      // changes" must not be claimed over it.
+      if (stateMoved.length === 0 && stateChanged.length === 0) {
+        const invisible = invisibleTracked();
+        if (invisible !== null && invisible.length === 0) {
+          nothingToReview = { reason: 'unchanged-since-last-round' };
+          writeStderrLine(
             `No changes since the last local review round (same model, same ` +
-              `HEAD, same content) — nothing to re-review.`)
-          : stateMoved.length === 0
-            ? // Nothing MOVED, but the scope is not empty: a path unhashable
-              // on both sides stays in it, because "could not capture it
-              // twice" is not "unchanged". Saying "nothing to re-review"
-              // here would be false twice over — the plan carries chunks,
-              // and SKILL.md stops the orchestrator on that exact sentence,
-              // so it would stop over live scope.
-              `No content changes since the last local review round, but ` +
-              `${stateChanged.length} path(s) could not be hashed on either ` +
-              `side (a pending deletion, or a name this layer cannot read) ` +
-              `— they are re-reviewed every round and never certified. ` +
-              `Their sections are in scope.`
-            : `Incremental scope since state ${display(
-                cache!.stateId.slice(0, 12),
-              )}: ` +
-              `${changed.length} changed file(s), ${interaction.size} ` +
-              `interaction file(s) (one import hop), ` +
-              (stateChanged.length > stateMoved.length
-                ? `${stateChanged.length - stateMoved.length} unreadable ` +
-                  `path(s) re-reviewed every round (never certified), `
-                : '') +
-              (removedCount > 0
-                ? `${removedCount} cached path(s) no longer present ` +
-                  `(treated as changes for the widening), `
-                : '') +
-              `${incremental.scope!.contextFileCount} clean file(s) left out of ` +
-              `scope.`,
-      );
+              `HEAD, same content) — nothing to re-review.`,
+          );
+        } else {
+          // …but "unchanged" was only proven over what `git diff` can see:
+          // a marked path's edit leaves every comparison above standing
+          // still. The same uncertainty that refuses an anchor withholds a
+          // stop — the round decides nothing and says why.
+          writeStderrLine(invisibleStopRefusal(invisible));
+        }
+      } else if (stateMoved.length === 0) {
+        // Nothing MOVED, but the scope is not empty: a path unhashable
+        // on both sides stays in it, because "could not capture it
+        // twice" is not "unchanged". Saying "nothing to re-review"
+        // here would be false twice over — the plan carries chunks,
+        // and SKILL.md stops the orchestrator on that exact sentence,
+        // so it would stop over live scope.
+        writeStderrLine(
+          `No content changes since the last local review round, but ` +
+            `${stateChanged.length} path(s) could not be hashed on either ` +
+            `side (a pending deletion, or a name this layer cannot read) ` +
+            `— they are re-reviewed every round and never certified. ` +
+            `Their sections are in scope.`,
+        );
+      } else {
+        writeStderrLine(
+          `Incremental scope since state ${display(
+            cache!.stateId.slice(0, 12),
+          )}: ` +
+            `${changed.length} changed file(s), ${interaction.size} ` +
+            `interaction file(s) (one import hop), ` +
+            (stateChanged.length > stateMoved.length
+              ? `${stateChanged.length - stateMoved.length} unreadable ` +
+                `path(s) re-reviewed every round (never certified), `
+              : '') +
+            (removedCount > 0
+              ? `${removedCount} cached path(s) no longer present ` +
+                `(treated as changes for the widening), `
+              : '') +
+            `${incremental.scope!.contextFileCount} clean file(s) left out of ` +
+            `scope.`,
+        );
+      }
     }
   }
 
@@ -806,9 +933,35 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // edits through it. The same uncertainty that refused the anchor
     // withholds the stop, or the round decides clean over bytes no round
     // ever read.
-    vanishedPresent.length === 0
+    vanishedPresent.length === 0 &&
+    // …and nothing tracked is INVISIBLE to the diff the cleanness claim is
+    // about: a path carrying an assume-unchanged/skip-worktree bit hides
+    // any edit from the empty diff this stop certifies, so "nothing staged,
+    // nothing unstaged, nothing untracked" proves nothing while one is
+    // set. The bits are enumerated, not the edits — one ANYWHERE withholds
+    // the stop, because the capture cannot tell which marked path diverges.
+    invisibleCertified()
   ) {
-    nothingToReview = { reason: 'clean-tree' };
+    if (args.untracked !== false) {
+      nothingToReview = { reason: 'clean-tree' };
+    } else {
+      // The stop's claim is "nothing staged, nothing unstaged, nothing
+      // untracked", and under `--no-untracked` the third clause was never
+      // checked: the untracked enumeration does not run and records no
+      // `skipped` entries, so a tracked-clean tree with pending untracked
+      // work passed every conjunct above. SKILL.md's own recovery from an
+      // oversized-untracked skip is "re-run with `--no-untracked`", which
+      // lands exactly here — deciding clean over the very content the first
+      // run could not read. The ANCHOR gate has carried this exclusion
+      // since the candidate recorded `untracked`; the stop follows it, out
+      // loud like every other withheld stop.
+      writeStderrLine(
+        'The tracked tree is clean, but untracked files were not ' +
+          'enumerated (--no-untracked), so this is NOT a decided clean ' +
+          'tree: report the untracked scope under "Not reviewed" and end ' +
+          'the round without a clean verdict.',
+      );
+    }
   }
 
   // …and the third decided shape, which the two above miss because both are
@@ -838,7 +991,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // to the whole-file review.
     args.file === undefined
   ) {
-    nothingToReview = { reason: 'scope-emptied' };
+    // …and the visibility bits are clean, the same gate both sibling stops
+    // carry: the empty slice proves only what `git diff` can see. Withheld,
+    // the refusal is said out loud like the unchanged stop's own.
+    const invisible = invisibleTracked();
+    if (invisible !== null && invisible.length === 0) {
+      nothingToReview = { reason: 'scope-emptied' };
+    } else {
+      writeStderrLine(invisibleStopRefusal(invisible));
+    }
   }
 
   // Published at a name the PARENT can predict, beside the plan rather than
@@ -964,9 +1125,20 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             'This is NOT a decided stop: the no-diff branch owes it a ' +
             'whole-file review — read the file and review its current ' +
             'state; do not report nothing-to-review.'
-          : treeHeldStill && vanishedPresent.length === 0
-            ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
-              'to review; do not run the review agents.'
+          : treeHeldStill &&
+              vanishedPresent.length === 0 &&
+              invisibleCertified()
+            ? // The prose channel carries the field gate's untracked
+              // exclusion too — the orchestrator reads BOTH, and a prose
+              // "clean" beside a withheld field re-opens the contradiction
+              // the moved-tree branch below closed.
+              args.untracked !== false
+              ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
+                'to review; do not run the review agents.'
+              : '0 chunks — the tracked tree is clean, but untracked files ' +
+                'were not enumerated (--no-untracked). This is NOT a decided ' +
+                'clean tree: report the untracked scope under "Not ' +
+                'reviewed" and end the round without a clean verdict.'
             : vanishedPresent.length > 0
               ? // …and NOT when the anchor refusal just proved a path
                 // diverges while invisible to `git diff` — the field gate
@@ -977,16 +1149,35 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
                 'this is NOT a clean tree — the divergence is invisible to ' +
                 '`git diff`. Re-run the review rather than reporting ' +
                 'nothing to review.'
-              : // …and NOT when the guard just proved the tree moved. The
-                // machine-readable stop is gated on `treeHeldStill`; this
-                // sentence was not, so the round printed "the working tree
-                // changed while the capture was being hashed" and "the working
-                // tree is clean" back to back and the orchestrator — which reads
-                // prose here — stopped on the second. The same contradiction the
-                // field-level gate closed, one layer up.
-                'WARNING: 0 chunks, but the working tree changed while the ' +
-                'capture was being hashed (above): this is NOT a clean tree. ' +
-                'Re-run the review rather than reporting nothing to review.',
+              : !treeHeldStill
+                ? // …and NOT when the guard just proved the tree moved. The
+                  // machine-readable stop is gated on `treeHeldStill`; this
+                  // sentence was not, so the round printed "the working tree
+                  // changed while the capture was being hashed" and "the working
+                  // tree is clean" back to back and the orchestrator — which reads
+                  // prose here — stopped on the second. The same contradiction the
+                  // field-level gate closed, one layer up.
+                  'WARNING: 0 chunks, but the working tree changed while the ' +
+                  'capture was being hashed (above): this is NOT a clean tree. ' +
+                  'Re-run the review rather than reporting nothing to review.'
+                : // The shape that remains: the tree held still and no cached
+                  // path diverges, but tracked paths carry a visibility bit
+                  // (or the bits could not be enumerated), and the field gate
+                  // above withheld the stop over it.
+                  (() => {
+                    const inv = invisibleTracked();
+                    return inv === null
+                      ? 'WARNING: 0 chunks, but the tracked-file visibility ' +
+                          'bits could not be enumerated (`git ls-files -v` ' +
+                          'failed): this is NOT a clean tree. Re-run the ' +
+                          'review rather than reporting nothing to review.'
+                      : `WARNING: 0 chunks, but ${inv.length} tracked ` +
+                          'path(s) carry an --assume-unchanged/--skip-worktree ' +
+                          `bit (e.g. ${display(inv[0].slice(0, 96))}): ` +
+                          '`git diff` is blind to any edit on them, so this ' +
+                          'is NOT a clean tree. Clear the bit(s) and re-run ' +
+                          'the review rather than reporting nothing to review.';
+                  })(),
     );
   }
   writeStderrLine(

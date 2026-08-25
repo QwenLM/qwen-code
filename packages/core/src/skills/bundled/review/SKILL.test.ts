@@ -51,23 +51,60 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
-  it('routes the scope-emptied stop to superseded findings, never standing blockers', () => {
-    // `scope-emptied` fires only when the anchored bytes were DELETED or
-    // DISCARDED — nothing remains to hold the cached Criticals against,
-    // yet the old bullet rendered them as still-standing blockers, every
-    // round, until HEAD or model changed. The rule this pins: those
-    // findings are SUPERSEDED (bytes gone), never still-standing blockers.
+  it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
+    // The stop gate cannot tell "every anchored path vanished" from
+    // "anchored paths sit byte-identical to the reviewed round" — the slice
+    // empties in both shapes — so the bullet must split the ledger by CITED
+    // PATHS instead of reporting it wholesale: findings whose cited bytes
+    // are gone are SUPERSEDED, never still-standing blockers; findings whose
+    // cited file still stands render as still-standing, exactly as the
+    // unchanged-since-last-round bullet does. Reporting the list wholesale
+    // rendered a standing Critical SUPERSEDED while its bytes still filled
+    // the tree, and the stop never surfaced it again.
     const body = skillBody();
     expect(body).toContain('nothingToReview: { reason: "scope-emptied" }');
     expect(body).toContain('SUPERSEDED');
     expect(body).toContain(
       'Never render these findings as still-standing blockers',
     );
+    // The split itself: the gate's blind spot named, and the still-standing
+    // half routed to the unchanged bullet's rendering.
+    expect(body).toContain('the stop gate does not distinguish the two');
+    expect(body).toContain(
+      "split the cache's still-open findings by their CITED PATHS",
+    );
+    expect(body).toContain(
+      'A finding whose cited file is STILL PRESENT in the tree',
+    );
     // The old routing, which sent the branch down the verbatim-standing
     // path, must not survive anywhere in the skill.
     expect(body).not.toContain(
       "Render the cache's still-open findings exactly as the two branches above do",
     );
+    // …and neither may the wholesale-SUPERSEDED instruction the split
+    // replaced: a list reported without the path split re-opens the defect.
+    expect(body).not.toContain('Name each still-open finding');
+  });
+
+  it('keeps the file-review plan family outside every cleanup sweep prefix', () => {
+    // Step 9 sweeps `.qwen/tmp/qwen-review-<target>-*`, and ANY
+    // `qwen-review-…` family sits inside SOME target's sweep — the target
+    // whose token prefixes it. A file literally named `file` (or
+    // `file-<X>`) cleaning up while another file review ran swept that
+    // review's live plan mid-round (measured), because file reviews take no
+    // lease and the plan is re-read all round long. The per-run plan family
+    // — the one carrying `<HHMMSS>` — must therefore not start with
+    // `qwen-review-`, which is what makes the Step 9 contract "cleanup must
+    // never glob its family" structurally true.
+    const body = skillBody();
+    const templates = [
+      ...body.matchAll(/\.qwen\/tmp\/([^\n]+?-plan\.json)/g),
+    ].map((m) => m[1]);
+    const perRun = templates.filter((t) => t.includes('<HHMMSS>'));
+    expect(perRun.length).toBeGreaterThan(0);
+    for (const t of perRun) {
+      expect(t.startsWith('qwen-review-')).toBe(false);
+    }
   });
 
   it('anchors every SKILL.md incident pointer at a DESIGN.md heading', () => {
@@ -1194,13 +1231,27 @@ describe('bundled review skill', () => {
   it('makes the file review remove its own chosen plan name', () => {
     // The plan's `--out` is the ONE name the orchestrator chooses — unique
     // per run, because a file review takes no lease — so Step 9's
-    // `qwen-review-<target>-*` sweep can never match it, and a cleanup that
-    // globbed the family would delete a concurrent file review's live plan.
-    // The run that wrote it removes it: name the duty, and the glob that
-    // must not exist.
+    // `qwen-review-<target>-*` sweep can never match it. The paragraph must
+    // keep both halves: the duty (the run that wrote it removes it) and the
+    // glob that must not exist — the family's `qwen-review-`-free prefix is
+    // what makes "never glob its family" true (pinned structurally above).
     const body = skillBody();
     expect(body).toContain('Remove the plan `--out` you wrote');
-    expect(body).toContain('the glob would delete a concurrent file review');
+    expect(body).toContain('must never glob its family');
+    expect(body).toContain(
+      "deleted concurrent file reviews' live plans mid-round",
+    );
+    // The plan-derived record directory (`<plan minus .json>-prompts`,
+    // prompt-record.ts) rode the same free stem out of every cleanup sweep
+    // and retention scan, and nothing else removed it — the manual-removal
+    // duty must cover it beside the plan JSON.
+    expect(body).toContain('and the `-prompts` directory beside it');
+    expect(body).toContain('nothing else removes it');
+    // …and the token-bearing inventory must not claim the reverse-audit
+    // transcripts carry the CLI-derived token: they ride the plan's stem
+    // via the record directory, which the same block declares free.
+    expect(body).toContain('the roster, coverage,');
+    expect(body).not.toContain('coverage, the reverse-audit');
   });
   it('never asks the orchestrator to derive the file-review target', () => {
     // Two derivations of one name is how `qwen review run` came to poll for
@@ -1241,6 +1292,15 @@ describe('bundled review skill', () => {
       'WARNING: 0 chunks, but a cached path dropped out of this capture while still on disk and diverges from HEAD',
     );
     expect(body).toContain('diverges from HEAD invisibly to git');
+    // The round-15 shape: `--no-untracked` leaves the clean-tree stop's
+    // third clause ("nothing untracked") checked by nobody, so the capture
+    // withholds the stop — same signature, its own sentence, and its own
+    // guidance: a re-run changes nothing (the flag is the cause), so the
+    // branch reports the untracked scope as not reviewed instead.
+    expect(body).toContain(
+      'the tracked tree is clean, but untracked files were not enumerated (--no-untracked)',
+    );
+    expect(body).toContain('for the `--no-untracked` shape do NOT re-run');
   });
   it('keys the local cache write to the marker\u2019s withholding conditions', () => {
     // R8-2: the local fail-closed LIST was "completed" three times and a
