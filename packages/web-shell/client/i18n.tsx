@@ -1632,7 +1632,6 @@ const EN: Messages = {
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
-  'skilldesc.desktopPet': 'Create a pixel-art desktop pet for Qwen Code',
   'skilldesc.docsAuditAndRefresh':
     'Audit and refresh docs/ against the codebase',
   'skilldesc.docsUpdateFromDiff': 'Update official docs from local git diff',
@@ -4621,7 +4620,6 @@ const ZH: Messages = {
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
-  'skilldesc.desktopPet': '为 Qwen Code 创建像素风桌面宠物',
   'skilldesc.docsAuditAndRefresh': '对照代码库审计并刷新 docs/ 文档',
   'skilldesc.docsUpdateFromDiff': '按本地 git diff 更新官方文档',
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
