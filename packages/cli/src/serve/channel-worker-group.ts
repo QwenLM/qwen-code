@@ -103,6 +103,7 @@ export interface ChannelWorkerGroupSharedOptions {
   cliEntryPath: string;
   daemonUrl: string;
   daemonToken?: string;
+  workerTlsCaCertPath?: string;
   restartPolicy?: ChannelWorkerRestartPolicy;
   startupTimeoutMs?: number;
   heartbeatTimeoutMs?: number;
@@ -230,6 +231,9 @@ export function createChannelWorkerGroup(
       daemonUrl: opts.shared.daemonUrl,
       ...(opts.shared.daemonToken
         ? { daemonToken: opts.shared.daemonToken }
+        : {}),
+      ...(opts.shared.workerTlsCaCertPath
+        ? { tlsCaCertPath: opts.shared.workerTlsCaCertPath }
         : {}),
       workspace: runtime.workspaceCwd,
       selection: group.selection,
