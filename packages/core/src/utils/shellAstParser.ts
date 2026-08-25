@@ -1176,6 +1176,173 @@ async function classifyInternal(
     tree.delete();
   }
 }
+/**
+ * Builtins that rebind how a *later* command resolves or what it reads.
+ *
+ * `read`/`mapfile`/`readarray`/`getopts` are here alongside the obvious
+ * `cd`/`export` family because they assign variables from stdin or argv —
+ * `read PATH <<< ./evil` plants exactly what `export PATH=./evil` does — and
+ * `let PATH=a` assigns arithmetically. `trap`, `enable`, `fc`, `alias`,
+ * `unalias`, `hash` and `shopt` rebind what a later *name* resolves to, which
+ * is the same unsoundness reached from the other side: a `DEBUG` trap runs
+ * before every later command without appearing in any of them. `exec` is here
+ * rather than among the resolution prefixes below because `exec > file`
+ * carries no command at all and redirects the current shell.
+ */
+const STATE_PLANTING_BUILTIN =
+  /^(?:cd|pushd|popd|export|unset|declare|readonly|typeset|local|set|shopt|alias|unalias|hash|trap|enable|fc|let|eval|exec|source|\.|read|mapfile|readarray|getopts)$/;
+
+/**
+ * Words that only choose *how* the next word is resolved, so the planter may
+ * be hiding behind one: `command cd /hostile`, `builtin cd /hostile`,
+ * `time cd /hostile` (bash's `time` keyword does not fork, so the `cd` lands
+ * on the current shell).
+ */
+const RESOLUTION_ORDER_PREFIX = /^(?:command|builtin|time)$/;
+
+/** Shapes that are a list of statements rather than a statement themselves. */
+const TRANSPARENT_STATEMENT_WRAPPER: ReadonlySet<string> = new Set([
+  'list',
+  'pipeline',
+  'redirected_statement',
+]);
+
+/** Substitutions bash evaluates while expanding a redirect target. */
+const REDIRECT_TARGET_SUBSTITUTION: Set<string> = new Set([
+  'command_substitution',
+  'process_substitution',
+]);
+
+/**
+ * The literal text a word carries after bash strips its quoting, or `null`
+ * when the word is not a plain literal at all.
+ *
+ * `\\cd` and `"cd"` are the same command as `cd` to bash but different text to
+ * a regex, which is one of the ways an enumerated planter used to hide.
+ */
+function literalWordText(node: SyntaxNode): string | null {
+  if (hasShellExpansion(node)) return null;
+  const stripped = stripOuterQuotes(node.text).replace(/\\(.)/g, '$1');
+  return /^[A-Za-z0-9_.-]+$/.test(stripped) ? stripped : null;
+}
+
+/**
+ * Whether one parsed statement plants state for whatever follows it.
+ *
+ * Fails closed by shape: only a plain `command` node can be cleared, and only
+ * once its resolved name is read and found not to be a planter. Every other
+ * shape — a bare `variable_assignment`, a `declaration_command`, an
+ * `unset_command`, a `function_definition`, a `negated_command`, a block, a
+ * keyword statement, a subshell — is treated as planting, because each is
+ * either a planter itself or a container the enumeration cannot see into.
+ *
+ * Inside a `command` node the same discipline applies to the parts that are
+ * not the name: a resolution-order prefix followed by anything this function
+ * cannot read is assumed to hide a planter rather than assumed not to, and
+ * `printf -v VAR` assigns despite `printf` being an ordinary name.
+ */
+function statementPlantsState(node: SyntaxNode): boolean {
+  if (node.type === 'comment') return false;
+  if (TRANSPARENT_STATEMENT_WRAPPER.has(node.type)) {
+    // Mirrors the classifier's own `redirected_statement` arm: the redirect
+    // operator itself plants nothing, but whatever follows a heredoc opener on
+    // the same line is parsed *inside* the redirect node, so its non-inert
+    // children are still real statements.
+    return node.namedChildren.some((child) =>
+      child.type.endsWith('_redirect')
+        ? redirectPlantsState(child)
+        : statementPlantsState(child),
+    );
+  }
+  if (node.type !== 'command') return true;
+
+  let sawResolutionPrefix = false;
+  let name: string | null = null;
+  for (const child of node.namedChildren) {
+    // A `VAR=VALUE` prefix on a command is scoped to that command, so it is
+    // not itself a planter — but the command it prefixes may be.
+    if (child.type === 'variable_assignment') continue;
+    // Redirects attach to the enclosing `redirected_statement`, not to the
+    // `command` itself, so they are screened in the wrapper arm above; this
+    // only guards against a grammar that starts attaching them here.
+    if (child.type.endsWith('_redirect')) continue;
+    if (name !== null) {
+      // Past the command name: only `printf -v VAR` still assigns.
+      if (name === 'printf' && /^-v/.test(stripOuterQuotes(child.text)))
+        return true;
+      continue;
+    }
+    const text = literalWordText(child);
+    if (text === null) return true;
+    if (STATE_PLANTING_BUILTIN.test(text)) return true;
+    if (RESOLUTION_ORDER_PREFIX.test(text)) {
+      sawResolutionPrefix = true;
+      continue;
+    }
+    // `command -p cd /hostile` and `command -- cd /hostile` put the planter
+    // behind a flag. The flags a resolution prefix takes are its own small
+    // vocabulary, but reading past one to find the real name is the kind of
+    // enumeration this predicate exists to stop doing — so a dash-leading word
+    // after a prefix plants.
+    if (sawResolutionPrefix && text.startsWith('-')) return true;
+    name = text;
+  }
+  return false;
+}
+
+/** Whether a redirect node runs something while its target is expanded. */
+function redirectPlantsState(node: SyntaxNode): boolean {
+  // The safety axis evaluates a substitution separately, on its own nodes, so
+  // it can treat one inside a redirect as inert. The plant axis has no such
+  // second pass: `echo x < $(./evil.sh)` runs the script before anything
+  // after it is classified.
+  return collectDescendants(node, REDIRECT_TARGET_SUBSTITUTION).length > 0;
+}
+
+/**
+ * Whether a sub-command plants state that makes classifying the sub-commands
+ * after it in isolation unsound.
+ *
+ * A confirmation dialog is built by splitting a compound command and dropping
+ * the parts that classify read-only, so the user approves only what needs
+ * approving. That is sound only while each part means the same thing alone as
+ * it does in sequence. `cd /hostile && wrapper status` moves the directory the
+ * planted-config gate probes; `export GIT_DIR=/hostile/.git && wrapper status`
+ * moves it with no `cd` at all; `hash -p ./evil/git git && git status` rewrites
+ * which binary the name `git` resolves to. Either way the later part is probed
+ * against the wrong world, classifies read-only, and vanishes from the scope
+ * the user is shown — while approval still runs the original compound.
+ *
+ * Decided on the parse rather than on the raw text, because the text form
+ * cannot be enumerated: a planter hides behind a block (`{ cd /hostile; }`), a
+ * keyword (`if true; then cd /hostile; fi`), an assignment prefix
+ * (`FOO=1 cd /hostile`), a resolution-order prefix (`command cd /hostile`), a
+ * respelling (`\\cd`, `"cd"`), a negation (`! cd /hostile`), or a function
+ * definition that rebinds a trusted name (`git() { rm -rf $HOME; }`), and a
+ * bare `PATH=evil` assignment statement carries no command word at all.
+ *
+ * Fails closed: an unparseable or unrecognised segment plants, which costs a
+ * larger confirmation dialog rather than a silently narrowed one.
+ */
+export async function plantsStateForLaterCommands(
+  command: string,
+): Promise<boolean> {
+  if (typeof command !== 'string' || !command.trim()) return true;
+  let tree: Parser.Tree;
+  try {
+    tree = await parseShellCommand(command);
+  } catch {
+    return true;
+  }
+  try {
+    const root = tree.rootNode;
+    if (root.hasError || root.namedChildCount === 0) return true;
+    return root.namedChildren.some(statementPlantsState);
+  } finally {
+    tree.delete();
+  }
+}
+
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {

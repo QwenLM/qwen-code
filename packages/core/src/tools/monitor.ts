@@ -52,6 +52,7 @@ import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
   isShellCommandReadOnlyASTInDirectory,
+  plantsStateForLaterCommands,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
@@ -212,6 +213,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
+    // See `plantsStateForLaterCommands`: after a `cd` or an `export`, a later
+    // sub-command no longer means alone what it means in sequence, so it must
+    // stay inside the scope the user approves.
+    let statePlanted = false;
     for (const sub of subCommands) {
       // Only filter out read-only commands via AST analysis.
       // We intentionally do NOT consult pm.isCommandAllowed() here because
@@ -220,9 +225,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // Monitor is a long-running background process with a different risk
       // profile than one-shot shell execution and should maintain its own
       // permission boundary.
+      // Decided before the drop below, and never dropped itself: a planter
+      // that classifies read-only alone (`cd /hostile`) is the one segment
+      // the user most needs to see.
+      const plants = await plantsStateForLaterCommands(sub);
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
+        isReadOnly =
+          !statePlanted &&
+          !plants &&
+          (await isShellCommandReadOnlyASTInDirectory(sub, cwd));
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
@@ -231,6 +243,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
           e,
         );
       }
+
+      statePlanted ||= plants;
 
       if (isReadOnly) {
         continue;

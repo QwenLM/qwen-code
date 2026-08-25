@@ -7279,8 +7279,11 @@ describe('ShellTool', () => {
       expect(details.type).toBe('exec');
     });
 
-    it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
-      // "cd" is read-only, "npm run build" is not
+    it('keeps a directory-changing sub-command in the confirmation scope', async () => {
+      // `cd` classifies read-only on its own, and used to be dropped for it.
+      // But it is the segment that makes `npm run build` mean something other
+      // than what it says — the user has to see which directory they are
+      // approving a build in. A planter is never dropped.
       const params = {
         command: 'cd packages/core && npm run build',
         is_background: false,
@@ -7294,17 +7297,65 @@ describe('ShellTool', () => {
         new AbortController().signal,
       )) as { rootCommand: string; permissionRules: string[] };
 
-      // rootCommand should only include 'npm', not 'cd'
-      expect(details.rootCommand).not.toContain('cd');
+      expect(details.rootCommand).toContain('cd');
       expect(details.rootCommand).toContain('npm');
-
-      // permissionRules should not include Bash(cd *)
-      expect(details.permissionRules).not.toContainEqual(
-        expect.stringContaining('cd'),
-      );
       expect(details.permissionRules).toContainEqual(
         expect.stringContaining('npm'),
       );
+    });
+
+    it('still drops a read-only sub-command that plants nothing', async () => {
+      const invocation = shellTool.build({
+        command: 'ls -la && npm run build',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).not.toContain('ls');
+      expect(details.rootCommand).toContain('npm');
+    });
+
+    it('keeps sub-commands after a state planter in the confirmation scope', async () => {
+      // A read-only classification is only meaningful for the directory and
+      // environment the sub-command actually runs in. After a `cd` or an
+      // `export`, classifying a later sub-command alone measures the wrong
+      // one — so it must stay in the scope the user approves, or approval
+      // silently covers a command the dialog never showed.
+      for (const command of [
+        'cd /hostile && git status && npm run build',
+        'export GIT_DIR=/hostile/.git && git status && npm run build',
+        // `hash -p` rewrites which binary the name `git` resolves to, and
+        // `unset PATH` changes resolution for everything after it. Neither
+        // touches the directory or the environment variables the planted
+        // config gate reads, so the later part still classifies read-only on
+        // its own text — the case the planter list exists to catch.
+        'hash -p ./evil/git git && git status && npm run build',
+        'unset PATH && git status && npm run build',
+      ]) {
+        const invocation = shellTool.build({ command, is_background: false });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { rootCommand: string };
+
+        expect(details.rootCommand).toContain('git');
+        expect(details.rootCommand).toContain('npm');
+      }
+    });
+
+    it('still drops a read-only sub-command that no planter precedes', async () => {
+      const invocation = shellTool.build({
+        command: 'git status && npm run build',
+        is_background: false,
+      });
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      expect(details.rootCommand).not.toContain('git');
+      expect(details.rootCommand).toContain('npm');
     });
 
     it('should not surface file descriptor redirects as standalone commands in confirmation details', async () => {
@@ -7347,6 +7398,59 @@ describe('ShellTool', () => {
 
       expect(details.rootCommand).toBe('git');
       expect(details.permissionRules).toEqual(['Bash(git commit *)']);
+    });
+
+    it('does not let an allow rule drop a sub-command after a planter', async () => {
+      // The `statePlanted` gate has to hold on the allow-rule path too. An
+      // allow rule matches on the sub-command's own text, which after a `cd`
+      // no longer says where it runs — so approving a dialog that shows only
+      // `npm run build` would also run `git status` in the cd'd directory.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => ['Bash(git *)'],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+      });
+      pm.initialize();
+      (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
+
+      const invocation = shellTool.build({
+        command: 'cd /repo2 && git status && npm run build',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).toContain('cd');
+      expect(details.rootCommand).toContain('git');
+      expect(details.rootCommand).toContain('npm');
+    });
+
+    it('still lets an allow rule drop a sub-command with no planter before it', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => ['Bash(git *)'],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+      });
+      pm.initialize();
+      (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
+
+      const invocation = shellTool.build({
+        command: 'git commit -m "msg" && npm run build',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).not.toContain('git');
+      expect(details.rootCommand).toContain('npm');
     });
 
     it('should pass the invocation directory to permission-manager command checks', async () => {

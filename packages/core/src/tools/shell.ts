@@ -74,6 +74,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
+  plantsStateForLaterCommands,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
 import {
@@ -2122,19 +2123,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
+    // A read-only classification is only meaningful for the directory and
+    // environment the sub-command actually runs in. Once an earlier one has
+    // planted state, classifying a later one alone measures the wrong world,
+    // so it stays in the scope the user approves. Mirrors
+    // `PermissionManager.evaluateCompoundCommand`.
+    let statePlanted = false;
     for (const sub of subCommands) {
+      // Decided before the drop below, and never dropped itself: a planter
+      // that happens to classify read-only on its own (`cd /hostile`) is the
+      // one segment the user most needs to see, since it is what makes the
+      // rest of the compound mean something other than what it says.
+      const plants = await plantsStateForLaterCommands(sub);
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
+        isReadOnly =
+          !statePlanted &&
+          !plants &&
+          (await isShellCommandReadOnlyASTInDirectory(sub, cwd));
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }
+      statePlanted ||= plants;
 
       if (isReadOnly) {
         continue;
       }
 
-      if (pm) {
+      if (pm && !statePlanted) {
         try {
           if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;

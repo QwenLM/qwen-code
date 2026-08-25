@@ -15,6 +15,7 @@ import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
+  plantsStateForLaterCommands,
   _resetParser,
   _setParserFailedForTesting,
 } from './shellAstParser.js';
@@ -1334,5 +1335,100 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
         false,
       );
     });
+  });
+});
+
+describe('plantsStateForLaterCommands', () => {
+  it('decides state planting on the parse, not on the leading word', async () => {
+    // A confirmation dialog is built by dropping the sub-commands that
+    // classify read-only, which is sound only while each part means the same
+    // thing alone as it does in sequence. Deciding that on raw text cannot be
+    // completed: the planter hides behind a block, a keyword, an assignment
+    // prefix, a resolution-order prefix, a respelling, a negation, or a
+    // function definition, and a bare assignment carries no command word.
+    for (const command of [
+      // named planters, plainly spelled
+      'cd x',
+      'pushd x',
+      'popd',
+      'export FOO=1',
+      'unset PATH',
+      'declare -x FOO=1',
+      'readonly FOO=1',
+      'typeset FOO=1',
+      'local FOO=1',
+      'set -e',
+      'shopt -s expand_aliases',
+      'alias git=evil',
+      'unalias -a',
+      'hash -p ./evil/git git',
+      "trap 'cp /tmp/evil .git/config' DEBUG",
+      'enable -f ./evil.so git',
+      'fc -e vi 1',
+      'let PATH=a',
+      'eval "$X"',
+      'exec > /tmp/out',
+      'source ./x',
+      '. ./x',
+      // variable-assigning builtins
+      'read PATH <<< ./evil',
+      'mapfile -t X < f',
+      'readarray -t X < f',
+      'getopts ab: opt',
+      'unsetenv PATH',
+      'printf -v PATH evil',
+      // bare assignment statement: no command word to anchor on
+      'PATH=evil',
+      'GIT_DIR=/hostile/.git',
+      // hiding shapes
+      '{ cd /hostile; }',
+      'if true; then cd /hostile; fi',
+      'FOO=1 cd /hostile',
+      'command cd /hostile',
+      'builtin cd /hostile',
+      'command -p cd /hostile',
+      'command -- cd /hostile',
+      'time cd /tmp',
+      '\\cd /hostile',
+      '"cd" /hostile',
+      '! cd /hostile',
+      'git() { rm -rf $HOME; }',
+      // a substitution in a redirect target runs before anything after it
+      'echo x < $(./evil.sh)',
+      'echo x > $(./evil.sh)',
+      // fails closed on anything it cannot read
+      '$CMD /hostile',
+      'cat <<EOF',
+    ]) {
+      expect(await plantsStateForLaterCommands(command)).toBe(true);
+    }
+  });
+
+  it('leaves ordinary commands alone', async () => {
+    for (const inert of [
+      'git status',
+      'npm run build',
+      'ls -la',
+      'cdr x',
+      'exports x',
+      'hashcat x',
+      'setup x',
+      'echo cd',
+      'FOO=1 ls',
+      'command git status',
+      'builtin echo hi',
+      'time npm run build',
+      'printf %s hello',
+      'npm run build 2>&1',
+      'echo x > /tmp/out',
+    ]) {
+      expect(await plantsStateForLaterCommands(inert)).toBe(false);
+    }
+  });
+
+  it('fails closed on an unparseable segment', async () => {
+    for (const command of ['', '   ', 'if then fi else']) {
+      expect(await plantsStateForLaterCommands(command)).toBe(true);
+    }
   });
 });

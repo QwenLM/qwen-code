@@ -133,7 +133,12 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
 
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
 const mockExtractCommandRules = vi.hoisted(() => vi.fn());
-vi.mock('../utils/shellAstParser.js', () => ({
+vi.mock('../utils/shellAstParser.js', async (importOriginal) => ({
+  // `plantsStateForLaterCommands` is deliberately NOT mocked away: the
+  // confirmation scope depends on the real predicate, and a stub returning
+  // false would hide the very defect it guards. Imported rather than copied,
+  // so it cannot go stale against the production version.
+  ...(await importOriginal<typeof import('../utils/shellAstParser.js')>()),
   isShellCommandReadOnlyASTInDirectory: mockIsShellCommandReadOnlyAST,
   extractCommandRules: mockExtractCommandRules,
 }));
@@ -422,6 +427,51 @@ describe('MonitorTool', () => {
         'Monitor(tail -f *)',
         'Monitor(rm -rf *)',
       ]);
+    });
+
+    it('keeps sub-commands after a state planter in the confirmation scope', async () => {
+      // Ported from shell.test.ts: monitor runs the identical loop, and until
+      // now nothing here exercised it — deleting the gate left this suite
+      // green. A read-only classification is only meaningful for the world the
+      // sub-command actually runs in; after a planter, classifying a later one
+      // alone measures the wrong world, so it must stay in the approved scope.
+      // `npm run build` must stay non-read-only, or every segment is dropped
+      // and the "nothing left, show everything" fallback masks the gate.
+      mockIsShellCommandReadOnlyAST.mockImplementation(
+        async (sub: string) => !sub.startsWith('npm'),
+      );
+      for (const command of [
+        'cd /hostile && tail -f /tmp/app.log && npm run build',
+        'export GIT_DIR=/hostile/.git && tail -f /tmp/app.log && npm run build',
+        'hash -p ./evil/git git && tail -f /tmp/app.log && npm run build',
+      ]) {
+        const invocation = createInvocation({ command });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as ToolCallConfirmationDetails & { rootCommand: string };
+
+        expect(details.rootCommand).toContain('tail');
+        expect(details.rootCommand).toContain('npm');
+      }
+      mockIsShellCommandReadOnlyAST.mockReset();
+    });
+
+    it('never drops the state planter itself from the scope', async () => {
+      // The planter is the segment that makes the rest mean something else,
+      // so it is the one the user most needs to see — even though it
+      // classifies read-only on its own.
+      mockIsShellCommandReadOnlyAST.mockImplementation(
+        async (sub: string) => !sub.startsWith('npm'),
+      );
+      const invocation = createInvocation({
+        command: 'cd /hostile && tail -f /tmp/app.log && npm run build',
+      });
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & { rootCommand: string };
+
+      expect(details.rootCommand).toContain('cd');
+      mockIsShellCommandReadOnlyAST.mockReset();
     });
 
     it('falls back to a canonical Monitor rule if command extraction fails', async () => {
