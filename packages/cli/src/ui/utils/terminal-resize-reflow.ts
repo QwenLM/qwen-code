@@ -26,6 +26,27 @@ const CLEAR_TERMINAL = ansiEscapes.clearTerminal;
 // eslint-disable-next-line no-control-regex
 const CURSOR_DOWN_PATTERN = /\x1b\[(\d+)B/;
 
+// Incremental-rendering frame vocabulary (Ink's patched createIncremental):
+// after a cursorUp to the frame top, `ESC[E` keeps a line and
+// `ESC[1G <content> ESC[K` rewrites one.
+const CURSOR_NEXT_LINE = `${ESC}E`;
+const CURSOR_TO_FIRST_COLUMN = `${ESC}1G`; // ansi-escapes cursorTo(0)
+const ERASE_END_LINE = `${ESC}K`;
+const CURSOR_SHOW = `${ESC}?25h`;
+const CURSOR_HIDE = `${ESC}?25l`;
+
+// eslint-disable-next-line no-control-regex
+const LEADING_CURSOR_UP_RE = /^\u001B\[(\d+)A/;
+// eslint-disable-next-line no-control-regex
+const RETURN_PREFIX_DOWN_RE = /^\u001B\[\d+B/;
+// Ink's trailing cursor suffix: optional cursorUp, cursorTo(x), showCursor.
+// eslint-disable-next-line no-control-regex
+const CURSOR_SUFFIX_RE = /(?:\u001B\[\d+A)?\u001B\[\d+G\u001B\[\?25h$/;
+// eslint-disable-next-line no-control-regex
+const CURSOR_SUFFIX_ONLY_RE = /^(?:\u001B\[\d+A)?\u001B\[\d+G\u001B\[\?25h$/;
+// eslint-disable-next-line no-control-regex
+const SGR_RE = /^\u001B\[[0-9;]*m/;
+
 // How long after a shrink every VP redraw starts from a clean viewport.
 export const CLEAR_WINDOW_MS = 600;
 
@@ -104,6 +125,181 @@ function reflowModel(model: FrameModel, columns: number): number {
   return total + (model.trailingNewline ? 1 : 0);
 }
 
+/**
+ * Splits a stored frame into visible lines for diff application. The
+ * stored content may carry Ink's trailing cursor suffix; the diff state
+ * tracks content lines only.
+ */
+function splitStoredFrame(model: FrameModel): {
+  lines: string[];
+  trailingNewline: boolean;
+} {
+  let body = model.content.replace(CURSOR_SUFFIX_RE, '');
+  if (model.trailingNewline && body.endsWith('\n')) {
+    body = body.slice(0, -1);
+  }
+  return { lines: body.split('\n'), trailingNewline: model.trailingNewline };
+}
+
+/**
+ * Applies one incremental (line-diff) frame to the stored model, mirroring
+ * Ink's createIncremental op stream: move to the frame top, then per line
+ * either keep it (`ESC[E`) or rewrite it (`ESC[1G <content> ESC[K`).
+ * Incremental frames carry no full content of their own, so the model can
+ * only advance by transforming its current lines. Returns true when the
+ * chunk parsed completely and the model advanced; any deviation leaves the
+ * model untouched — a stale replay beats a corrupt one.
+ */
+function applyIncrementalDiff(
+  model: FrameModel,
+  chunk: string,
+  shrink?: { eraseCount: number },
+): boolean {
+  if (!model.content) return false;
+  const { lines, trailingNewline } = splitStoredFrame(model);
+  let pos = 0;
+  // Optional return-to-bottom prefix: hideCursor?, cursorDown?, cursorTo(0).
+  if (chunk.startsWith(CURSOR_HIDE, pos)) pos += CURSOR_HIDE.length;
+  const down = RETURN_PREFIX_DOWN_RE.exec(chunk.slice(pos));
+  if (down) pos += down[0].length;
+  if (chunk.startsWith(CURSOR_TO_FIRST_COLUMN, pos)) {
+    pos += CURSOR_TO_FIRST_COLUMN.length;
+  }
+  const head = LEADING_CURSOR_UP_RE.exec(chunk.slice(pos));
+  if (!head) return false;
+  pos += head[0].length;
+  const headCount = Number(head[1]);
+
+  let targetHeight: number;
+  if (shrink) {
+    // eraseLines count = prevVisible - nextVisible + trailing-newline slot;
+    // the cursorUp after it names the new visible height directly.
+    targetHeight = headCount;
+    if (
+      shrink.eraseCount !==
+      lines.length - targetHeight + (trailingNewline ? 1 : 0)
+    ) {
+      return false;
+    }
+  } else {
+    // cursorUp(previousLines.length - 1); previousLines is the split of the
+    // rendered output, which carries one extra element for a trailing '\n'.
+    if (headCount !== lines.length - 1 + (trailingNewline ? 1 : 0)) {
+      return false;
+    }
+    targetHeight = -1;
+  }
+
+  const next = lines.slice();
+  let row = 0;
+  let consumed = 0;
+  let frameTrailingNewline = false;
+  let suffix = '';
+
+  while (pos < chunk.length) {
+    if (chunk.startsWith(CURSOR_NEXT_LINE, pos)) {
+      if (row >= next.length) return false;
+      pos += CURSOR_NEXT_LINE.length;
+      row++;
+      consumed++;
+      frameTrailingNewline = true;
+      continue;
+    }
+    if (LEADING_CURSOR_UP_RE.test(chunk.slice(pos))) {
+      // Line ops never emit cursor-up; this starts the cursor suffix.
+      suffix = chunk.slice(pos);
+      pos = chunk.length;
+      break;
+    }
+    if (chunk.startsWith(CURSOR_TO_FIRST_COLUMN, pos)) {
+      if (chunk.slice(pos + CURSOR_TO_FIRST_COLUMN.length) === CURSOR_SHOW) {
+        // Cursor suffix with no cursorUp (cursor already on the bottom row).
+        suffix = chunk.slice(pos);
+        pos = chunk.length;
+        break;
+      }
+      pos += CURSOR_TO_FIRST_COLUMN.length;
+      let text = '';
+      let terminated = false;
+      while (pos < chunk.length) {
+        const char = chunk[pos];
+        if (char === '\u001B') {
+          if (chunk.startsWith(ERASE_END_LINE, pos)) {
+            pos += ERASE_END_LINE.length;
+            terminated = true;
+            break;
+          }
+          if (chunk.startsWith(ESC, pos)) {
+            // Only SGR travels inside line content.
+            const sgr = SGR_RE.exec(chunk.slice(pos));
+            if (!sgr) return false;
+            text += sgr[0];
+            pos += sgr[0].length;
+            continue;
+          }
+          if (chunk[pos + 1] === ']') {
+            // OSC payload (hyperlinks, inline images): pass through intact.
+            const bel = chunk.indexOf('\u0007', pos);
+            const st = chunk.indexOf('\u001B\\', pos);
+            const end =
+              bel !== -1 && (st === -1 || bel < st)
+                ? bel + 1
+                : st !== -1
+                  ? st + 2
+                  : -1;
+            if (end === -1) return false;
+            text += chunk.slice(pos, end);
+            pos = end;
+            continue;
+          }
+          return false;
+        }
+        // Rewritten lines terminate with ESC[K before any newline.
+        if (char === '\n') return false;
+        text += char;
+        pos++;
+      }
+      if (!terminated) return false;
+      if (row === next.length) next.push(text);
+      else next[row] = text;
+      row++;
+      consumed++;
+      if (chunk[pos] === '\n') {
+        pos++;
+        frameTrailingNewline = true;
+      } else {
+        frameTrailingNewline = false;
+      }
+      continue;
+    }
+    return false;
+  }
+
+  if (suffix && !CURSOR_SUFFIX_ONLY_RE.test(suffix)) return false;
+
+  let height: number;
+  if (shrink) {
+    height = targetHeight;
+    if (consumed !== height && consumed !== height - 1) return false;
+    // Ink emits no op for a kept LAST line without a trailing newline.
+    if (consumed === height - 1) frameTrailingNewline = false;
+  } else if (consumed === lines.length - 1) {
+    // Same-height frame whose kept last line carries no trailing newline.
+    height = lines.length;
+    frameTrailingNewline = false;
+  } else if (consumed >= lines.length) {
+    height = consumed;
+  } else {
+    return false;
+  }
+
+  next.length = height;
+  model.content = next.join('\n') + (frameTrailingNewline ? '\n' : '') + suffix;
+  model.trailingNewline = frameTrailingNewline;
+  // Width never changes inside a diff frame; model.columns stays valid.
+  return true;
+}
+
 export interface ResizeReflowOptions {
   /** VP / alternate-screen mode: the shrink clear may blank the viewport. */
   virtualViewport?: boolean;
@@ -168,6 +364,11 @@ export function buildWakeRepaint(deps: WakeRepaintDeps): () => void {
  *   frame that actually reached the terminal (greedy-packed per character,
  *   plus Ink's cursor-below line); walking further up would eat committed
  *   scrollback, so the count stays conservative there.
+ *
+ * VP additionally runs Ink's incremental renderer, whose frames are line
+ * diffs rather than erase-prefixed full frames; the model therefore anchors
+ * on the first bare frame / full resets and applies each diff as a
+ * transform, so the wake repaint always has the current frame to replay.
  */
 export function installTerminalResizeReflow(
   stdout: NodeJS.WriteStream,
@@ -190,6 +391,9 @@ export function installTerminalResizeReflow(
   // and only printable writes consume it — Ink's standalone synchronized-
   // output control writes must not.
   let expectFrame = false;
+  // VP only: the alternate-screen entry clear arms a one-shot capture of the
+  // first bare frame; incremental diffs alone cannot reconstruct a frame.
+  let expectFirstFrame = false;
   // Printable bare writes seen in the current armed burst; the second one is
   // the live frame following a static append and bypasses MIN_FRAME_LINES.
   let barePrintableCount = 0;
@@ -253,51 +457,69 @@ export function installTerminalResizeReflow(
       const match = ERASE_LINES_PATTERN.exec(chunk);
       if (match) {
         const content = chunk.slice(match.index + match[0].length);
-        const printable = stripAnsi(content).trim() !== '';
-        if (printable) {
-          // Erase-prefixed printable writes are authoritative Ink renders of
-          // the new live region (console interleaving arrives as clear-only +
-          // bare), so they update the model even below MIN_FRAME_LINES —
-          // rejecting them would freeze the amplification target on a stale
-          // larger frame after every turn commit.
-          modelFrame(content, true);
+        // VP incremental shrink-diff frames carry the erase prefix in front
+        // of a cursorUp to the frame top plus line ops; apply them as a
+        // transform instead of mistaking the fragment for a full frame.
+        // Such a frame is self-consistent against the post-shrink screen,
+        // so it also skips the clear-window rewrite below.
+        const incrementalShrinkDiff =
+          isVP &&
+          LEADING_CURSOR_UP_RE.test(content) &&
+          applyIncrementalDiff(model, content, {
+            eraseCount: countOccurrences(match[0], ERASE_LINE),
+          });
+        if (incrementalShrinkDiff) {
           expectFrame = false;
+          expectFirstFrame = false;
           barePrintableCount = 0;
         } else {
-          // Clear-only write (Ink's log.clear): the redraw follows bare.
-          expectFrame = true;
-          barePrintableCount = 0;
-          handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
-        }
-        debugLogger.debug('match', { printable });
-        if (isVP && Date.now() < clearUntil) {
-          debugLogger.debug('clear-viewport');
-          chunk =
-            chunk.slice(0, match.index) +
-            CLEAR_VIEWPORT +
-            chunk.slice(match.index + match[0].length);
-        } else if (pendingAmplify > 0) {
-          const count = countOccurrences(match[0], ERASE_LINE);
-          const target = pendingAmplify;
-          pendingAmplify = 0;
-          if (count < target) {
-            // A return-to-bottom prefix's cursorDown was computed from
-            // PRE-reflow geometry; the screen grew by (target - count) rows,
-            // so advance the cursor by that delta too or the amplified erase
-            // window shifts up into scrollback. Terminals clamp cursor moves
-            // at the bottom row, keeping this safe.
-            const delta = target - count;
-            const prefix = chunk
-              .slice(0, match.index)
-              .replace(
-                CURSOR_DOWN_PATTERN,
-                (_m, n: string) => `${ESC}${Number(n) + delta}B`,
-              );
-            debugLogger.debug('amplify', { original: count, target });
+          const printable = stripAnsi(content).trim() !== '';
+          if (printable) {
+            // Erase-prefixed printable writes are authoritative Ink renders of
+            // the new live region (console interleaving arrives as clear-only +
+            // bare), so they update the model even below MIN_FRAME_LINES —
+            // rejecting them would freeze the amplification target on a stale
+            // larger frame after every turn commit.
+            modelFrame(content, true);
+            expectFrame = false;
+            expectFirstFrame = false;
+            barePrintableCount = 0;
+          } else {
+            // Clear-only write (Ink's log.clear): the redraw follows bare.
+            expectFrame = true;
+            barePrintableCount = 0;
+            handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
+          }
+          debugLogger.debug('match', { printable });
+          if (isVP && Date.now() < clearUntil) {
+            debugLogger.debug('clear-viewport');
             chunk =
-              prefix +
-              ansiEscapes.eraseLines(target) +
+              chunk.slice(0, match.index) +
+              CLEAR_VIEWPORT +
               chunk.slice(match.index + match[0].length);
+          } else if (pendingAmplify > 0) {
+            const count = countOccurrences(match[0], ERASE_LINE);
+            const target = pendingAmplify;
+            pendingAmplify = 0;
+            if (count < target) {
+              // A return-to-bottom prefix's cursorDown was computed from
+              // PRE-reflow geometry; the screen grew by (target - count) rows,
+              // so advance the cursor by that delta too or the amplified erase
+              // window shifts up into scrollback. Terminals clamp cursor moves
+              // at the bottom row, keeping this safe.
+              const delta = target - count;
+              const prefix = chunk
+                .slice(0, match.index)
+                .replace(
+                  CURSOR_DOWN_PATTERN,
+                  (_m, n: string) => `${ESC}${Number(n) + delta}B`,
+                );
+              debugLogger.debug('amplify', { original: count, target });
+              chunk =
+                prefix +
+                ansiEscapes.eraseLines(target) +
+                chunk.slice(match.index + match[0].length);
+            }
           }
         }
       } else if (chunk.includes(CLEAR_TERMINAL)) {
@@ -305,10 +527,30 @@ export function installTerminalResizeReflow(
         // live frame as one write, with NO preceding log.clear()): the chunk
         // is not a frame, so drop the model until a clean erase-prefixed
         // write re-anchors it. Not gated on expectFrame — the reset write
-        // arrives unarmed in the normal interactive state.
+        // arrives unarmed in the normal interactive state. VP re-anchors
+        // below: the entry clear arms the first-frame capture, and the
+        // overflow reset carries the full live frame in the write itself.
         expectFrame = false;
+        expectFirstFrame = false;
         barePrintableCount = 0;
         model.content = '';
+        if (isVP) {
+          const after = chunk.slice(
+            chunk.indexOf(CLEAR_TERMINAL) + CLEAR_TERMINAL.length,
+          );
+          if (after === '') {
+            // Alternate-screen entry: the first frame follows as a single
+            // bare write — arm its capture. Incremental diffs alone cannot
+            // reconstruct a frame, so without this anchor the wake repaint
+            // would only have a clear to replay.
+            expectFirstFrame = true;
+            handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
+          } else if (stripAnsi(after).trim() !== '') {
+            // VP overflow full reset: the write itself carries the full
+            // live frame (VP keeps no <Static>, so no transcript prefix).
+            modelFrame(after, true);
+          }
+        }
       } else if (expectFrame) {
         if (Date.now() >= handoffUntil) {
           // The commit's bare writes land in one synchronous render; a bare
@@ -325,6 +567,18 @@ export function installTerminalResizeReflow(
           modelFrame(chunk, barePrintableCount > 1);
           if (barePrintableCount > 1) expectFrame = false;
         }
+      } else if (expectFirstFrame) {
+        if (Date.now() >= handoffUntil) {
+          expectFirstFrame = false;
+        } else if (stripAnsi(chunk).trim() !== '') {
+          // The first VP frame arrives bare (no erase prefix); anchor the
+          // model with it — every later frame is a diff against this one.
+          expectFirstFrame = false;
+          modelFrame(chunk, true);
+        }
+      } else if (isVP && model.content) {
+        // Incremental grow/same-height frame: apply it as a transform.
+        applyIncrementalDiff(model, chunk);
       }
     }
     return originalWrite.call(
