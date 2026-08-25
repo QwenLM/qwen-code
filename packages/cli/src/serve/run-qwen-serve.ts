@@ -1333,6 +1333,14 @@ function cannotIssueCertificates(cert: X509Certificate): boolean {
   return !isV1Certificate(cert) && keyUsage === undefined;
 }
 
+/** Whether `cert`'s validity window contains `now`. */
+function certValidAt(cert: X509Certificate, now: number): boolean {
+  return (
+    new Date(cert.validFrom).getTime() <= now &&
+    new Date(cert.validTo).getTime() >= now
+  );
+}
+
 function isSelfSignedCert(x509: X509Certificate): boolean {
   if (x509.subject !== x509.issuer) return false;
   try {
@@ -1531,11 +1539,20 @@ function walkWorkerAnchorPath(
         : { anchored: true, path };
     }
     walked.add(current.fingerprint256);
-    const issuer: X509Certificate | undefined = chain.find(
+    const issuers = chain.filter(
       (candidate) =>
         !walked.has(candidate.fingerprint256) &&
         certIssuedBy(current, candidate),
     );
+    // A renewed CA leaves two certificates in the bundle that share a subject
+    // AND a key, so both verify what they issued. Taking whichever one came
+    // first reported the expired copy as the path the handshake depends on and
+    // told the operator to renew a CA they had already renewed, while the
+    // merged bundle authorizes through the renewed copy. OpenSSL may use
+    // either, so prefer the copy that is usable now.
+    const issuer: X509Certificate | undefined =
+      issuers.find((candidate) => certValidAt(candidate, Date.now())) ??
+      issuers[0];
     // `certIssuedBy` asks only "did this sign that": name match plus signature.
     // OpenSSL asks a second question of every certificate it uses AS an issuer,
     // and answering only the first is how a chain that walks THROUGH an
