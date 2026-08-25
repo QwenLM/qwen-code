@@ -17,19 +17,23 @@ const {
   getTasksMock,
   refreshCommandsMock,
   runSavedWorkflowMock,
+  readSavedWorkflowMock,
 } = vi.hoisted(() => {
   const getTasks = vi.fn();
   const refreshCommands = vi.fn();
   const runSavedWorkflow = vi.fn();
+  const readSavedWorkflow = vi.fn();
   return {
     getTasksMock: getTasks,
     refreshCommandsMock: refreshCommands,
     runSavedWorkflowMock: runSavedWorkflow,
+    readSavedWorkflowMock: readSavedWorkflow,
     actionsMock: {
       getTasks,
       getWorkflowTasks: getTasks,
       refreshCommands,
       runSavedWorkflow,
+      readSavedWorkflow,
       cancelTask: vi.fn(),
       controlWorkflowTask: vi.fn(),
     },
@@ -74,6 +78,7 @@ afterEach(() => {
   getTasksMock.mockReset();
   refreshCommandsMock.mockReset();
   runSavedWorkflowMock.mockReset();
+  readSavedWorkflowMock.mockReset();
   createViaChatMock.mockReset();
   refreshCommandsMock.mockResolvedValue(undefined);
   runSavedWorkflowMock.mockResolvedValue({ started: true });
@@ -260,6 +265,117 @@ describe('WorkflowRunsPage', () => {
     ).find((button) => button.textContent?.includes('Running'));
     expect(runningTab?.getAttribute('aria-selected')).toBe('true');
     expect(container.textContent).toContain('deep-review');
+  });
+
+  it('expands a saved workflow into its definition, recent runs, and source', async () => {
+    connectionMock.supportedCommands.savedWorkflows = [
+      { name: 'deep-review', source: 'project' },
+    ];
+    const script = [
+      'export const meta = {',
+      "  name: 'deep-review',",
+      "  description: 'Review a branch in depth',",
+      "  whenToUse: 'Before merging risky changes',",
+      "  phases: [{ title: 'Scan', detail: 'collect files' }, { title: 'Verify' }],",
+      '}',
+      "return await agent('go')",
+    ].join('\n');
+    readSavedWorkflowMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      name: 'deep-review',
+      source: 'project',
+      scriptPath: '/repo/.qwen/workflows/deep-review.js',
+      script,
+      meta: {
+        name: 'deep-review',
+        description: 'Review a branch in depth',
+        whenToUse: 'Before merging risky changes',
+        phases: [
+          { title: 'Scan', detail: 'collect files' },
+          { title: 'Verify' },
+        ],
+      },
+    });
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [
+        workflowTask('workflow-done', 'deep-review', {
+          status: 'completed',
+          endTime: 8_000,
+          isHistorical: true,
+        }),
+        workflowTask('workflow-other', 'release-check'),
+      ],
+    });
+
+    expect(container.querySelector('[data-workflow-detail]')).toBeNull();
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Show details for deep-review"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false');
+
+    await act(async () => toggle!.click());
+
+    expect(readSavedWorkflowMock).toHaveBeenCalledWith('deep-review');
+    expect(toggle!.getAttribute('aria-expanded')).toBe('true');
+    const detail = container.querySelector(
+      '[data-workflow-detail="deep-review"]',
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.textContent).toContain('Review a branch in depth');
+    expect(detail!.textContent).toContain('Before merging risky changes');
+    expect(detail!.textContent).toContain('Phases (2)');
+    expect(detail!.textContent).toContain('collect files');
+    expect(detail!.textContent).toContain(
+      '/repo/.qwen/workflows/deep-review.js',
+    );
+    // Only runs of this definition count, and the source stays folded.
+    expect(detail!.textContent).toContain('View 1 run in History');
+    expect(detail!.textContent).not.toContain('release-check');
+    expect(container.querySelector('[data-workflow-source]')).toBeNull();
+
+    const showSource = Array.from(
+      detail!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Show source'));
+    expect(showSource).toBeDefined();
+    await act(async () => showSource!.click());
+    expect(
+      container.querySelector('[data-workflow-source]')?.textContent,
+    ).toContain("return await agent('go')");
+
+    await act(async () => toggle!.click());
+    expect(container.querySelector('[data-workflow-detail]')).toBeNull();
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('reports a definition that the daemon can no longer read', async () => {
+    connectionMock.supportedCommands.savedWorkflows = [
+      { name: 'deep-review', source: 'project' },
+    ];
+    readSavedWorkflowMock.mockResolvedValueOnce(null);
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [],
+    });
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Show details for deep-review"]',
+    );
+    await act(async () => toggle!.click());
+
+    const detail = container.querySelector(
+      '[data-workflow-detail="deep-review"]',
+    );
+    expect(detail?.textContent).toContain(
+      'This workflow definition is no longer available.',
+    );
+    expect(detail?.querySelector('[data-workflow-source]')).toBeNull();
   });
 
   it('ignores a saved-workflow completion from the previous session', async () => {

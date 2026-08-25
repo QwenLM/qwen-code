@@ -44,6 +44,7 @@ import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
@@ -1703,6 +1704,16 @@ export interface AcpSessionBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /**
+   * Read one saved workflow definition visible to a live session. The
+   * envelope's `workflow` is null when the name is unknown or Workflow
+   * controls are unavailable.
+   */
+  getSessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+  ): Promise<ServeSessionSavedWorkflowStatus>;
 
   /**
    * Read a page of persisted transcript replay events through the ACP child.

@@ -188,6 +188,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/tasks/:taskId/workflow-action',
   },
   {
+    method: 'GET',
+    path: '/session/:id/saved-workflows/:name',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/saved-workflows/:name',
+  },
+  {
     method: 'POST',
     path: '/session/:id/goal',
     attribution: 'handler_resolved',

@@ -51,6 +51,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
+  DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -881,6 +882,14 @@ export class DaemonSessionClient {
 
   workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
     return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
+  }
+
+  savedWorkflow(name: string): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.client.sessionSavedWorkflow(
+      this.sessionId,
+      name,
+      this.clientId,
+    );
   }
 
   lspStatus(): Promise<DaemonSessionLspStatus> {
