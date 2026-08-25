@@ -3944,6 +3944,40 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(readFileSync(out3, 'utf8')).toContain(
         'https://assets.example.test/pr-assets/verify/pr7999-79-1/01-ab.png',
       );
+
+      // An ossutil install failure is expected to degrade to a text-only
+      // report. This executes the production dispatch arm without touching
+      // the network and pins its successful return under set -e.
+      const out4 = join(dir, 'comment4.md');
+      const res4 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out4,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '80',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'failure',
+          OSS_STUB_ROOT: join(dir, 'oss'),
+        },
+      });
+      expect(res4.status).toBe(0);
+      const comment4 = readFileSync(out4, 'utf8');
+      expect(comment4).toContain('Sandboxed verification');
+      expect(comment4).not.toContain('Evidence images');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

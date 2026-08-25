@@ -94,7 +94,10 @@ function hostingBlockSource() {
   return raw;
 }
 
-function runHostingBlock(hasImages) {
+function runHostingBlock(
+  hasImages,
+  { publicBaseUrl = 'https://assets.example.test', uploadFails = false } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
   const runnerTemp = join(dir, 'runner-temp');
   const stage = join(dir, 'stage');
@@ -117,6 +120,7 @@ function runHostingBlock(hasImages) {
       "'use strict';",
       "const { copyFileSync, mkdirSync, writeFileSync } = require('node:fs');",
       "const { basename, join } = require('node:path');",
+      "if (process.env.OSS_STUB_FAIL === '1') process.exit(1);",
       "const opts = { bucket: '', config: '', prefix: '' };",
       'const assets = [];',
       'const argv = process.argv.slice(2);',
@@ -156,7 +160,7 @@ function runHostingBlock(hasImages) {
     `RUN_HEAD_SHA=${headSha}`,
     `STAGE=${JSON.stringify(stage)}`,
     'ALIYUN_OSS_BUCKET=assets-bucket',
-    'ALIYUN_OSS_PUBLIC_BASE_URL=https://assets.example.test',
+    `ALIYUN_OSS_PUBLIC_BASE_URL=${JSON.stringify(publicBaseUrl)}`,
     `RUNNER_TEMP=${JSON.stringify(runnerTemp)}`,
     hostingBlockSource(),
     'printf \'RAW_BASE=%s\\n\' "$RAW_BASE"',
@@ -170,6 +174,7 @@ function runHostingBlock(hasImages) {
       ...process.env,
       OSS_STUB_ROOT: stubRoot,
       OSS_STUB_RECORD: recordPath,
+      OSS_STUB_FAIL: uploadFails ? '1' : '0',
     },
   });
   return { res, recordPath, stubRoot, pr, headSha, runnerTemp };
@@ -221,6 +226,28 @@ test('hosting block skips the uploader entirely on the no-change arm', () => {
   assert.match(res.stdout, /^RAW_BASE=$/m); // empty -> image-less comment
   assert.doesNotMatch(res.stdout, /hosted at/);
   assert.equal(existsSync(recordPath), false); // the uploader never ran
+});
+
+test('hosting block aborts without publishing a URL when upload fails', () => {
+  const { res, recordPath } = runHostingBlock(true, { uploadFails: true });
+  assert.notEqual(res.status, 0);
+  assert.doesNotMatch(res.stdout, /^RAW_BASE=/m);
+  assert.equal(existsSync(recordPath), false);
+});
+
+test('hosting block strips a trailing slash from the public base URL', () => {
+  const { res, pr, headSha } = runHostingBlock(true, {
+    publicBaseUrl: 'https://assets.example.test/',
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(
+    res.stdout,
+    new RegExp(
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}$`,
+      'm',
+    ),
+  );
+  assert.doesNotMatch(res.stdout, /assets\.example\.test\/\/pr-assets/);
 });
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
