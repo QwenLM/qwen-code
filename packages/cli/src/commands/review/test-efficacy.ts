@@ -82,6 +82,7 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
+  adminEntryInsideReviewTmp,
   discardWorktree,
   exposeDependencies,
   redirectedAncestor,
@@ -1620,6 +1621,16 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
         realpathSync(probeTree)
       ) {
         return `${probeTree}'s admin entry does not point back at it`;
+      }
+      // ...and the entry itself must not live where the reviewed code can
+      // write it. The round-trip above proves the two agree, not that either
+      // is the pipeline's: a gitfile rewritten to a directory planted under
+      // the same mount, carrying its own backpointer, agrees with itself all
+      // the way — and the `checkout --force` below then runs whatever
+      // `filter.<x>.smudge` that directory declares, on the HOST. See
+      // `adminEntryInsideReviewTmp`.
+      if (adminEntryInsideReviewTmp(gitDir, mountRootFor, probeTree)) {
+        return `${probeTree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
       }
       // And every ancestor between the tree and the repository it belongs to:
       // a link above the tree redirects the checkout and the clean together,

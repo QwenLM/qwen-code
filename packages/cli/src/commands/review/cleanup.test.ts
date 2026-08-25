@@ -92,7 +92,7 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
   readReviewWorktreeLease: mocks.readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
   reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
+    `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
   isReviewLeaseFile: (fileName: string) =>
     /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));

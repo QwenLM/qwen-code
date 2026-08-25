@@ -15,6 +15,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   LEASE_PREFIX,
   REVIEW_TMP_DIR,
+  REVIEW_LEASE_DIR,
   reviewBranch,
 } from '../commands/review/lib/paths.js';
 
@@ -60,7 +61,16 @@ export interface ReviewWorktreeLease {
 }
 
 function leaseDirectory(repositoryRoot: string): string {
-  return join(repositoryRoot, REVIEW_TMP_DIR);
+  return join(repositoryRoot, REVIEW_LEASE_DIR);
+}
+
+/**
+ * Where leases lived before they moved out of the mounted directory. Read only
+ * to delete: a file left there is inert to everything above, and the sweep
+ * that used to skip it still does.
+ */
+function legacyLeasePath(repositoryRoot: string, target: string): string {
+  return join(repositoryRoot, REVIEW_TMP_DIR, `${LEASE_PREFIX}${target}.json`);
 }
 
 function leasePath(repositoryRoot: string, target: string): string {
@@ -130,6 +140,11 @@ export function createReviewWorktreeLease(params: {
   const data = `${JSON.stringify(lease, null, 2)}\n`;
   const path = leasePath(repositoryRoot, params.target);
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
+  // A lease written by a build from before the move is inert — nothing above
+  // reads that location any more — but it would sit in the mounted directory
+  // forever, because the sweep still skips the lease shape. Remove the one
+  // this call supersedes, and only that one.
+  rmSync(legacyLeasePath(repositoryRoot, params.target), { force: true });
   try {
     // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
     // fetch-prs can both pass the gate's read, and a plain write would let

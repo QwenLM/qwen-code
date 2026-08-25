@@ -330,7 +330,7 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
   readReviewWorktreeLease: vi.fn((): unknown => null),
   reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
   reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
+    `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
 }));
 
 vi.mock('./lib/gh.js', async (importOriginal) => {

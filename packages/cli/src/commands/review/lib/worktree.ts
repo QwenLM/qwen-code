@@ -33,7 +33,15 @@ import {
   type Stats,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -108,6 +116,52 @@ const GIT_ENV_EXEC = [
   'GIT_EXTERNAL_DIFF',
   'XDG_CONFIG_HOME',
 ];
+
+/**
+ * Whether a linked worktree's admin entry sits where reviewed code can write it.
+ *
+ * The gitfile inside a pipeline tree cannot move — git requires `<tree>/.git` —
+ * and that tree is inside the directory the sandbox bind-mounts read-write, so
+ * containerized code (and, before the sandbox, any code the review ran) can
+ * rewrite it to `gitdir: <a directory it planted under the same mount>`. Put a
+ * `config` carrying `filter.<x>.smudge` in that directory and the next
+ * HOST-side `git checkout` executes it — out of the container, as the review
+ * user, on CI with the runner's tokens.
+ *
+ * The identity gates that already exist do not catch this, and cannot: the
+ * planted directory's own backpointer round-trips because the same writer
+ * chose it, `--show-toplevel` still prints the tree the gitfile sits in, and
+ * no symlink is involved anywhere. Asking git for the common dir does not help
+ * either — that answer is resolved THROUGH the rewritten gitfile, so it comes
+ * from the same hand.
+ *
+ * The question that does have an honest answer is about location, not
+ * content: a real linked worktree's admin entry lives under
+ * `<repo>/.git/worktrees/`, which is outside the mounted directory; a planted
+ * one has to be inside it, because that is the only place the writer can
+ * reach. So refuse an admin entry that resolves inside the review temp dir,
+ * and let every other check stand as it is.
+ */
+export function adminEntryInsideReviewTmp(
+  gitDir: string,
+  mountRoot: (cwd: string) => string | null,
+  tree: string,
+): boolean {
+  const root = mountRoot(tree);
+  if (root === null) return false;
+  let real: string;
+  let realRoot: string;
+  try {
+    real = realpathSync(resolve(gitDir));
+    realRoot = realpathSync(root);
+  } catch {
+    // Unresolvable is not a licence to proceed: the caller's other gates
+    // report it, and answering "not inside" here would be a guess.
+    return true;
+  }
+  const rel = relative(realRoot, real);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
 
 /**
  * The first symlink at or above `dir`, or null when every component is real.

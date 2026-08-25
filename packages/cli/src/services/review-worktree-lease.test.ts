@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
@@ -82,7 +82,9 @@ describe('review worktree leases', () => {
       ).trim(),
     ).toBe('');
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(false);
   });
 
@@ -116,7 +118,9 @@ describe('review worktree leases', () => {
       ).trim(),
     ).toBe('');
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(false);
   });
 
@@ -143,7 +147,9 @@ describe('review worktree leases', () => {
 
     expect(existsSync(worktree)).toBe(false);
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(true);
   });
 
@@ -206,7 +212,7 @@ describe('review worktree leases', () => {
     ).toBe('');
     expect(
       readFileSync(
-        join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-2.json'),
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-2.json'),
         'utf8',
       ),
     ).toContain('session-b');
@@ -242,7 +248,9 @@ describe('review worktree leases', () => {
 
     expect(existsSync(worktree)).toBe(true);
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(true);
   });
 
@@ -268,7 +276,9 @@ describe('review worktree leases', () => {
 
     expect(readFileSync(join(outside, 'marker'), 'utf8')).toBe('keep');
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(true);
   });
 
@@ -302,7 +312,9 @@ describe('review worktree leases', () => {
 
     expect(existsSync(worktree)).toBe(true);
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(true);
   });
 
@@ -349,7 +361,9 @@ describe('review worktree leases', () => {
 
     clearReviewWorktreeLease(root, 'pr-1');
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+      existsSync(
+        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
+      ),
     ).toBe(false);
     cleanupReviewWorktreeLeases({
       sessionId: 'session-a',
@@ -385,7 +399,7 @@ describe('readReviewWorktreeLease', () => {
     expect(lease?.promptId).toBe('prompt-parent');
     expect(lease?.worktreePath).toBe(join(root, '.qwen', 'tmp', 'review-pr-1'));
     expect(reviewLeasePath(root, 'pr-1')).toBe(
-      join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json'),
+      join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
     );
   });
 
@@ -443,6 +457,7 @@ describe('lease acquisition is atomic (#9205)', () => {
     // writer rewriting it is self-heal, not clobber.
     const root = createRepository();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(join(root, '.qwen', 'review-leases'), { recursive: true });
     writeFileSync(reviewLeasePath(root, 'pr-1'), '{"truncated');
     createReviewWorktreeLease(leaseParams(root));
     expect(readReviewWorktreeLease(root, 'pr-1')?.sessionId).toBe('session-a');
@@ -511,7 +526,13 @@ describe('cleanupReviewWorktreeLeases scan', () => {
       worktree,
       'qwen-review/pr-1',
     ]);
-    const stray = join(root, '.qwen', 'tmp', 'qwen-review-lease-local.json');
+    const stray = join(
+      root,
+      '.qwen',
+      'review-leases',
+      'qwen-review-lease-local.json',
+    );
+    mkdirSync(dirname(stray), { recursive: true });
     writeFileSync(
       stray,
       JSON.stringify({

@@ -32,6 +32,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  adminEntryInsideReviewTmp,
   discardWorktree,
   exposeDependencies,
   sanitizedGitEnv,
@@ -1870,5 +1871,71 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('adminEntryInsideReviewTmp', () => {
+  const made: string[] = [];
+  const tmp = () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-admin-')));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses an entry planted inside the mounted directory', () => {
+    // The shape the round-trip gate cannot see: the writer chose BOTH the
+    // gitfile's target and that target's backpointer, so the two agree, no
+    // symlink is involved, and `--show-toplevel` still names the tree. Only
+    // the entry's location tells them apart.
+    const repo = tmp();
+    const tree = join(repo, '.qwen', 'tmp', 'review-pr-1-probe');
+    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+    mkdirSync(tree, { recursive: true });
+    mkdirSync(planted, { recursive: true });
+    expect(
+      adminEntryInsideReviewTmp(
+        planted,
+        () => join(repo, '.qwen', 'tmp'),
+        tree,
+      ),
+    ).toBe(true);
+  });
+
+  it('admits the real admin entry, which lives under the repository git dir', () => {
+    const repo = tmp();
+    const tree = join(repo, '.qwen', 'tmp', 'review-pr-1-probe');
+    const real = join(repo, '.git', 'worktrees', 'review-pr-1-probe');
+    mkdirSync(tree, { recursive: true });
+    mkdirSync(real, { recursive: true });
+    expect(
+      adminEntryInsideReviewTmp(real, () => join(repo, '.qwen', 'tmp'), tree),
+    ).toBe(false);
+  });
+
+  it('refuses rather than guesses when the entry cannot be resolved', () => {
+    // Fails CLOSED: "not inside" would be a guess, and the guess that lets a
+    // planted entry through is the one that ends in host execution.
+    const repo = tmp();
+    const tree = join(repo, '.qwen', 'tmp', 'review-pr-1-probe');
+    mkdirSync(tree, { recursive: true });
+    expect(
+      adminEntryInsideReviewTmp(
+        join(repo, 'gone'),
+        () => join(repo, '.qwen', 'tmp'),
+        tree,
+      ),
+    ).toBe(true);
+  });
+
+  it('has nothing to say about a tree outside any mounted directory', () => {
+    // A local checkout is never mounted, so there is no writable surface for
+    // this question to be about — and answering `true` there would refuse
+    // every ordinary repository.
+    const repo = tmp();
+    expect(adminEntryInsideReviewTmp(repo, () => null, repo)).toBe(false);
   });
 });

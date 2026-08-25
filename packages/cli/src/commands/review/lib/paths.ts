@@ -38,6 +38,23 @@ export function assertWritableOutPath(out: string): void {
 }
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
+
+/**
+ * Where worktree leases live — a SIBLING of the review temp dir, not a child.
+ *
+ * The leases are host-trusted state: `cleanupReviewWorktreeLeases` matches one
+ * by session ids alone and then force-removes whatever worktree and deletes
+ * whatever branch it names. `REVIEW_TMP_DIR` is the directory the review
+ * sandbox bind-mounts read-write, so keeping them there put that state inside
+ * the container's writable surface — and inside reach of an unsandboxed run
+ * too, which is how it stood before the sandbox existed. Reviewed code that
+ * can edit a lease can make another session's cleanup destroy the wrong tree,
+ * or plant one no session will ever sweep and wedge that PR on that machine.
+ *
+ * One directory over is the whole fix: nothing mounts it, and the lease
+ * lifecycle is unchanged.
+ */
+export const REVIEW_LEASE_DIR = join('.qwen', 'review-leases');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
