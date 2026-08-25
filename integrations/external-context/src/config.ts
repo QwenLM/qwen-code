@@ -160,10 +160,7 @@ function resolveProvider(
   env: NodeJS.ProcessEnv,
 ): Mem0ProviderConfig | Mem0OssProviderConfig | GenericHttpProviderConfig {
   switch (provider.type) {
-    case 'mem0-platform-v3': {
-      const apiKey = readCredential(env, provider.apiKeyEnv);
-      return { ...provider, apiKey };
-    }
+    case 'mem0-platform-v3':
     case 'mem0': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
       return { ...provider, apiKey };

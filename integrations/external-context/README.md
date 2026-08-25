@@ -394,8 +394,8 @@ These services commonly expose plain HTTP on an IP whitelist. Because the
 credential travels in cleartext on HTTP, keep `allowInsecureHttp` off unless
 the whitelist is the intended network control, and prefer HTTPS or a loopback
 relay (for example `ssh -L` or a VPC-side proxy) when one is available. The
-shipped example therefore defaults to HTTPS and omits the flag: an HTTP
-`baseUrl` fails validation until `"allowInsecureHttp": true` is added
+shipped example therefore defaults to HTTPS and omits the flag: a non-loopback
+HTTP `baseUrl` fails validation until `"allowInsecureHttp": true` is added
 explicitly.
 
 `userId` selects the tenant whose memories are read and written. It is fixed

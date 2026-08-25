@@ -247,6 +247,14 @@ describe('validateProviderBaseUrl', () => {
     ).toThrow('set "allowInsecureHttp": true');
   });
 
+  it('does not suggest the HTTP opt-in for non-HTTP schemes', () => {
+    expect(() =>
+      validateProviderBaseUrl('wss://mem0.internal:8443', {
+        allowInsecureHttpHint: true,
+      }),
+    ).toThrow('Provider URL must use HTTPS or loopback HTTP.');
+  });
+
   it('rejects non-loopback HTTP unless explicitly allowed', () => {
     expect(() => validateProviderBaseUrl('http://192.0.2.1:8080')).toThrow(
       'Provider URL must use HTTPS or loopback HTTP.',

@@ -52,7 +52,7 @@ export function validateProviderBaseUrl(
     return url;
   }
   throw new Error(
-    options?.allowInsecureHttpHint === true
+    options?.allowInsecureHttpHint === true && url.protocol === 'http:'
       ? 'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true to permit plain HTTP for this provider.'
       : 'Provider URL must use HTTPS or loopback HTTP.',
   );
