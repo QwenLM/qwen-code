@@ -400,6 +400,61 @@ await agent('scan package.json')
       expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
     });
 
+    // The loader canonicalizes `scriptPath` with realpath, so a `..`-laced
+    // path can load a file far from its raw spelling. Classifying the raw
+    // string would show the opposite identity from what actually loads.
+    it('classifies a ..-laced scriptPath by its normalized location', async () => {
+      const storage = new Storage(
+        path.join(os.tmpdir(), 'workflow-label-test'),
+      );
+      const config = { storage } as unknown as Config;
+      // Raw string sits inside the generated root; the `..` segments climb
+      // out of it, so the normalized path is no longer under the root.
+      const scriptPath = [
+        storage.getGeneratedWorkflowsDir(),
+        '..',
+        '..',
+        '..',
+        '..',
+        'workflows',
+        'audit.js',
+      ].join(path.sep);
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (audit.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+    });
+
+    // The loader trusts the whole subtree under the generated root (writers
+    // nest per session), so the label must follow nested scripts too, not
+    // just files sitting directly under the root.
+    it('labels a nested generated-root scriptPath as a generated script', async () => {
+      const storage = new Storage(
+        path.join(os.tmpdir(), 'workflow-label-test'),
+      );
+      const config = { storage } as unknown as Config;
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        's-abc',
+        'fanout.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
     // The cost warning used to arrive only after a successful run — i.e.
     // after the spend it warns about, and never at all on the failure path.
     it('warns about token cost before the spend, exactly once', async () => {

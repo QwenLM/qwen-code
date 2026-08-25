@@ -24,6 +24,7 @@ import {
   type ToolLocation,
 } from '../tools.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
+import { isWithinRoot } from '../../utils/fileUtils.js';
 import {
   extractAndStripMeta,
   type WorkflowMeta,
@@ -647,15 +648,16 @@ function readMetaForConfirmation(script: string): WorkflowMeta | null {
  * True when a `scriptPath` points inside the generated-scripts root. Such a
  * script is a throwaway artifact a tool emitted for this run, not a workflow
  * the user saved — the approval surface labels it accordingly so a grant is
- * given under the right identity. Lexical match on purpose: this only picks
- * a label; the security check is the realpath boundary in the loader.
+ * given under the right identity. Both sides are resolved before comparing,
+ * so a `..`-laced path is classified where it canonically points — the same
+ * location the loader decides to load. This only picks a label; the security
+ * check is the realpath boundary in the loader.
  */
 function isGeneratedWorkflowScriptPath(
   config: Config,
   scriptPath: string,
 ): boolean {
-  const root = config.storage.getGeneratedWorkflowsDir();
-  return scriptPath === root || scriptPath.startsWith(root + path.sep);
+  return isWithinRoot(scriptPath, config.storage.getGeneratedWorkflowsDir());
 }
 
 /**
