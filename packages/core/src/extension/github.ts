@@ -1016,13 +1016,13 @@ export async function extractArchiveFile(
   await flattenSingleExtensionDirectory(destination, archivePath);
   signal?.throwIfAborted();
   if (options.allowContainedSymlinks === true) {
-    await assertDirectorySymlinksAreSafe(
-      destination,
-      signal,
-      options.enforceResourceLimits === true
-        ? MAX_ARCHIVE_EXPANDED_BYTES
-        : undefined,
-    );
+    await assertDirectorySymlinksAreSafe(destination, signal, {
+      maxExpandedBytes:
+        options.enforceResourceLimits === true
+          ? MAX_ARCHIVE_EXPANDED_BYTES
+          : undefined,
+      excludePath: archivePath,
+    });
   }
   signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);

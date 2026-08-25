@@ -123,7 +123,6 @@ export async function assertTarArchiveLinksAreSafe(
   const unsupportedLinkPaths: string[] = [];
   const acceptedSymlinks: AcceptedSymlink[] = [];
   const archiveEntries = new Map<string, ArchiveEntry>();
-  const archiveEntryParents = new Set<string>();
   let unsupportedLinkCount = 0;
   let linkCount = 0;
   let entryCount = 0;
@@ -157,13 +156,6 @@ export async function assertTarArchiveLinksAreSafe(
         return;
       }
       archiveEntries.set(entryPath, { type: entry.type });
-      for (
-        let parent = path.posix.dirname(entryPath);
-        parent !== '.' && parent !== '/';
-        parent = path.posix.dirname(parent)
-      ) {
-        archiveEntryParents.add(parent);
-      }
     }
     if (enforceResourceLimits) {
       entryCount += 1;
@@ -228,11 +220,18 @@ export async function assertTarArchiveLinksAreSafe(
   }
   signal?.throwIfAborted();
   if (validationError) throw validationError;
+  const hasArchiveDescendant = (entryPath: string) => {
+    for (const candidatePath of archiveEntries.keys()) {
+      signal?.throwIfAborted();
+      if (candidatePath.startsWith(`${entryPath}/`)) return true;
+    }
+    return false;
+  };
   for (const link of acceptedSymlinks) {
     signal?.throwIfAborted();
     const target = archiveEntries.get(link.targetPath);
     if (
-      archiveEntryParents.has(link.entryPath) ||
+      hasArchiveDescendant(link.entryPath) ||
       !target ||
       !REGULAR_FILE_TYPES.has(target.type)
     ) {
@@ -253,41 +252,48 @@ export async function assertTarArchiveLinksAreSafe(
 export async function assertDirectorySymlinksAreSafe(
   root: string,
   signal?: AbortSignal,
-  maxExpandedBytes?: number,
+  options: { maxExpandedBytes?: number; excludePath?: string } = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   const resolvedRoot = path.resolve(root);
   const realRoot = await fs.promises.realpath(root);
+  const excludedPath = options.excludePath
+    ? path.resolve(options.excludePath)
+    : undefined;
   let expandedBytes = 0;
   const accountForMaterializedFile = (size: number) => {
-    if (maxExpandedBytes === undefined) return;
+    if (options.maxExpandedBytes === undefined) return;
     expandedBytes += size;
-    if (expandedBytes > maxExpandedBytes) {
-      throw new Error(`Tar archive expands beyond ${maxExpandedBytes} bytes.`);
+    if (expandedBytes > options.maxExpandedBytes) {
+      throw new Error(
+        `Tar archive expands beyond ${options.maxExpandedBytes} bytes.`,
+      );
     }
   };
   const visit = async (directory: string): Promise<void> => {
-    for (const entry of await fs.promises.readdir(directory, {
-      withFileTypes: true,
-    })) {
+    for (const entryName of await fs.promises.readdir(directory)) {
       signal?.throwIfAborted();
-      const entryPath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
+      const entryPath = path.join(directory, entryName);
+      if (entryPath === excludedPath) continue;
+      const entryStat = await fs.promises.lstat(entryPath);
+      if (entryStat.isDirectory()) {
         await visit(entryPath);
         continue;
       }
-      if (entry.isFile()) {
-        accountForMaterializedFile((await fs.promises.lstat(entryPath)).size);
+      if (entryStat.isFile()) {
+        accountForMaterializedFile(entryStat.size);
         continue;
       }
-      if (!entry.isSymbolicLink()) continue;
-      const targetPath = path.resolve(
-        path.dirname(entryPath),
-        await fs.promises.readlink(entryPath),
-      );
+      if (!entryStat.isSymbolicLink()) continue;
+      const linkPath = await fs.promises.readlink(entryPath);
+      const targetPath = path.resolve(path.dirname(entryPath), linkPath);
       let targetSize: number | undefined;
       try {
-        if (isContainedPath(resolvedRoot, targetPath)) {
+        if (
+          !path.isAbsolute(linkPath) &&
+          !WINDOWS_ABSOLUTE_PATH.test(linkPath) &&
+          isContainedPath(resolvedRoot, targetPath)
+        ) {
           const targetStat = await fs.promises.lstat(targetPath);
           const realTarget = await fs.promises.realpath(targetPath);
           if (targetStat.isFile() && isContainedPath(realRoot, realTarget)) {

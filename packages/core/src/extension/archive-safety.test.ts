@@ -297,6 +297,18 @@ describe('assertTarArchiveLinksAreSafe', () => {
       },
     );
 
+    it('accepts a symlink declared before its target', async () => {
+      const archive = path.join(root, 'target-after-link.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('AGENTS.md', 'CLAUDE.md'),
+        createTarFileHeader('CLAUDE.md', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).resolves.toBeUndefined();
+    });
+
     it.runIf(process.platform !== 'win32')(
       'accepts a nested symlink that stays inside the archive root',
       async () => {
@@ -426,6 +438,15 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await expect(assertDirectorySymlinksAreSafe(chainCase)).rejects.toThrow(
           'unsupported link entry',
         );
+
+        const absoluteCase = path.join(root, 'absolute-case');
+        await fs.mkdir(absoluteCase);
+        const absoluteTarget = path.join(absoluteCase, 'target');
+        await fs.writeFile(absoluteTarget, 'content');
+        await fs.symlink(absoluteTarget, path.join(absoluteCase, 'link'));
+        await expect(
+          assertDirectorySymlinksAreSafe(absoluteCase),
+        ).rejects.toThrow('unsupported link entry');
       },
     );
 
@@ -459,10 +480,37 @@ describe('assertTarArchiveLinksAreSafe', () => {
         ).resolves.toBeUndefined();
 
         await expect(
-          assertDirectorySymlinksAreSafe(source, undefined, 9),
+          assertDirectorySymlinksAreSafe(source, undefined, {
+            maxExpandedBytes: 9,
+          }),
         ).rejects.toThrow('Tar archive expands beyond 9 bytes.');
       },
     );
+
+    it('excludes the compressed archive from final size accounting', async () => {
+      const archive = path.join(root, 'download.tar.gz');
+      await fs.writeFile(path.join(root, 'extension.txt'), 'large');
+      await fs.writeFile(archive, 'large');
+
+      await expect(
+        assertDirectorySymlinksAreSafe(root, undefined, {
+          maxExpandedBytes: 5,
+          excludePath: archive,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('classifies final-layout entries with lstat', async () => {
+      const file = path.join(root, 'extension.txt');
+      await fs.writeFile(file, 'content');
+      const readdirSpy = vi.spyOn(fs, 'readdir');
+      const lstatSpy = vi.spyOn(fs, 'lstat');
+
+      await assertDirectorySymlinksAreSafe(root);
+
+      expect(readdirSpy).toHaveBeenCalledWith(root);
+      expect(lstatSpy).toHaveBeenCalledWith(file);
+    });
 
     it('counts accepted symlinks toward the link-entry limit', async () => {
       const archive = path.join(root, 'accepted-link-limit.tar');

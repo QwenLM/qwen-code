@@ -35,9 +35,11 @@ import * as tar from 'tar';
 import * as archiver from 'archiver';
 import {
   ExtensionUpdateState,
+  copyExtension,
   type Extension,
   type ExtensionManager,
 } from './extensionManager.js';
+import { convertCompatibleExtension } from './extension-converter.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
@@ -1081,7 +1083,7 @@ describe('git extension helpers', () => {
         await fs.mkdir(archiveRoot, { recursive: true });
         await fs.mkdir(destination);
         await fs.writeFile(
-          path.join(archiveRoot, EXTENSIONS_CONFIG_FILENAME),
+          path.join(archiveRoot, 'gemini-extension.json'),
           JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
         );
         // Mirrors the obra/superpowers root symlink from issue #8993.
@@ -1098,6 +1100,7 @@ describe('git extension helpers', () => {
           archive,
         );
 
+        let convertedDir: string | undefined;
         try {
           await expect(
             downloadPublicGitHubArchiveFallback(
@@ -1114,7 +1117,19 @@ describe('git extension helpers', () => {
           const installedLink = path.join(destination, 'AGENTS.md');
           expect((await fs.lstat(installedLink)).isSymbolicLink()).toBe(true);
           expect(await fs.readlink(installedLink)).toBe('CLAUDE.md');
+
+          const converted = await convertCompatibleExtension(destination);
+          convertedDir = converted.extensionDir;
+          expect(converted.originSource).toBe('Gemini');
+          const installed = path.join(tempDir, 'installed');
+          await copyExtension(converted.extensionDir, installed);
+          const installedAgents = path.join(installed, 'AGENTS.md');
+          expect((await fs.lstat(installedAgents)).isFile()).toBe(true);
+          expect(await fs.readFile(installedAgents, 'utf8')).toBe('# agents\n');
         } finally {
+          if (convertedDir && convertedDir !== destination) {
+            await fs.rm(convertedDir, { recursive: true, force: true });
+          }
           await fs.rm(tempDir, { recursive: true, force: true });
         }
       },
