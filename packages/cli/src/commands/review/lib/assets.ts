@@ -222,8 +222,11 @@ export function parseAssetsRepo(
     return {
       error:
         'QWEN_REVIEW_ASSETS_REPO is not set. Designate an assets repository ' +
-        '(owner/repo you can push to — the repo under review for maintainers, ' +
-        'a fork or scratch repo otherwise) to publish review evidence images.',
+        '(owner/repo you can push to — a dedicated image-host repository, or ' +
+        'a fork or scratch repo rather than the repository under review) to ' +
+        'publish review evidence images. The PR-review workflow blanks a ' +
+        'self-targeting designation before the CLI sees it, so it reads as ' +
+        'unset here.',
     };
   }
   const parts = v.split('/');
