@@ -48,11 +48,14 @@
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
 import { REVIEW_TMP_DIR } from './paths.js';
 import { redirectedAncestor } from './worktree.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
+import { readPackageUpSync } from 'read-package-up';
+import { CLI_VERSION } from '../../../generated/git-commit.js';
 
 /**
  * The fallback when neither override names an image: the published sandbox
@@ -60,7 +63,13 @@ import { isFileSourcedEnvKey } from '../../../config/environment.js';
  * digest would go stale in a file nobody updates, and the override exists for
  * anyone who needs reproducibility.
  */
-const DEFAULT_IMAGE = 'ghcr.io/qwenlm/qwen-code/sandbox:latest';
+/**
+ * Last resort only, and versioned rather than floating: the real default is
+ * the CLI's own `config.sandboxImageUri` — see `cliSandboxImage`. This literal
+ * exists for the case where the package manifest cannot be found at all (an
+ * unusual install layout), so the argv still names something that exists.
+ */
+const DEFAULT_IMAGE = `ghcr.io/qwenlm/qwen-code:${CLI_VERSION}`;
 
 /** Container runtimes this module knows how to drive, in preference order. */
 const RUNTIMES = ['docker', 'podman'] as const;
@@ -698,6 +707,43 @@ export function containerCommand(
  * a specific Node major), which is the case this default cannot cover and
  * should not pretend to.
  */
+/**
+ * The image `qwen --sandbox` itself runs, read from the package manifest that
+ * ships with this CLI (`config.sandboxImageUri`) — the same field
+ * `sandboxConfig.ts` reads, so the two cannot drift.
+ *
+ * This is a correction, not a refinement. The first cut hardcoded
+ * `ghcr.io/qwenlm/qwen-code/sandbox:latest` and its comment claimed that was
+ * "the same image `qwen --sandbox` uses". It is not: the CLI's image is
+ * `ghcr.io/qwenlm/qwen-code:<version>`, a different repository path and a
+ * pinned tag, and the hardcoded name does not resolve at all — an anonymous
+ * manifest request answers 403 where the real one answers 200. Every command
+ * of an opted-in review therefore failed at image pull, which nineteen rounds
+ * of argv-level review could not see because no container was ever started
+ * from that argv.
+ *
+ * Read once and cached: this is on the per-command path.
+ */
+function cliSandboxImage(): string | undefined {
+  if (manifestImage !== undefined) return manifestImage ?? undefined;
+  try {
+    const found = readPackageUpSync({
+      cwd: dirname(fileURLToPath(import.meta.url)),
+    });
+    const uri = (
+      found?.packageJson as
+        | { config?: { sandboxImageUri?: string } }
+        | undefined
+    )?.config?.sandboxImageUri;
+    manifestImage = typeof uri === 'string' && uri.trim() ? uri.trim() : null;
+  } catch {
+    manifestImage = null;
+  }
+  return manifestImage ?? undefined;
+}
+
+let manifestImage: string | null | undefined;
+
 export function reviewSandboxImage(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
@@ -711,6 +757,11 @@ export function reviewSandboxImage(
   return (
     pick('QWEN_REVIEW_SANDBOX_IMAGE') ||
     pick(CUSTOM_SANDBOX_IMAGE_ENV_VAR) ||
+    // The operator's own sandbox image, if they configured one for
+    // `qwen --sandbox`. Through `pick`, so a repository shipping it in its
+    // `.qwen/.env` cannot choose the image its own code runs in.
+    pick('QWEN_SANDBOX_IMAGE') ||
+    cliSandboxImage() ||
     DEFAULT_IMAGE
   );
 }

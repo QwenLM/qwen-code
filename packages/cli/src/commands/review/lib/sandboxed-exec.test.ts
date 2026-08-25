@@ -11,9 +11,10 @@
 // happens when there is no runtime at all.
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import {
   existsSync,
+  readFileSync,
   mkdirSync,
   writeFileSync,
   mkdtempSync,
@@ -22,6 +23,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
@@ -917,6 +919,37 @@ describe('reviewSandboxImage', () => {
     expect(reviewSandboxImage({ QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1' })).toBe(
       'mine:1',
     );
-    expect(reviewSandboxImage({})).toContain('sandbox');
+    // The operator's own sandbox image, if they configured one for
+    // `qwen --sandbox`, rather than ignoring it and pulling a second one.
+    expect(reviewSandboxImage({ QWEN_SANDBOX_IMAGE: 'theirs:2' })).toBe(
+      'theirs:2',
+    );
+  });
+
+  it('defaults to the image this CLI actually ships with', () => {
+    // Pinned against the MANIFEST, not against a spelling. The assertion this
+    // replaces was `toContain('sandbox')`, which is how a default of
+    // `ghcr.io/qwenlm/qwen-code/sandbox:latest` shipped: it contains the word,
+    // it is not the CLI's image, and it does not resolve at all — an anonymous
+    // manifest request answers 403 where the real one answers 200, so every
+    // command of an opted-in review failed at image pull. Nineteen rounds of
+    // argv-level review could not see it because no container was ever
+    // started. The real image happens NOT to contain "sandbox", so the old
+    // assertion would fail on the correct value and pass on the broken one.
+    const manifest = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          '..',
+          '..',
+          'package.json',
+        ),
+        'utf8',
+      ),
+    ) as { config?: { sandboxImageUri?: string } };
+    expect(manifest.config?.sandboxImageUri).toBeTruthy();
+    expect(reviewSandboxImage({})).toBe(manifest.config?.sandboxImageUri);
   });
 });
