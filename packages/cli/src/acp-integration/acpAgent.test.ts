@@ -313,7 +313,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
-  ApprovalMode: { YOLO: 'yolo' },
+  // The real enum: the reload approval-mode fold reaches beyond YOLO
+  // (ApprovalMode.AUTO), and a partial shape leaves the other members
+  // undefined at runtime.
+  ApprovalMode: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ApprovalMode,
   isGatedMcpScope: (scope: unknown) =>
     scope === 'project' || scope === 'workspace',
   matchesAnyServerPattern: (name: string, patterns: string[] | undefined) =>
@@ -22266,6 +22271,218 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(setApprovalMode).not.toHaveBeenCalled();
       expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
       expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
+    // The file pins plan; the session legitimately exits plan through an
+    // approved exit_plan_mode, which switches the live mode at runtime
+    // without ever persisting (core Config.setApprovalMode is runtime-only,
+    // as are ACP session/set_mode and the sessionApprovalMode ext). A reload
+    // whose file value is unchanged must not re-apply the disk value: that
+    // would flip the executing session back into PLAN between turns and
+    // destroy its approved revision + stop-guard trust.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-runtime-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-runtime-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
+    try {
+      // Runtime-only transition (approved plan exit): the live session drops
+      // to default between turns while the file still says plan. An
+      // unrelated-settings reload must leave it alone.
+      approvalMode = 'default';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+      expect(approvalMode).toBe('default');
+
+      // The disk flips plan→default; the session already sits on default, so
+      // the per-session guard no-ops, but the daemon baseline advances...
+      mergedSettings = { tools: { approvalMode: 'default' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+
+      // ...which keeps the mirror direction safe too: the file is default
+      // while the user drafts in PLAN at runtime (session/set_mode never
+      // persists), and a no-edit reload must not discard the draft.
+      approvalMode = 'plan';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(approvalMode).toBe('plan');
+
+      // A genuine disk flip must still reach the runtime-diverged session.
+      mergedSettings = { tools: { approvalMode: 'auto' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('folds a removed or invalid approvalMode key to AUTO for live sessions on reload', async () => {
+    // Deleting tools.approvalMode from the settings file must reach live
+    // sessions: the reload folds a missing/invalid value to AUTO — the same
+    // default a fresh session derives — instead of skipping it and pinning a
+    // stale privileged mode until daemon restart.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-removal'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-removal'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
+    try {
+      // The operator deletes the key (hand edit / dotfile sync): the live
+      // session leaves plan for AUTO on the next reload.
+      mergedSettings = {};
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+      // The baseline advanced with the fold: a repeat reload is a no-op...
+      setApprovalMode.mockClear();
+      clearActiveTodoPlanRevision.mockClear();
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+      // ...and an invalid value folds to the same default (also a no-op
+      // while live sessions already sit on AUTO).
+      mergedSettings = { tools: { approvalMode: 'bogus' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }

@@ -1791,6 +1791,20 @@ function readCoreSettingValues(
   return values;
 }
 
+/**
+ * Folds a raw `tools.approvalMode` settings value into the mode live
+ * sessions must converge on: a valid mode passes through unchanged, while a
+ * missing or invalid key folds to AUTO — the same default a fresh session
+ * derives when the key is absent (see loadCliConfig). Folding (instead of
+ * skipping) is what lets a key deletion or corruption reach live sessions on
+ * reload rather than pinning a stale privileged mode until daemon restart.
+ */
+function foldReloadApprovalMode(raw: unknown): ApprovalMode {
+  return typeof raw === 'string' && APPROVAL_MODES.includes(raw as ApprovalMode)
+    ? (raw as ApprovalMode)
+    : ApprovalMode.AUTO;
+}
+
 export function normalizeCoreSettingValue(
   key: QwenCoreSettingKey,
   value: unknown,
@@ -3222,6 +3236,18 @@ class QwenAgent implements Agent {
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
   private sessionWorkflowEnabledOverride: boolean | undefined;
+  /**
+   * The last file-derived approval mode the daemon converged its live
+   * sessions on (seeded from the boot settings). `workspaceReload` compares
+   * the reloaded disk value against this baseline — not against each
+   * session's live mode — because approval mode has runtime-only writers
+   * (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`, the
+   * `sessionApprovalMode` ext) that never persist, so a live session
+   * legitimately diverges from the file mid-workflow and an unchanged file
+   * must not clobber those transitions. The baseline lives on the daemon so
+   * it survives a `this.settings` cache swap.
+   */
+  private sessionApprovalModeFileValue: ApprovalMode | undefined;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4220,6 +4246,14 @@ class QwenAgent implements Agent {
         budget: this.workspaceMcpBudget,
       });
     }
+    // Seed the file-derived approval-mode baseline from the boot settings so
+    // a `workspaceReload` with an unchanged file never re-applies the disk
+    // value: sessions created at boot derive this same value from the same
+    // merged settings, and any later divergence is a runtime-only transition
+    // (approved plan exit, ACP session/set_mode) the reload must preserve.
+    this.sessionApprovalModeFileValue = foldReloadApprovalMode(
+      this.settings.merged.tools?.approvalMode,
+    );
   }
 
   private runWithPinnedRuntimeBaseDir<T>(
@@ -11489,6 +11523,26 @@ class QwenAgent implements Agent {
           reloadedSessionWorkflow,
         );
 
+        // Fold a missing/invalid key to the fresh-session default (AUTO) so a
+        // key deletion reaches live sessions too, and compare the reloaded
+        // disk value against the daemon-held baseline — not against each
+        // session's live mode. Approval mode has runtime-only writers
+        // (ExitPlanModeTool approved plan exits, ACP session/set_mode, the
+        // sessionApprovalMode ext; core Config.setApprovalMode never
+        // persists), so a live session legitimately diverges from the file
+        // mid-workflow, and re-applying the disk value whenever it merely
+        // differs from the live mode would flip an approved-plan session
+        // back into PLAN between turns and destroy its bound revision.
+        // Comparing against the baseline still delivers a genuine disk flip
+        // even after `this.settings` was swapped for a fresh loadSettings
+        // instance (the baseline lives on the daemon, not the settings
+        // object), while an unchanged file leaves runtime transitions intact.
+        const reloadedApprovalMode = foldReloadApprovalMode(
+          newMerged.tools?.approvalMode,
+        );
+        const approvalModeFileChanged =
+          reloadedApprovalMode !== this.sessionApprovalModeFileValue;
+
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -11552,26 +11606,19 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
             }
 
-            // Apply the reloaded approval mode unconditionally (mirroring
-            // the Session Workflow gate re-derivation above): the
-            // merged↔merged diff against `oldMerged` is unreliable because
-            // `this.settings` is a replaceable "latest loaded" cache that
-            // other handlers can swap for a fresh loadSettings instance
-            // between a disk edit and this reload, after which `changed`
-            // reports no `tools` diff and a mode flip (e.g. into plan)
-            // would never reach live sessions. The no-op decision stays
-            // per-session on `newMode !== previousMode`, so re-applying on
-            // every reload is idempotent.
-            const newMode = newMerged.tools?.approvalMode;
+            // Apply the reloaded approval mode only when the file value
+            // itself changed since the daemon last converged on it (see the
+            // baseline derivation above); the per-session `!== previousMode`
+            // guard keeps the apply idempotent for sessions already at the
+            // disk value.
             const previousMode = config.getApprovalMode();
             if (
-              newMode &&
-              APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-              newMode !== previousMode
+              approvalModeFileChanged &&
+              reloadedApprovalMode !== previousMode
             ) {
               try {
-                config.setApprovalMode(newMode as ApprovalMode);
-                if (newMode === 'plan') {
+                config.setApprovalMode(reloadedApprovalMode);
+                if (reloadedApprovalMode === 'plan') {
                   session.clearActiveTodoPlanRevision();
                   session.clearTodoStopGuardTrust();
                 } else if (previousMode === 'plan') {
@@ -11611,6 +11658,12 @@ class QwenAgent implements Agent {
             skipped.push(sessions[i]![0]);
           }
         }
+
+        // The daemon has now converged every idle live session on this file
+        // value; advance the baseline so a no-edit reload stays a no-op and
+        // runtime-only transitions made after this reload survive until the
+        // file itself changes again.
+        this.sessionApprovalModeFileValue = reloadedApprovalMode;
 
         return {
           env: envResult,
