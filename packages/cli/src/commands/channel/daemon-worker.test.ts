@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { networkInterfaces } from 'node:os';
 
 const mockCanonicalizeWorkspace = vi.hoisted(() => vi.fn((p: string) => p));
 const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
@@ -1332,7 +1333,7 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('Channel "missing" not found in settings.');
   });
 
-  it('rejects daemon URLs that are not http(s) loopback URLs', async () => {
+  it('rejects daemon URLs that name no address on this host', async () => {
     const sdk = createSdk();
 
     for (const daemonUrl of [
@@ -1346,7 +1347,9 @@ describe('runChannelDaemonWorker', () => {
           selection: { mode: 'names', names: ['telegram'] },
           loadDaemonSdk: async () => sdk,
         }),
-      ).rejects.toThrow('QWEN_DAEMON_URL must use an http(s) loopback URL.');
+      ).rejects.toThrow(
+        "QWEN_DAEMON_URL must use an http(s) loopback URL or a literal address of one of this machine's interfaces.",
+      );
     }
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
@@ -1393,6 +1396,60 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'https://[::1]:4170',
     });
+  });
+
+  // R2-4/R15-1: a daemon bound to a concrete interface listens on that
+  // socket only — loopback is NOT bound, so rewriting the worker URL to
+  // `127.0.0.1` would trade this validator's rejection for `ECONNREFUSED`.
+  // The worker dials the bound address instead, and an own-interface address
+  // keeps the daemon token on this host exactly as loopback does — the
+  // property the rule protects. Without this widening the documented LAN
+  // flow (`qwen serve --hostname <lan-ip> --channel …`) passes every boot
+  // check (`assertChannelWorkerDaemonUrlIsLocal` certifies the bind) and
+  // then throws in every worker: the first one exits the daemon, later ones
+  // restart-loop with /health green.
+  it("accepts a daemon URL bound to one of this host's own interfaces", async () => {
+    const ownAddress = Object.values(networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)?.address;
+    // A machine with no non-loopback IPv4 interface cannot exercise this.
+    if (!ownAddress) return;
+
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: `https://${ownAddress}:4170`,
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: `https://${ownAddress}:4170`,
+    });
+  });
+
+  // The widening is to THIS host's addresses, not to routable addresses in
+  // general: a literal that belongs to no local interface stays rejected, so
+  // the daemon token still cannot be aimed off-box.
+  it('still rejects a routable address that is not on this host', async () => {
+    const sdk = createSdk();
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'https://203.0.113.7:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow(
+      "QWEN_DAEMON_URL must use an http(s) loopback URL or a literal address of one of this machine's interfaces.",
+    );
+    expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
 
   it('fails fast when no channels are configured', async () => {
