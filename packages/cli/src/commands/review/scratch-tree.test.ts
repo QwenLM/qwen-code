@@ -289,6 +289,28 @@ describe('runScratchTree', () => {
     expect(run().available).toBe(true);
   });
 
+  it('admits the inert gc.* keys one by one — the section is never certified whole', () => {
+    // `gc.recentObjectsHook` (git ≥ 2.45) is shell-executed at the user's
+    // own next gc — reachable.c wires it with use_shell — so the
+    // section-wide `/^gc\./` shape certified an execution unread: the miss
+    // the invariant above the allowlist prices as a refusal, never an
+    // execution (R17-2, probed live on git 2.47.3). The section is screened
+    // key by key instead: the inert knobs stay admitted, everything
+    // unlisted fails closed.
+    git(worktree, 'config', 'gc.recentObjectsHook', 'touch PWNED');
+    let r = run();
+    expect(r.available).toBe(false);
+    // Git reports keys lowercased; the refusal names the key git reads.
+    expect(r.note).toContain('gc.recentobjectshook');
+    git(worktree, 'config', '--unset', 'gc.recentObjectsHook');
+
+    git(worktree, 'config', 'gc.auto', '0');
+    git(worktree, 'config', 'gc.pruneExpire', 'now');
+    git(worktree, 'config', 'gc.reflogExpire', '90.days');
+    r = run();
+    expect(r.available).toBe(true);
+  });
+
   it('refuses an include.* key — the imported file is invisible to a per-file scan', () => {
     // `git config --file` reads do not follow includes, so one planted
     // `include.path` importing a command key was invisible to the screen
@@ -321,6 +343,57 @@ describe('runScratchTree', () => {
 
     expect(r.available).toBe(false);
     expect(r.note).toContain('core.fsmonitor');
+  });
+
+  it('screens the repo-local config of the submodule gitdirs under the common dir', () => {
+    // `<common>/modules/<name>/config` is repo-local config git honors —
+    // the user's own next operations inside the submodule execute it, and
+    // `git worktree remove --force` leaves the whole `modules/` dir
+    // standing, so a plant there outlives the copy's discard. The screen
+    // read only the main and per-worktree configs and admitted the plant
+    // while the refusal message claimed every uncertified repo-local key is
+    // refused (R17-3, probed live).
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    const first = run();
+    expect(first.available).toBe(true);
+
+    const moduleDir = join(common, 'modules', 'vendor');
+    mkdirSync(moduleDir, { recursive: true });
+    writeFileSync(join(moduleDir, 'config'), '[alias]\n\tpwn = !touch PWNED\n');
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('alias.pwn');
+
+    // An empty module gitdir is nothing git reads — admitted, not refused,
+    // and neither is a stray plain file under `modules/`: only directories
+    // can be gitdirs.
+    rmSync(join(moduleDir, 'config'));
+    writeFileSync(join(common, 'modules', 'stray'), 'not a gitdir');
+    expect(run().available).toBe(true);
+
+    // The sibling placement under a worktree's admin entry, where git since
+    // 2.47 puts a submodule initialized inside a LINKED worktree.
+    const adminModules = join(
+      common,
+      'worktrees',
+      basename(first.path!),
+      'modules',
+      'vendor',
+    );
+    mkdirSync(adminModules, { recursive: true });
+    writeFileSync(
+      join(adminModules, 'config'),
+      '[alias]\n\tpwn = !touch PWNED\n',
+    );
+
+    const r2 = run();
+    expect(r2.available).toBe(false);
+    expect(r2.note).toContain('alias.pwn');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -376,6 +449,167 @@ describe('runScratchTree', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'screens the hooks dirs of the submodule gitdirs — the config screen cannot see a hook',
+    () => {
+      // A submodule's hooks stand in its own gitdir under the common dir
+      // and fire at the user's own next commit INSIDE the submodule — the
+      // same shared-surface persistence the main hooks screen refuses,
+      // which never looked there (R17-3, probed live: the planted hook
+      // fired on a user submodule commit and again after the copy's
+      // discard).
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const first = run();
+      expect(first.available).toBe(true);
+
+      const hook = join(common, 'modules', 'vendor', 'hooks', 'pre-commit');
+      mkdirSync(dirname(hook), { recursive: true });
+      writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(hook, 0o755);
+
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('modules/vendor/hooks/pre-commit');
+
+      // Non-executable, git does not run it.
+      chmodSync(hook, 0o644);
+      expect(run().available).toBe(true);
+
+      // The worktree-scoped placement too.
+      const adminHook = join(
+        common,
+        'worktrees',
+        basename(first.path!),
+        'modules',
+        'vendor',
+        'hooks',
+        'pre-commit',
+      );
+      mkdirSync(dirname(adminHook), { recursive: true });
+      writeFileSync(adminHook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(adminHook, 0o755);
+
+      const r2 = run();
+      expect(r2.available).toBe(false);
+      expect(r2.note).toContain('pre-commit');
+    },
+  );
+
+  it('honors a GLOBAL hooksPath redirect for the module hooks dirs too', () => {
+    // A repo-local hooksPath is refused upstream by the config screen, so
+    // any redirect standing by the time hooks are scanned is global — the
+    // user's own contract — and it applies to the submodule gitdirs as
+    // well: none of the default dirs is the active surface then, so what
+    // stands in them is not this screen's business.
+    const globalHooks = join(repo, 'global-hooks');
+    mkdirSync(globalHooks, { recursive: true });
+    git(repo, 'config', '--global', 'core.hooksPath', globalHooks);
+    const hook = join(repo, '.git', 'modules', 'vendor', 'hooks', 'pre-commit');
+    mkdirSync(dirname(hook), { recursive: true });
+    writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+    chmodSync(hook, 0o755);
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails CLOSED when the modules dir cannot be listed — git still reads module gitdirs by name',
+    () => {
+      // A mode-0111 `modules` dir: unreadable to `readdirSync` while git
+      // still reads `<common>/modules/<name>/config` and runs hooks by
+      // name — the shape the worktrees admin dir and the hooks dir already
+      // fail closed on.
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const modulesDir = join(common, 'modules');
+      mkdirSync(join(modulesDir, 'vendor'), { recursive: true });
+      chmodSync(modulesDir, 0o111);
+      try {
+        const r = run();
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('submodule gitdirs could not be enumerated');
+      } finally {
+        chmodSync(modulesDir, 0o755);
+      }
+    },
+  );
+
+  it('refuses a symlinked entry under the modules dir — it could resolve anywhere', () => {
+    // Git's submodule layout creates plain directories; a symlink under
+    // `modules/` could name any directory the screen cannot certify, so it
+    // belongs to the unknowable class — a refusal, like a dir that cannot
+    // be listed.
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    mkdirSync(join(common, 'modules'), { recursive: true });
+    symlinkSync(join(repo, 'nowhere'), join(common, 'modules', 'vendor'));
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('submodule gitdirs could not be enumerated');
+  });
+
+  it('admits a repository whose submodules are initialized — git’s own module keys are inert', () => {
+    // Initializing a submodule writes git's own keys into
+    // `<common>/modules/<name>/config` — among them `core.worktree`, which
+    // the screen must certify or EVERY repository with an initialized
+    // submodule stands refused (R17-3's verifier flip). Every key git
+    // writes there is admitted; only foreign ones refuse.
+    const sub = join(repo, 'sub-origin');
+    mkdirSync(sub, { recursive: true });
+    git(sub, 'init', '-q', '-b', 'main');
+    git(sub, 'config', 'user.email', 't@t.t');
+    git(sub, 'config', 'user.name', 't');
+    writeFileSync(join(sub, 's.txt'), 'x\n');
+    git(sub, 'add', '-A');
+    git(sub, 'commit', '-qm', 'one');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor',
+      ],
+      { cwd: repo },
+    );
+    git(repo, 'commit', '-qm', 'add submodule');
+    headSha = git(repo, 'rev-parse', 'main');
+    git(worktree, 'checkout', '--detach', '-q', headSha);
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+      ],
+      { cwd: repo },
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+  });
+
   it('certifies the inert VALUES of value-checked keys — fail-closed is not value-blind', () => {
     // The old blocklist was value-blind: a boolean `core.fsmonitor` selects
     // git's builtin daemon and an `https://` fetch address names no program
@@ -417,6 +651,13 @@ describe('runScratchTree', () => {
       ['remote.origin.url', '9p::addr'],
       ['remote.origin.url', '::addr'],
       ['remote.origin.url', 'evilproto://host/x'],
+      // Git's builtin-transport matching is case-SENSITIVE: an uppercase or
+      // mixed-case scheme is not a builtin, and git dispatches an executable
+      // `git-remote-<Scheme>` helper for it (traced live: `HTTP://` runs
+      // `git remote-HTTP`) — exactly the dispatch class refused above.
+      ['remote.origin.url', 'HTTP://127.0.0.1/x'],
+      ['remote.origin.url', 'HtTpS://example.com/x'],
+      ['submodule.vendor.url', 'GIT://example.com/x'],
       ['submodule.vendor.update', '!sh -c evil'],
       ['submodule.vendor.url', 'ext::evil'],
     ] as Array<[string, string]>) {

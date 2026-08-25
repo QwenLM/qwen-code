@@ -47,7 +47,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   assertWritableOutPath,
@@ -159,15 +159,20 @@ const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 // must stay inert for EVERY value; anything executable, or uncertifiable,
 // belongs out of it — a miss costs a refusal, never an execution.
 const INERT_KEY_SHAPES: RegExp[] = [
-  // Written by `git init`, `git clone` and `git worktree add` itself.
-  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository)$/,
+  // Written by `git init`, `git clone` and `git worktree add` itself — and
+  // `core.worktree` by `git submodule` into every module gitdir.
+  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository|worktree)$/,
   // Identity and per-branch plumbing — names, addresses, refs, booleans.
   /^(user|author|committer)\./,
   /^branch\./,
   // Capability flags: they change which FILES git reads, and every file this
   // screen reads is one of the candidates below.
   /^extensions\./,
-  /^gc\./,
+  // gc knobs taking numbers, booleans, sizes and expiry dates — never a
+  // command; lowercase because git reports keys lowercased. Deliberately not
+  // section-wide: `gc.recentObjectsHook` (git ≥ 2.45) is shell-executed, so
+  // a section-wide shape would certify it unread.
+  /^gc\.(aggressivedepth|aggressivewindow|auto|autodetach|autopacklimit|bigpackthreshold|cruftpacks|logexpiry|maxcruftsize|packrefs|pruneexpire|reflogexpire|reflogexpireunreachable|repackfilter|repackfiltermaxpacksize|rerere|rerereautoupdate|worktreepruneexpire|writecommitgraph)$/,
   // A remote's refspecs and behaviour flags; its url shapes are value-checked
   // below — `ext::` and `<helper>::` schemes execute.
   /^remote\..+\.(fetch|push|tagopt|mirror)$/,
@@ -209,8 +214,11 @@ const VALUE_CHECKED_SHAPES: Array<{
       // slash spares IPv6 literals like `ssh://[2001:db8::1]/repo`, whose
       // `::` sits after it.
       if (head.includes('::')) return false;
-      const scheme = /^([a-z0-9+.-]+):\/\//i.exec(v)?.[1];
-      return !scheme || /^(https?|ftps?|ssh|git|file)$/i.test(scheme);
+      // Extracted across both cases, admitted only in git's exact
+      // lowercase: builtin-transport matching is case-sensitive, and every
+      // case variant dispatches an executable `git-remote-<Scheme>` helper.
+      const scheme = /^([A-Za-z0-9+.-]+):\/\//.exec(v)?.[1];
+      return !scheme || /^(https?|ftps?|ssh|git|file)$/.test(scheme);
     },
   },
   {
@@ -281,7 +289,18 @@ function localCommandConfig(worktree: string): string[] {
   // any of these is a plant whichever tree carries it.
   try {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+      const admin = join(common, 'worktrees', entry);
+      candidates.push(join(admin, 'config.worktree'));
+      // ...and the submodule gitdirs under the admin entry, where git since
+      // 2.47 puts a submodule initialized inside a linked worktree.
+      const adminModules = moduleGitdirsUnder(admin);
+      if (adminModules === null) {
+        return ['(the submodule gitdirs could not be enumerated)'];
+      }
+      for (const gitdir of adminModules) {
+        candidates.push(join(gitdir, 'config'));
+        candidates.push(join(gitdir, 'config.worktree'));
+      }
     }
   } catch (err) {
     // ENOENT means no linked worktrees registered — the candidates above
@@ -291,6 +310,18 @@ function localCommandConfig(worktree: string): string[] {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       return ['(the worktrees admin directory could not be listed)'];
     }
+  }
+  // The repository's OWN submodule gitdirs — `<common>/modules/<name>` —
+  // carry repo-local config git honors at the user's own operations inside
+  // each submodule, and discard never wipes them: `worktree remove --force`
+  // leaves `modules/` standing (R17-3, probed live).
+  const modules = moduleGitdirsUnder(common);
+  if (modules === null) {
+    return ['(the submodule gitdirs could not be enumerated)'];
+  }
+  for (const gitdir of modules) {
+    candidates.push(join(gitdir, 'config'));
+    candidates.push(join(gitdir, 'config.worktree'));
   }
   const found: string[] = [];
   for (const file of candidates) {
@@ -343,8 +374,42 @@ function configValuesIn(
   return r.stdout.split('\0').filter(Boolean);
 }
 
+// The submodule gitdirs git honors under `base/modules`, recursively: a
+// submodule's own submodules nest under its own gitdir. `null` is the
+// fail-closed answer — a `modules` dir that cannot be listed, an entry that
+// cannot be stat'ed, a symlinked entry: git reads those gitdirs by name
+// whatever a readdir sees, and git's submodule layout creates plain
+// directories, so anything else is an uncertifiable class — a refusal.
+function moduleGitdirsUnder(base: string): string[] | null {
+  const out: string[] = [];
+  const walk = (dir: string): boolean => {
+    let entries: string[];
+    try {
+      entries = readdirSync(join(dir, 'modules'));
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+    for (const name of entries) {
+      const gitdir = join(dir, 'modules', name);
+      let stats;
+      try {
+        stats = lstatSync(gitdir);
+      } catch {
+        return false;
+      }
+      if (stats.isSymbolicLink()) return false;
+      if (!stats.isDirectory()) continue;
+      out.push(gitdir);
+      if (!walk(gitdir)) return false;
+    }
+    return true;
+  };
+  return walk(base) ? out : null;
+}
+
 /**
- * The executable hooks standing in the repository's own hooks dir, when any.
+ * The executable hooks standing in the repository's own hooks dir — its own
+ * and each submodule gitdir's — when any.
  *
  * A hook carries no config key, so the screen above passes whatever the dir
  * holds — and the dir lives in the common dir this report calls shared: a
@@ -352,10 +417,12 @@ function configValuesIn(
  * copy's discard (R12-1). This command's own git runs with hooks disabled;
  * the refusal is for the persistence, which cannot be told apart from a hook
  * the user set deliberately and cannot be safely wiped — an upstream refusal,
- * not a cleanup. Only the repository's OWN hooks dir is this surface: a
- * repo-local `core.hooksPath` is refused by the config screen (its inertness
- * is not established), and one set globally resolves elsewhere — the user's
- * own contract, like their global config.
+ * not a cleanup. The surface is the repository's OWN hooks dir plus the
+ * hooks dirs of its submodule gitdirs: a submodule hook fires at the user's
+ * own commit inside the submodule and survives the copy's discard the same
+ * way (R17-3). A repo-local `core.hooksPath` is refused by the config screen
+ * (its inertness is not established), and one set globally resolves
+ * elsewhere — the user's own contract, like their global config.
  */
 function localExecutableHooks(worktree: string): string[] {
   const r = spawnSync(
@@ -370,40 +437,85 @@ function localExecutableHooks(worktree: string): string[] {
   const [commonDir, hooksPath] = r.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
   const ownHooksDir = join(common, 'hooks');
-  // The resolved path honors any hooksPath redirect; only the default dir
-  // is the planting surface this screen owns (see the doc comment).
+  // The resolved path honors any hooksPath redirect; only the default dirs
+  // are the planting surface this screen owns (see the doc comment). By the
+  // time this runs the redirect can only be a GLOBAL hooksPath — a repo-local
+  // one is refused upstream by the config screen — and a global redirect
+  // applies to the submodule gitdirs too, so the one check stands for all.
   try {
-    if (!existsSync(ownHooksDir)) return [];
-    if (
-      realpathSync(resolve(worktree, hooksPath)) !== realpathSync(ownHooksDir)
-    ) {
+    if (existsSync(ownHooksDir)) {
+      if (
+        realpathSync(resolve(worktree, hooksPath)) !== realpathSync(ownHooksDir)
+      ) {
+        return [];
+      }
+    } else if (existsSync(resolve(worktree, hooksPath))) {
+      // Redirected to another standing dir — no default dir is the surface.
       return [];
     }
   } catch {
     return [];
   }
+  const found = executableHooksIn(ownHooksDir, 'hooks');
+  if (found === null) return ['(the hooks directory could not be listed)'];
+  // A submodule's hooks stand in its own gitdir under the common dir and
+  // fire at the user's own commits inside the submodule — the same shared
+  // surface, and discard never wipes `modules/` (R17-3, probed live). The
+  // worktree-scoped placement is deleted with the tree that carries it,
+  // which bounds but does not remove the window.
+  const bases = [common];
+  try {
+    for (const entry of readdirSync(join(common, 'worktrees'))) {
+      bases.push(join(common, 'worktrees', entry));
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return ['(the worktrees admin directory could not be listed)'];
+    }
+  }
+  for (const base of bases) {
+    const gitdirs = moduleGitdirsUnder(base);
+    if (gitdirs === null) {
+      return ['(the submodule gitdirs could not be enumerated)'];
+    }
+    for (const gitdir of gitdirs) {
+      const hooks = executableHooksIn(
+        join(gitdir, 'hooks'),
+        join(relative(common, gitdir), 'hooks'),
+      );
+      if (hooks === null) {
+        return ['(the hooks directory could not be listed)'];
+      }
+      found.push(...hooks);
+    }
+  }
+  return found;
+}
+
+function executableHooksIn(dir: string, prefix: string): string[] | null {
   let entries: string[];
   try {
-    entries = readdirSync(ownHooksDir);
-  } catch {
+    entries = readdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     // Fail closed, like the config screen: a dir that cannot be listed can
     // still carry hooks — git executes them by name lookup, which needs
     // traverse only, and a mode-0111 dir throws here while staying runnable.
-    return ['(the hooks directory could not be listed)'];
+    return null;
   }
   const found: string[] = [];
   for (const name of entries) {
     if (name.endsWith('.sample')) continue;
     let stats;
     try {
-      stats = statSync(join(ownHooksDir, name));
+      stats = statSync(join(dir, name));
     } catch {
       continue;
     }
     if (!stats.isFile()) continue;
     // Windows has no exec bit git honors — any standing file can run.
     if (process.platform === 'win32' || (stats.mode & 0o111) !== 0) {
-      found.push(`hooks/${name}`);
+      found.push(`${prefix}/${name}`);
     }
   }
   return found;
