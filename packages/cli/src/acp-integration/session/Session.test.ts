@@ -2423,6 +2423,62 @@ describe('Session', () => {
     );
   });
 
+  it('gates the orphan restore on the send chat instance across a compression swap', async () => {
+    // R10-7: the restore gate must compare push counters on the SAME chat
+    // instance. Compression during the resend swaps in a fresh chat whose
+    // counter starts at 0; the resend pushes there (0→1) and the stream
+    // throws. A gate re-reading the CURRENT chat but comparing against the
+    // PRE-compression snapshot (1 <= 1) double-restores the orphan on top
+    // of the landed resend.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    // The failed first attempt already pushed on the pre-compression chat.
+    (
+      mockChat as unknown as { getUserContentPushCount: () => number }
+    ).getUserContentPushCount = vi.fn(() => 1);
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+
+    // tryCompressChat swaps the live chat before the resend sends.
+    let compressedPushCount = 0;
+    const compressedChat = {
+      sendMessageStream: vi.fn().mockImplementation(async () => {
+        compressedPushCount += 1;
+        throw new Error('transient API error');
+      }),
+      addHistory: vi.fn(),
+      getUserContentPushCount: vi.fn(() => compressedPushCount),
+    } as unknown as GeminiChat;
+    mockGeminiClient.tryCompressChat = vi.fn().mockImplementation(async () => {
+      vi.mocked(mockGeminiClient.getChat).mockReturnValue(compressedChat);
+      return {
+        originalTokenCount: 1000,
+        newTokenCount: 500,
+        compressionStatus: core.CompressionStatus.COMPRESSED,
+      };
+    });
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'failed prompt' }],
+        _meta: { 'qwen.daemon.retry': true },
+      } as PromptRequest),
+    ).rejects.toThrow('transient API error');
+
+    // The resend pushed on the compressed chat...
+    expect(compressedChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(compressedPushCount).toBe(1);
+    // ...so the orphan must NOT be restored on top of it — neither on the
+    // send chat nor on the pre-compression one.
+    expect(compressedChat.addHistory).not.toHaveBeenCalled();
+    expect(mockChat.addHistory).not.toHaveBeenCalled();
+  });
+
   it('re-adds every stripped entry a no-adoption retry does not re-push', async () => {
     // Two stacked failed attempts leave two marked orphans; the retry
     // strips BOTH and fails closed on adoption (length !== 1). The resend

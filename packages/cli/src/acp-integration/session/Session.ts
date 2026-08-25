@@ -5118,6 +5118,13 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let resubmittedPromptIdentity: string | undefined;
             let orphanPushCountSnapshot = 0;
+            // The send-time capture for the push-count restore gate (R10-7):
+            // compression during the resend can swap in a fresh chat whose
+            // counter starts at 0, so the gate must compare the SAME
+            // instance that actually sends — captured in `beforeSend` below,
+            // after compression. Undefined until the first send reaches it.
+            let orphanSendChat: GeminiChat | undefined;
+            let orphanSendPushCountBeforeSend = 0;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -5860,6 +5867,23 @@ export class Session implements SessionContext {
                           turnCount === 1
                             ? getApiHistoryPromptId(nextMessage)
                             : undefined,
+                        // R10-7: capture the ACTUAL send chat and its push
+                        // count after compression (this callback runs after
+                        // tryCompressChat, right before the provider send),
+                        // so the orphan restore gate below compares counters
+                        // on the SAME instance that pushes. Mirrors the
+                        // guard-preservation capture (`providerSendChat`).
+                        beforeSend: async () => {
+                          if (turnCount === 1) {
+                            orphanSendChat = this.#getCurrentChat();
+                            orphanSendPushCountBeforeSend =
+                              orphanSendChat.getUserContentPushCount?.() ?? 0;
+                          }
+                          return {
+                            kind: 'send',
+                            message: nextMessage?.parts ?? [],
+                          };
+                        },
                       },
                     );
                   if (!sendResult.responseStream) {
@@ -5992,11 +6016,23 @@ export class Session implements SessionContext {
                   // the core Retry restore in client.ts — so we only restore
                   // when the content never landed (a later tool-loop send
                   // throwing leaves the counter advanced → no double-restore).
-                  if (
-                    strippedOrphanEntries &&
-                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
-                      orphanPushCountSnapshot
-                  ) {
+                  //
+                  // R10-7: the counters must come from the SAME chat
+                  // instance. When compression swapped the chat during the
+                  // resend, `this.#getCurrentChat()` is the fresh instance
+                  // (counter reset to 0) while `orphanPushCountSnapshot`
+                  // was captured on the pre-compression one — comparing
+                  // across instances double-restores the orphan on top of a
+                  // landed resend. Prefer the send-time capture; fall back
+                  // to the strip-time pair only when the send was never
+                  // reached (the throw left the current chat unchanged or
+                  // replaced it before any push, so restoring is correct).
+                  const orphanRestoreGatePassed = orphanSendChat
+                    ? (orphanSendChat.getUserContentPushCount?.() ?? 0) <=
+                      orphanSendPushCountBeforeSend
+                    : (this.#getCurrentChat().getUserContentPushCount?.() ??
+                        0) <= orphanPushCountSnapshot;
+                  if (strippedOrphanEntries && orphanRestoreGatePassed) {
                     for (const entry of strippedOrphanEntries) {
                       this.#getCurrentChat().addHistory(entry);
                     }
