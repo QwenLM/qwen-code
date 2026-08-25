@@ -126,8 +126,12 @@ const symlinksWork = (() => {
   }
 })();
 /** Run the stage step's extracted script against a fixture tree. */
-const runStageStep = (cwd, runnerTemp, prNumber) =>
-  spawnSync(
+const runStageStep = (cwd, runnerTemp, prNumber) => {
+  // The step writes the minted staging dir to $GITHUB_OUTPUT for the
+  // upload step to read; give the extracted run a file for that channel.
+  const githubOutput = join(runnerTemp, 'gho');
+  writeFileSync(githubOutput, '');
+  return spawnSync(
     'bash',
     // The run block spells the staging dir with the runner CONTEXT, so the
     // extracted script needs the expression bound before bash can run it —
@@ -139,10 +143,12 @@ const runStageStep = (cwd, runnerTemp, prNumber) =>
         PATH: process.env.PATH,
         RUNNER_TEMP: runnerTemp,
         PR_NUMBER: prNumber,
+        GITHUB_OUTPUT: githubOutput,
       },
       encoding: 'utf8',
     },
   );
+};
 
 describe('review artifact upload — naming contract', () => {
   it('extracts the stage patterns from the workflow', () => {
@@ -221,17 +227,26 @@ describe('review artifact upload — naming contract', () => {
     // worktree checkout living under that same tree. The reviews find has
     // no such subtree, so only the tmp find's flag load-bears.
     expect(findCmdOf(REVIEW_TMP_DIR)).toContain('-maxdepth 1');
-    // The stage dir and the upload path are one join with no other copy in
-    // the tree. Compare the extracted names — a substring check ships
-    // green when one side is renamed to a SUPERSTRING of the other.
-    const stageDirName =
-      stageBlock.match(/STAGE='\$\{\{ runner\.temp \}\}\/([^'"]+)'/)?.[1] ?? '';
-    const uploadDirName =
-      uploadBlock.match(/path: '\$\{\{ runner\.temp \}\}\/([^'"]+)\/'/)?.[1] ??
-      '';
-    expect(stageDirName).toBe('qwen-review-upload');
-    expect(uploadDirName).toBe('qwen-review-upload');
-    expect(stageDirName).toBe(uploadDirName);
+    // The stage dir is a fresh per-run mktemp under runner.temp, and the
+    // upload reads ONLY the path the stage step outputs — never a fixed
+    // path. A fixed staging path on this pool can arrive pre-occupied by
+    // foreign-uid residue a previous (root, containerised) job left in
+    // RUNNER_TEMP and this job cannot remove; the unconditional upload
+    // would then publish that residue as this run's record. The mktemp
+    // name is unpredictable and minted 0700 for the runner user, and the
+    // wiring below is the one join that keeps the residue unread: the
+    // emitted output name and the upload's interpolation of it must agree
+    // exactly, or the upload either reads a constant again or nothing.
+    expect(stageStep.id).toBe('stage');
+    expect(stageBlock).toContain(
+      'STAGE="$(mktemp -d "${{ runner.temp }}/qwen-review-upload.XXXXXX")"',
+    );
+    expect(stageBlock).toContain('echo "dir=${STAGE}" >> "${GITHUB_OUTPUT}"');
+    const uploadPath = uploadBlock.match(/path: '([^']+)'/)?.[1] ?? '';
+    expect(uploadPath).toBe('${{ steps.stage.outputs.dir }}');
+    // No constant path for the upload to fall back to.
+    expect(uploadBlock).not.toContain('runner.temp');
+    expect(uploadBlock).not.toContain('qwen-review-upload');
   });
 
   it('names the artifact per attempt and states its retention', () => {
@@ -296,13 +311,15 @@ describe('review artifact upload — naming contract', () => {
 
 describe('review artifact upload — the stage step, extracted and run', () => {
   it.skipIf(!bashAvailable)(
-    'wipes the staging dir even when no PR number resolved',
+    'guard exit leaves residue behind but stages nothing and emits no path',
     () => {
-      // The upload step runs unconditionally and reads the staging dir,
-      // and on this persistent pool the previous job's successful stage
-      // still occupies it. The guard's early exit must therefore wipe the
-      // dir BEFORE it leaves — otherwise the previous job's record
-      // uploads as this run's, green and unsignalled.
+      // Staging is a fresh per-run mktemp dir, so residue at the old
+      // fixed path (or any foreign-uid leftover in RUNNER_TEMP that this
+      // job cannot remove) is simply never READ: the upload only follows
+      // the path this step outputs, and the guard exit emits none. A
+      // previous job's record can no longer upload as this run's — the
+      // failure the old wipe-before-guard existed to prevent is closed by
+      // construction instead of by wiping.
       const runnerTemp = mkdtempSync(join(tmpdir(), 'review-stage-temp-'));
       const stale = join(runnerTemp, 'qwen-review-upload');
       mkdirSync(stale);
@@ -312,7 +329,15 @@ describe('review artifact upload — the stage step, extracted and run', () => {
         const out = runStageStep(cwd, runnerTemp, '');
         expect(out.status).toBe(0);
         expect(out.stdout).toContain('no valid PR number resolved');
-        expect(existsSync(stale)).toBe(false);
+        // Residue stays — this job cannot necessarily remove it — but no
+        // staging dir was minted and no upload path was emitted.
+        expect(existsSync(stale)).toBe(true);
+        expect(
+          readdirSync(runnerTemp).filter((n) =>
+            n.startsWith('qwen-review-upload.'),
+          ),
+        ).toEqual([]);
+        expect(readFileSync(join(runnerTemp, 'gho'), 'utf8')).toBe('');
       } finally {
         rmSync(runnerTemp, { recursive: true, force: true });
         rmSync(cwd, { recursive: true, force: true });
@@ -363,9 +388,20 @@ describe('review artifact upload — the stage step, extracted and run', () => {
         const out = runStageStep(cwd, runnerTemp, '42');
         expect(out.status).toBe(0);
         expect(out.stdout).not.toMatch(/^(::|##\[)/m);
-        expect(
-          readdirSync(join(runnerTemp, 'qwen-review-upload')).sort(),
-        ).toEqual([
+        // The staged files live in the fresh mktemp dir the step OUTPUT —
+        // the upload follows that path, never a constant. The dir name is
+        // per-run random under the pinned prefix.
+        const dirLine = readFileSync(join(runnerTemp, 'gho'), 'utf8')
+          .split('\n')
+          .find((l) => l.startsWith('dir='));
+        expect(typeof dirLine).toBe('string');
+        const stageDir = String(dirLine).slice('dir='.length);
+        expect(stageDir).toMatch(
+          new RegExp(
+            `^${escapeRe(runnerTemp)}/qwen-review-upload\\.[A-Za-z0-9]+$`,
+          ),
+        );
+        expect(readdirSync(stageDir).sort()).toEqual([
           '2026-08-23-120000-pr-42.md',
           'qwen-review-pr-42-findings.json',
           'qwen-review-pr-42-note\n::error::forged',

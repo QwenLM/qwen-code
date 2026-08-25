@@ -6581,6 +6581,30 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed[0]).toContain('mapping unsupported');
   });
 
+  it('renders a non-string or missing report field inertly — never a throw', () => {
+    // The report is read with `JSON.parse(...) as ScriptLintReport` and no
+    // runtime validation, and it is a side file the review agent can
+    // rewrite: a non-string `reason` in skipped[]/deferred[] or a
+    // non-string or missing `tool` in errored[] must degrade to rendered
+    // prose like every other malformed shape in this module — never a
+    // TypeError, because a thrown compose loses the whole round, Criticals
+    // included.
+    const p = writePlan({});
+    writeReport({
+      skipped: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 42 }],
+      errored: [{ path: 'deploy.sh' }],
+      deferred: [
+        { path: 'ci.yml', tool: 'actionlint', reason: { why: 'deferred' } },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.unreviewed).toHaveLength(2);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('42');
+    expect(g.unreviewed[1]).toContain('undefined errored');
+    expect(g.disclosed[0]).toContain('[object Object]');
+  });
+
   it('reports an errored checker as unreviewed (fail closed)', () => {
     const p = writePlan({});
     writeReport({

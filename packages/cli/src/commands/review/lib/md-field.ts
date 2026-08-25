@@ -52,6 +52,12 @@ export function mdField(s: unknown): string {
  * needs raw comment grammar in either surface. The text between the
  * delimiters survives; only the grammar goes inert.
  */
-export function stripCommentGrammar(s: string): string {
-  return s.replace(/<!--|-->/g, ' ');
+export function stripCommentGrammar(s: unknown): string {
+  // Coerce like mdField does: scriptLintGate quotes side-file report fields
+  // read with `JSON.parse(...) as ScriptLintReport` and no runtime
+  // validation, and the report is a side file the review agent can rewrite
+  // — a non-string or missing field must degrade to rendered prose, never a
+  // TypeError, because a thrown compose loses the whole round, Criticals
+  // included (this module's stated invariant for every malformed shape).
+  return String(s).replace(/<!--|-->/g, ' ');
 }
