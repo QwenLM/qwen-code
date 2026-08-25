@@ -197,6 +197,19 @@ describe('emit-workflow — what it refuses', () => {
     ).toThrow(/one tool result/);
   });
 
+  // A plan whose sizes failed to arrive is not a small review — its topology
+  // is UNKNOWABLE, and `isTerritoryFanOut`'s missing-to-zero coercion would
+  // bake the guess that it is 3A into the script. Refuse it like a territory
+  // fan-out: the emitter-side half of the same routing ruling.
+  it('refuses an unsized plan — unknowable topology is not 3A', () => {
+    expect(() =>
+      buildFanOutRoster(
+        localPlan({ srcDiffLines: null, diffLines: null }),
+        planPath,
+      ),
+    ).toThrow(/no usable diff size/);
+  });
+
   // A worktree is not a refusal: `agent({workingDir})` exists and the
   // generated script passes it. This used to throw, pinning a capability
   // claim the runtime disproves.

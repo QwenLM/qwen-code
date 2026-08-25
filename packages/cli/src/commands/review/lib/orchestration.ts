@@ -20,6 +20,7 @@
 // missing piece rather than saying "unsupported".
 
 import { isTerritoryFanOut, type RosterPlan } from './roster.js';
+import { usableLineCount } from './budget.js';
 
 /** How Step 3 should dispatch, and why. */
 export interface OrchestrationVerdict {
@@ -77,6 +78,22 @@ export function reviewWorkflowEnabled(
  * construction, not by two lists kept in step.
  */
 export function structuralBlocker(plan: RosterPlan): string | null {
+  // The size ruling must precede the topology ruling: `isTerritoryFanOut`
+  // coerces a missing or null size to 0, so a plan whose counts failed to
+  // arrive — an older CLI's, or ones `JSON.stringify` corrupted from `NaN`
+  // to `null` — would classify as "not a territory fan-out" and be routed
+  // onto the lossy single-result delivery this function exists to refuse.
+  // Unknown size is not small size: the unsized plan could be the
+  // 5,800-line one. The same usability ruling `reverseAuditRoundTier`
+  // makes about the round cap — the routing verdict must not disagree.
+  if (!usableLineCount(plan.srcDiffLines) || !usableLineCount(plan.diffLines)) {
+    return (
+      'this plan carries no usable diff size fields, so its topology is ' +
+      'unknown and it may be a territory fan-out — route it through the ' +
+      'legacy path, which delivers one tool result per agent.'
+    );
+  }
+
   // The one thing the workflow path cannot do yet, stated as the delivery
   // fact it is rather than as an expressibility claim about the roster.
   //

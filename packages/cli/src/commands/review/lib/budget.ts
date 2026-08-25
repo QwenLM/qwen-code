@@ -361,7 +361,7 @@ export function cappedRoundTier(
  * the sweep, the tool budget) have a safe floor to land on; the tier has no
  * such floor — landing on `0` there means "small diff", the costliest cap.
  */
-function usableLineCount(v: unknown): v is number {
+export function usableLineCount(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0;
 }
 

@@ -111,6 +111,21 @@ describe('resolveOrchestration — the gates', () => {
     expect(territory.reason).toMatch(/territory fan-out \(Step 3B\)/);
   });
 
+  // The fail-closed routing for a plan whose sizes failed to arrive: the
+  // legacy path is what every plan got before this feature, and a plan whose
+  // topology is unknowable must land there, not on the lossy single-result
+  // delivery — see the `structuralBlocker` test below for the shapes.
+  it('routes an unsized plan to legacy even with both gates open', () => {
+    for (const unsized of [
+      {} as RosterPlan,
+      localPlan({ srcDiffLines: null, diffLines: null }),
+    ]) {
+      const verdict = resolveOrchestration(unsized, ON);
+      expect(verdict.mode).toBe('legacy');
+      expect(verdict.reason).toMatch(/no usable diff size/);
+    }
+  });
+
   // The flagship case: every same-repo PR review has a worktree. It is NOT a
   // structural blocker — the runtime takes `agent({workingDir})` and the
   // generated script passes it — so the gates opening must actually route it.
@@ -146,6 +161,30 @@ describe('structuralBlocker — what a plan itself forecloses', () => {
     // expressible, and saying otherwise sends a maintainer looking for a
     // script limitation that does not exist.
     expect(reason).not.toMatch(/does not express|expresses the Step 3A roster/);
+  });
+
+  // The size fields are the topology ruling's only input. When they fail to
+  // arrive — an older CLI's plan, or counts corrupted to `null`, which is
+  // what `JSON.stringify` writes for a `NaN` line count — the plan is not a
+  // small 3A review, it is a review whose size is UNKNOWN, and an unsized
+  // plan could be the 5,800-line one. Blocking here is the same ruling
+  // `reverseAuditRoundTier` makes about the round cap; the routing verdict
+  // must not disagree with it.
+  it('blocks a plan with no usable size — unknowable topology is not 3A', () => {
+    for (const unsized of [
+      {} as RosterPlan,
+      // The NaN-corruption shape: both counts serialized as `null`.
+      localPlan({ srcDiffLines: null, diffLines: null }),
+      // One half missing, one half present.
+      localPlan({ srcDiffLines: undefined }),
+    ]) {
+      const reason = structuralBlocker(unsized);
+      expect(reason).not.toBeNull();
+      expect(reason).toMatch(/no usable diff size/);
+      // The verdict is "cannot tell", so it must not claim the plan IS a
+      // territory fan-out — that ruling needs a size this plan does not have.
+      expect(reason).not.toMatch(/territory fan-out \(Step 3B\)/);
+    }
   });
 
   // `agent({workingDir})` exists — `KNOWN_AGENT_OPTS` carries it, the
