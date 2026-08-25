@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 const FILE_OPENING = '[FILE:';
 const MAX_FILE_PATH_CHARS = 4096;
 export const MAX_FILES_PER_RESPONSE = 5;
+export const FILE_UNAVAILABLE_NOTICE = '[File delivery unavailable]';
 
 export interface FileProjection {
   text: string;
@@ -92,10 +93,6 @@ export class OutboundFileProjector {
     };
   }
 
-  hasReservedLine(): boolean {
-    return this.reserved.length > 0;
-  }
-
   private finishReservedLine(): void {
     const match = /^\[FILE: ([^\]\r\n]+)\]\r?$/u.exec(this.reserved);
     const path = match?.[1];
@@ -124,4 +121,9 @@ export function projectFileText(text: string): FileProjection {
   const projector = new OutboundFileProjector();
   const safe = projector.append(text) + projector.complete();
   return projector.result(safe);
+}
+
+export function withFileUnavailableNotice(text: string): string {
+  const safe = text.trimEnd();
+  return `${safe}${safe ? '\n' : ''}${FILE_UNAVAILABLE_NOTICE}`;
 }

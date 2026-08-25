@@ -27,7 +27,11 @@ import {
   replaceImageMarkers,
   uploadDingTalkImage,
 } from './outbound-image.js';
-import { OutboundFileProjector, projectFileText } from './outbound-file.js';
+import {
+  OutboundFileProjector,
+  projectFileText,
+  withFileUnavailableNotice,
+} from './outbound-file.js';
 import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
@@ -1066,8 +1070,7 @@ export class DingtalkChannel extends ChannelBase {
       notice ||= streamedResult.markerCount > 0 || !streamed.matches(text);
     }
     if (!notice) return projection.text;
-    const safe = projection.text.trimEnd();
-    return `${safe}${safe ? '\n' : ''}[File delivery unavailable]`;
+    return withFileUnavailableNotice(projection.text);
   }
 
   private async prepareOutgoingText(
@@ -1790,43 +1793,74 @@ export class DingtalkChannel extends ChannelBase {
     this.stopReaction(chatId, messageId, sessionId);
   }
 
+  /**
+   * Out-of-turn one-shot sends (background responses) must not flow through
+   * the session's block-streaming projector: a second sender interleaving with
+   * mid-projection state can swallow the send or split a held marker.
+   */
+  override async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    if (this.config.blockStreaming !== 'on') {
+      return super.dispatchBackgroundResponse(sessionId, text);
+    }
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      text.trim().length === 0
+    ) {
+      return;
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      await this.pushProactive(target, text);
+      return;
+    }
+    await this.sendReply(target.chatId, text);
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
   ): Promise<void> {
+    let outgoingText = text;
+    let consumesMention = true;
     if (this.config.blockStreaming === 'on') {
-      let state = this.blockFileProjectors.get(sessionId);
-      if (!state) {
-        state = {
-          projector: new OutboundFileProjector(),
-          reportedMarkers: 0,
-        };
-        this.blockFileProjectors.set(sessionId, state);
-      }
-      let outgoingText = state.projector.append(text);
-      if (state.projector.hasReservedLine() && text.endsWith(']')) {
-        outgoingText += state.projector.complete();
-      }
-      const result = state.projector.result(outgoingText);
-      if (result.markerCount > state.reportedMarkers) {
-        const safe = outgoingText.trimEnd();
-        outgoingText = `${safe}${safe ? '\n' : ''}[File delivery unavailable]`;
-        state.reportedMarkers = result.markerCount;
-      }
-      if (!outgoingText.trim()) return;
-      const atUserId = this.atSender
+      const projected = this.projectBlockStreamChunk(text, sessionId);
+      if (!projected.text.trim()) return;
+      outgoingText = projected.text;
+      // A notice-only block must not consume the prompt's mention target:
+      // the @mention belongs to the block carrying the actual answer.
+      consumesMention = projected.hasContent;
+    }
+    const atUserId =
+      consumesMention && this.atSender
         ? this.sessionMentionTargets.get(sessionId)
         : undefined;
-      if (atUserId) this.sessionMentionTargets.delete(sessionId);
-      await this.sendReply(chatId, outgoingText, atUserId);
-      return;
-    }
-    const atUserId = this.atSender
-      ? this.sessionMentionTargets.get(sessionId)
-      : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(chatId, outgoingText, atUserId);
+  }
+
+  private projectBlockStreamChunk(
+    text: string,
+    sessionId: string,
+  ): { text: string; hasContent: boolean } {
+    let state = this.blockFileProjectors.get(sessionId);
+    if (!state) {
+      state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
+      this.blockFileProjectors.set(sessionId, state);
+    }
+    const safe = state.projector.append(text);
+    const hasContent = safe.trim().length > 0;
+    const result = state.projector.result(safe);
+    let outgoingText = safe;
+    if (result.markerCount > state.reportedMarkers) {
+      outgoingText = withFileUnavailableNotice(safe);
+      state.reportedMarkers = result.markerCount;
+    }
+    return { text: outgoingText, hasContent };
   }
 
   private async sendFallbackReply(
@@ -1870,11 +1904,10 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override onOutputSegmentEnd(
     _chatId: string,
-    sessionId: string,
+    _sessionId: string,
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
-    this.blockFileProjectors.delete(sessionId);
     this.fileProjectors.delete(segment.segmentId);
     if (!this.interactionPresenter) return;
     return this.interactionPresenter

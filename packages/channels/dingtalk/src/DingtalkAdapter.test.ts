@@ -899,6 +899,20 @@ function seedMentionTarget(
   ).mentionTargets.set(messageId, staffId);
 }
 
+function seedSessionTarget(
+  channel: DingtalkChannelInstance,
+  sessionId: string,
+  target: SessionTarget,
+): void {
+  (
+    channel as unknown as {
+      router: { getTarget(sessionId: string): SessionTarget | undefined };
+    }
+  ).router = {
+    getTarget: (id: string) => (id === sessionId ? target : undefined),
+  };
+}
+
 function deferredPromise<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -5883,9 +5897,142 @@ describe('DingtalkChannel outbound file projection', () => {
       expect(
         (channel as unknown as { blockFileProjectors: Map<string, unknown> })
           .blockFileProjectors.size,
+      ).toBe(1);
+      getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+      expect(
+        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+          .blockFileProjectors.size,
       ).toBe(0);
     },
   );
+
+  it('keeps the block projector across a segment reset so split markers stay redacted', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', 'Report\n[FILE: /workspace/secret-', 'session-1');
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      segment(),
+      'response_boundary',
+    );
+    await send('cid123', 'report.txt]\nDone', 'session-1');
+
+    const texts = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        (
+          JSON.parse(String((init as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+    );
+    expect(texts.join('\n')).not.toContain('report.txt');
+    expect(texts.join('\n')).toContain('File delivery unavailable');
+  });
+
+  it('keeps a reserved line pending across blocks that end on an early "]"', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', 'before\n[FILE: /workspace/report [v2]', 'session-1');
+    await send('cid123', '.txt]\nafter', 'session-1');
+
+    const bodies = JSON.stringify(fetchSpy.mock.calls);
+    expect(bodies).not.toContain('.txt]');
+    expect(bodies).not.toContain('[FILE:');
+    expect(bodies).toContain('File delivery unavailable');
+  });
+
+  it('reports the unavailable notice once across later blocks', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', '[FILE: /workspace/a.txt]\n', 'session-1');
+    await send('cid123', 'Answer part one\n', 'session-1');
+    await send('cid123', 'Answer part two\n', 'session-1');
+
+    const texts = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        (
+          JSON.parse(String((init as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+    );
+    expect(texts.join('\n').match(/File delivery unavailable/g)).toHaveLength(
+      1,
+    );
+  });
+
+  it('keeps the group mention for the answer after a notice-only block', async () => {
+    const channel = createChannel({ atSender: true, blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    const send = getResponseHook(channel);
+
+    await send('cid123', '[FILE: /workspace/a.txt', 'session-1');
+    await send('cid123', ']\nThe answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    ) as Array<{ markdown: { text: string }; at?: { atUserIds: string[] } }>;
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.markdown.text).toBe('[File delivery unavailable]');
+    expect(bodies[0]).not.toHaveProperty('at');
+    expect(bodies[1]!.markdown.text).toContain('@staff-1');
+    expect(bodies[1]!.markdown.text).toContain('The answer');
+    expect(bodies[1]!.at).toEqual({ atUserIds: ['staff-1'] });
+  });
+
+  it('delivers DM background responses without interleaving the block projector', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cid123',
+      isGroup: false,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send(
+      'cid123',
+      'Partial answer [FILE: /workspace/report.txt',
+      'session-1',
+    );
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Background notification',
+    );
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    ) as Array<{ markdown: { text: string } }>;
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.markdown.text).toBe('Background notification');
+    expect(JSON.stringify(bodies)).not.toContain('[FILE:');
+    expect(JSON.stringify(bodies)).not.toContain('/workspace/report.txt');
+  });
 
   it('feeds status presentation only projected chunks and final text', async () => {
     const channel = createChannel();
