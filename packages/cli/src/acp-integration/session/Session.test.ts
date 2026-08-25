@@ -8773,7 +8773,8 @@ describe('Session', () => {
         status: 'skipped',
         convertedCount: 0,
         omittedCount: 0,
-        modelId: 'qwen3.7-plus',
+        modelId: 'idealab:qwen3.7-plus',
+        modelEndpoint: 'idealab.alibaba-inc.com',
         egressOccurred: true,
       });
       mockChat.sendMessageStream = vi
@@ -8797,6 +8798,28 @@ describe('Session', () => {
       expect(
         textParts(sent).some((t: string) => t.includes('look at this')),
       ).toBe(true);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Vision bridge cancelled. Your image and prompt/context were sent to qwen3.7-plus (idealab.alibaba-inc.com).',
+          },
+          _meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: {
+              status: 'skipped',
+              convertedCount: 0,
+              omittedCount: 0,
+              modelName: 'qwen3.7-plus',
+              modelEndpoint: 'idealab.alibaba-inc.com',
+              egressOccurred: true,
+            },
+          },
+        },
+      });
     });
 
     it('preserves oversized inline images for the vision bridge', async () => {
@@ -11923,6 +11946,37 @@ describe('Session', () => {
               text:
                 'IMPORTANT: This conversation accumulated enough tool screenshots to trigger compaction for qwen3-code-plus. ' +
                 'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
+      it('marks estimated compression counts in the ACP notice (#9309)', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 26600,
+          newTokenCount: 14500,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: ~26600 to 14500 tokens).',
             },
           },
         });
