@@ -635,25 +635,32 @@ export function createDaemonWorkspaceActions({
       );
     },
     async artifactPublishConfig(path) {
-      const client = requireClient(getClient, 'Share configuration failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Share configuration failed',
+      );
       // Provider CLI and account checks can require browser-backed network
       // access, so they use the route's own bounded command timeouts.
-      return client.artifactPublishConfig(undefined, path);
+      return workspace.artifactPublishConfig(path);
     },
     async setupArtifactProvider(provider, req, opts) {
-      const client = requireClient(getClient, `${provider} setup failed`);
-      return client.setupArtifactProvider(
-        provider,
-        req,
-        undefined,
-        opts?.signal,
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        `${provider} setup failed`,
       );
+      return workspace.setupArtifactProvider(provider, req, opts?.signal);
     },
     async publishArtifact(req, opts) {
-      const client = requireClient(getClient, 'Share failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Share failed',
+      );
       // No withActionTimeout: provider publishing can outlast the default
       // action budget on a large page or a slow link.
-      return client.publishArtifact(req, undefined, opts?.signal);
+      return workspace.publishArtifact(req, opts?.signal);
     },
 
     async writeFile(req) {
