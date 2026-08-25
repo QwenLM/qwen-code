@@ -21,6 +21,7 @@ import {
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
+import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 
@@ -130,6 +131,57 @@ describe('WorkflowTool', () => {
     // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
     // absolute path it cannot construct.
     expect(description).toContain('.qwen/workflows');
+  });
+
+  // The policy prose above tells the model how to orchestrate *well*; on its
+  // own it reads as encouragement, and the model fans out on tasks nobody
+  // asked to spend a fleet on. This gate is the half that says when not to.
+  it('description gates the tool on an explicit user request', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+
+    // Ordering is the point, not just presence: a gate placed after the
+    // "what a workflow is for" pitch reads as a footnote to it. It has to
+    // come first, so it frames everything below rather than qualifying it.
+    const gate = description.indexOf('**Only on an explicit request**');
+    const pitch = description.indexOf('**What a workflow is for**');
+    expect(gate).toBeGreaterThanOrEqual(0);
+    expect(gate).toBeLessThan(pitch);
+
+    // Each enumerated form is a real qwen trigger. Without the list the gate
+    // is unfalsifiable from the model's side — it cannot tell whether the
+    // request in front of it qualifies.
+    expect(description).toContain(
+      'It counts as requested when any of these holds:',
+    );
+    expect(description).toMatch(/contains the word `workflow`/);
+    expect(description).toMatch(/in their own words/);
+    expect(description).toMatch(/skill or slash command/);
+    expect(description).toMatch(/named a saved workflow/);
+    expect(description).toMatch(/resume or continue an earlier run/);
+
+    // Upstream's marker for this is `ultracode`, which does not exist here:
+    // naming it would enumerate a trigger no qwen user can pull, and the
+    // gate would refuse work that a real trigger should have allowed.
+    expect(description).not.toMatch(/ultracode/i);
+
+    // The load-bearing half of the gate. Without an offer-and-ask path the
+    // model reads "do not call it" as "refuse", and a user who would have
+    // said yes never gets asked. Over-blocking is this change's one real
+    // failure mode, so the escape hatch is anchored.
+    expect(description).toContain(
+      'Do not call this tool unless the user has asked for multi-agent orchestration.',
+    );
+    expect(description).toContain(
+      'Otherwise do not call it, however well the task would parallelize.',
+    );
+    expect(description).toMatch(/let the user decide/);
+    expect(description).toMatch(/skips the ask/);
+
+    // Interpolated, not pasted: the gate justifies itself with the fleet
+    // size, so a raised cap has to move this sentence too.
+    expect(description).toContain(
+      `dispatch up to ${DEFAULT_MAX_AGENTS_PER_RUN} subagents`,
+    );
   });
 
   // ── Approval dialog ────────────────────────────────────────────────────
@@ -322,6 +374,26 @@ await agent('scan package.json')
         tool.build({ script: 'await agent("x")' } as never).getDescription(),
       ).toContain('chars)');
     });
+  });
+
+  // A script that never compiled has no run behind it. Reporting it as a
+  // failed workflow sends the model looking for a runId that was never
+  // minted, and reads as "the orchestration broke" when the real problem is
+  // a typo it can fix and re-send.
+  it('reports an uncompilable script as not launched, not as a failure', async () => {
+    const { config } = configWithRegistry();
+    const tool = new WorkflowTool(config);
+    const result = await tool
+      .build({ script: "const x: string = 'a';\nawait agent(x);" } as never)
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    const text = JSON.stringify(result.llmContent);
+    expect(text).toContain('was not launched');
+    expect(text).toContain('plain JavaScript');
+    // No run happened, so there is no run id to hand back.
+    expect(result.workflowRunId).toBeUndefined();
+    expect(text).not.toContain('Workflow failed');
   });
 
   // The tool description is not the only model-visible copy of the caps —

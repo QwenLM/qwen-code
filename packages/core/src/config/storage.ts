@@ -23,8 +23,18 @@ const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
+// Win32 and darwin default volumes equate names differing only in case,
+// and realpath preserves the spelling it was given — so the same physical
+// path can reach a comparison under two spellings. Fold case there, or a
+// case-variant spelling slips past the containment guard.
+function platformFoldsCase(): boolean {
+  return process.platform === 'win32' || process.platform === 'darwin';
+}
+
 function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
-  const relativePath = path.relative(parentPath, childPath);
+  const child = platformFoldsCase() ? childPath.toLowerCase() : childPath;
+  const parent = platformFoldsCase() ? parentPath.toLowerCase() : parentPath;
+  const relativePath = path.relative(parent, child);
   return (
     relativePath === '' ||
     (!relativePath.startsWith(`..${path.sep}`) &&
@@ -333,6 +343,269 @@ export class Storage {
 
   static getGlobalArenaDir(): string {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
+  }
+
+  /**
+   * Create or adopt the outside-repo landing for /audit reports and sidecars
+   * when the audited repository's ignore state cannot keep them out of
+   * version control. Per-user and per-project, honoring the QWEN_HOME
+   * override; 0700 on POSIX so the quoted (possibly exploitable) module
+   * content stays private to the user.
+   */
+  static ensureAuditFallbackDir(projectRoot: string): string {
+    // Resolve symlinks before hashing so the fallback root is stable across
+    // spellings of the same directory (macOS `/var` → `/private/var`):
+    // plan-files, guard-check, and the SKILL relocation must all agree on
+    // one root, or the relocation-containment check spuriously fails.
+    let resolved = projectRoot;
+    try {
+      resolved = fs.realpathSync(projectRoot);
+    } catch {
+      // Unresolvable (e.g. not yet created): hash the raw path.
+    }
+    if (platformFoldsCase()) {
+      // Case-variant spellings of one physical root must share one leaf.
+      resolved = resolved.toLowerCase();
+    }
+    const baseDir = Storage.getGlobalQwenDir();
+    const dir = path.join(baseDir, 'audits', getProjectHash(resolved));
+    // The landing exists to keep artifacts OUT of version control, so refuse
+    // before creating anything when QWEN_HOME resolves inside the audited
+    // repository.
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
+    // Everything below validates a landing this process may have ADOPTED
+    // rather than created. The path is fully predictable — the project hash
+    // is a pure function of the root — and 0700 does not exclude the user's
+    // own other processes, so "it exists already" is not evidence that this
+    // tool made it. The landing is where relocation puts artifacts precisely
+    // BECAUSE they must stay private, so adoption is validated, not assumed.
+    //
+    // Validation walks EVERY component this method creates, not just the
+    // leaf. `mkdirSync(…, { recursive: true })` follows symlinks in every
+    // component above the final one, and `lstat` refuses to follow only the
+    // final one — so a leaf-only check cannot see a redirected parent. With
+    // `audits` planted as a symlink (one `ln -s`, no race: `~/.qwen` exists
+    // long before `audits` does), the leaf is created inside the planter's
+    // directory, reports as a perfectly real directory, and every artifact
+    // written "into the landing" lands wherever the link points. Binding
+    // writes to "this root" later cannot help if the root itself moved.
+    //
+    // QWEN_HOME itself is deliberately NOT validated here: it is the user's
+    // own configured location, not a path this method invents. It is created
+    // recursively when missing — matching every other writer under it — and
+    // only `audits` and the project leaf below are validated components.
+    try {
+      fs.mkdirSync(baseDir, { recursive: true });
+    } catch (err) {
+      // A dangling symlink, symlink loop, or symlink-to-file as the tail
+      // fails resolution here, before any adoption check can own the state;
+      // classify it like every other refusal this method owns.
+      throw new FatalConfigError(
+        `audit: the QWEN_HOME base ${baseDir} could not be created as a ` +
+          `directory (${(err as Error).message}) — remove what stands at ` +
+          `that path and re-run.`,
+      );
+    }
+    // Re-check now that the base exists: the check above resolves through
+    // the deepest EXISTING ancestor, so a not-yet-existing QWEN_HOME passed
+    // it, and a same-UID process can plant that tail as a symlink into the
+    // audited repository between the check and this mkdir — which
+    // mkdirSync(recursive) then follows.
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
+    const auditsDir = Storage.adoptDirectory(
+      path.join(baseDir, 'audits'),
+      'the audit artifact directory',
+    );
+    Storage.adoptDirectory(dir, 'the fallback landing');
+    Storage.assertAuditLandingIsClean(dir);
+    // Every check above ran BEFORE the component it guards existed, so a
+    // same-UID swap landing in a window between checks passes the check that
+    // already ran. Re-validate with everything in place: re-adoption
+    // lstat-refuses a swapped `audits` or leaf, the content re-check refuses
+    // a child planted after the first snapshot, and the containment re-check
+    // catches a swapped ancestor the lstats cannot see — failing closed when
+    // the swap makes resolution itself impossible. The re-walk narrows the
+    // race but cannot close the tail of a path-returning API: the artifact
+    // writes must themselves stay contained in the returned root.
+    Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
+    Storage.adoptDirectory(dir, 'the fallback landing');
+    Storage.assertAuditLandingIsClean(dir);
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved, true);
+    // The content and containment re-checks above FOLLOW the guarded
+    // components, so a swap landing inside either passes every lstat that
+    // already ran; re-adoption runs again after them to refuse that case.
+    Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
+    Storage.adoptDirectory(dir, 'the fallback landing');
+    return dir;
+  }
+
+  /**
+   * Create one path component and return it only if what is there now is a
+   * real directory (not a symlink). On POSIX a pre-existing component is
+   * tightened to 0700; ownership itself is not checked.
+   *
+   * Non-recursive on purpose: `recursive: true` would silently walk (and
+   * follow) anything already standing in the path. Creating exactly one
+   * component at a time is what makes each component checkable.
+   */
+  private static adoptDirectory(dir: string, what: string): string {
+    try {
+      fs.mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      // EEXIST is the adoption case the checks below exist for. Anything
+      // else (a missing parent, a permission error) surfaces as itself.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory()) {
+      throw new FatalConfigError(
+        `audit: ${what} ${dir} is not a directory (it may be a symlink ` +
+          `planted ahead of the run) — remove it and re-run.`,
+      );
+    }
+    // mkdirSync's mode applies only to directories it CREATES, so a
+    // pre-existing component keeps whatever mode it was given. Normalize the
+    // FULL mode, not just group/other: a missing owner-read bit (e.g. 0300)
+    // is just as planted — listing needs r while creating entries needs only
+    // w+x, so it would blind the content check below while writes still
+    // succeed. Windows reports a mode that carries no POSIX bits and chmod
+    // there is a no-op, so a pre-existing component keeps whatever DACL it
+    // had — Node exposes no portable ACL enforcement.
+    if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700) {
+      fs.chmodSync(dir, 0o700);
+    }
+    return dir;
+  }
+
+  /**
+   * Refuse a fallback landing whose CONTENTS would redirect writes out of it.
+   *
+   * Validating the leaf alone is not enough: artifacts land at paths BELOW it
+   * (`audit-<ts>.sidecar/sidecar.json`, the dated report), and an
+   * O_NOFOLLOW open only ever guards the final component. A planted symlink
+   * child is therefore a complete escape — `mkdirSync` happily treats a
+   * symlink-to-directory as the directory, and every artifact written
+   * "inside" the landing lands wherever the link points, while the leaf
+   * itself stays a perfectly valid directory that re-validation passes.
+   * A hardlinked regular file is the same story for reads: an existing name
+   * reopened with O_TRUNC writes into the planter's inode.
+   *
+   * Directory children are validated recursively: a planted real
+   * subdirectory holding a symlinked file is the same escape. Entries that
+   * are neither regular files nor directories (a FIFO, socket, or device)
+   * are refused outright: opening one for the report would block, or stream
+   * the content to whoever holds the other end.
+   *
+   * The landing is REUSED across runs (the report and its sidecar are the
+   * durable artifacts), so this cannot refuse a non-empty landing — only
+   * entries that are not what a previous run of this tool would have left.
+   */
+  private static assertAuditLandingIsClean(dir: string): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      // Fail closed: an unlistable landing cannot be validated, and
+      // unreadable does NOT imply unwritable — listing needs r while
+      // creating entries needs only w+x.
+      throw new FatalConfigError(
+        `audit: the fallback landing ${dir} could not be listed for ` +
+          `validation (${(err as Error).message}) — remove it and re-run.`,
+      );
+    }
+    for (const entry of entries) {
+      // The dirent type is a snapshot from the readdir above, and the
+      // landing is reused across runs with predictable entry names: a
+      // same-UID process can swap what a typed dirent names between the
+      // snapshot and this loop reaching it. Lstat every entry fresh and
+      // drive every arm — type AND nlink — from that one stat.
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(path.join(dir, entry.name));
+      } catch {
+        continue; // vanished between readdir and lstat
+      }
+      if (stat.isSymbolicLink()) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} contains a symlink ` +
+            `(${entry.name}) — artifacts written under it would land outside ` +
+            `the landing. Remove it and re-run.`,
+        );
+      }
+      if (stat.isDirectory()) {
+        // Artifacts nest BELOW the leaf, so a directory child is validated
+        // like the leaf itself — a planted real subdirectory holding a
+        // symlinked file is the same escape.
+        Storage.assertAuditLandingIsClean(path.join(dir, entry.name));
+        // The recursion re-read this path with follow semantics, so a swap
+        // for a symlink-to-directory during the walk validated the target.
+        let childStat: fs.Stats;
+        try {
+          childStat = fs.lstatSync(path.join(dir, entry.name));
+        } catch {
+          continue; // vanished during the walk — nothing left to validate
+        }
+        if (!childStat.isDirectory()) {
+          throw new FatalConfigError(
+            `audit: the fallback landing ${dir} contains a symlink ` +
+              `(${entry.name}) — artifacts written under it would land ` +
+              `outside the landing. Remove it and re-run.`,
+          );
+        }
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} contains a special file ` +
+            `(${entry.name}) — a write to it would block or be captured by ` +
+            `whoever holds the other end. Remove it and re-run.`,
+        );
+      }
+      // A hardlink twin proves another name for the same inode exists
+      // somewhere this check can never see.
+      if (stat.nlink > 1) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} contains a hardlinked file ` +
+            `(${entry.name}) — a write to it would also write through its ` +
+            `twin. Remove it and re-run.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Refuse a fallback landing that resolves inside the audited repository.
+   * A resolution failure (a non-directory component, a symlink loop, an
+   * unreadable ancestor) falls through at the pre-adoption sites: such a
+   * path cannot resolve to a usable landing, and the adoption checks that
+   * still run afterwards own that state with the actionable message. At the
+   * final site nothing runs afterwards, so the same failure fails closed
+   * instead of returning an unvalidated landing.
+   */
+  private static assertAuditLandingIsOutsideRepo(
+    dir: string,
+    resolvedProjectRoot: string,
+    finalCheck = false,
+  ): void {
+    let contained = false;
+    try {
+      contained = Storage.isPathWithinDirectory(dir, resolvedProjectRoot);
+    } catch (err) {
+      if (finalCheck) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} could not be validated as ` +
+            `outside the audited project root (${(err as Error).message}) — ` +
+            `remove it and re-run.`,
+        );
+      }
+      // Unresolvable: the adoption checks own this state (see above).
+    }
+    if (contained) {
+      throw new FatalConfigError(
+        `audit: the fallback landing ${dir} resolves inside the audited ` +
+          `project root — point QWEN_HOME outside the repository and re-run.`,
+      );
+    }
   }
 
   getQwenDir(): string {
