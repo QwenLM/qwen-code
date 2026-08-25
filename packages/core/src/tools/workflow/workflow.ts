@@ -59,6 +59,7 @@ import {
 } from '../../agents/runtime/workflow-budget.js';
 import {
   WorkflowRunner,
+  WorkflowScriptNotLaunchedError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
 import * as path from 'node:path';
@@ -354,6 +355,21 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (runInBackground && signal.aborted) {
         return backgroundStartCancelledResult();
+      }
+      // A script that never compiled has no run behind it, so reporting it as
+      // a failed workflow would be wrong twice: it invites the model to go
+      // looking for a runId that was never minted, and it reads as "the
+      // orchestration broke" when the actual problem is a typo the model can
+      // fix and re-send.
+      if (error instanceof WorkflowScriptNotLaunchedError) {
+        return {
+          llmContent: [{ text: error.message }],
+          returnDisplay: error.message,
+          error: {
+            message: error.message,
+            type: ToolErrorType.INVALID_TOOL_PARAMS,
+          },
+        };
       }
       throw error;
     }
@@ -808,6 +824,18 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  * their model-visible source of truth.
  */
 const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates subagents deterministically.
+
+**Only on an explicit request**
+
+Do not call this tool unless the user has asked for multi-agent orchestration. A run can dispatch up to ${DEFAULT_MAX_AGENTS_PER_RUN} subagents and spend tokens accordingly, so that scale has to be requested rather than inferred. It counts as requested when any of these holds:
+
+- The user's message contains the word \`workflow\`; a system reminder confirms it when it does.
+- The user asked for orchestration in their own words — run a workflow, fan out agents, orchestrate this with subagents.
+- A skill or slash command the user invoked instructs you to use this tool.
+- The user named a saved workflow to run, reached through \`workflow('<name>')\` or \`scriptPath\`.
+- The user asked to resume or continue an earlier run, which is \`resumeFromRunId\`.
+
+Otherwise do not call it, however well the task would parallelize. Do the work in the main loop, or spawn a single subagent for one self-contained piece. When a workflow would genuinely be the better tool, say in one sentence what it would fan out over and roughly how many agents that is, then let the user decide — and mention that including the word \`workflow\` next time skips the ask.
 
 **What a workflow is for**
 
