@@ -194,8 +194,9 @@ export class StreamInactivityTimeoutError extends Error {
         `increase modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ` +
         `provider configuration takes precedence, so model.generationConfig is ` +
         `ignored for those models. For runtime models, increase ` +
-        `model.generationConfig.streamIdleTimeoutMs. When no explicit value is ` +
-        `active, use ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}. ` +
+        `model.generationConfig.streamIdleTimeoutMs. Built-in Qwen OAuth models ` +
+        `cannot be overridden via settings. Use ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} ` +
+        `for them or whenever no explicit value is active. ` +
         `Set the active value to 0 to disable it.`,
     );
     this.name = 'StreamInactivityTimeoutError';
