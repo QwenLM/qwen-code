@@ -59,6 +59,8 @@ import {
   type LiveThinkingItem,
   type LiveToolItem,
 } from './live-session-model.js';
+import { assistantMarkdownForRender } from './markdown-heal.js';
+import { batchTextEvents } from './text-batcher.js';
 import { formatDuration } from '../utils/displayUtils.js';
 
 /** Maps a goal card's semantic palette slot onto the theme colors. */
@@ -475,7 +477,7 @@ function AssistantMessage(props: {
       <text fg={C.accent}>◆ </text>
       <box flexGrow={1} flexDirection="column">
         <markdown
-          content={item.text}
+          content={assistantMarkdownForRender(item.text, item.streaming)}
           streaming={item.streaming}
           syntaxStyle={SYNTAX}
           fg={C.text}
@@ -2412,11 +2414,8 @@ function App({
       setStreaming(true);
       (async () => {
         try {
-          for await (const ev of livePromptEvents(
-            config,
-            content,
-            controller.signal,
-            {
+          for await (const ev of batchTextEvents(
+            livePromptEvents(config, content, controller.signal, {
               ...(options?.modelOverride
                 ? { modelOverride: options.modelOverride }
                 : {}),
@@ -2436,7 +2435,7 @@ function App({
                 if (approvalDialogCallIdRef.current !== null) return;
                 presentApprovalDialog(callId);
               },
-            },
+            }),
           ))
             applyEvent(ev);
           // Turn end: the generator only returns when the whole agent loop
@@ -2520,15 +2519,11 @@ function App({
       setStreaming(true);
       void (async () => {
         try {
-          for await (const ev of clientToolEvents(
-            config,
-            toolName,
-            toolArgs,
-            controller.signal,
-            {
+          for await (const ev of batchTextEvents(
+            clientToolEvents(config, toolName, toolArgs, controller.signal, {
               onWaitingCall: ({ name, confirmationDetails }) =>
                 handleSchedulerWaitingCall({ name, confirmationDetails }),
-            },
+            }),
           )) {
             applyEvent(ev);
           }
