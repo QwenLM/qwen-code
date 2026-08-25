@@ -2047,10 +2047,17 @@ export class LoopDetectionService {
    * streak starts fresh and is judged on its own results; decay never runs
    * for a key with requests still in flight (the requested-set skip above),
    * so this cannot drop a streak the in-flight accounting is still
-   * deferring. lastFingerprint survives the decay: when polling
-   * resumes, the first fresh result is still judged against the last
-   * observed one (changed → productive, unchanged → the count
-   * re-accumulates toward the halt).
+   * deferring. Exception — a suppressedRequests-ONLY entry (no result
+   * evidence) keeps its standing streak AND its suppressedRequests: the
+   * gate subtracts the never-answerable requests, so a pure suppressed
+   * stream crossing round-trip boundaries still halts at the threshold,
+   * and resumed EXECUTED polling on the same key stays exonerable —
+   * zeroing suppressedRequests while the request-side count stands would
+   * leave expectedResults permanently one above resultsObserved and
+   * false-halt a changing-board poller (issue #9450). lastFingerprint
+   * survives the decay: when polling resumes, the first fresh result is
+   * still judged against the last observed one (changed → productive,
+   * unchanged → the count re-accumulates toward the halt).
    */
   private decayAbandonedStatefulStreaks(): void {
     let decayed = false;
@@ -2065,18 +2072,32 @@ export class LoopDetectionService {
         state.consecutiveIdenticalResults = 0;
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
-        state.suppressedRequests = 0;
         if (hadResultEvidence && this.lastToolCallKey === key) {
           // Dropping the exoneration gate's result evidence while the
           // consecutive count stands would leave the gate permanently
-          // unsatisfiable, so drop the streak with it. A
-          // suppressedRequests-only entry keeps its count: the gate stays
-          // satisfiable for it (no result evidence to expect), so the
-          // threshold still halts a stream of identical suppressed calls
-          // crossing round-trip boundaries.
+          // unsatisfiable, so drop the streak with it — and the suppression
+          // count with the streak: it belongs to the dropped streak, and a
+          // later streak must not subtract requests it never made.
+          state.suppressedRequests = 0;
           this.lastToolCallKey = null;
           this.toolCallRepetitionCount = 0;
+        } else if (this.lastToolCallKey !== key) {
+          // The streak no longer belongs to this key (or was reset): the
+          // suppression count is read only while its streak stands, so it
+          // decays with the rest of the evidence.
+          state.suppressedRequests = 0;
         }
+        // Else: suppressed-only evidence (no result evidence) with the
+        // streak still standing — a stream of identical suppressed calls
+        // crossing round-trip boundaries. Keep the streak AND its
+        // suppressedRequests: the exoneration gate subtracts the
+        // never-answerable requests, so the threshold still halts a pure
+        // suppressed stream, and if EXECUTED polling resumes on the same
+        // key the gate stays satisfiable (zeroing suppressedRequests while
+        // the request-side count stands would leave expectedResults
+        // permanently one above resultsObserved and false-halt a
+        // changing-board poller — the #9450 false positive re-entering via
+        // the decay layer).
         decayed = true;
       }
     }

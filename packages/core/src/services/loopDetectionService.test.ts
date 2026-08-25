@@ -4337,6 +4337,98 @@ describe('LoopDetectionService', () => {
       expect(fallbackService.getLastLoopType()).toBeNull();
     });
 
+    it('does not halt a resumed poller whose suppressed-only evidence decayed (issue #9450)', () => {
+      // Two identical task_list requests stream and are suppressed without
+      // executing (authorization rejection / scheduler not_started): the
+      // streak stands at repCount 2 with suppressedRequests 2 and no result
+      // evidence. Two tool-call-free round-trips then decay the entry at the
+      // second Finished boundary. Pre-fix the decay zeroed
+      // suppressedRequests while KEEPING the streak: when executed polling
+      // resumed, expectedResults = repCount - inFlight - 0 stayed
+      // permanently one above resultsObserved (every new request adds one
+      // to repCount and, a round later, one to resultsObserved), so the
+      // exoneration gate was never satisfiable again and the poller halted
+      // CONSECUTIVE_IDENTICAL_TOOL_CALLS at the 5th consecutive request
+      // despite every executed result having changed. The decay must keep
+      // suppressedRequests alongside the kept streak so the gate keeps
+      // subtracting the never-answerable requests.
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const gapService = new LoopDetectionService(makeConfig());
+      gapService.reset('decay-suppressed-resume-productive');
+
+      // Suppressed-only entry: two identical requests, never executed.
+      expect(gapService.checkAlwaysOnSafeties(taskListEvent('sup-0'))).toBe(
+        false,
+      );
+      expect(gapService.checkAlwaysOnSafeties(taskListEvent('sup-1'))).toBe(
+        false,
+      );
+      gapService.noteSuppressedToolCallByCallId('sup-0');
+      gapService.noteSuppressedToolCallByCallId('sup-1');
+      // Two tool-call-free round-trips: the first boundary consumes the
+      // suppression marks, the second decays the entry (suppressed-only, so
+      // the streak is kept).
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+
+      // Executed polling resumes with the board still changing: no halt.
+      let fired = false;
+      for (let i = 0; i < 9 && !fired; i++) {
+        fired = gapService.checkAlwaysOnSafeties(taskListEvent(`poll-${i}`));
+        if (fired) break;
+        gapService.checkAlwaysOnSafeties(finishedEvent);
+        fired = gapService.recordToolResultByCallId(
+          `poll-${i}`,
+          taskListResult(`board state v${i}`, `poll-${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(gapService.getLastLoopType()).toBeNull();
+    });
+
+    it('still halts a pure suppressed stream crossing round-trip boundaries (fail-safe)', () => {
+      // Fail-safe twin of the suppressed-only decay fix: the decay keeps the
+      // suppressed-only streak armed, so a persistent stream of identical
+      // suppressed calls — no result ever lands for it — still halts at the
+      // threshold even when it crosses a decay boundary. Kept
+      // suppressedRequests keep balancing the gate exactly like the
+      // uninterrupted stream does.
+      const finishedEvent = {
+        type: GeminiEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerGeminiStreamEvent;
+      const gapService = new LoopDetectionService(makeConfig());
+      gapService.reset('decay-suppressed-halt');
+
+      expect(gapService.checkAlwaysOnSafeties(taskListEvent('sup-0'))).toBe(
+        false,
+      );
+      expect(gapService.checkAlwaysOnSafeties(taskListEvent('sup-1'))).toBe(
+        false,
+      );
+      gapService.noteSuppressedToolCallByCallId('sup-0');
+      gapService.noteSuppressedToolCallByCallId('sup-1');
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+      gapService.checkAlwaysOnSafeties(finishedEvent);
+
+      let fired = false;
+      let requests = 2;
+      for (let i = 2; i < 10 && !fired; i++) {
+        fired = gapService.checkAlwaysOnSafeties(taskListEvent(`sup-${i}`));
+        requests = i + 1;
+        if (fired) break;
+        gapService.noteSuppressedToolCallByCallId(`sup-${i}`);
+      }
+      expect(fired).toBe(true);
+      expect(requests).toBe(TOOL_CALL_LOOP_THRESHOLD);
+      expect(gapService.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     describe('persisted oversized results (issue #9450 follow-up)', () => {
       // Results over the response-finalizer budget are rewritten into
       // persistence stubs (utils/truncation.ts buildStub) whose envelope
