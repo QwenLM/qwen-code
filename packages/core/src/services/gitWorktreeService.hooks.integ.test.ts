@@ -174,20 +174,27 @@ describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
 
   // Git stores symlinks, so a checked-out branch can plant a symlinked
   // `.qwen/.gitignore`. The upgrade must skip it — following the link would
-  // rewrite a file outside `.qwen/`.
-  it('does not follow a symlinked legacy gitignore', async () => {
-    const qwenDir = path.join(repoRoot, '.qwen');
-    await fs.mkdir(qwenDir, { recursive: true });
-    const targetPath = path.join(repoRoot, 'target.txt');
-    await fs.writeFile(targetPath, LEGACY_WORKTREES_GITIGNORE_BODY);
-    await fs.symlink(targetPath, path.join(qwenDir, '.gitignore'));
+  // rewrite a file outside `.qwen/`. The fixture itself needs
+  // SeCreateSymbolicLinkPrivilege on Windows, which the CI lane does not
+  // have — the same reason every other symlink fixture in this repo skips
+  // win32. The lstat guard under test is platform-independent and stays
+  // witnessed on the POSIX lanes.
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a symlinked legacy gitignore',
+    async () => {
+      const qwenDir = path.join(repoRoot, '.qwen');
+      await fs.mkdir(qwenDir, { recursive: true });
+      const targetPath = path.join(repoRoot, 'target.txt');
+      await fs.writeFile(targetPath, LEGACY_WORKTREES_GITIGNORE_BODY);
+      await fs.symlink(targetPath, path.join(qwenDir, '.gitignore'));
 
-    const svc = new GitWorktreeService(repoRoot);
-    expect((await svc.createUserWorktree('symlink-safe')).success).toBe(true);
-    expect(await fs.readFile(targetPath, 'utf8')).toBe(
-      LEGACY_WORKTREES_GITIGNORE_BODY,
-    );
-  });
+      const svc = new GitWorktreeService(repoRoot);
+      expect((await svc.createUserWorktree('symlink-safe')).success).toBe(true);
+      expect(await fs.readFile(targetPath, 'utf8')).toBe(
+        LEGACY_WORKTREES_GITIGNORE_BODY,
+      );
+    },
+  );
 
   // The gated provision paths run the repair BEFORE the dirty check: an
   // untracked pre-fix body is exactly what makes the gate report dirty, so
