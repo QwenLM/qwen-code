@@ -110,19 +110,21 @@ if you want to bound an Arena run:
 
 ```json
 {
-  "arena": {
-    "worktreeBaseDir": "~/.qwen/arena",
-    "maxRoundsPerAgent": 50,
-    "timeoutSeconds": 600
+  "agents": {
+    "arena": {
+      "worktreeBaseDir": "~/.qwen/arena",
+      "maxRoundsPerAgent": 50,
+      "timeoutSeconds": 600
+    }
   }
 }
 ```
 
-| Setting                   | Description                                 | Default         |
-| :------------------------ | :------------------------------------------ | :-------------- |
-| `arena.worktreeBaseDir`   | Base directory for arena worktrees          | `~/.qwen/arena` |
-| `arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent          | Unset; no limit |
-| `arena.timeoutSeconds`    | Timeout for the entire Arena run in seconds | Unset; no limit |
+| Setting                          | Description                                 | Default         |
+| :------------------------------- | :------------------------------------------ | :-------------- |
+| `agents.arena.worktreeBaseDir`   | Base directory for arena worktrees          | `~/.qwen/arena` |
+| `agents.arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent          | Unset; no limit |
+| `agents.arena.timeoutSeconds`    | Timeout for the entire Arena run in seconds | Unset; no limit |
 
 ## Best practices
 
