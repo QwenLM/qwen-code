@@ -3962,6 +3962,9 @@ describe('qwen-triage verify hardening round 2', () => {
       )?.[1] ?? '';
     expect(script).toContain('node_bin="$(command -v node || true)"');
     expect(script).toContain('upload_cmd=("$node_bin" "$uploader")');
+    expect(script).toContain('upload_path="$trusted_bin"');
+    expect(script).toContain('if ! PATH="$upload_path" "${upload_cmd[@]}"');
+    expect(script).not.toContain('PATH="$RUNNER_TEMP:$PATH"');
     expect(script).toContain('--bucket "$ALIYUN_OSS_BUCKET"');
     expect(script).toContain('--config "${RUNNER_TEMP:-/tmp}/.ossutilconfig"');
     expect(script).toContain('--prefix "$prefix"');
@@ -3970,17 +3973,29 @@ describe('qwen-triage verify hardening round 2', () => {
   // The credential lifecycle is security-relevant: dropping the cleanup
   // (or its always() condition) leaves the OSS key pair in $RUNNER_TEMP on
   // the persistent ecs-qwen pool between jobs, and a dropped sha256 check
-  // installs whatever the mirror serves.
+  // installs whatever the mirror serves. Consumers must also trust the
+  // Actions-computed outcome, never a marker in the PR-writable temp dir.
   it('pins the ossutil install/configure/cleanup credential lifecycle', () => {
     const install = stepIn('publish-verify', 'Install ossutil');
+    expect(install).toContain("id: 'install-ossutil'");
     expect(install).toContain('continue-on-error: true');
     expect(install).toContain('sha256sum -c');
     const configure = stepIn(
       'publish-verify',
       'Configure Aliyun OSS credentials',
     );
+    expect(configure).toContain(
+      'if: "${{ steps.install-ossutil.outcome == \'success\' }}"',
+    );
     expect(configure).toContain('continue-on-error: true');
     expect(configure).toContain('-c "$RUNNER_TEMP/.ossutilconfig"');
+    const publish = stepIn('publish-verify', 'Post verification report comment');
+    expect(publish).toContain(
+      "OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'",
+    );
+    expect(publish).toContain(
+      'elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = \'success\' ]; then',
+    );
     const cleanup = stepIn('publish-verify', 'Cleanup Aliyun OSS credentials');
     expect(cleanup).toContain("if: '${{ always() }}'");
     expect(cleanup).toContain('rm -f "$RUNNER_TEMP/.ossutilconfig"');

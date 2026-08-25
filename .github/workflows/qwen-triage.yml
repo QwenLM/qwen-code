@@ -4990,6 +4990,7 @@ jobs:
           persist-credentials: false
 
       - name: 'Install ossutil'
+        id: 'install-ossutil'
         # Evidence hosting is best-effort; the report still posts as text if
         # the client cannot be installed.
         continue-on-error: true
@@ -5010,6 +5011,7 @@ jobs:
           "$RUNNER_TEMP/ossutil" >/dev/null
 
       - name: 'Configure Aliyun OSS credentials'
+        if: "${{ steps.install-ossutil.outcome == 'success' }}"
         continue-on-error: true
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
@@ -5060,6 +5062,7 @@ jobs:
           VERIFY_RESULT: '${{ needs.verify.result }}'
           DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'
           # The default public URL is derived from the bucket so that
           # overriding only one of the two vars cannot post comment links
           # that 404 against (or show stale objects from) the other bucket.
@@ -5429,7 +5432,7 @@ jobs:
             local trusted_bin=''
             if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
               upload_cmd=("$uploader")
-            else
+            elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ]; then
               # Resolve node under the inherited PATH BEFORE any shared
               # temp dir comes into play: the containerized verify job runs
               # PR code with $RUNNER_TEMP bind-mounted from this pool, so a
@@ -5446,6 +5449,10 @@ jobs:
                 install -m 0755 "${RUNNER_TEMP:-/tmp}/ossutil" "$trusted_bin/ossutil" 2>/dev/null || true
                 upload_path="$trusted_bin"
               fi
+            else
+              echo "::warning::ossutil install did not succeed; posting a text-only report." >&2
+              EVIDENCE_SECTION=''
+              return 0
             fi
             if ! PATH="$upload_path" "${upload_cmd[@]}" \
               --bucket "$ALIYUN_OSS_BUCKET" \

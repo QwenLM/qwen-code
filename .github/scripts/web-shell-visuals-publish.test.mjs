@@ -45,6 +45,8 @@ test('workflow hosts visuals on OSS without writing Git refs', () => {
     /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}/,
   );
   assert.match(workflow, /ALIYUN_OSS_PUBLIC_BASE_URL/);
+  assert.match(workflow, /PATH="\$trusted_bin" "\$node_bin"/);
+  assert.doesNotMatch(workflow, /PATH="\$RUNNER_TEMP:\$PATH"/);
   assert.doesNotMatch(workflow, /git push/);
   assert.doesNotMatch(workflow, /checkout -q --orphan/);
 });
